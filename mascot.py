@@ -1476,19 +1476,23 @@ class TodoPanel:
 
     본체 창은 캐릭터 크기에 맞춰져 있어 옆으로 그릴 자리가 없다. 그래서
     같은 색상키 투명을 쓰는 별도 창을 왼쪽에 두고 본체를 따라다니게 한다.
-    말풍선을 우클릭하면 수정 / 완료를 고를 수 있다.
+    말풍선을 우클릭하면 수정 / 완료 / 꼬리 방향 바꾸기를 고를 수 있다.
     """
 
-    W = 216                      # 패널 폭
+    # 맥은 같은 크기라도 글자가 더 넓게 그려져 말풍선이 길어 보인다
+    W = 186 if IS_MAC else 216   # 패널 폭
     TAIL_W, TAIL_H = 17, 13      # 말풍선 꼬리 크기 (캐릭터 말풍선과 동일)
     PAD = TAIL_H + 8             # 간격 (꼬리가 다음 칸을 안 침범하게)
 
     def __init__(self, master, card, bg, on_done, on_move, on_edit=None,
-                 offset=None):
+                 offset=None, flip=False, on_flip=None):
         self.card = card
         self.on_done = on_done
         self.on_move = on_move
         self.on_edit = on_edit
+        self.on_flip = on_flip
+        # 꼬리 방향 — 패널을 캐릭터 오른쪽에 두면 꼬리도 왼쪽을 봐야 한다
+        self.flip = bool(flip)
         # 본체 창 왼쪽 위 모서리 기준 상대 위치 (끌어서 옮기면 갱신·저장)
         self.offset = tuple(offset) if offset else (-(self.W - 40), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
@@ -1524,23 +1528,24 @@ class TodoPanel:
                 pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
         return self.canvas.create_polygon(pts, smooth=True, **kw)
 
-    def _tail(self, x1, y1, r, fill, outline=None, dx=0, dy=0):
-        """오른쪽 아래를 향한 날카로운 세모 꼬리.
+    def _tail(self, x0, x1, y1, r, fill, outline=None, dx=0, dy=0):
+        """아래를 향한 날카로운 세모 꼬리. flip이면 왼쪽 아래를 본다.
 
         밑변을 말풍선 테두리 안쪽까지 덮어 그 구간의 테두리를 지우고,
         양 옆 빗변만 테두리 색으로 그어 이음새가 없게 만든다.
         """
         c = self.canvas
         tw, th = self.TAIL_W, self.TAIL_H
-        bx1 = x1 - r + dx                    # 밑변 오른쪽 (모서리 곡선 안쪽)
-        bx0 = bx1 - tw
+        s = -1 if self.flip else 1           # 꼬리가 향하는 쪽
+        base = (x0 + r if self.flip else x1 - r) + dx   # 밑변의 바깥쪽 끝
+        bin_ = base - tw * s                              # 밑변의 안쪽 끝
         by = y1 + dy
-        tipx, tipy = bx1 + th * 0.7, by + th  # 오른쪽 아래를 향한 뾰족한 끝
-        c.create_polygon(bx0, by - 2, tipx, tipy, bx1, by - 2,
+        tipx, tipy = base + th * 0.7 * s, by + th
+        c.create_polygon(bin_, by - 2, tipx, tipy, base, by - 2,
                          fill=fill, outline="")
         if outline:
-            c.create_line(bx0, by, tipx, tipy, fill=outline, width=2)
-            c.create_line(tipx, tipy, bx1, by, fill=outline, width=2)
+            c.create_line(bin_, by, tipx, tipy, fill=outline, width=2)
+            c.create_line(tipx, tipy, base, by, fill=outline, width=2)
 
 
     def render(self, todos):
@@ -1565,10 +1570,10 @@ class TodoPanel:
         for i, (text, h) in enumerate(zip(todos, heights)):
             self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, 13,
                         fill="#e6e2e8", outline="")      # 그림자
-            self._tail(x1, y + h, 13, "#e6e2e8", dx=2, dy=3)
+            self._tail(x0 + 2, x1 + 2, y + h, 13, "#e6e2e8", dx=0, dy=3)
             self._rrect(x0, y, x1, y + h, 13, fill="#ffffff",
                         outline=cd["border"], width=2)
-            self._tail(x1, y + h, 13, "#ffffff", cd["border"])
+            self._tail(x0, x1, y + h, 13, "#ffffff", cd["border"])
             mid = y + h / 2
             t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
                               font=("Malgun Gothic", 9), fill=cd["text"],
@@ -1613,7 +1618,7 @@ class TodoPanel:
         return None
 
     def _menu(self, e):
-        """말풍선 우클릭 — 수정 / 완료."""
+        """말풍선 우클릭 — 수정 / 완료 / 꼬리 방향."""
         idx = self._at(e.x, e.y)
         if idx is None:
             return
@@ -1621,10 +1626,19 @@ class TodoPanel:
         if self.on_edit is not None:
             m.add_command(label="수정", command=lambda: self.on_edit(idx))
         m.add_command(label="완료", command=lambda: self.on_done(idx))
+        m.add_separator()
+        m.add_command(label="꼬리 오른쪽으로" if self.flip else "꼬리 왼쪽으로",
+                      command=self._toggle_flip)
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def _toggle_flip(self):
+        """꼬리 방향만 뒤집는다 — 글자는 그대로다(뒤집으면 읽을 수 없으니)."""
+        self.flip = not self.flip
+        if self.on_flip is not None:
+            self.on_flip(self.flip)
 
     def place(self, x, y):
         """본체 창 기준 저장된 자리에 붙인다 (끌어서 옮긴 위치)."""
@@ -1766,13 +1780,15 @@ class Mascot:
         self.todo_on = bool(self.cfg.get("todo"))
         self.todos = []
         self.todo_pos = None         # 본체 기준 패널 위치 (끌어서 옮긴 자리)
+        self.todo_flip = False       # 말풍선 꼬리가 왼쪽을 보는가
         self.todo_panel = None
         self.todo_path = os.path.join(self.state_dir, ".todos.json")
         if self.todo_on:
             self._todo_load()
             self.todo_panel = TodoPanel(self.root, self.card, bg,
                                         self._todo_done, self._todo_moved,
-                                        self._todo_edit, self.todo_pos)
+                                        self._todo_edit, self.todo_pos,
+                                        self.todo_flip, self._todo_flipped)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
 
         # ── 귀여운 이벤트 (선물 캐릭터 전용 — config의 "fun") ────────────
@@ -2728,16 +2744,23 @@ class Mascot:
                 p = data.get("pos")
                 if isinstance(p, (list, tuple)) and len(p) == 2:
                     self.todo_pos = (int(p[0]), int(p[1]))
+                self.todo_flip = bool(data.get("flip"))
         except Exception:
             self.todos = []
 
     def _todo_save(self):
         try:
             with open(self.todo_path, "w", encoding="utf-8") as fp:
-                json.dump({"items": self.todos, "pos": self.todo_pos},
-                          fp, ensure_ascii=False)
+                json.dump({"items": self.todos, "pos": self.todo_pos,
+                           "flip": self.todo_flip}, fp, ensure_ascii=False)
         except Exception:
             pass
+
+    def _todo_flipped(self, flip):
+        """꼬리 방향을 기억한다 — 패널을 캐릭터 오른쪽에 두는 사람도 있다."""
+        self.todo_flip = bool(flip)
+        self._todo_save()
+        self._todo_refresh()
 
     def _todo_moved(self, x, y):
         """패널을 끌어서 옮기면 본체 기준 상대 위치로 기억한다."""
@@ -2921,14 +2944,29 @@ class Mascot:
         self._reset_records()
         self._timer_save()
 
+    @staticmethod
+    def _app_key(s):
+        """앱 이름 비교용 정규화 — 확장자·공백·기호를 지우고 소문자로.
+
+        윈도우는 실행파일 이름('clipstudiopaint.exe'), 맥은 앱 표시 이름
+        ('CLIP STUDIO PAINT')이라 그대로 비교하면 같은 프로그램도 안 맞는다.
+        둘 다 'clipstudiopaint'로 만들어 비교한다.
+        """
+        s = str(s).lower()
+        for ext in (".exe", ".app"):
+            if s.endswith(ext):
+                s = s[:-len(ext)]
+        return "".join(ch for ch in s if ch.isalnum())
+
     def _fg_is_work(self, now):
         """앞 창이 작업 프로그램인지 (1초 캐시)."""
         if now - self._fg_checked > 1.0:
             self._fg_checked = now
-            fg = foreground_process()
-            apps = [a.strip().lower() for a in
+            fg = self._app_key(foreground_process())
+            apps = [self._app_key(a) for a in
                     str(self.us["work_apps"]).split(",") if a.strip()]
-            self._fg_work = any(a == fg or a in fg for a in apps)
+            self._fg_work = bool(fg) and any(a and (a == fg or a in fg or fg in a)
+                                             for a in apps)
         return self._fg_work
 
     def _timer_tick(self, now, idle):
