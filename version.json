@@ -1,22 +1,22 @@
 {
- "version": 1784941290,
+ "version": 1784942810,
  "files": {
-  "mascot.py": "f4ff70c483a47afbc9dd98c4bb8511f8f8fc5f6729d6ef57f2886dc783693a00",
-  "parts_saga/arm_key.png": "83a4d39e8e93d29c19d6cbeeb8da9b6fa1ec6aee7beab8c4ca8a7b630a222790",
-  "parts_saga/arm_pen.png": "8db113298ba5138c53e64518616a98c4cabe1d12186e5a7a327720bdb24040de",
-  "parts_saga/arm_right.png": "447e3416992efd90c23d1f066fb45e3ac27faefdfe963b5daa19fc5ee1c8453a",
-  "parts_saga/arm_right_typing.png": "d619b9287085f9291b80e842c3b016639345979b26cf93e679e7d004f5a9f047",
-  "parts_saga/back.png": "edf259e270abd52843eb9ad2b05eebf79dcd6f6573346009eb21f14c8e827173",
-  "parts_saga/body_open.png": "b0eaaf9fe938e5eb9455b129212c7484796b0d6ab46ffe8a949c40e04dc14e45",
-  "parts_saga/config.json": "5e827fc7efc24e6bb05ee52faa072770829d43d6db0da89198dc27455545c69d",
-  "parts_saga/desk.png": "89c6f68cbeeee015cb2e5ec9db8140614013ad8e942f0fbc1501f4e277f7a1d3",
-  "parts_saga/eyes_closed.png": "3b8b11183a5b305a2a89e683d7946de9e15813424356aa14070f1a55bb04c79b",
-  "parts_saga/hair.png": "deb63eda61c08842929d2a43cf2da9f39e97e971112020cd05ea09d1ed3bc16a",
+  "mascot.py": "7bc7b242a2aa253baff35f29e6b6fb7cc9760bb3267e52ffca187b76dc72de04",
+  "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
+  "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
+  "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
+  "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
+  "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
+  "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
+  "parts_saga/config.json": "8e0dff254e5d15311aa8ce898e7635c7b556b4f95d239951a865b2cbca2db4e6",
+  "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
+  "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
+  "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
   "parts_saga/head.png": "392f666a9219ff4defefafab263346a44c09b9f523db7d09aded4b0b90af7294",
-  "parts_saga/lashes.png": "63b3c3d6c4fa8f1aa7941505011af69fff5552d3f781e78ab1fd0f2e1f426b5f",
-  "parts_saga/layout.json": "bc26a0ff3ef7009ab2a053db5717d65341cc3aa5516199672a3e3d6190b82a42",
-  "parts_saga/pupils.png": "75eab63ca8c4421b6705fb3487ca28a4bb33c2641bc7afd5de9ce22ae8fa8697",
-  "parts_saga/smile.png": "84ec8240949997fdd15004630aafc9068c3586d42538da669dd6b1317691ce85",
+  "parts_saga/lashes.png": "e2a4e6b192d55c593bca8294c0cd8ae3991fdbc418e405d85089c43c58c8b0a5",
+  "parts_saga/layout.json": "bf29efebc03db7c998ae4b93f0cee8f7d03038403714ef91fbe81d32f4674826",
+  "parts_saga/pupils.png": "44e9ea344b58969a19398d473af26ab98a43e3f321da1d7b7ebcf09e6bfa2a3b",
+  "parts_saga/smile.png": "9df47cf3101e68023c6ae84af133f08603db1be32ae96af088417874c50e42c9",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/key1.wav": "34ca127f328b29dfee7e5d777636cad708371d6bdadcfc3d05d988c1555fa97e",
@@ -76,6 +76,6 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "처음 만나서 반가워요!"
+  "타이머 장식이 캐릭터에 맞게 바뀌었어요"
  ]
 }

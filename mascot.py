@@ -1808,6 +1808,9 @@ class Mascot:
         self.prop_dir = self.parts_dir   # 소품 PNG를 읽을 폴더
         self._prop_layout = self.layout  # 소품 좌표가 든 layout
         self._back_cache = {}        # 몸 뒤 파츠 움직임 프레임 (칸별로만 만든다)
+        self._back_phase = 0.0       # 움직임 위상 0~1
+        self._back_last = 0.0        # 직전 프레임 시각 (위상 적분용)
+        self._back_period = float(self.cfg.get("back_period", 2.6))
         self._load_parts()
 
         # ── 상태 ──────────────────────────────────────────────────────────
@@ -2449,8 +2452,15 @@ class Mascot:
             return
         amp = float(self.cfg.get("back_amp", 1.0))
         STEPS = 12                       # 한 주기를 12칸으로 — 캐시가 12장이면 끝
-        period = float(self.cfg.get("back_period", 2.6))
-        k = int((now / max(period, 0.3)) * STEPS) % STEPS
+        # 위상을 직접 굴린다 — 한 번 왕복할 때마다 다음 주기를 새로 뽑을 수 있게
+        # (시계에서 바로 계산하면 속도를 바꿀 수 없어 날갯짓이 기계적으로 보인다)
+        dt = 0.0 if self._back_last <= 0 else min(now - self._back_last, 0.2)
+        self._back_last = now
+        self._back_phase += dt / max(self._back_period, 0.15)
+        if self._back_phase >= 1.0:
+            self._back_phase -= int(self._back_phase)
+            self._back_period = self._new_back_period()
+        k = int(self._back_phase * STEPS) % STEPS
         img = self._back_frame(mode, k, STEPS, amp)
         if img is None:
             self._put("back", x, y + yo)
@@ -2459,6 +2469,15 @@ class Mascot:
         bw, bh = self._pil_cache["back"].size
         self.canvas.create_image(x + bw / 2, y + bh / 2 + yo,
                                  image=img, anchor="center")
+
+    def _new_back_period(self):
+        """다음 한 번의 왕복에 걸릴 시간. back_jitter가 있으면 매번 흔들어
+        뽑는다 — 새가 파닥이듯 빨라졌다 느려졌다 하게."""
+        base = float(self.cfg.get("back_period", 2.6))
+        j = float(self.cfg.get("back_jitter", 0.0))
+        if j <= 0:
+            return base
+        return base * random.uniform(max(0.15, 1.0 - j), 1.0 + j)
 
     def _back_frame(self, mode, k, steps, amp):
         key = (mode, k)
@@ -3016,6 +3035,30 @@ class Mascot:
                               fill="#f5bdd2", outline="#d687ab", width=2)
                 c.create_arc(ex - 8, y0 - 13, ex + 8, y0 + 3, start=300,
                              extent=270, style="arc", outline="#d687ab", width=2)
+        elif deco == "ribbon":
+            # 사가: 카드 위 한가운데 작은 분홍 리본
+            mx = (x0 + x1) / 2
+            fill, line = "#f9b6d2", "#e07aa8"
+            for sign in (-1, 1):                    # 좌우 고리
+                c.create_polygon(mx, y0 - 1, mx + 17 * sign, y0 - 14,
+                                 mx + 19 * sign, y0 + 1, mx + 15 * sign, y0 + 6,
+                                 smooth=True, fill=fill, outline=line, width=2)
+            for sign in (-1, 1):                    # 아래로 늘어진 끈
+                c.create_line(mx + 2 * sign, y0 + 3, mx + 7 * sign, y0 + 13,
+                              fill=line, width=3)
+            c.create_oval(mx - 5, y0 - 6, mx + 5, y0 + 4,
+                          fill="#ffd9e8", outline=line, width=2)   # 가운데 매듭
+        elif deco == "sprout":
+            # 기뽀: 카드 위 한가운데 작은 새싹
+            mx = (x0 + x1) / 2
+            leaf, stem = "#8fc34a", "#5c8a2c"
+            c.create_line(mx, y0 + 6, mx, y0 - 12, fill=stem, width=3)
+            for sign in (-1, 1):                    # 좌우 잎
+                c.create_polygon(mx, y0 - 9 - 2 * (sign > 0),
+                                 mx + 8 * sign, y0 - 18,
+                                 mx + 15 * sign, y0 - 10,
+                                 mx + 6 * sign, y0 - 4,
+                                 smooth=True, fill=leaf, outline=stem, width=2)
 
     def _status_of(self, state, sleeping):
         if state == "off":
