@@ -1493,8 +1493,10 @@ class TodoPanel:
         self.on_flip = on_flip
         # 꼬리 방향 — 패널을 캐릭터 오른쪽에 두면 꼬리도 왼쪽을 봐야 한다
         self.flip = bool(flip)
-        # 본체 창 왼쪽 위 모서리 기준 상대 위치 (끌어서 옮기면 갱신·저장)
-        self.offset = tuple(offset) if offset else (-(self.W - 40), 0)
+        # 본체 창 왼쪽 위 모서리 기준 상대 위치 (끌어서 옮기면 갱신·저장).
+        # 캐릭터 창과 겹치면 겹친 구간의 우클릭이 캐릭터한테 가서 설정 창이
+        # 뜬다. 그래서 기본값은 딱 붙되 겹치지 않는 자리로 둔다.
+        self.offset = tuple(offset) if offset else (-(self.W + 4), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
         self.top = tk.Toplevel(master)
         self.top.overrideredirect(True)
@@ -1677,7 +1679,11 @@ def already_running(char):
 
 
 class Mascot:
+    # 타이머 카드가 잘리지 않는 최소 창 폭 (카드 200 + 그림자·여백)
+    CARD_MIN_W = 210
+
     def __init__(self, char_dir="parts", preview=False, state_dir=None):
+        self.ox = 0.0                # 창이 카드 때문에 넓어진 만큼 캐릭터를 민다
         self.char_arg = char_dir
         self.dir = os.path.join(HERE, char_dir)
         self.char = os.path.basename(char_dir)
@@ -1749,7 +1755,12 @@ class Mascot:
         self.oy = self._timer_oy()                  # 캐릭터 전체 y 오프셋
         cw, ch = self.layout["canvas"]
         self.cw_px, self.ch_px = round(cw * s), round(ch * s)
-        self.W, self.H = self.cw_px, self.ch_px + self.oy
+        # 타이머 카드는 글자 크기 때문에 폭이 고정(200px)이라, 캐릭터를 작게
+        # 줄이면 창이 카드보다 좁아져 카드 양옆이 잘린다. 창을 카드가 들어갈
+        # 만큼은 넓혀 두고, 남는 폭만큼 캐릭터를 가운데로 민다(ox).
+        self.W = max(self.cw_px, self.CARD_MIN_W if self.timer_on else 0)
+        self.ox = (self.W - self.cw_px) / 2
+        self.H = self.ch_px + self.oy
 
         self.root = tk.Tk()
         globals()["_TK_ROOT"] = self.root      # 커서·화면 크기 조회용
@@ -2129,7 +2140,7 @@ class Mascot:
                 # 책상 PNG가 캔버스 전체가 아니라 잘려 있을 수 있으므로
                 # layout 위치를 더해 창 좌표로 옮긴다 (옛 캐릭터는 pos가 0,0)
                 dx, dy = self.layout["desk"]["pos"]
-                dx, dy = dx * s, dy * s
+                dx, dy = dx * s + self.ox, dy * s
                 self.card_cx = dx + (bb[0] + bb[2]) / 2
                 self._desk_top = dy + bb[1]
 
@@ -2144,8 +2155,8 @@ class Mascot:
         hb = base_im.split()[3].getbbox() if base_im is not None else None
         hx, hy = self.layout.get(base, {}).get("pos", (0, 0))
         # 머리(없으면 몸통) 실루엣 상자 — zzZ 위치·기울임 축의 기준
-        self._head_box = ((hx * s + hb[0], hy * s + hb[1],
-                           hx * s + hb[2], hy * s + hb[3]) if hb else
+        self._head_box = ((hx * s + self.ox + hb[0], hy * s + hb[1],
+                           hx * s + self.ox + hb[2], hy * s + hb[3]) if hb else
                           (0, 0, self.W, self.H))
         if self.has.get("head"):
             self._neck = ((self._head_box[0] + self._head_box[2]) / 2,
@@ -2284,7 +2295,7 @@ class Mascot:
             return
         if r < 1.5:
             return
-        x, y = nose[0] * self.s, nose[1] * self.s
+        x, y = nose[0] * self.s + self.ox, nose[1] * self.s
         x, y = self._tilt_xy(x, y, -deg)           # 캔버스 좌표는 회전 방향 반대
         x += tdx
         y += self.oy + yo
@@ -2353,7 +2364,7 @@ class Mascot:
             else:
                 big = small
             px, py = self.layout[name]["pos"]
-            px, py = px * self.s, py * self.s
+            px, py = px * self.s + self.ox, py * self.s
             # 원래 실루엣의 밑변 중심을 기준으로 커지고 기울어지게
             sb = small.split()[3].getbbox() or (0, 0, small.width, small.height)
             ax, ay = px + (sb[0] + sb[2]) / 2, py + sb[3]
@@ -2381,21 +2392,24 @@ class Mascot:
         s = self.s
         ar = self.layout["arm_right"]
         ax, ay = ar["pos"]
-        self.arm_top = ((ax + ar["top"][0]) * s, (ay + ar["top"][1]) * s + self.oy)
-        self.arm_bottom = ((ax + ar["bottom"][0]) * s,
+        self.arm_top = ((ax + ar["top"][0]) * s + self.ox,
+                        (ay + ar["top"][1]) * s + self.oy)
+        self.arm_bottom = ((ax + ar["bottom"][0]) * s + self.ox,
                            (ay + ar["bottom"][1]) * s + self.oy)
         self._arm_nat = (self.arm_bottom[0] - self.arm_top[0],
                          self.arm_bottom[1] - self.arm_top[1])
         px, py = self.layout["arm_pen"]["pos"]
         tx, ty = self.cfg.get("pen_tip", self.layout["arm_pen"]["pen_tip"])
-        self.pen_base_tip = ((px + tx) * s, (py + ty) * s + self.oy)
-        self.quad = [(x * s, y * s + self.oy) for x, y in self.cfg["screen_quad"]]
+        self.pen_base_tip = ((px + tx) * s + self.ox, (py + ty) * s + self.oy)
+        self.quad = [(x * s + self.ox, y * s + self.oy)
+                     for x, y in self.cfg["screen_quad"]]
         blink = self.cfg.get("blink")
         self.blink_cfg = None
         if blink and self.has["body_mask"]:
             r = blink["rect"]
-            self.blink_cfg = ([r[0] * s, r[1] * s + self.oy,
-                               r[2] * s, r[3] * s + self.oy], blink["color"])
+            self.blink_cfg = ([r[0] * s + self.ox, r[1] * s + self.oy,
+                               r[2] * s + self.ox, r[3] * s + self.oy],
+                              blink["color"])
 
     def _build_shadow_img(self):
         """캐릭터+카드 실루엣을 흐려 만든 반투명 그림자 이미지.
@@ -2480,6 +2494,8 @@ class Mascot:
         else:
             w, h = 200, (88 if self.cfg.get("fun") else 62)
         x0 = getattr(self, "card_cx", self.W / 2) - w / 2
+        # 창 밖으로 나가지 않게 — 책상이 한쪽으로 치우친 캐릭터도 안 잘리게
+        x0 = max(3.0, min(x0, self.W - w - 3.0)) if self.W >= w + 6 else x0
         y0 = float(self.cfg.get("card_top", 22))
         return {"x0": x0, "y0": y0, "x1": x0 + w, "y1": y0 + h, "w": w, "h": h}
 
@@ -3943,7 +3959,7 @@ class Mascot:
 
     def _pos(self, name):
         x, y = self.layout[name]["pos"]
-        return x * self.s, y * self.s + self.oy
+        return x * self.s + self.ox, y * self.s + self.oy
 
     def _stretched_arm(self, dx, dy):
         nx, ny = self._arm_nat
