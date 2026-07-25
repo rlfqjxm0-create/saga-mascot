@@ -339,6 +339,7 @@ DEFAULT_SETTINGS = {
     "sound": True,        # 타자 소리 (Mechvibes 팩)
     "sound_volume": 60,   # 타자 소리 볼륨 (0~100)
     "pen_volume": 10,     # 펜 긋는 소리 볼륨 (0~100)
+    "poke_volume": 40,    # 캐릭터를 눌렀을 때 나는 소리 볼륨 (0~100)
     "sound_pack": "banana split lubed",
     "skin": "기본",        # 패션 슬롯 이름
 }
@@ -1145,8 +1146,91 @@ class MacPenSound(_MacSoundPool):
         self._all_stop()
 
 
+class PokeSound:
+    """캐릭터를 눌렀을 때 나는 짧은 소리.
+
+    누르는 건 잦아서 같은 소리가 그대로 반복되면 금방 물린다. 그래서 매번
+    재생 속도를 조금씩 흔들어 음높이를 달리한다. 볼륨은 미리 곱해 두고
+    (waveOutSetVolume은 드라이버가 무시할 수 있다) 재생 때는 고르기만 한다.
+    """
+
+    def __init__(self, folder, volume=40):
+        import wave
+        names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
+        if not names:
+            raise ValueError("클릭 소리 wav 없음")
+        with wave.open(os.path.join(folder, names[0]), "rb") as w:
+            if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                raise ValueError("클릭 소리는 16bit 모노 wav만 지원")
+            self.fr = w.getframerate()
+            self.pcm = w.readframes(w.getnframes())
+        self._voices = []
+        self.set_volume(volume)
+
+    def set_volume(self, volume):
+        self.volume = max(0.0, min(float(volume), 100.0))
+        self.buf = (_scaled_buffer(self.pcm, self.volume / 100.0, 2)
+                    if self.volume > 0 else None)
+
+    def play(self):
+        self.reap()
+        if self.buf is None:
+            return
+        fr2 = max(8000, int(self.fr * random.uniform(0.92, 1.10)))
+        wfx = _WAVEFORMATEX(1, 1, fr2, fr2 * 2, 2, 16, 0)
+        wm = ctypes.windll.winmm
+        h = ctypes.c_void_p()
+        if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF, ctypes.byref(wfx), 0, 0, 0):
+            return
+        wm.waveOutSetVolume(h, 0xFFFFFFFF)     # 실볼륨은 샘플에 이미 반영됨
+        hdr = _WAVEHDR()
+        hdr.lpData = ctypes.cast(self.buf, ctypes.c_void_p)
+        hdr.dwBufferLength = len(self.pcm)
+        wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        self._voices.append((h, hdr))
+
+    def reap(self):
+        wm = ctypes.windll.winmm
+        keep = []
+        for h, hdr in self._voices:
+            if hdr.dwFlags & 0x00000001:        # WHDR_DONE
+                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+                wm.waveOutClose(h)
+            else:
+                keep.append((h, hdr))
+        self._voices = keep
+
+    def close(self):
+        wm = ctypes.windll.winmm
+        for h, hdr in self._voices:
+            try:
+                wm.waveOutReset(h)
+                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+                wm.waveOutClose(h)
+            except Exception:
+                pass
+        self._voices = []
+
+
+class MacPokeSound(_MacSoundPool):
+    """맥용 클릭 소리 (PokeSound와 같은 인터페이스). 피치 변주는 없다."""
+
+    def __init__(self, folder, volume=40):
+        names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
+        if not names:
+            raise ValueError("클릭 소리 wav 없음")
+        super().__init__([os.path.join(folder, names[0])], volume)
+
+    def play(self):
+        self._fire(0)
+
+    def close(self):
+        self._all_stop()
+
+
 if IS_MAC:                        # 맥에서는 같은 이름으로 맥 구현을 쓴다
-    SoundPack, PenSound = MacSoundPack, MacPenSound
+    SoundPack, PenSound, PokeSound = MacSoundPack, MacPenSound, MacPokeSound
 
 
 if IS_WIN:
@@ -1910,6 +1994,7 @@ class Mascot:
         # ── 타자 소리 / 펜 소리 ──────────────────────────────────────────
         self.sndpack = None
         self.pensnd = None
+        self.pokesnd = None
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -2618,6 +2703,12 @@ class Mascot:
             except Exception:
                 pass
             self.pensnd = None
+        if self.pokesnd is not None:
+            try:
+                self.pokesnd.close()
+            except Exception:
+                pass
+            self.pokesnd = None
         self._pen_playing = False
         self._pen_release_t = None
         if not (self.us.get("sound", True) and self.sound_packs):
@@ -2646,6 +2737,13 @@ class Mascot:
                 except Exception:
                     self.pensnd = None
         self._pen_grain = isinstance(self.pensnd, PenGrainSound)
+        poke_dir = os.path.join(self.dir, "sounds", "poke")
+        if os.path.isdir(poke_dir):
+            try:
+                self.pokesnd = PokeSound(
+                    poke_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.pokesnd = None
 
     # ── 입력 콜백 ─────────────────────────────────────────────────────────
     def _on_key(self, key):
@@ -2890,6 +2988,11 @@ class Mascot:
         now = time.time()
         self.click_bounce = now + 0.45
         self.squash_until = now + 0.12
+        if self.pokesnd is not None:
+            try:
+                self.pokesnd.play()
+            except Exception:
+                pass
         self._say(random.choice(self._click_pool()), 2.2)
 
     def _toggle_clock(self):
@@ -4454,6 +4557,7 @@ class Mascot:
             y = group(y, "소리", [
                 lambda ry: slider(ry, "타자 소리 볼륨", "sound_volume", 0, 100),
                 lambda ry: slider(ry, "펜 소리 볼륨", "pen_volume", 0, 100),
+                lambda ry: slider(ry, "클릭 소리 볼륨", "poke_volume", 0, 100),
                 lambda ry: toggle(ry, "타자 소리", "sound"),
                 lambda ry: picker(ry, "소리 팩", "sound_pack", self.sound_packs),
             ])
@@ -4526,7 +4630,7 @@ class Mascot:
             new["idle_sec"] = max(float(new["idle_sec"]), 5.0)
             new["sleep_min"] = max(1, int(new["sleep_min"]))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
-            for k in ("sound_volume", "pen_volume"):
+            for k in ("sound_volume", "pen_volume", "poke_volume"):
                 new[k] = max(0, min(100, int(new[k])))
             need_restart = (new["scale_pct"] != self.us["scale_pct"]
                             or new.get("skin") != self.us.get("skin")
