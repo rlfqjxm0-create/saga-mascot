@@ -1,17 +1,18 @@
 {
- "version": 1784942810,
+ "version": 1784945650,
  "files": {
-  "mascot.py": "7bc7b242a2aa253baff35f29e6b6fb7cc9760bb3267e52ffca187b76dc72de04",
+  "mascot.py": "08fac741f70383fbd858d6c1c904cc4e8a9602cc93bb1c6ed4bf9bdbc1184b09",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
   "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
   "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
   "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
-  "parts_saga/config.json": "8e0dff254e5d15311aa8ce898e7635c7b556b4f95d239951a865b2cbca2db4e6",
+  "parts_saga/config.json": "9547f03e7254dedae4f242f0682f9da0059705d56665375b7c69cc6078c5c9d0",
   "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
   "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
   "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
+  "parts_saga/hat.png": "4bd1da80b760cff3694c7b21350e8dce6a177026846dcd737d796ad7560f277f",
   "parts_saga/head.png": "392f666a9219ff4defefafab263346a44c09b9f523db7d09aded4b0b90af7294",
   "parts_saga/lashes.png": "e2a4e6b192d55c593bca8294c0cd8ae3991fdbc418e405d85089c43c58c8b0a5",
   "parts_saga/layout.json": "bf29efebc03db7c998ae4b93f0cee8f7d03038403714ef91fbe81d32f4674826",
@@ -76,6 +77,6 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "타이머 장식이 캐릭터에 맞게 바뀌었어요"
+  "작업 종료 축하 연출이 더 예뻐졌어요"
  ]
 }

@@ -2408,8 +2408,29 @@ class Mascot:
             cg = self._card_geom()
             cx0, cy0 = cg["x0"] + P, cg["y0"] + P
             cx1, cy1 = cg["x1"] + P, cg["y1"] + P
-            for ex in (cx0 + 26, cx1 - 26):        # 귀 실루엣
-                d.ellipse([ex - 12, cy0 - 17, ex + 12, cy0 + 7], fill=(0, 0, 0, 255))
+            # 카드 위 장식의 실루엣도 함께 — 안 맞으면 리본을 달아도 귀
+            # 그림자가 진다. _draw_deco와 모양을 맞춰 둘 것.
+            deco = self.card.get("deco")
+            mx = (cx0 + cx1) / 2
+            if deco == "ribbon":                   # 사가: 리본 실루엣
+                for sign in (-1, 1):
+                    d.polygon([(mx, cy0 - 1), (mx + 17 * sign, cy0 - 14),
+                               (mx + 19 * sign, cy0 + 1), (mx + 15 * sign, cy0 + 6)],
+                              fill=(0, 0, 0, 255))
+                d.ellipse([mx - 5, cy0 - 6, mx + 5, cy0 + 4], fill=(0, 0, 0, 255))
+            elif deco == "sprout":                 # 기뽀: 새싹 실루엣
+                d.line([(mx, cy0 + 6), (mx, cy0 - 12)], fill=(0, 0, 0, 255), width=3)
+                for sign in (-1, 1):
+                    d.polygon([(mx, cy0 - 9), (mx + 8 * sign, cy0 - 18),
+                               (mx + 15 * sign, cy0 - 10), (mx + 6 * sign, cy0 - 4)],
+                              fill=(0, 0, 0, 255))
+            elif deco == "scarf":                  # 퀸시: 목도리 띠 (귀 없음)
+                d.rounded_rectangle([cx0 + 14, cy0 - 15, cx1 - 14, cy0 + 7],
+                                    radius=9, fill=(0, 0, 0, 255))
+            else:                                  # 귀 달린 캐릭터들
+                for ex in (cx0 + 26, cx1 - 26):
+                    d.ellipse([ex - 12, cy0 - 17, ex + 12, cy0 + 7],
+                              fill=(0, 0, 0, 255))
             d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=16, fill=(0, 0, 0, 255))
         a = comp.getchannel("A").filter(ImageFilter.GaussianBlur(7))
         a = a.point(lambda v: int(v * 0.30))

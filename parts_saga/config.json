@@ -46,5 +46,10 @@
  },
  "card_top": 44,
  "todo": true,
- "records": true
+ "records": true,
+ "hat_scale": 0.26,
+ "hat_pos": [
+  -28,
+  78
+ ]
 }
