@@ -1,7 +1,7 @@
 {
- "version": 1784971363,
+ "version": 1784972237,
  "files": {
-  "mascot.py": "0c7eae3f975e463b600f99564cb38af2346aaba7aa6a5acde60d7a326cfc12ae",
+  "mascot.py": "db1dedf1159b7dd3038abbcfe6f86c4e92552fd91cf670fdf640dc34b53ab773",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
@@ -78,7 +78,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "환경설정에서 글자 크기를 조절할 수 있어요",
-  "화면 배율이 큰 컴퓨터에서 글자가 겹치던 문제도 고쳤어요"
+  "환경설정에서 타이머 글자 크기를 조절할 수 있어요",
+  "할 일 목록이 화면을 덜 가리고 글자는 커졌어요"
  ]
 }

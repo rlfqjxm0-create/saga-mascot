@@ -1564,8 +1564,10 @@ class TodoPanel:
     말풍선을 우클릭하면 수정 / 완료 / 꼬리 방향 바꾸기를 고를 수 있다.
     """
 
-    # 맥은 같은 크기라도 글자가 더 넓게 그려져 말풍선이 길어 보인다
-    W = 186 if IS_MAC else 216   # 패널 폭
+    # 좁고 글자는 크게 — 화면을 덜 가리면서 잘 읽히게.
+    # 맥은 같은 크기라도 글자가 더 넓게 그려져 조금 더 좁게 잡는다.
+    W = 150 if IS_MAC else 160   # 패널 폭
+    FS = 12                      # 글자 크기 (글자 크기 설정과 무관하게 고정)
     TAIL_W, TAIL_H = 17, 13      # 말풍선 꼬리 크기 (캐릭터 말풍선과 동일)
     PAD = TAIL_H + 8             # 간격 (꼬리가 다음 칸을 안 침범하게)
 
@@ -1643,11 +1645,11 @@ class TodoPanel:
         if not todos:
             self.top.withdraw()
             return
-        tw = self.W - 40                      # 글자가 들어갈 폭
+        tw = self.W - 30                      # 글자가 들어갈 폭
         heights = []                          # 먼저 줄바꿈 높이를 잰다
         for text in todos:
             t = c.create_text(0, 0, anchor="nw", text=text, width=tw,
-                              font=("Malgun Gothic", 9))
+                              font=("Malgun Gothic", self.FS))
             bb = c.bbox(t)
             heights.append(max(bb[3] - bb[1] + 20, 32))
             c.delete(t)
@@ -1663,7 +1665,7 @@ class TodoPanel:
             self._tail(x0, x1, y + h, 13, "#ffffff", cd["border"])
             mid = y + h / 2
             t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
-                              font=("Malgun Gothic", 9), fill=cd["text"],
+                              font=("Malgun Gothic", self.FS), fill=cd["text"],
                               justify="center")
             tb = c.bbox(t)          # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
             if tb:
@@ -2966,7 +2968,7 @@ class Mascot:
         cv.create_text(W / 2, 100,
                        text=("엔터로 저장 · Esc로 취소" if edit is not None
                              else "엔터로 추가 · Esc로 닫기"),
-                       font=self._cf(8), fill=cd["sub"])
+                       font=("Malgun Gothic", 8), fill=cd["sub"])
 
         def commit(_e=None):
             text = var.get().strip()
