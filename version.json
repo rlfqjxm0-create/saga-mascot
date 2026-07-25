@@ -1,5 +1,5 @@
 {
- "version": 1784955383,
+ "version": 1784964548,
  "files": {
   "mascot.py": "2e905a09bd1ed5f95ee720d7d631c4367c4acf69dd0a64a928ee017d162a9a98",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
@@ -8,7 +8,7 @@
   "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
   "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
   "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
-  "parts_saga/config.json": "9547f03e7254dedae4f242f0682f9da0059705d56665375b7c69cc6078c5c9d0",
+  "parts_saga/config.json": "6dd1126e2d4b2326b1c97ca464c2bc8a0c00d9e0a51ff9e792cfb85807566eee",
   "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
   "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
   "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
@@ -77,7 +77,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "할 일 우클릭이 가끔 설정 창을 열던 문제를 고쳤어요",
-  "크기를 줄여도 타이머 카드가 안 잘려요"
+  "혼잣말이 훨씬 다양해졌어요",
+  "무슨 말을 할지는 지켜봐 주세요"
  ]
 }
