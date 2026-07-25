@@ -1476,21 +1476,22 @@ class TodoPanel:
 
     본체 창은 캐릭터 크기에 맞춰져 있어 옆으로 그릴 자리가 없다. 그래서
     같은 색상키 투명을 쓰는 별도 창을 왼쪽에 두고 본체를 따라다니게 한다.
-    말풍선 왼쪽의 동그라미를 누르면 그 할 일이 사라진다.
+    말풍선을 우클릭하면 수정 / 완료를 고를 수 있다.
     """
 
     W = 216                      # 패널 폭
     TAIL_W, TAIL_H = 17, 13      # 말풍선 꼬리 크기 (캐릭터 말풍선과 동일)
-    PAD = TAIL_H + 8             # 간격 (꼬리가 다음 칸 아이콘을 안 침범하게)
-    BOX = 18                     # 완료 동그라미 지름
+    PAD = TAIL_H + 8             # 간격 (꼬리가 다음 칸을 안 침범하게)
 
-    def __init__(self, master, card, bg, on_done, on_move, offset=None):
+    def __init__(self, master, card, bg, on_done, on_move, on_edit=None,
+                 offset=None):
         self.card = card
         self.on_done = on_done
         self.on_move = on_move
+        self.on_edit = on_edit
         # 본체 창 왼쪽 위 모서리 기준 상대 위치 (끌어서 옮기면 갱신·저장)
         self.offset = tuple(offset) if offset else (-(self.W - 40), 0)
-        self.items = []          # [(원 좌표, 할 일 인덱스)]
+        self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
         self.top = tk.Toplevel(master)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
@@ -1508,6 +1509,7 @@ class TodoPanel:
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
         self.canvas.bind("<ButtonRelease-1>", self._release)
+        self.canvas.bind("<Button-3>", self._menu)
         self.top.withdraw()
         self._pressed = None
         self._moved = False
@@ -1549,17 +1551,17 @@ class TodoPanel:
         if not todos:
             self.top.withdraw()
             return
-        tw = self.W - self.BOX - 34          # 글자가 들어갈 폭
+        tw = self.W - 40                      # 글자가 들어갈 폭
         heights = []                          # 먼저 줄바꿈 높이를 잰다
         for text in todos:
             t = c.create_text(0, 0, anchor="nw", text=text, width=tw,
                               font=("Malgun Gothic", 9))
             bb = c.bbox(t)
-            heights.append(max(bb[3] - bb[1] + 20, self.BOX + 14))
+            heights.append(max(bb[3] - bb[1] + 20, 32))
             c.delete(t)
 
         y = self.PAD
-        x0, x1 = self.BOX + 12, self.W - 6
+        x0, x1 = 8, self.W - 6
         for i, (text, h) in enumerate(zip(todos, heights)):
             self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, 13,
                         fill="#e6e2e8", outline="")      # 그림자
@@ -1574,12 +1576,7 @@ class TodoPanel:
             tb = c.bbox(t)          # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
             if tb:
                 c.move(t, 0, round(mid - (tb[1] + tb[3]) / 2) - 1)
-            cy, r = y + h / 2, self.BOX / 2
-            c.create_oval(6, cy - r, 6 + self.BOX, cy + r,
-                          fill="#ffffff", outline=cd["fill"], width=2)
-            c.create_line(11, cy, 14, cy + 4, 20, cy - 5,
-                          fill="#d5cfda", width=2, capstyle="round")
-            self.items.append(((6, cy - r, 6 + self.BOX, cy + r), i))
+            self.items.append(((x0, y, x1, y + h), i))   # 우클릭 영역 = 말풍선
             y += h + self.PAD
         self.canvas.config(height=y)
         self.top.geometry(f"{self.W}x{int(y)}")
@@ -1605,12 +1602,29 @@ class TodoPanel:
         if self._moved:
             self.top.update_idletasks()      # 옮긴 좌표가 반영된 뒤 읽는다
             self.on_move(self.top.winfo_rootx(), self.top.winfo_rooty())
-        else:
-            for (x0, y0, x1, y1), idx in self.items:
-                if x0 - 4 <= e.x <= x1 + 4 and y0 - 4 <= e.y <= y1 + 4:
-                    self.on_done(idx)
-                    break
+        # 왼쪽 버튼은 옮기기 전용 — 지우기는 우클릭 메뉴로만 (실수 방지)
         self._pressed = None
+
+    def _at(self, x, y):
+        """그 자리에 있는 할 일 번호 (없으면 None)."""
+        for (x0, y0, x1, y1), idx in self.items:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return idx
+        return None
+
+    def _menu(self, e):
+        """말풍선 우클릭 — 수정 / 완료."""
+        idx = self._at(e.x, e.y)
+        if idx is None:
+            return
+        m = tk.Menu(self.top, tearoff=0)
+        if self.on_edit is not None:
+            m.add_command(label="수정", command=lambda: self.on_edit(idx))
+        m.add_command(label="완료", command=lambda: self.on_done(idx))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
 
     def place(self, x, y):
         """본체 창 기준 저장된 자리에 붙인다 (끌어서 옮긴 위치)."""
@@ -1758,7 +1772,7 @@ class Mascot:
             self._todo_load()
             self.todo_panel = TodoPanel(self.root, self.card, bg,
                                         self._todo_done, self._todo_moved,
-                                        self.todo_pos)
+                                        self._todo_edit, self.todo_pos)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
 
         # ── 귀여운 이벤트 (선물 캐릭터 전용 — config의 "fun") ────────────
@@ -2741,25 +2755,40 @@ class Mascot:
         self.todo_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
 
     def _todo_done(self, idx):
-        """완료 표시를 누르면 그 할 일이 사라진다."""
-        if 0 <= idx < len(self.todos):
-            del self.todos[idx]
-            self._todo_save()
-            self._todo_refresh()
-            if self.can_talk:
-                self._say(random.choice(["하나 끝!", "잘했어요!", "좋아요!"]), 2.5)
-
-    def add_todo(self):
-        """할 일 입력 창 — 엔터로 추가, Esc로 닫기. 연달아 여러 개 적을 수 있다."""
-        if getattr(self, "_todo_win", None) is not None                 and self._todo_win.winfo_exists():
-            self._todo_win.lift()
-            self._todo_win.focus_force()
+        """우클릭 > 완료 — 그 할 일이 사라지고 캐릭터가 축하해 준다."""
+        if not (0 <= idx < len(self.todos)):
             return
+        del self.todos[idx]
+        self._todo_save()
+        self._todo_refresh()
+        now = time.time()
+        self.smile_until = now + 4.0        # 웃는 표정 (파츠 없으면 그냥 넘어감)
+        self.click_bounce = now + 0.45      # 콩 하고 튐
+        self.squash_until = now + 0.12
+        left = len(self.todos)
+        msg = ("할 일 다 끝냈어요!" if left == 0
+               else random.choice(["하나 끝!", "잘했어요!", "좋아요!",
+                                   f"{left}개 남았어요!"]))
+        self._say(msg, 3.0)
+        self._safe("todo_pop", self._burst, 18)
+
+    def _todo_edit(self, idx):
+        """우클릭 > 수정 — 그 할 일의 글을 고친다."""
+        if 0 <= idx < len(self.todos):
+            self.add_todo(edit=idx)
+
+    def add_todo(self, edit=None):
+        """할 일 입력 창 — 엔터로 추가, Esc로 닫기. 연달아 여러 개 적을 수 있다.
+
+        edit에 번호를 주면 그 할 일을 고치는 창이 된다(엔터 한 번으로 끝).
+        """
+        if getattr(self, "_todo_win", None) is not None                 and self._todo_win.winfo_exists():
+            self._todo_win.destroy()        # 수정 창을 새로 열 수 있게 닫는다
         cd = self.card
         W, H = 300, 118
         win = tk.Toplevel(self.root)
         self._todo_win = win
-        win.title("할 일 추가")
+        win.title("할 일 수정" if edit is not None else "할 일 추가")
         win.attributes("-topmost", True)
         win.resizable(False, False)
         win.configure(bg=cd["panel"])
@@ -2773,19 +2802,30 @@ class Mascot:
             return cv.create_polygon(pts, smooth=True, **kw)
 
         rr(14, 12, W - 14, 44, 12, fill=cd["soft"], outline=cd["border"], width=2)
-        cv.create_text(W / 2, 28, text="무엇을 할까요?",
+        cv.create_text(W / 2, 28,
+                       text="이렇게 바꿀까요?" if edit is not None else "무엇을 할까요?",
                        font=("Malgun Gothic", 10, "bold"), fill=cd["text"])
-        var = tk.StringVar()
+        var = tk.StringVar(value=self.todos[edit] if edit is not None
+                           and edit < len(self.todos) else "")
         ent = tk.Entry(win, textvariable=var, font=("Malgun Gothic", 10),
                        relief="flat", bg="#ffffff", fg=cd["text"],
                        highlightthickness=1, highlightbackground=cd["border"],
                        highlightcolor=cd["fill"])
         cv.create_window(20, 56, anchor="nw", window=ent, width=W - 40, height=26)
-        cv.create_text(W / 2, 100, text="엔터로 추가 · Esc로 닫기",
+        cv.create_text(W / 2, 100,
+                       text=("엔터로 저장 · Esc로 취소" if edit is not None
+                             else "엔터로 추가 · Esc로 닫기"),
                        font=("Malgun Gothic", 8), fill=cd["sub"])
 
         def commit(_e=None):
             text = var.get().strip()
+            if edit is not None:                 # 수정: 한 번 고치고 닫는다
+                if text and edit < len(self.todos):
+                    self.todos[edit] = text[:200]
+                    self._todo_save()
+                    self._todo_refresh()
+                win.destroy()
+                return
             if text:
                 self.todos.append(text[:200])
                 del self.todos[20:]
@@ -2797,6 +2837,8 @@ class Mascot:
 
         ent.bind("<Return>", commit)
         win.bind("<Escape>", lambda _e: win.destroy())
+        if edit is not None:
+            ent.select_range(0, "end")       # 바로 고쳐 쓸 수 있게 전체 선택
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
@@ -3444,6 +3486,17 @@ class Mascot:
         except Exception:
             self._log_error("end_cmd")
         self._celebrate()
+
+    def _burst(self, n=24, spread=45):
+        """카드 위로 색종이가 팡 터진다 (할 일 완료·기록 갱신 등 작은 축하용)."""
+        cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff", "#ffa9a9"]
+        for _ in range(n):
+            ang = random.uniform(-2.7, -0.45)
+            spd = random.uniform(3.0, 7.0)
+            self.particles.append([self.card_cx + random.uniform(-spread, spread),
+                                   self.oy + 46,
+                                   math.cos(ang) * spd, math.sin(ang) * spd,
+                                   random.choice(cols), random.randint(35, 70)])
 
     def _celebrate(self):
         """작업 종료 — 고깔모자 + 폭죽 + 축하 말풍선, 잠시 뒤 브리핑."""

@@ -1,7 +1,7 @@
 {
- "version": 1784945650,
+ "version": 1784947018,
  "files": {
-  "mascot.py": "08fac741f70383fbd858d6c1c904cc4e8a9602cc93bb1c6ed4bf9bdbc1184b09",
+  "mascot.py": "57887ae453b2a4126fe5885c5833d2494b6cd9f62d0235e47040beeafc5c8a2e",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
@@ -77,6 +77,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "작업 종료 축하 연출이 더 예뻐졌어요"
+  "할 일을 우클릭하면 수정·완료를 고를 수 있어요",
+  "완료하면 캐릭터가 축하해 줍니다"
  ]
 }
