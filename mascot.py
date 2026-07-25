@@ -330,6 +330,7 @@ DEFAULT_SETTINGS = {
     "trail": False,       # 타블렛 낙서 표시
     "topmost": True,      # 항상 위
     "scale_pct": 100,     # 캐릭터 크기(%)
+    "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, sai2.exe, krita.exe",
     "sleep_min": 10,      # 이 시간(분) 동안 무입력이면 수면 모드
@@ -1836,6 +1837,9 @@ class Mascot:
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
 
+        # 글자 크기 배율 — 글꼴만 키우면 카드를 넘치므로 카드 치수도 같이 키운다
+        self.font_k = max(0.7, min(1.6,
+                                   float(self.us.get("font_pct", 100)) / 100.0))
         self.oy = self._timer_oy()                  # 캐릭터 전체 y 오프셋
         cw, ch = self.layout["canvas"]
         self.cw_px, self.ch_px = round(cw * s), round(ch * s)
@@ -2962,7 +2966,7 @@ class Mascot:
         cv.create_text(W / 2, 100,
                        text=("엔터로 저장 · Esc로 취소" if edit is not None
                              else "엔터로 추가 · Esc로 닫기"),
-                       font=("Malgun Gothic", 8), fill=cd["sub"])
+                       font=self._cf(8), fill=cd["sub"])
 
         def commit(_e=None):
             text = var.get().strip()
@@ -3648,8 +3652,12 @@ class Mascot:
             return
         text = self.bubble[0]
         c, cd = self.canvas, self.card
-        w = max(self._text_w(text) + 34, 74)
-        h = 36
+        # 말풍선은 카드와 달리 크기가 고정이 아니라, 글자에 맞춰 상자가 늘어난다.
+        # 그래서 글자 크기 설정을 그대로 따라도 겹칠 일이 없다. 다만 창보다
+        # 넓어지면 안 되니 그 선에서만 줄인다.
+        font = self._fit(text, 9, self.W - 46)
+        w = max(self._mw(text, font) + 34, 74)
+        h = max(36, self._mh(font) + 20)
         cx = self.card_cx
         if time.time() < self.hat_until:      # 고깔모자를 가리지 않게 옆으로
             cx += 42
@@ -3662,8 +3670,7 @@ class Mascot:
         pts = self._bubble_pts(x0, by - h, x1, by, 13, cx + 4, 17, 13)
         c.create_polygon([p + 2 for p in pts], fill="#e6e2e8", outline="")
         c.create_polygon(pts, fill="#ffffff", outline=cd["border"], width=2)
-        c.create_text(cx, by - h / 2, text=text,
-                      font=("Malgun Gothic", 9), fill=cd["text"])
+        c.create_text(cx, by - h / 2, text=text, font=font, fill=cd["text"])
 
 
     def _end_workday(self):
@@ -3903,6 +3910,56 @@ class Mascot:
         py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
         win.geometry(f"+{int(px)}+{int(py)}")
 
+    def _cf(self, size, bold=False):
+        """글자 크기 설정을 반영한 글꼴."""
+        n = max(6, round(size * getattr(self, "font_k", 1.0)))
+        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+
+    def _mw(self, text, font):
+        """그 글꼴로 글자를 그리면 폭이 얼마인지 (측정값 캐시)."""
+        key = (text, font)
+        w = self._tw_cache.get(key)
+        if w is None:
+            t = self.canvas.create_text(-3000, -3000, text=text, anchor="nw",
+                                        font=font)
+            bb = self.canvas.bbox(t)
+            w = (bb[2] - bb[0]) if bb else len(text) * 11
+            self.canvas.delete(t)
+            self._tw_cache[key] = w
+        return w
+
+    def _mh(self, font):
+        """그 글꼴의 글자 높이(px)."""
+        key = ("__height__", font)
+        h = self._tw_cache.get(key)
+        if h is None:
+            t = self.canvas.create_text(-3000, -3000, text="가", anchor="nw",
+                                        font=font)
+            bb = self.canvas.bbox(t)
+            h = (bb[3] - bb[1]) if bb else 16
+            self.canvas.delete(t)
+            self._tw_cache[key] = h
+        return h
+
+    def _fit(self, text, size, max_w, bold=False):
+        """카드 안에 들어가는 가장 큰 글꼴.
+
+        카드 크기는 고정이라, 글자 크기를 키우면 상태와 시간이 서로 파고든다.
+        그래서 정해진 폭을 넘으면 들어갈 때까지 한 단계씩 줄인다. 설정한
+        크기가 카드에 안 맞아도 겹치지는 않게 하는 안전장치다.
+        """
+        n = max(6, round(size * getattr(self, "font_k", 1.0)))
+        while n > 6:
+            f = self._cf_n(n, bold)
+            if self._mw(text, f) <= max_w:
+                return f
+            n -= 1
+        return self._cf_n(6, bold)
+
+    @staticmethod
+    def _cf_n(n, bold=False):
+        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+
     def _draw_timer(self, state, sleeping, now):
         c = self.canvas
         cd = self.card
@@ -3926,32 +3983,42 @@ class Mascot:
         if self.has_clock and self.clock_open:
             # 세로 카드: 상태(위) → 시계(가운데) → 시간(아래) — 모두 정중앙 정렬
             cxm = (x0 + x1) / 2
-            tw = self._text_w(status)
+            f_stat = self._fit(status, 8, (x1 - x0) - 34)
+            tw = self._mw(status, f_stat)
             gx = cxm - (16 + tw) / 2            # 점+간격+텍스트 그룹 중앙
             status_dot(gx + 5, y0 + 16)
             c.create_text(gx + 16, y0 + 16, anchor="w", text=status,
-                          font=("Malgun Gothic", 8), fill=cd["sub"])
+                          font=f_stat, fill=cd["sub"])
             R = 38
             clock_cy = y0 + 30 + R
             self._draw_clock(cxm, clock_cy, R, now)
             c.create_text(cxm, clock_cy + R + 18, text=label,
-                          font=("Malgun Gothic", 14, "bold"), fill=cd["text"])
+                          font=self._fit(label, 14, (x1 - x0) - 20, True),
+                          fill=cd["text"])
         elif self.has_clock:
             # 접힘: 상태 + 시간 한 줄 (게이지 없음)
             row = y0 + 20
             status_dot(x0 + pad + 5, row)
+            avail = (x1 - pad) - (x0 + pad + 16)
+            f_time = self._fit(label, 13, avail * 0.62, True)
+            f_stat = self._fit(status, 8,
+                               avail - self._mw(label, f_time) - 8)
             c.create_text(x0 + pad + 16, row, anchor="w", text=status,
-                          font=("Malgun Gothic", 8), fill=cd["sub"])
+                          font=f_stat, fill=cd["sub"])
             c.create_text(x1 - pad, row, anchor="e", text=label,
-                          font=("Malgun Gothic", 13, "bold"), fill=cd["text"])
+                          font=f_time, fill=cd["text"])
         else:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
             row1 = y0 + 20
             status_dot(x0 + pad + 5, row1)
+            avail = (x1 - pad) - (x0 + pad + 16)
+            f_time = self._fit(label, 13, avail * 0.62, True)
+            f_stat = self._fit(status, 8,
+                               avail - self._mw(label, f_time) - 8)
             c.create_text(x0 + pad + 16, row1, anchor="w", text=status,
-                          font=("Malgun Gothic", 8), fill=cd["sub"])
+                          font=f_stat, fill=cd["sub"])
             c.create_text(x1 - pad, row1, anchor="e", text=label,
-                          font=("Malgun Gothic", 13, "bold"), fill=cd["text"])
+                          font=f_time, fill=cd["text"])
             goal = max(float(self.us["goal_hours"]), 0.5) * 3600
             frac = min(self.work_secs / goal, 1.0)
             row2 = y0 + 45
@@ -3963,7 +4030,7 @@ class Mascot:
                               width=6, capstyle="round",
                               fill="#7ccf8f" if frac >= 1.0 else cd["fill"])
             c.create_text(x1 - pad, row2, anchor="e", text=f"{int(frac * 100)}%",
-                          font=("Malgun Gothic", 7, "bold"),
+                          font=self._fit(f"{int(frac * 100)}%", 7, 34, True),
                           fill="#5aa86e" if frac >= 1.0 else cd["sub"])
             if self.fun:                      # 작업 종료 버튼
                 bw = 104
@@ -3972,7 +4039,7 @@ class Mascot:
                 r = (bx - bw / 2, by - 11, bx + bw / 2, by + 11)
                 self._rrect(*r, 11, fill=cd["fill"], outline="")
                 c.create_text(bx, by, text="작업 종료",
-                              font=("Malgun Gothic", 8, "bold"), fill="#ffffff")
+                              font=self._fit("작업 종료", 8, bw - 12, True), fill="#ffffff")
                 self._end_btn = r
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
@@ -4598,6 +4665,7 @@ class Mascot:
                 disp.append(lambda ry: picker(ry, "패션", "skin", self.skin_names))
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
+                lambda ry: stepper(ry, "글자 크기", "font_pct", 70, 160, 10, "%"),
                 lambda ry: toggle(ry, "캐릭터 그림자", "shadow"),
                 lambda ry: toggle(ry, "타블렛 낙서 표시", "trail"),
                 lambda ry: toggle(ry, "항상 위에 표시", "topmost"),
@@ -4662,9 +4730,11 @@ class Mascot:
             new["idle_sec"] = max(float(new["idle_sec"]), 5.0)
             new["sleep_min"] = max(1, int(new["sleep_min"]))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
+            new["font_pct"] = max(70, min(160, int(new["font_pct"])))
             for k in ("sound_volume", "pen_volume", "poke_volume"):
                 new[k] = max(0, min(100, int(new[k])))
             need_restart = (new["scale_pct"] != self.us["scale_pct"]
+                            or new["font_pct"] != self.us.get("font_pct", 100)
                             or new.get("skin") != self.us.get("skin")
                             or bool(new["show_timer"]) != self.timer_on
                             or bool(new["shadow"]) != bool(self.us.get("shadow", True)))
@@ -4711,6 +4781,7 @@ class Mascot:
         self.us["idle_sec"] = max(5.0, float(self.us["idle_sec"]))
         self.us["goal_hours"] = max(0.5, float(self.us["goal_hours"]))
         self.us["scale_pct"] = max(50, min(200, int(self.us["scale_pct"])))
+        self.us["font_pct"] = max(70, min(160, int(self.us.get("font_pct", 100))))
 
     def _save_settings(self):
         try:
