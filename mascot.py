@@ -1848,6 +1848,15 @@ class Mascot:
 
         self.root = tk.Tk()
         globals()["_TK_ROOT"] = self.root      # 커서·화면 크기 조회용
+        # 글자 크기를 화면 배율과 무관하게 고정한다. Tk는 포인트로 지정한
+        # 글꼴을 화면 DPI에 맞춰 키우는데, 이 프로그램의 카드·말풍선·패널은
+        # 전부 픽셀 단위로 짜여 있어서 배율이 높은 화면에서는 글자만 커져
+        # 서로 겹친다(175%부터 '딴짓 중'과 시간이 포개짐). 96DPI 기준으로
+        # 못 박아 어느 화면에서도 설계한 그대로 나오게 한다.
+        try:
+            self.root.tk.call("tk", "scaling", 96.0 / 72.0)
+        except Exception:
+            pass
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.us["topmost"]))
         # 투명 배경: 윈도우는 색상키, 맥은 Tk의 진짜 투명 속성
@@ -1922,7 +1931,8 @@ class Mascot:
         self.click_bounce = 0.0      # 클릭 반응 튀어오름 종료 시각
         self.pet_t0 = 0.0            # 반려동물 등장 시작(0=쉬는 중)
         _now = time.time()
-        self.next_talk = _now + random.uniform(90, 200)
+        self.next_talk = _now + random.uniform(120, 300)
+        self._recent_talk = []       # 최근에 한 말 (연달아 반복 방지)
         self.next_pet = _now + random.uniform(30, 80)   # 첫 인사는 좀 이르게
         # 하루 브리핑용 집계
         self.stat = {"work": 0.0, "other": 0.0, "idle": 0.0, "keys": 0,
@@ -2993,7 +3003,7 @@ class Mascot:
                 self.pokesnd.play()
             except Exception:
                 pass
-        self._say(random.choice(self._click_pool()), 2.2)
+        self._say(self._pick_talk(self._click_pool()), 2.2)
 
     def _toggle_clock(self):
         """시계 펼침/접힘 — 창 높이를 바꾸고(아래 고정) 좌표·그림자 재계산."""
@@ -3373,6 +3383,19 @@ class Mascot:
     def _talk_pool(self, state):
         return self.cfg.get("talk") or self.TALK
 
+    def _pick_talk(self, pool):
+        """최근에 한 말은 빼고 고른다 — 같은 말이 금방 또 나오면 김이 샌다.
+
+        목록의 3분의 1 정도를 기억해 두고 그 밖에서 뽑는다. 목록이 짧으면
+        기억하는 개수도 같이 줄어 항상 뽑을 게 남는다.
+        """
+        keep = max(1, min(len(pool) - 1, len(pool) // 3))
+        recent = getattr(self, "_recent_talk", [])
+        cand = [t for t in pool if t not in recent] or list(pool)
+        pick = random.choice(cand)
+        self._recent_talk = (recent + [pick])[-keep:]
+        return pick
+
     def _click_pool(self):
         return self.cfg.get("click_talk") or self._talk_pool(None)
 
@@ -3398,8 +3421,8 @@ class Mascot:
         self._rec_tick(now, state)
         if (self.bubble is None and now >= self.next_talk
                 and not sleeping and now > self.celebrate_until):
-            self._say(random.choice(self._talk_pool(state)))
-            self.next_talk = now + random.uniform(150, 420)
+            self._say(self._pick_talk(self._talk_pool(state)))
+            self.next_talk = now + random.uniform(700, 1700)
         # 반려동물 등장/퇴장
         total = self.PET_RISE + self.PET_HOLD + self.PET_FALL
         if self.pet_t0 == 0.0 and now >= self.next_pet and not sleeping:
