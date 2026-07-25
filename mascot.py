@@ -3023,6 +3023,15 @@ class Mascot:
                 self._ms.stop()
             if self.todo_panel is not None:
                 self.todo_panel.destroy()
+            # 살아있음 신호를 지운다. 안 지우면 에이전트가 최대 8초 동안
+            # '아직 떠 있다'고 착각해서, 그 사이 아이콘을 눌러도 캐릭터가
+            # 안 뜨고 클릭이 그냥 삼켜진다.
+            if self.ws_path is not None:
+                try:
+                    os.remove(os.path.join(os.path.dirname(self.ws_path),
+                                           ".mascot_live"))
+                except OSError:
+                    pass
         finally:
             self.root.destroy()
 
