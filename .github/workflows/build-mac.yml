@@ -1,0 +1,49 @@
+name: 맥 앱 빌드
+
+# 이 레포는 공개라 GitHub Actions가 무료다(무료 한도는 비공개 레포에만 적용).
+# 본 레포(ena-workspace)가 비공개라 한도를 다 쓰면 여기서 대신 빌드한다.
+# mascot.py와 parts_saga 는 자동 업데이트 페이로드로 이미 여기 있고,
+# 런처(saga_mac.py)만 함께 두면 앱을 만들 수 있다.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tk 9 파이썬 준비
+        run: |
+          set -x
+          brew install --quiet python@3.13 python-tk@3.13
+          /opt/homebrew/bin/python3.13 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet --upgrade pip
+          /tmp/venv/bin/pip install --quiet pillow pyobjc-framework-Cocoa             pyobjc-framework-Quartz pyinstaller certifi
+          /tmp/venv/bin/python -c "import tkinter; r=tkinter.Tk(); print('Tk', r.tk.call('info','patchlevel')); r.destroy()"
+
+      - name: 빌드
+        run: |
+          set -x
+          /tmp/venv/bin/python -m py_compile mascot.py saga_mac.py
+          /tmp/venv/bin/pyinstaller --noconfirm --clean --windowed --name Saga             --osx-bundle-identifier com.ena.mascot.saga             --add-data "parts_saga:parts_saga"             --collect-submodules tkinter             --collect-data certifi --hidden-import certifi             saga_mac.py
+          ls -la dist
+          # 인증서가 실제로 담겼는지 확인 (이게 빠지면 자동 업데이트가 조용히 실패한다)
+          find dist/Saga.app -name "cacert.pem" | head
+
+      - name: 앱 압축 후 build 브랜치에 올리기
+        run: |
+          set -x
+          ditto -c -k --sequesterRsrc --keepParent dist/Saga.app Saga-mac-arm64.zip
+          ls -la Saga-mac-arm64.zip
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          SIZE=$(du -h Saga-mac-arm64.zip | cut -f1)
+          git checkout --orphan build
+          git rm -rq --cached . || true
+          git add -f Saga-mac-arm64.zip
+          git commit -m "맥 앱 ($SIZE)"
+          git push -f origin build
