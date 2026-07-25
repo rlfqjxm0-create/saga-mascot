@@ -1566,13 +1566,24 @@ class TodoPanel:
 
     # 좁고 글자는 크게 — 화면을 덜 가리면서 잘 읽히게.
     # 맥은 같은 크기라도 글자가 더 넓게 그려져 조금 더 좁게 잡는다.
-    W = 150 if IS_MAC else 160   # 패널 폭
-    FS = 12                      # 글자 크기 (글자 크기 설정과 무관하게 고정)
+    W = 150 if IS_MAC else 160   # 패널 폭 (96DPI 기준)
+    FS = 12                      # 글자 크기 (캐릭터 글자 크기 설정과는 무관)
     TAIL_W, TAIL_H = 17, 13      # 말풍선 꼬리 크기 (캐릭터 말풍선과 동일)
     PAD = TAIL_H + 8             # 간격 (꼬리가 다음 칸을 안 침범하게)
 
+    # 우클릭 메뉴에서 고를 수 있는 배율 (%)
+    ZOOMS = (60, 70, 80, 90, 100, 120, 140)
+
     def __init__(self, master, card, bg, on_done, on_move, on_edit=None,
-                 offset=None, flip=False, on_flip=None):
+                 offset=None, flip=False, on_flip=None, ui_k=1.0,
+                 zoom=100, on_zoom=None):
+        # 화면 배율 반영 — 비율은 그대로 두고 통째로 키운다. 배율이 큰 화면에서
+        # 폭·글자를 안 키우면 물리적으로 너무 작게 보인다. 다만 얼마나 커야
+        # 편한지는 사람마다 달라서, 우클릭 메뉴에서 다시 조절할 수 있게 했다.
+        self.ui_k = max(1.0, min(3.0, float(ui_k)))
+        self.zoom = self._near_zoom(zoom)
+        self.on_zoom = on_zoom
+        self._scale()
         self.card = card
         self.on_done = on_done
         self.on_move = on_move
@@ -1583,6 +1594,7 @@ class TodoPanel:
         # 본체 창 왼쪽 위 모서리 기준 상대 위치 (끌어서 옮기면 갱신·저장).
         # 캐릭터 창과 겹치면 겹친 구간의 우클릭이 캐릭터한테 가서 설정 창이
         # 뜬다. 그래서 기본값은 딱 붙되 겹치지 않는 자리로 둔다.
+        self._moved_by_user = bool(offset)
         self.offset = tuple(offset) if offset else (-(self.W + 4), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
         self.top = tk.Toplevel(master)
@@ -1606,6 +1618,47 @@ class TodoPanel:
         self.top.withdraw()
         self._pressed = None
         self._moved = False
+
+    @classmethod
+    def _near_zoom(cls, pct):
+        """저장된 값이 이상해도 고를 수 있는 단계 중 가장 가까운 것으로."""
+        try:
+            pct = int(pct)
+        except Exception:
+            return 100
+        return min(cls.ZOOMS, key=lambda z: abs(z - pct))
+
+    def _scale(self):
+        """화면 배율 × 사용자가 고른 배율로 치수를 다시 잡는다.
+
+        인스턴스 값이 아니라 클래스에 적힌 기준값에서 매번 새로 계산한다.
+        (인스턴스 값에서 다시 곱하면 배율을 바꿀 때마다 눈덩이처럼 커진다.)
+        """
+        k = self.k = self.ui_k * self.zoom / 100.0
+        c = TodoPanel
+        self.W = round(c.W * k)
+        self.PAD = round(c.PAD * k)
+        self.TAIL_W = round(c.TAIL_W * k)
+        self.TAIL_H = round(c.TAIL_H * k)
+        self.FS = max(7, round(c.FS * k))
+        self.MENU_FS = max(7, round(9 * self.ui_k))   # 메뉴는 화면 배율만 따른다
+
+    def set_zoom(self, pct):
+        """할 일 목록만 키우거나 줄인다 (캐릭터·카드 크기와는 무관)."""
+        pct = self._near_zoom(pct)
+        if pct == self.zoom:
+            return
+        self.zoom = pct
+        self._scale()
+        try:
+            self.canvas.config(width=self.W)
+        except Exception:
+            pass
+        # 직접 옮긴 적이 없으면 폭이 바뀐 만큼 붙는 자리도 따라간다
+        if not self._moved_by_user:
+            self.offset = (-(self.W + 4), self.offset[1])
+        if self.on_zoom is not None:
+            self.on_zoom(self.zoom)
 
     def _rrect(self, x0, y0, x1, y1, r, **kw):
         """그냥 둥근 사각형 — 꼬리 때문에 모양이 일그러지지 않게 따로 그린다."""
@@ -1645,24 +1698,26 @@ class TodoPanel:
         if not todos:
             self.top.withdraw()
             return
-        tw = self.W - 30                      # 글자가 들어갈 폭
+        tw = self.W - round(30 * self.k)   # 글자가 들어갈 폭
         heights = []                          # 먼저 줄바꿈 높이를 잰다
         for text in todos:
             t = c.create_text(0, 0, anchor="nw", text=text, width=tw,
                               font=("Malgun Gothic", self.FS))
             bb = c.bbox(t)
-            heights.append(max(bb[3] - bb[1] + 20, 32))
+            heights.append(max(bb[3] - bb[1] + round(20 * self.k),
+                               round(32 * self.k)))
             c.delete(t)
 
         y = self.PAD
-        x0, x1 = 8, self.W - 6
+        x0, x1 = round(8 * self.k), self.W - round(6 * self.k)
         for i, (text, h) in enumerate(zip(todos, heights)):
-            self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, 13,
+            r = round(13 * self.k)
+            self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
                         fill="#e6e2e8", outline="")      # 그림자
-            self._tail(x0 + 2, x1 + 2, y + h, 13, "#e6e2e8", dx=0, dy=3)
-            self._rrect(x0, y, x1, y + h, 13, fill="#ffffff",
+            self._tail(x0 + 2, x1 + 2, y + h, r, "#e6e2e8", dx=0, dy=3)
+            self._rrect(x0, y, x1, y + h, r, fill="#ffffff",
                         outline=cd["border"], width=2)
-            self._tail(x0, x1, y + h, 13, "#ffffff", cd["border"])
+            self._tail(x0, x1, y + h, r, "#ffffff", cd["border"])
             mid = y + h / 2
             t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
                               font=("Malgun Gothic", self.FS), fill=cd["text"],
@@ -1711,13 +1766,20 @@ class TodoPanel:
         idx = self._at(e.x, e.y)
         if idx is None:
             return
-        m = tk.Menu(self.top, tearoff=0)
+        m = tk.Menu(self.top, tearoff=0,
+                    font=("Malgun Gothic", self.MENU_FS))
         if self.on_edit is not None:
             m.add_command(label="수정", command=lambda: self.on_edit(idx))
         m.add_command(label="완료", command=lambda: self.on_done(idx))
         m.add_separator()
         m.add_command(label="꼬리 오른쪽으로" if self.flip else "꼬리 왼쪽으로",
                       command=self._toggle_flip)
+        sub = tk.Menu(m, tearoff=0, font=("Malgun Gothic", self.MENU_FS))
+        for z in self.ZOOMS:
+            sub.add_command(label=("● " if z == self.zoom else "    ") + f"{z}%",
+                            command=lambda p=z: self.set_zoom(p))
+        m.add_cascade(label="크기 조절", menu=sub)
+        self._menu_ref = (m, sub)       # 파이썬이 메뉴를 먼저 치우지 않게
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1744,6 +1806,37 @@ class TodoPanel:
             self.top.destroy()
         except Exception:
             pass
+
+
+def _screen_scale(root=None):
+    """화면 배율 (150% 화면이면 1.5).
+
+    Tk의 winfo_fpixels로 재면 두 가지에 걸린다 — scaling을 고정한 뒤에는 그
+    값이 되돌아오고, 한 프로세스에서 창을 두 번째로 만들면 앞서 고정한 값이
+    새어 96으로 나온다. 그래서 윈도우에 직접 물어본다.
+    """
+    if IS_WIN:
+        u = ctypes.windll.user32
+        try:                                  # 창이 놓인 모니터 기준 (가장 정확)
+            if root is not None:
+                hwnd = int(root.wm_frame(), 16)
+                dpi = u.GetDpiForWindow(hwnd)
+                if dpi:
+                    return max(1.0, min(3.0, dpi / 96.0))
+        except Exception:
+            pass
+        try:
+            dpi = u.GetDpiForSystem()
+            if dpi:
+                return max(1.0, min(3.0, dpi / 96.0))
+        except Exception:
+            pass
+    try:
+        if root is not None:
+            return max(1.0, min(3.0, root.winfo_fpixels("1i") / 96.0))
+    except Exception:
+        pass
+    return 1.0
 
 
 def already_running(char):
@@ -1787,9 +1880,12 @@ class Mascot:
         self.us = dict(DEFAULT_SETTINGS)
         self.us["idle_sec"] = float(tcfg.get("idle_sec", self.us["idle_sec"]))
         self.settings_path = os.path.join(self.state_dir, ".settings.json")
+        self._font_pct_saved = False
         try:
             with open(self.settings_path, encoding="utf-8") as fp:
-                self.us.update(json.load(fp))
+                saved = json.load(fp)
+            self._font_pct_saved = "font_pct" in saved
+            self.us.update(saved)
         except Exception:
             pass
         self._sanitize_settings()
@@ -1839,9 +1935,7 @@ class Mascot:
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
 
-        # 글자 크기 배율 — 글꼴만 키우면 카드를 넘치므로 카드 치수도 같이 키운다
-        self.font_k = max(0.7, min(1.6,
-                                   float(self.us.get("font_pct", 100)) / 100.0))
+        self.font_k = 1.0        # 창을 만든 뒤 화면 배율을 보고 다시 정한다
         self.oy = self._timer_oy()                  # 캐릭터 전체 y 오프셋
         cw, ch = self.layout["canvas"]
         self.cw_px, self.ch_px = round(cw * s), round(ch * s)
@@ -1859,10 +1953,16 @@ class Mascot:
         # 전부 픽셀 단위로 짜여 있어서 배율이 높은 화면에서는 글자만 커져
         # 서로 겹친다(175%부터 '딴짓 중'과 시간이 포개짐). 96DPI 기준으로
         # 못 박아 어느 화면에서도 설계한 그대로 나오게 한다.
+        self.ui_k = _screen_scale(self.root)
         try:
             self.root.tk.call("tk", "scaling", 96.0 / 72.0)
         except Exception:
             pass
+        # 처음 켜는 사람은 화면 배율에 맞춘 크기로 시작한다 (설정한 적이 있으면 존중)
+        if not self._font_pct_saved:
+            self.us["font_pct"] = max(70, min(160, round(self.ui_k * 100)))
+        self.font_k = max(0.7, min(1.6,
+                                   float(self.us.get("font_pct", 100)) / 100.0))
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.us["topmost"]))
         # 투명 배경: 윈도우는 색상키, 맥은 Tk의 진짜 투명 속성
@@ -1891,6 +1991,7 @@ class Mascot:
         self.todos = []
         self.todo_pos = None         # 본체 기준 패널 위치 (끌어서 옮긴 자리)
         self.todo_flip = False       # 말풍선 꼬리가 왼쪽을 보는가
+        self.todo_zoom = 100         # 할 일 목록만의 배율 (우클릭 → 크기 조절)
         self.todo_panel = None
         self.todo_path = os.path.join(self.state_dir, ".todos.json")
         if self.todo_on:
@@ -1898,7 +1999,9 @@ class Mascot:
             self.todo_panel = TodoPanel(self.root, self.card, bg,
                                         self._todo_done, self._todo_moved,
                                         self._todo_edit, self.todo_pos,
-                                        self.todo_flip, self._todo_flipped)
+                                        self.todo_flip, self._todo_flipped,
+                                        self.ui_k, self.todo_zoom,
+                                        self._todo_zoomed)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
 
         # ── 귀여운 이벤트 (선물 캐릭터 전용 — config의 "fun") ────────────
@@ -1992,7 +2095,7 @@ class Mascot:
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        menu = tk.Menu(self.root, tearoff=0)
+        menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
         if self.todo_on:
             menu.add_command(label="할 일 추가", command=self.add_todo)
             menu.add_separator()
@@ -2875,6 +2978,7 @@ class Mascot:
                 if isinstance(p, (list, tuple)) and len(p) == 2:
                     self.todo_pos = (int(p[0]), int(p[1]))
                 self.todo_flip = bool(data.get("flip"))
+                self.todo_zoom = TodoPanel._near_zoom(data.get("zoom", 100))
         except Exception:
             self.todos = []
 
@@ -2882,9 +2986,19 @@ class Mascot:
         try:
             with open(self.todo_path, "w", encoding="utf-8") as fp:
                 json.dump({"items": self.todos, "pos": self.todo_pos,
-                           "flip": self.todo_flip}, fp, ensure_ascii=False)
+                           "flip": self.todo_flip, "zoom": self.todo_zoom},
+                          fp, ensure_ascii=False)
         except Exception:
             pass
+
+    def _todo_zoomed(self, pct):
+        """할 일 목록 배율을 기억하고 바로 다시 그린다."""
+        # 자리는 저장하지 않는다 — 직접 옮긴 적이 없다면 다음에 켤 때도
+        # 그때의 폭에 맞춰 캐릭터 옆에 붙는 게 맞다.
+        self.todo_zoom = int(pct)
+        self._todo_save()
+        self._last_pos = None                # 다음 틱에 위치 재적용
+        self._todo_refresh()
 
     def _todo_flipped(self, flip):
         """꼬리 방향을 기억한다 — 패널을 캐릭터 오른쪽에 두는 사람도 있다."""
@@ -2898,6 +3012,7 @@ class Mascot:
                          int(y - self.root.winfo_rooty()))
         if self.todo_panel is not None:
             self.todo_panel.offset = self.todo_pos
+            self.todo_panel._moved_by_user = True
         self._last_pos = None                # 다음 틱에 위치 재적용
         self._todo_save()
 
@@ -2938,7 +3053,8 @@ class Mascot:
         if getattr(self, "_todo_win", None) is not None                 and self._todo_win.winfo_exists():
             self._todo_win.destroy()        # 수정 창을 새로 열 수 있게 닫는다
         cd = self.card
-        W, H = 300, 118
+        u = self._ui
+        W, H = u(300), u(118)
         win = tk.Toplevel(self.root)
         self._todo_win = win
         win.title("할 일 수정" if edit is not None else "할 일 추가")
@@ -2954,21 +3070,23 @@ class Mascot:
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
 
-        rr(14, 12, W - 14, 44, 12, fill=cd["soft"], outline=cd["border"], width=2)
-        cv.create_text(W / 2, 28,
+        rr(u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
+           outline=cd["border"], width=2)
+        cv.create_text(W / 2, u(28),
                        text="이렇게 바꿀까요?" if edit is not None else "무엇을 할까요?",
-                       font=("Malgun Gothic", 10, "bold"), fill=cd["text"])
+                       font=self._uf(10, True), fill=cd["text"])
         var = tk.StringVar(value=self.todos[edit] if edit is not None
                            and edit < len(self.todos) else "")
-        ent = tk.Entry(win, textvariable=var, font=("Malgun Gothic", 10),
+        ent = tk.Entry(win, textvariable=var, font=self._uf(10),
                        relief="flat", bg="#ffffff", fg=cd["text"],
                        highlightthickness=1, highlightbackground=cd["border"],
                        highlightcolor=cd["fill"])
-        cv.create_window(20, 56, anchor="nw", window=ent, width=W - 40, height=26)
-        cv.create_text(W / 2, 100,
+        cv.create_window(u(20), u(56), anchor="nw", window=ent,
+                         width=W - u(40), height=u(26))
+        cv.create_text(W / 2, u(100),
                        text=("엔터로 저장 · Esc로 취소" if edit is not None
                              else "엔터로 추가 · Esc로 닫기"),
-                       font=("Malgun Gothic", 8), fill=cd["sub"])
+                       font=self._uf(8), fill=cd["sub"])
 
         def commit(_e=None):
             text = var.get().strip()
@@ -3742,10 +3860,11 @@ class Mascot:
                 ("키 입력", f"{int(s.get('keys', 0)):,}회"),
                 ("그린 획", f"{int(s.get('strokes', 0)):,}획")]
 
-        W, PAD, ROW = 350, 22, 34
-        HEAD_H = 78
-        body_h = ROW * len(rows) + 20
-        H = 22 + HEAD_H + 22 + body_h + 26 + 42 + 24
+        u = self._ui
+        W, PAD, ROW = u(350), u(22), u(34)
+        HEAD_H = u(78)
+        body_h = ROW * len(rows) + u(20)
+        H = u(22) + HEAD_H + u(22) + body_h + u(26) + u(42) + u(24)
         win = tk.Toplevel(self.root)
         self._brief_win = win
         win.title("오늘의 작업")
@@ -3761,28 +3880,28 @@ class Mascot:
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
 
-        y = 22
-        rr(PAD, y, W - PAD, y + HEAD_H, 18, fill=cd["soft"],
+        y = u(22)
+        rr(PAD, y, W - PAD, y + HEAD_H, u(18), fill=cd["soft"],
            outline=cd["border"], width=2)
-        cv.create_text(W / 2, y + 30, text="오늘도 수고하셨어요!",
-                       font=("Malgun Gothic", 12, "bold"), fill=cd["text"])
-        cv.create_text(W / 2, y + 54, text=hm(total) + " 작업했어요",
-                       font=("Malgun Gothic", 9), fill=cd["sub"])
-        y += HEAD_H + 22
+        cv.create_text(W / 2, y + u(30), text="오늘도 수고하셨어요!",
+                       font=self._uf(12, True), fill=cd["text"])
+        cv.create_text(W / 2, y + u(54), text=hm(total) + " 작업했어요",
+                       font=self._uf(9), fill=cd["sub"])
+        y += HEAD_H + u(22)
 
-        rr(PAD, y, W - PAD, y + body_h, 16, fill="#ffffff",
+        rr(PAD, y, W - PAD, y + body_h, u(16), fill="#ffffff",
            outline=cd["line"], width=1)
-        ry = y + 10 + ROW / 2
+        ry = y + u(10) + ROW / 2
         for i, (k, v) in enumerate(rows):
             if i:
-                cv.create_line(PAD + 18, ry - ROW / 2, W - PAD - 18, ry - ROW / 2,
+                cv.create_line(PAD + u(18), ry - ROW / 2, W - PAD - u(18), ry - ROW / 2,
                                fill=cd["line"])
-            cv.create_text(PAD + 18, ry, anchor="w", text=k,
-                           font=("Malgun Gothic", 9), fill=cd["sub"])
-            cv.create_text(W - PAD - 18, ry, anchor="e", text=v,
-                           font=("Malgun Gothic", 9, "bold"), fill=cd["text"])
+            cv.create_text(PAD + u(18), ry, anchor="w", text=k,
+                           font=self._uf(9), fill=cd["sub"])
+            cv.create_text(W - PAD - u(18), ry, anchor="e", text=v,
+                           font=self._uf(9, True), fill=cd["text"])
             ry += ROW
-        y += body_h + 26
+        y += body_h + u(26)
 
         def reset_and_close():
             self.work_secs = 0.0
@@ -3793,16 +3912,16 @@ class Mascot:
             self._timer_save()
             win.destroy()
 
-        gap = 12
+        gap = u(12)
         bw = (W - PAD * 2 - gap) / 2
-        b1 = (PAD, y, PAD + bw, y + 42)
-        b2 = (PAD + bw + gap, y, W - PAD, y + 42)
-        rr(*b1, 16, fill="#f4f1f5", outline="")
-        cv.create_text((b1[0] + b1[2]) / 2, y + 21, text="새로 시작",
-                       font=("Malgun Gothic", 10, "bold"), fill=cd["sub"])
-        rr(*b2, 16, fill=cd["fill"], outline="")
-        cv.create_text((b2[0] + b2[2]) / 2, y + 21, text="닫기",
-                       font=("Malgun Gothic", 10, "bold"), fill="#ffffff")
+        b1 = (PAD, y, PAD + bw, y + u(42))
+        b2 = (PAD + bw + gap, y, W - PAD, y + u(42))
+        rr(*b1, u(16), fill="#f4f1f5", outline="")
+        cv.create_text((b1[0] + b1[2]) / 2, y + u(21), text="새로 시작",
+                       font=self._uf(10, True), fill=cd["sub"])
+        rr(*b2, u(16), fill=cd["fill"], outline="")
+        cv.create_text((b2[0] + b2[2]) / 2, y + u(21), text="닫기",
+                       font=self._uf(10, True), fill="#ffffff")
 
         def on_click(e):
             if b1[0] <= e.x <= b1[2] and b1[1] <= e.y <= b1[3]:
@@ -3827,12 +3946,13 @@ class Mascot:
         if not notes or self._update_win is not None:
             return
         cd = self.card
-        W, PAD = 330, 20
-        head_h = 66
+        u = self._ui
+        W, PAD = u(330), u(20)
+        head_h = u(66)
         # 줄바꿈: 캔버스 폰트로 실제 폭을 재서 접는다
         probe = tk.Canvas(self.root)
-        font = ("Malgun Gothic", 9)
-        inner = W - PAD * 2 - 46
+        font = self._uf(9)
+        inner = W - PAD * 2 - u(46)
 
         def too_wide(s):
             tid = probe.create_text(0, 0, text=s, font=font, anchor="w")
@@ -3856,8 +3976,9 @@ class Mascot:
         if not lines:
             self._update_win = None
             return
-        body_h = 14 + 22 * len(lines) + 14
-        H = 20 + head_h + 16 + body_h + 20 + 40 + 20
+        row_h = u(22)
+        body_h = u(14) + row_h * len(lines) + u(14)
+        H = u(20) + head_h + u(16) + body_h + u(20) + u(40) + u(20)
 
         win = tk.Toplevel(self.root)
         self._update_win = win
@@ -3874,31 +3995,31 @@ class Mascot:
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
 
-        y = 20
-        rr(PAD, y, W - PAD, y + head_h, 16, fill=cd["soft"],
+        y = u(20)
+        rr(PAD, y, W - PAD, y + head_h, u(16), fill=cd["soft"],
            outline=cd["border"], width=2)
-        cv.create_text(W / 2, y + 24, text="새 버전으로 업데이트 됐어요",
-                       font=("Malgun Gothic", 11, "bold"), fill=cd["text"])
-        cv.create_text(W / 2, y + 46, text="이번에 바뀐 점이에요",
-                       font=("Malgun Gothic", 9), fill=cd["sub"])
-        y += head_h + 16
+        cv.create_text(W / 2, y + u(24), text="새 버전으로 업데이트 됐어요",
+                       font=self._uf(11, True), fill=cd["text"])
+        cv.create_text(W / 2, y + u(46), text="이번에 바뀐 점이에요",
+                       font=self._uf(9), fill=cd["sub"])
+        y += head_h + u(16)
 
-        rr(PAD, y, W - PAD, y + body_h, 14, fill="#ffffff",
+        rr(PAD, y, W - PAD, y + body_h, u(14), fill="#ffffff",
            outline=cd["line"], width=1)
-        ly = y + 14 + 11
+        ly = y + u(14) + u(11)
         for text, is_first in lines:
             if is_first:
-                cv.create_oval(PAD + 16, ly - 3, PAD + 22, ly + 3,
+                cv.create_oval(PAD + u(16), ly - u(3), PAD + u(22), ly + u(3),
                                fill=cd["fill"], outline="")
-            cv.create_text(PAD + 32, ly, anchor="w", text=text,
+            cv.create_text(PAD + u(32), ly, anchor="w", text=text,
                            font=font, fill=cd["text"])
-            ly += 22
-        y += body_h + 20
+            ly += row_h
+        y += body_h + u(20)
 
-        b = (PAD, y, W - PAD, y + 40)
-        rr(*b, 14, fill=cd["fill"], outline="")
-        cv.create_text(W / 2, y + 20, text="확인",
-                       font=("Malgun Gothic", 10, "bold"), fill="#ffffff")
+        b = (PAD, y, W - PAD, y + u(40))
+        rr(*b, u(14), fill=cd["fill"], outline="")
+        cv.create_text(W / 2, y + u(20), text="확인",
+                       font=self._uf(10, True), fill="#ffffff")
 
         def close(_e=None):
             self._update_win = None
@@ -3911,6 +4032,19 @@ class Mascot:
         px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
         py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
         win.geometry(f"+{int(px)}+{int(py)}")
+
+    def _uf(self, size, bold=False):
+        """별도 창(환경설정·브리핑·메뉴)용 글꼴 — 화면 배율을 그대로 따른다.
+
+        이 창들은 그림 위가 아니라 보통 창이라, 다른 프로그램처럼 배율을
+        반영해야 어느 컴퓨터에서든 적당한 크기로 보인다.
+        """
+        n = max(7, round(size * getattr(self, "ui_k", 1.0)))
+        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+
+    def _ui(self, px):
+        """별도 창의 치수(px)도 같은 배율로."""
+        return round(px * getattr(self, "ui_k", 1.0))
 
     def _cf(self, size, bold=False):
         """글자 크기 설정을 반영한 글꼴."""
@@ -4484,8 +4618,10 @@ class Mascot:
             return
         cd = self.card
         PANEL, SOFT, LINE = cd["panel"], cd["soft"], cd["line"]
-        W, PAD, ROW, IN = 372, 20, 40, 18
+        W, PAD, ROW, IN = (self._ui(372), self._ui(20),
+                           self._ui(40), self._ui(18))
         FONT = "Malgun Gothic"
+        FS = lambda n: max(7, round(n * self.ui_k))   # 설정 창 글꼴
         win = tk.Toplevel(self.root)
         self._settings_win = win
         win.title(f"{self.cfg.get('name', self.char)} 설정")
@@ -4501,7 +4637,7 @@ class Mascot:
         cv = tk.Canvas(win, width=W, height=640, bg=PANEL, highlightthickness=0)
         cv.pack()
         apps_var = tk.StringVar(value=str(st.get("work_apps", "")))
-        apps_entry = tk.Entry(win, textvariable=apps_var, font=(FONT, 8),
+        apps_entry = tk.Entry(win, textvariable=apps_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
                               highlightthickness=0, borderwidth=0)
         hits, sliders = [], []
@@ -4529,7 +4665,7 @@ class Mascot:
                       outline=cd["border"], width=2)
                 cv.create_text(W / 2, y + 36,
                                text=f"{self.cfg.get('name', self.char)} 설정",
-                               font=(FONT, 12, "bold"), fill=cd["text"])
+                               font=(FONT, FS(12), "bold"), fill=cd["text"])
                 return y + 78
             ec = {"cat": "#f5bdd2", "rose": "#f5bdd2"}.get(deco, "#2b2b2b")
             for ex in (hx0 + 34, hx1 - 34):
@@ -4541,7 +4677,7 @@ class Mascot:
             rrect(hx0, y + 10, hx1, y + 62, 18, fill=SOFT,
                   outline=cd["border"], width=2)
             cv.create_text(W / 2, y + 36, text=f"{self.cfg.get('name', self.char)} 설정",
-                           font=(FONT, 12, "bold"), fill=cd["text"])
+                           font=(FONT, FS(12), "bold"), fill=cd["text"])
             return y + 78
 
         def group(y, title, rows):
@@ -4549,7 +4685,7 @@ class Mascot:
             cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
             cv.create_text(PAD + 18, y, anchor="w", text=title,
-                           font=(FONT, 9, "bold"), fill=cd["fill"])
+                           font=(FONT, FS(9), "bold"), fill=cd["fill"])
             y += 16
             h = ROW * len(rows) + 14
             rrect(PAD, y, W - PAD, y + h, 16, fill="#ffffff",
@@ -4562,7 +4698,7 @@ class Mascot:
 
         def label(y, text):
             cv.create_text(LX, y, anchor="w", text=text,
-                           font=(FONT, 9), fill=cd["text"])
+                           font=(FONT, FS(9)), fill=cd["text"])
 
         def toggle(y, text, key):
             label(y, text)
@@ -4595,7 +4731,7 @@ class Mascot:
                     st[k] = max(lo, min(hi, round(v, 2)))
                 hits.append((cx - 15, y - 15, cx + 15, y + 15, bump))
             cv.create_text(RX - 56, y, text=f"{val:g}{suffix}",
-                           font=(FONT, 9, "bold"), fill=cd["text"])
+                           font=(FONT, FS(9), "bold"), fill=cd["text"])
 
         def slider(y, text, key, lo, hi):
             label(y, text)
@@ -4610,7 +4746,7 @@ class Mascot:
             cv.create_oval(kx - 9, y - 9, kx + 9, y + 9, fill="#ffffff",
                            outline=cd["fill"], width=2)
             cv.create_text(RX, y, anchor="e", text=f"{val:g}",
-                           font=(FONT, 9, "bold"), fill=cd["text"])
+                           font=(FONT, FS(9), "bold"), fill=cd["text"])
             sliders.append((sx0, sx1, y, key, lo, hi))
 
         def chevron(cx, y, sign):
@@ -4623,7 +4759,7 @@ class Mascot:
             label(y, text)
             if not options:
                 cv.create_text(RX, y, anchor="e", text="(없음)",
-                               font=(FONT, 8), fill=cd["sub"])
+                               font=(FONT, FS(8)), fill=cd["sub"])
                 return
             cur = st.get(key, options[0])
             idx = options.index(cur) if cur in options else 0
@@ -4634,7 +4770,7 @@ class Mascot:
             if len(name) > 16:
                 name = name[:15] + "…"
             cv.create_text((bx0 + bx1) / 2, y, text=name,
-                           font=(FONT, 8), fill=cd["text"])
+                           font=(FONT, FS(8)), fill=cd["text"])
             for sign, cx in ((-1, bx0 + 15), (1, bx1 - 15)):
                 chevron(cx, y, sign)
 
@@ -4680,9 +4816,9 @@ class Mascot:
             cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
             cv.create_text(PAD + 18, y, anchor="w", text="작업 프로그램",
-                           font=(FONT, 9, "bold"), fill=cd["fill"])
+                           font=(FONT, FS(9), "bold"), fill=cd["fill"])
             cv.create_text(W - PAD - 4, y, anchor="e", text="쉼표로 구분",
-                           font=(FONT, 8), fill=cd["sub"])
+                           font=(FONT, FS(8)), fill=cd["sub"])
             y += 16
             rrect(PAD, y, W - PAD, y + 50, 16, fill="#ffffff",
                   outline=LINE, width=1)
@@ -4691,12 +4827,12 @@ class Mascot:
             y += 50 + 22
 
             cv.create_text(W / 2, y, text="패션 · 크기 · 타이머는 저장 시 재시작",
-                           font=(FONT, 8), fill=cd["sub"])
+                           font=(FONT, FS(8)), fill=cd["sub"])
             y += 22
             bx0, bx1 = W / 2 - 64, W / 2 + 64
             rrect(bx0, y, bx1, y + 40, 18, fill=cd["fill"], outline="")
             cv.create_text(W / 2, y + 20, text="저장",
-                           font=(FONT, 10, "bold"), fill="#ffffff")
+                           font=(FONT, FS(10), "bold"), fill="#ffffff")
             hits.append((bx0, y, bx1, y + 40, save))
             cv.config(height=y + 40 + 22)
 
