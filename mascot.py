@@ -29,7 +29,7 @@ import threading
 import time
 import tkinter as tk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageOps, ImageTk
 
 if sys.platform == "darwin":
     # 맥에서는 pynput을 쓰지 않는다. pynput의 맥 리스너는 별도 스레드에서
@@ -1808,6 +1808,30 @@ class TodoPanel:
             pass
 
 
+def _arc(center, point, deg):
+    """point를 center를 축으로 deg만큼 돌린 자리 (팔 길이는 그대로)."""
+    a = math.radians(deg)
+    vx, vy = point[0] - center[0], point[1] - center[1]
+    return (center[0] + vx * math.cos(a) - vy * math.sin(a),
+            center[1] + vx * math.sin(a) + vy * math.cos(a))
+
+
+def _end_anchors(im):
+    """팔 그림의 위·아래 접합점 (가장 위/아래 불투명 줄의 가로 한가운데)."""
+    a = im.split()[3]
+    bb = a.getbbox()
+    if not bb:
+        return (im.width / 2, 0.0), (im.width / 2, float(im.height))
+
+    def mid(y0, y1):
+        r = a.crop((0, y0, im.width, y1)).getbbox()
+        return (r[0] + r[2]) / 2 if r else im.width / 2
+
+    top, bot = bb[1], bb[3] - 1
+    return ((mid(top, min(top + 3, im.height)), float(top)),
+            (mid(max(top, bot - 2), bot + 1), float(bot)))
+
+
 def _screen_scale(root=None):
     """화면 배율 (150% 화면이면 1.5).
 
@@ -2015,6 +2039,26 @@ class Mascot:
         self.hat_until = 0.0         # 고깔모자 표시 종료 시각
         self.smile_until = 0.0       # 웃는 표정 종료 시각
         self.celebrate_until = 0.0   # 축하 연출 종료 시각
+        # ── 제스처 (config의 "gestures") ──────────────────────────────────
+        # 값은 전부 여기서 초기화한다. 조건문 뒤에서 처음 만들면 draw() 중에
+        # 없는 이름을 찾다 예외가 나고, 캐릭터가 사라지고 그림자만 남는다.
+        self.gestures_on = bool(self.cfg.get("gestures"))
+        self.gest = None             # 진행 중인 동작 이름
+        self.gest_t0 = 0.0           # 시작 시각
+        self.gest_dur = 0.0          # 동작 길이(초)
+        self._g_dy = 0.0             # 이번 프레임 몸 전체 상하 이동
+        self._g_hdy = 0.0            # 이번 프레임 머리만 상하 이동 (끄덕임)
+        self._g_tilt = 0.0           # 이번 프레임 머리 기울기(도)
+        self._g_hands = None         # 이번 프레임 손 이동량 (없으면 평소대로)
+        self._g_eyes_shut = False    # 이번 프레임 눈을 감고 있는가 (기지개)
+        self._g_smile = False        # 이번 프레임 웃는 얼굴인가 (리듬 타기)
+        self.gest_groove_next = 0.0  # 다음 리듬 타기 시각
+        self.gest_stretch_next = 0.0 # 다음 기지개 시각
+        self.gest_wave_next = 0.0    # 작업 시작 인사 쿨다운
+        self._last_state = "idle"    # 지난 프레임의 타이머 상태
+        self.notes = []              # 음표 [x, y, vx, vy, 종류, 남은프레임, 총]
+        self._note_next = 0.0        # 다음 음표가 튀어나올 시각
+        self._note_left = 0          # 이번 리듬 타기에 남은 음표 수
         self._fail = {}              # 구역별 실패 횟수 (3회면 그 구역만 끔)
         self._sleeping = False       # 자는 중이면 프레임을 줄인다
         # 기록 갱신 축하 — '오늘'의 기준은 시각이 아니라 한 세션
@@ -2354,6 +2398,8 @@ class Mascot:
         # 잘 때 머리를 기울이는 축 = 목 (머리 가로 중심 · 몸통 윗선)
         self._tilt_cache = {}
         self._tilt_max = 0.0
+        self._tilt_base = self._tilt_base_awake = None
+        self._tilt_base_smile = None
         base = "head" if self.has.get("head") else "body_open"
         base_im = pil_cache.get(base)
         hb = base_im.split()[3].getbbox() if base_im is not None else None
@@ -2368,7 +2414,7 @@ class Mascot:
 
         # 회전 손 파츠: 어깨(최상단) 앵커 기준으로 회전 — 어깨가 몸에서 안 떨어짐
         self.hop = {}
-        for name in ("arm_key", "arm_right_typing"):
+        for name in ("arm_key", "arm_right_typing", "arm_pen"):
             try:
                 im = load_pil(name)
             except Exception:
@@ -2377,18 +2423,51 @@ class Mascot:
             top = ab[1]
             row = im.crop((0, top, im.width, min(top + 3, im.height))).split()[3].getbbox()
             anchor_x = (row[0] + row[2]) / 2 if row else im.width / 2
-            m = max(6, round(im.height * 0.18))       # 회전 여유 패딩
+            # 회전 여유 패딩. 펜 쥔 손은 제스처에서 크게 흔드는데 파츠가
+            # 길어서(펜) 끝이 많이 돌아나가므로 여유를 더 준다.
+            m = max(6, round(im.height * (0.45 if name == "arm_pen" else 0.18)))
             padded = Image.new("RGBA", (im.width + 2 * m, im.height + m), (0, 0, 0, 0))
             padded.paste(im, (m, 0))
             self.hop[name] = {"pil": padded, "anchor": (anchor_x + m, top),
                               "off": (-m, 0), "cache": {}}
 
-        # 오른팔: 늘리기용
+        # 오른팔: 늘리기용. 좌우 반전본은 박수처럼 팔이 몸 안쪽을 향해야 할 때
+        # 쓴다 (원본은 바깥으로 휘어 있어 안쪽으로 모으면 어색하다).
         try:
             self.arm_pil = load_pil("arm_right")
         except Exception:
             self.arm_pil = None
+        self.arm_pil_m = (ImageOps.mirror(self.arm_pil)
+                          if self.arm_pil is not None else None)
+        # 왼팔(arm_key)도 손끝을 원하는 자리로 보낼 수 있게 위·아래 접합점을
+        # 잰다. 오른팔은 layout.json에 적혀 오지만 왼팔은 없어서 직접 잰다.
+        self.arm_key_pil = None
+        self._armk_anchor = None
+        try:
+            ki = load_pil("arm_key")
+            self.arm_key_pil = ki
+            self._armk_anchor = _end_anchors(ki)
+        except Exception:
+            pass
         self._arm_cache = {}
+        self._build_notes()             # 리듬 탈 때 튀어나오는 음표
+        # 펜 쥔 손을 '팔 손끝'을 축으로 돌리기 위한 판. 축을 그림 한가운데에
+        # 두고 정사각형으로 만들어 두면 어느 각도로 돌려도 잘리지 않는다.
+        # (손을 안 돌리면 팔만 방향이 바뀌어 손이 팔에서 떨어져 보인다.)
+        self._pen_rot = None
+        try:
+            pi = load_pil("arm_pen")
+            ar, ap = self.layout["arm_right"], self.layout["arm_pen"]
+            vx = (ar["pos"][0] + ar["bottom"][0] - ap["pos"][0]) * s
+            vy = (ar["pos"][1] + ar["bottom"][1] - ap["pos"][1]) * s
+            R = int(math.ceil(max(math.hypot(vx - x, vy - y)
+                                  for x in (0, pi.width)
+                                  for y in (0, pi.height)))) + 2
+            sq = Image.new("RGBA", (2 * R, 2 * R), (0, 0, 0, 0))
+            sq.alpha_composite(pi, (int(round(R - vx)), int(round(R - vy))))
+            self._pen_rot = {"pil": sq, "cache": {}}
+        except Exception:
+            self._pen_rot = None
         # 왼손 위치 미세 보정 (캔버스 px, config의 arm_key_offset)
         ko = self.cfg.get("arm_key_offset", [0, 0])
         self.arm_key_off = (ko[0] * s, ko[1] * s)
@@ -2436,12 +2515,42 @@ class Mascot:
             layer.alpha_composite(self._pil_cache[name],
                                   (round(x * self.s) + p, round(y * self.s) + p))
 
+        overlays = self.layout.get("overlays") or ["eyes_closed", "hair"]
         paste("head")
-        for name in (self.layout.get("overlays") or ["eyes_closed", "hair"]):
+        for name in overlays:
             if name in ("body_mask", "head") or not self.has.get(name):
                 continue
             paste(name)
         self._tilt_base = layer
+
+        # 깨어 있을 때 기울이는 판 — 눈을 감기지 않고 눈동자를 넣는다.
+        # 잘 때 쓰는 판에는 '눈깜빡'이 들어 있어서, 그대로 쓰면 몸짓만
+        # 하면 눈을 감아 버린다. 눈동자는 기울인 동안 가운데로 고정된다.
+        layer2 = Image.new("RGBA", (self.W + 2 * p, self.H + 2 * p), (0, 0, 0, 0))
+        layer, self._tilt_base_awake = layer2, layer2
+        paste("head")
+        if self.has.get("pupils"):
+            paste("pupils")
+        for name in overlays:
+            if name in ("body_mask", "head", "eyes_closed")                     or not self.has.get(name):
+                continue
+            paste(name)
+
+        # 웃는 얼굴로 기울이는 판 — 리듬을 타는 내내 웃고 있어야 하는데,
+        # 눈 뜬 판을 쓰면 고개가 기울 때마다 표정이 평소로 돌아가 깜빡인다.
+        self._tilt_base_smile = None
+        if self.has.get("smile"):
+            layer3 = Image.new("RGBA", (self.W + 2 * p, self.H + 2 * p),
+                               (0, 0, 0, 0))
+            layer, self._tilt_base_smile = layer3, layer3
+            paste("head")
+            for name in overlays:
+                if name in ("body_mask", "head", "lashes")                         or not self.has.get(name):
+                    continue
+                paste("smile" if name == "eyes_closed" else name)
+            if "eyes_closed" not in overlays:
+                paste("smile")
+
         self._tilt_max = 0.0
         # 실제로 돌려 보고, 창 밖으로 8px 이내로만 밀리는 최대 각도를 고른다
         for deg in (8, 7, 6, 5, 4, 3, 2):
@@ -2449,11 +2558,12 @@ class Mascot:
                 self._tilt_max = float(deg)
                 break
 
-    def _rot_head(self, deg):
+    def _rot_head(self, deg, mode="sleep"):
         p = self.TILT_PAD
-        return self._tilt_base.rotate(deg, center=(self._neck[0] + p,
-                                                   self._neck[1] + p),
-                                      resample=self._resample())
+        base = {"awake": self._tilt_base_awake,
+                "smile": self._tilt_base_smile}.get(mode) or self._tilt_base
+        return base.rotate(deg, center=(self._neck[0] + p, self._neck[1] + p),
+                           resample=self._resample())
 
     def _tilt_fit(self, im):
         """돌린 머리가 창 안에 들어오도록 좌우로 밀어야 할 픽셀 수."""
@@ -2463,15 +2573,15 @@ class Mascot:
             return 0
         return max((p + 2) - bb[0], 0) - max(bb[2] - (p + self.W - 2), 0)
 
-    def _sleep_head(self, deg):
-        """잘 때 기울어진 머리 — (이미지, 창 안으로 미는 보정값), 1도 단위 캐시."""
-        key = round(deg)
+    def _sleep_head(self, deg, mode="sleep"):
+        """기울어진 머리 — (이미지, 창 안으로 미는 보정값), 1도 단위 캐시."""
+        key = (round(deg), mode)
         hit = self._tilt_cache.get(key)
         if hit is not None:
             return hit
-        if len(self._tilt_cache) > 24:
+        if len(self._tilt_cache) > 60:
             self._tilt_cache.clear()
-        layer = self._rot_head(key)
+        layer = self._rot_head(key[0], mode)
         dx = max(-12, min(12, self._tilt_fit(layer)))
         hit = (ImageTk.PhotoImage(self._hard(layer)), dx)
         self._tilt_cache[key] = hit
@@ -2602,6 +2712,38 @@ class Mascot:
                            (ay + ar["bottom"][1]) * s + self.oy)
         self._arm_nat = (self.arm_bottom[0] - self.arm_top[0],
                          self.arm_bottom[1] - self.arm_top[1])
+        # 왼팔(반전 재활용)의 어깨와 손끝. 어깨는 오른쪽 어깨를 몸통 한가운데
+        # 기준으로 접어 넘긴 자리, 손끝은 왼손 파츠가 팔에 붙는 지점이다.
+        bo = self.layout["body_open"]
+        mid = (bo["pos"][0] + bo["size"][0] / 2) * s + self.ox
+        self.body_mid_x = mid
+        # 왼팔(arm_key)의 어깨와 손끝 — 그림에서 직접 잰 접합점을 화면 좌표로.
+        if self._armk_anchor is not None:
+            kx, ky = self.layout["arm_key"]["pos"]
+            bx = kx * s + self.ox + self.arm_key_off[0]
+            by = ky * s + self.oy + self.arm_key_off[1]
+            (tx, ty), (ex, ey) = self._armk_anchor
+            self.armk_top = (bx + tx, by + ty)
+            self.armk_bottom = (bx + ex, by + ey)
+        else:
+            self.armk_top = (2 * mid - self.arm_top[0], self.arm_top[1])
+            self.armk_bottom = (2 * mid - self.arm_bottom[0], self.arm_bottom[1])
+        # 늘여 그릴 팔 그림과 그 기준 벡터. 기준이 0에 가까우면 늘이기 배율이
+        # 폭발해 얼굴을 가로지르는 흰 막대가 되므로 _stretched_arm에서 막는다.
+        nk = (self.armk_bottom[0] - self.armk_top[0],
+              self.armk_bottom[1] - self.armk_top[1])
+        self._arm_src = {}
+        if self.arm_pil is not None:
+            at = (ar["top"][0] * s, ar["top"][1] * s)
+            ab = (ar["bottom"][0] * s, ar["bottom"][1] * s)
+            w = self.arm_pil.width
+            self._arm_src["r"] = (self.arm_pil, self._arm_nat, at, ab)
+            self._arm_src["rm"] = (self.arm_pil_m,
+                                   (-self._arm_nat[0], self._arm_nat[1]),
+                                   (w - at[0], at[1]), (w - ab[0], ab[1]))
+        if self.arm_key_pil is not None and self._armk_anchor is not None:
+            self._arm_src["l"] = (self.arm_key_pil, nk,
+                                  self._armk_anchor[0], self._armk_anchor[1])
         px, py = self.layout["arm_pen"]["pos"]
         tx, ty = self.cfg.get("pen_tip", self.layout["arm_pen"]["pen_tip"])
         self.pen_base_tip = ((px + tx) * s + self.ox, (py + ty) * s + self.oy)
@@ -3033,6 +3175,7 @@ class Mascot:
         self.smile_until = now + 4.0        # 웃는 표정 (파츠 없으면 그냥 넘어감)
         self.click_bounce = now + 0.45      # 콩 하고 튐
         self.squash_until = now + 0.12
+        self._gest_start("clap", force=True)
         left = len(self.todos)
         msg = ("할 일 다 끝냈어요!" if left == 0
                else random.choice(["하나 끝!", "잘했어요!", "좋아요!",
@@ -3127,6 +3270,9 @@ class Mascot:
                 self.pokesnd.play()
             except Exception:
                 pass
+        # 세 번에 한 번쯤은 몸으로도 반응한다 (매번 하면 금방 질린다)
+        if random.random() < 0.35:
+            self._gest_start(random.choice(("wave", "nod", "shake")))
         self._say(self._pick_talk(self._click_pool()), 2.2)
 
     def _toggle_clock(self):
@@ -3531,6 +3677,8 @@ class Mascot:
             self.bubble = None
         if self.particles:
             self._step_particles()
+        if self.notes:
+            self._step_notes()
         if not self.fun and not self.can_cheer:
             return
         if not self.fun:
@@ -3545,8 +3693,11 @@ class Mascot:
         self._rec_tick(now, state)
         if (self.bubble is None and now >= self.next_talk
                 and not sleeping and now > self.celebrate_until):
-            self._say(self._pick_talk(self._talk_pool(state)))
+            line = self._pick_talk(self._talk_pool(state))
+            self._say(line)
             self.next_talk = now + random.uniform(700, 1700)
+            if random.random() < 0.4:         # 혼잣말하며 고개를 까딱
+                self._gest_start(self._talk_gesture(line))
         # 반려동물 등장/퇴장
         total = self.PET_RISE + self.PET_HOLD + self.PET_FALL
         if self.pet_t0 == 0.0 and now >= self.next_pet and not sleeping:
@@ -3602,6 +3753,7 @@ class Mascot:
         now = time.time()
         self._rec_next = now + 90             # 연달아 뜨지 않게
         self._say(text, 4.5)
+        self._gest_start("clap", force=True)
         if self.has.get("smile"):
             self.smile_until = now + 3.0
         cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff"]
@@ -3803,6 +3955,343 @@ class Mascot:
             self._log_error("end_cmd")
         self._celebrate()
 
+    # ── 제스처 ───────────────────────────────────────────────────────────
+    # 파츠를 새로 그리지 않고, 이미 있는 것들을 옮기고 돌려서 만든 동작들.
+    # 움직일 수 있는 것은 머리(목을 축으로 회전 + 상하), 몸 전체(상하),
+    # 그리고 두 손(늘어나는 팔이 따라온다)뿐이라 이 넷의 조합으로 짠다.
+    GESTURES = {"wave": 2.0, "clap": 1.9, "nod": 1.2,
+                "shake": 1.3, "stretch": 3.0, "groove": 3.6}
+    STRETCH_EVERY = 30 * 60      # 기지개 간격 (타이머를 켜고 30분마다)
+    # 박수 자세 (캔버스 px 기준). 팔을 아래에서 위로 올려 붙이는 모양이
+    # 되도록 어깨를 몸 아래쪽에 두고, 손은 턱 바로 밑에서 만나게 한다.
+    CLAP_SWING = 26.0            # 손끝이 벌어지는 각도(도)
+    CLAP_SHY = 70.0              # 박수용 어깨를 얼마나 내릴지
+    CLAP_LEN = 0.95              # 박수에서 쓰는 팔 길이 (원래 길이 대비)
+    WAVE_SHY = -8.0              # 손 흔들 때 어깨를 얼마나 올릴지
+
+    def _gest_start(self, name, force=False):
+        """동작을 시작한다. 이미 하고 있으면 무시 — 겹치면 손이 튄다."""
+        if not self.gestures_on or name not in self.GESTURES:
+            return
+        now = time.time()
+        if not force and self.gest is not None \
+                and now < self.gest_t0 + self.gest_dur:
+            return
+        self.gest, self.gest_t0 = name, now
+        self.gest_dur = self.GESTURES[name]
+        if name == "groove":              # 음표는 두세 개만 — 많으면 지저분하다
+            self._note_left = random.randint(2, 3)
+            self._note_next = now + 0.35
+
+    def _gest_tick(self, now, sleeping):
+        """이번 프레임의 머리·몸·손 이동량을 정한다 (draw 맨 앞에서 호출)."""
+        self._g_dy = self._g_hdy = self._g_tilt = 0.0
+        self._g_hands = None
+        self._g_eyes_shut = self._g_smile = False
+        if not self.gestures_on:
+            return
+        # 그리거나 타자 치는 중에도 몸짓은 끝까지 한다. 팔이 잠깐 펜을
+        # 놓더라도 그린 획 수와 펜 소리는 _track_pen이 계속 센다.
+        if sleeping:
+            self.gest = None
+            return
+        if self.gest is not None and now >= self.gest_t0 + self.gest_dur:
+            self.gest = None
+        self._gest_schedule(now)
+        if self.gest is None:
+            return
+        try:
+            self._gest_pose(now)
+        except Exception:
+            self.gest = None
+            self._g_dy = self._g_hdy = self._g_tilt = 0.0
+            self._g_hands = None
+            self._g_eyes_shut = self._g_smile = False
+            self._log_error("gesture")
+
+    NOTE_STEPS = 7               # 음표가 사라지기까지의 단계 수
+
+    def _build_notes(self):
+        """음표 그림. 글꼴에 기대지 않고 도형으로 그린다 — 맥에서도 같은 모양.
+
+        색상키 창에서는 반투명이 그대로 안 나온다(반투명 픽셀이 배경색과 섞여
+        거뭇해진다). 그래서 옅어지는 대신 픽셀을 점점 솎아내 사라지게 한다.
+        """
+        self.note_imgs = []
+        try:
+            from PIL import ImageDraw, ImageFilter
+            h = max(14, round(self.W * 0.095))
+            col = self.card.get("fill", "#f2a7c5")
+            st = max(2, round(h * 0.085))          # 기둥 굵기
+            rx, ry = h * 0.21, h * 0.165           # 음표 머리 반지름
+
+            def head(d, cx, cy):
+                d.ellipse([cx - rx, cy - ry, cx + rx, cy + ry], fill=col)
+
+            def stem(d, x, y0, y1):
+                d.rectangle([x - st, y0, x, y1], fill=col)
+
+            shapes = []
+            # ① 홑음표 — 머리 + 기둥 + 휘어진 깃발
+            w0 = round(h * 0.70)
+            def draw0(d):
+                cx, cy = rx + 1, h - ry - 1
+                top = h * 0.10
+                head(d, cx, cy)
+                stem(d, cx + rx, top, cy)
+                d.polygon([(cx + rx, top), (cx + rx + h * 0.26, top + h * 0.16),
+                           (cx + rx + h * 0.24, top + h * 0.44),
+                           (cx + rx + h * 0.10, top + h * 0.30),
+                           (cx + rx + h * 0.13, top + h * 0.17),
+                           (cx + rx, top + h * 0.24)], fill=col)
+            shapes.append((w0, draw0))
+            # ② 두 음표 — 기둥 위를 굵은 대로 이었다 (참고 그림처럼 살짝 기울게)
+            w1 = round(h * 1.05)
+            def draw1(d):
+                ax, ay = rx + 1, h - ry - 1
+                bx, by = w1 - rx - 1, h - ry - h * 0.16
+                ta, tb = h * 0.20, h * 0.06
+                head(d, ax, ay); head(d, bx, by)
+                stem(d, ax + rx, ta, ay)
+                stem(d, bx + rx, tb, by)
+                d.polygon([(ax + rx - st, ta), (bx + rx, tb),
+                           (bx + rx, tb + h * 0.20),
+                           (ax + rx - st, ta + h * 0.20)], fill=col)
+            shapes.append((w1, draw1))
+
+            for w, fn in shapes:
+                base = Image.new("RGBA", (w + 4, h + 4), (0, 0, 0, 0))
+                fn(ImageDraw.Draw(base))
+                # 어떤 배경에서도 보이게 흰 테두리를 한 겹 두른다
+                rim = base.split()[3].filter(ImageFilter.MaxFilter(3))
+                out = Image.new("RGBA", base.size, (255, 255, 255, 0))
+                out.putalpha(rim)
+                out.alpha_composite(base)
+                lv = []
+                for k in range(self.NOTE_STEPS):
+                    keep = 1.0 - k / float(self.NOTE_STEPS)
+                    im = out.copy()
+                    a = im.split()[3].load()
+                    px = im.load()
+                    for y in range(im.height):
+                        for x in range(im.width):
+                            if a[x, y] and random.random() > keep:
+                                px[x, y] = (0, 0, 0, 0)
+                    lv.append(ImageTk.PhotoImage(self._hard(im)))
+                self.note_imgs.append(lv)
+        except Exception:
+            self.note_imgs = []
+            self._log_error("notes")
+
+    def _spawn_note(self, now):
+        """머리 위로 음표 하나를 푱 하고 띄운다."""
+        if not self.note_imgs:
+            return
+        hx0, hy0, hx1, hy1 = self._head_box
+        side = random.choice((-1, 1))
+        x = (hx0 + hx1) / 2 + side * (hx1 - hx0) * random.uniform(0.22, 0.44)
+        y = self.oy + hy0 + (hy1 - hy0) * random.uniform(0.05, 0.22)
+        life = random.randint(34, 52)
+        self.notes.append([x, y, side * random.uniform(0.25, 0.7),
+                           random.uniform(1.1, 1.8),
+                           random.randrange(len(self.note_imgs)), life, life])
+
+    def _step_notes(self):
+        alive = []
+        for n in self.notes:
+            n[0] += n[2]
+            n[1] -= n[3]
+            n[2] *= 0.985
+            n[5] -= 1
+            if n[5] > 0 and n[1] > -20:
+                alive.append(n)
+        self.notes = alive
+
+    def _draw_notes(self):
+        for n in self.notes:
+            lv = self.note_imgs[n[4]]
+            i = min(len(lv) - 1, int((1.0 - n[5] / max(n[6], 1)) * len(lv)))
+            self.canvas.create_image(n[0], n[1], image=lv[i], anchor="center")
+
+    def _gest_schedule(self, now):
+        """스스로 나오는 몸짓 — 리듬 타기와 기지개."""
+        if self.gest_groove_next == 0.0:      # 켜자마자 움직이면 놀란다
+            self.gest_groove_next = now + random.uniform(300, 900)
+        elif now >= self.gest_groove_next:
+            self.gest_groove_next = now + random.uniform(1200, 1800)
+            self._gest_start("groove")        # 1시간에 2~3번
+        if not self.timer_on:
+            return
+        if self.gest_stretch_next == 0.0:
+            self.gest_stretch_next = now + self.STRETCH_EVERY
+        elif now >= self.gest_stretch_next:
+            self.gest_stretch_next = now + self.STRETCH_EVERY
+            self._gest_start("stretch")       # 타이머를 켜고 30분마다
+
+    def _talk_gesture(self, text):
+        """대사에 어울리는 고개짓 — 부정하는 말이면 도리도리, 아니면 끄덕임."""
+        t = str(text)
+        if any(k in t for k in ("아니", "몰라", "싫", "안 ", "못 ", "말고",
+                                "글쎄", "없어", "없어요")):
+            return "shake"
+        if any(k in t for k in ("좋", "그래", "맞", "하자", "가자", "해야",
+                                "!", "네", "응")):
+            return "nod"
+        return random.choice(("nod", "shake"))
+
+    def _gest_pose(self, now):
+        """진행도(0~1)에 따라 이번 프레임의 자세를 계산한다.
+
+        손 이동량은 PSD 캔버스 픽셀로 적고 마지막에 표시 배율(s)을 곱한다.
+        그래야 캐릭터를 크게/작게 해도 같은 자세가 나온다.
+        """
+        p = min(1.0, max(0.0, (now - self.gest_t0) / max(self.gest_dur, 0.01)))
+        ease = math.sin(p * math.pi)          # 시작과 끝에서 0 — 튀지 않게
+        tm = self._tilt_max or 0.0
+        s = self.s
+        g = self.gest
+        if g == "nod":                        # 끄덕끄덕 — 머리만 아래위로
+            self._g_hdy = abs(math.sin(p * math.pi * 4)) * 18 * s * ease
+            return
+        if g == "shake":                      # 도리도리 — 목을 축으로 좌우
+            self._g_tilt = math.sin(p * math.pi * 6) * tm * ease
+            return
+        if g == "groove":                     # 리듬 타기 — 머리 기울기 + 통통
+            # 손은 건드리지 않는다. 제스처 중의 손은 머리 위에 그려지는데,
+            # 제자리 근처에서 그러면 평소 머리에 가려 있던 부분이 갑자기
+            # 드러나 툭 튀어 보인다. 크게 움직이는 동작에서만 손을 쓴다.
+            beat = math.sin(p * math.pi * 4)
+            self._g_tilt = beat * tm * 0.85 * ease
+            self._g_dy = -abs(math.sin(p * math.pi * 8)) * 5 * ease
+            self._g_smile = True
+            if self._note_left > 0 and now >= self._note_next:
+                self._note_left -= 1
+                self._note_next = now + random.uniform(0.65, 1.0)
+                self._spawn_note(now)
+            return
+        if g == "wave":                       # 손 흔들기 — 손끝을 위아래로
+            # 오른팔 손끝만 까딱까딱. 펜 쥔 손은 손끝에 붙어 함께 따라온다.
+            osc = math.sin(p * math.pi * 6)
+            self._g_hands = {"r": (-25 * s * ease,
+                                   (-90 + 55 * osc) * s * ease),
+                             "sh_dy": self.WAVE_SHY}
+            self._g_tilt = -tm * 0.45 * ease
+            return
+        if g == "stretch":
+            # 기지개 — 두 팔을 위로 쭉 올려 길게 뻗은 채로 버티다가, 팔 끝이
+            # 바르르 떨리고, 천천히 내려온다. 올라가고 내려오는 구간만
+            # 부드럽게 하고 가운데는 그대로 붙잡아 둔다(그냥 사인 곡선으로
+            # 하면 최대 자세가 한순간이라 버티는 느낌이 안 난다).
+            if p < 0.26:
+                u = p / 0.26
+            elif p < 0.74:
+                u = 1.0
+            else:
+                u = max(0.0, (1.0 - p) / 0.26)
+            u = math.sin(min(1.0, u) * math.pi / 2)
+            tre = (math.sin((p - 0.30) / 0.42 * math.pi)
+                   if 0.30 < p < 0.72 else 0.0)
+            jx = math.sin(now * 52.0) * 11 * s * tre
+            jy = math.sin(now * 47.0 + 1.1) * 9 * s * tre
+            self._g_hands = {"r": (-110 * s * u + jx, -260 * s * u + jy),
+                             "l": (110 * s * u - jx, -260 * s * u + jy)}
+            self._g_dy = -7 * u
+            self._g_eyes_shut = u > 0.25      # 시원하게 눈을 감는다
+            return
+        if g == "clap":
+            # 박수 — 어깨(팔이 몸에 붙는 자리)를 축으로 고정하고 팔 위쪽만
+            # 호를 그린다. 팔 길이는 원래대로 두어야 손이 눌려 보이지 않는다.
+            # 두 손이 만나는 자리는 어깨 간격과 팔 길이로 정해지는 삼각형의
+            # 꼭짓점이라, 자연히 어깨보다 위가 된다.
+            op = abs(math.sin(p * math.pi * 7))   # 0 = 맞붙음, 1 = 벌어짐
+            sr = self._gest_shoulder(self.arm_top, self.CLAP_SHY)
+            sl = self._gest_shoulder(self.armk_top, self.CLAP_SHY)
+            cx, cy = (sr[0] + sl[0]) / 2.0, (sr[1] + sl[1]) / 2.0
+            ux, uy = sl[0] - sr[0], sl[1] - sr[1]
+            span = math.hypot(ux, uy) or 1.0
+            half = span / 2.0
+            L = max(math.hypot(*self._arm_nat) * self.CLAP_LEN, half * 1.08)
+            h = math.sqrt(max(L * L - half * half, 1.0))
+            nx, ny = -uy / span, ux / span       # 어깨선의 수직 방향
+            if ny > 0:
+                nx, ny = -nx, -ny                # 위쪽으로
+            meet = (cx + nx * h, cy + ny * h)
+            out = {}
+            for side, sh, rest in (("r", sr, self.arm_bottom),
+                                   ("l", sl, self.armk_bottom)):
+                # 벌어지는 방향 = 그 팔의 어깨가 있는 바깥쪽. 만나는 점이
+                # 두 어깨의 한가운데라 '중심에서 멀어지는 쪽'으로 고르면
+                # 양팔이 같은 방향으로 돌아 손이 벌어지지 않는다.
+                want = 1.0 if sh[0] > cx else -1.0
+                far = meet
+                for d in (self.CLAP_SWING, -self.CLAP_SWING):
+                    cand = _arc(sh, meet, d)
+                    if (cand[0] - meet[0]) * want > 0:
+                        far = cand
+                        break
+                # 올리고 내리는 과정은 보여주지 않는다. 시작하자마자 팔이
+                # 올라가 있고 끝나면 툭 하고 제자리로 — 그래서 ease를 안 쓴다.
+                tip = (meet[0] + (far[0] - meet[0]) * op,
+                       meet[1] + (far[1] - meet[1]) * op)
+                out[side] = (tip[0] - rest[0], tip[1] - rest[1])
+            out["sh_dy"] = self.CLAP_SHY
+            out["r_mirror"] = True               # 팔이 몸 안쪽을 향하게
+            out["hide_pen"] = True               # 박수 칠 땐 펜을 놓는다
+            self._g_hands = out
+            self._g_hdy = -4.0
+            return
+
+    def _gest_shoulder(self, top, dy=16.0):
+        """제스처용 어깨 — 원래 접합점보다 몸 안쪽으로 묻어 둔 자리.
+
+        팔을 위로 들면 어깨 쪽 둥근 끝이 몸 윤곽 밖으로 돌아나가면서 그 사이로
+        머리카락과 배경이 비친다. 접합점을 몸 안에 넣어 두면 팔뿌리가 몸에
+        덮여 틈이 생기지 않는다. dy로 위아래 위치도 동작마다 달리 잡는다.
+        """
+        s = self.s
+        d = 1.0 if self.body_mid_x >= top[0] else -1.0
+        return (top[0] + 34 * s * d, top[1] + dy * s)
+
+    def _draw_gesture_arms(self, yo):
+        """제스처 중의 두 팔. 어깨는 그대로 두고 손끝만 원하는 자리로 보낸다.
+
+        '오른손'(펜 쥔 파츠)은 오른팔 손끝에 붙어 함께 움직인다 — 따로 돌리면
+        팔에서 떨어져 보인다. 왼팔은 옮길 때만 늘여 그리고, 아니면 평소 자리에
+        그대로 둔다(늘인 팔을 겹쳐 그리면 팔이 두 개로 보인다).
+        """
+        c = self.canvas
+        g = self._g_hands or {}
+        d4 = yo * 0.25
+        ddx, ddy = g.get("r", (0.0, 0.0))
+        sx, sy = self._gest_shoulder(self.arm_top, g.get("sh_dy", 16.0))
+        hx, hy = self.arm_bottom[0] + ddx, self.arm_bottom[1] + ddy
+        arm = self._stretched_arm(hx - sx, hy - sy,
+                                  "rm" if g.get("r_mirror") else "r")
+        if arm is not None:
+            c.create_image(sx - arm[1][0], sy - arm[1][1] + d4,
+                           image=arm[0], anchor="nw")
+        if not g.get("hide_pen"):
+            deg = self._arm_deg(hx - sx, hy - sy,
+                                "rm" if g.get("r_mirror") else "r")
+            if not self._pen_at_tip(hx, hy + d4, deg):
+                px, py = self._pos("arm_pen")
+                self._put("arm_pen", px + ddx, py + ddy + d4)
+
+        hk = self.hop.get("arm_key")
+        if "l" in g and "l" in self._arm_src:
+            lx, ly = g["l"]
+            sx2, sy2 = self._gest_shoulder(self.armk_top, g.get("sh_dy", 16.0))
+            hx2, hy2 = self.armk_bottom[0] + lx, self.armk_bottom[1] + ly
+            arm2 = self._stretched_arm(hx2 - sx2, hy2 - sy2, "l")
+            if arm2 is not None:
+                c.create_image(sx2 - arm2[1][0], sy2 - arm2[1][1] + d4,
+                               image=arm2[0], anchor="nw")
+        elif hk is not None:
+            kx, ky = self._pos("arm_key")
+            c.create_image(kx + self.arm_key_off[0] + hk["off"][0],
+                           ky + self.arm_key_off[1] + hk["off"][1] + d4,
+                           image=self._rotated_hop("arm_key", 0.0), anchor="nw")
+
     def _burst(self, n=24, spread=45):
         """카드 위로 색종이가 팡 터진다 (할 일 완료·기록 갱신 등 작은 축하용)."""
         cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff", "#ffa9a9"]
@@ -3820,6 +4309,7 @@ class Mascot:
         self.celebrate_until = now + 4.0
         self.hat_until = now + 14.0
         self.smile_until = now + 5.0            # 말풍선이 떠 있는 동안 웃는 얼굴
+        self._gest_start("clap", force=True)
         self._reset_records()                   # 작업 종료 = 이번 '오늘'의 끝
         self._say("수고하셨습니다!", 5.0)
         cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff", "#ffa9a9"]
@@ -4299,21 +4789,62 @@ class Mascot:
         x, y = self.layout[name]["pos"]
         return x * self.s + self.ox, y * self.s + self.oy
 
-    def _stretched_arm(self, dx, dy):
-        nx, ny = self._arm_nat
-        nat_len = math.hypot(nx, ny)
+    def _arm_deg(self, dx, dy, which="r"):
+        """어깨→손끝 방향으로 팔이 돌아간 각도 (손도 같은 각도로 돌린다)."""
+        e = self._arm_src.get(which)
+        if e is None:
+            return 0.0
+        nx, ny = e[1]
+        return math.degrees(math.atan2(dx, dy) - math.atan2(nx, ny))
+
+
+    def _pen_at_tip(self, tx, ty, deg):
+        """펜 쥔 손을 팔 손끝(tx, ty)에 붙여 팔과 같은 각도로 그린다."""
+        e = self._pen_rot
+        if e is None:
+            return False
+        k = round(deg)
+        if k not in e["cache"]:
+            if len(e["cache"]) > 90:
+                e["cache"].clear()
+            e["cache"][k] = ImageTk.PhotoImage(
+                self._hard(e["pil"].rotate(k, resample=self._resample())))
+        self.canvas.create_image(tx, ty, image=e["cache"][k], anchor="center")
+        return True
+
+    def _stretched_arm(self, dx, dy, which="r"):
+        """어깨에서 손끝까지를 잇도록 늘이고 돌린 팔 그림.
+
+        which — "r" 오른팔, "rm" 오른팔 좌우반전(안쪽으로 모을 때), "l" 왼팔.
+        """
+        e = self._arm_src.get(which)
+        if e is None:
+            return None
+        src, (nx, ny), atop, _abot = e
+        nat_len = max(math.hypot(nx, ny), 8.0)
         cur_len = max(math.hypot(dx, dy), 8.0)
-        k = cur_len / max(nat_len, 1)
+        k = max(0.25, min(3.0, cur_len / nat_len))   # 늘이기 배율 상한선
         deg = math.degrees(math.atan2(dx, dy) - math.atan2(nx, ny))
-        key = (round(k * 25), round(deg))
-        if key not in self._arm_cache:
+        key = (round(k * 25), round(deg), which)
+        hit = self._arm_cache.get(key)
+        if hit is None:
             if len(self._arm_cache) > 1500:
                 self._arm_cache.clear()      # 안전장치 (실측 포화 ~580개)
-            w, h = self.arm_pil.size
-            im = self.arm_pil.resize((w, max(8, round(h * k))), Image.LANCZOS)
+            w, h = src.size
+            nh = max(8, round(h * k))
+            im = src.resize((w, nh), Image.LANCZOS)
             im = im.rotate(deg, expand=True, resample=self._resample())
-            self._arm_cache[key] = ImageTk.PhotoImage(self._hard(im))
-        return self._arm_cache[key]
+            # 돌린 그림 안에서 '어깨 접합점'이 어디로 갔는지 따라간다. 이걸
+            # 안 하고 가운데에 맞춰 그리면 팔을 늘일수록 어깨가 몸에서 떨어져
+            # 그 사이로 머리카락과 배경이 비친다.
+            a = math.radians(deg)
+            ox_ = atop[0] - w / 2.0
+            oy_ = atop[1] * k - nh / 2.0
+            rx = ox_ * math.cos(a) + oy_ * math.sin(a) + im.width / 2.0
+            ry = -ox_ * math.sin(a) + oy_ * math.cos(a) + im.height / 2.0
+            hit = (ImageTk.PhotoImage(self._hard(im)), (rx, ry))
+            self._arm_cache[key] = hit
+        return hit
 
     def draw(self, now):
         c = self.canvas
@@ -4328,8 +4859,9 @@ class Mascot:
             breathe = math.sin(now * 1.1) * 2.5     # 자는 동안은 느리고 깊게
         else:
             breathe = math.sin(now * 2.0) * 1.5
+        self._safe("gesture", self._gest_tick, now, sleeping)
         squash = 3 if now < self.squash_until else 0
-        yo = breathe + squash
+        yo = breathe + squash + self._g_dy
         if self.fun and now < self.click_bounce:      # 클릭 반응: 콩 하고 튐
             t = (self.click_bounce - now) / 0.45
             yo -= math.sin(t * math.pi) * 7
@@ -4359,10 +4891,12 @@ class Mascot:
             if not self._pet_sh_on:
                 self.shadow.set_image(self._shadow_base)
 
-        blinking = (sleeping or now < self.blink_until or f.get("blink", False)) \
+        blinking = (sleeping or now < self.blink_until or self._g_eyes_shut
+                    or f.get("blink", False)) \
             and (self.blink_cfg is not None or self.has.get("eyes_closed"))
         smiling = bool(self.has.get("smile")
-                       and (now < self.smile_until or f.get("smile", False)))
+                       and (now < self.smile_until or self._g_smile
+                            or f.get("smile", False)))
         if smiling:
             blinking = False
 
@@ -4372,6 +4906,13 @@ class Mascot:
         except Exception:
             state, _ = "idle", self._log_error("timer_tick")
         # 아래는 모두 구역 격리 — 하나가 터져도 캐릭터 본체는 그려진다
+        if state != self._last_state:
+            # 작업이 시작돼 타이머 초가 흐르기 시작하면 손을 흔들어 인사한다.
+            # 잠깐 쉬었다 돌아올 때마다 하면 성가시므로 쿨다운을 둔다.
+            if state == "work" and now >= self.gest_wave_next:
+                self.gest_wave_next = now + 600
+                self._gest_start("wave")
+            self._last_state = state
         self._safe("fun_tick", self._fun_tick, now, state, sleeping)
         if self.timer_on:
             self._safe("timer", self._draw_timer, state, sleeping, now)
@@ -4430,6 +4971,8 @@ class Mascot:
                        blinking, smiling, sleeping)
         if self.cfg.get("pen_over_head"):     # 퀸시: 깃펜이 맨 위 레이어
             self._safe("pen_hand", self._draw_pen_hand)
+        if self._g_hands is not None:        # 제스처 손 — 머리보다 위
+            self._safe("gesture_arms", self._draw_gesture_arms, yo)
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
@@ -4444,6 +4987,9 @@ class Mascot:
                 c.create_text(zx + dx, zy + dy + bob, text="z" if i == 0 else "Z",
                               font=("Malgun Gothic", size, "bold"), fill=color)
 
+        if self.notes:                  # 음표는 머리보다 위로 떠오른다
+            self._safe("notes", self._draw_notes)
+
         # ── 귀여운 연출: 고깔모자 → 폭죽 → 말풍선 (맨 위) ────────────────
         if self.fun:
             self._safe("hat", self._draw_hat, yo)
@@ -4451,6 +4997,36 @@ class Mascot:
             self._safe("particles", self._draw_particles)
             self._safe("bubble", self._draw_bubble, yo)
         self._safe("pet_shadow", self._update_pet_shadow)
+
+    def _track_pen(self, now, f, cx, cy):
+        """펜 끝이 따라갈 자리를 구하고 그린 획 수·낙서 선을 기록한다.
+
+        팔을 그리는 것과 분리해 둔다 — 몸짓 중에는 팔이 딴짓을 하지만
+        사용자가 실제로 긋는 획은 그대로 세어야 하기 때문이다.
+        """
+        if "pen" in f:
+            target = self._quad_xy(*f["pen"])
+            drawing = True
+        else:
+            ml, mt, mr, mb = monitor_at(cx, cy)
+            u = min(1.0, max(0.0, (cx - ml) / max(mr - ml, 1)))
+            v = min(1.0, max(0.0, (cy - mt) / max(mb - mt, 1)))
+            target = self._quad_xy(u, v)
+            drawing = self.mouse_pressed
+        self._pen_xy[0] += (target[0] - self._pen_xy[0]) * 0.55
+        self._pen_xy[1] += (target[1] - self._pen_xy[1]) * 0.55
+        tx, ty = self._pen_xy
+        if drawing and not getattr(self, "_stroke_prev", False):
+            self.stat["strokes"] = self.stat.get("strokes", 0) + 1
+        self._stroke_prev = drawing
+        if drawing:
+            if self._new_stroke or not self.strokes:
+                self.strokes.append([])
+                self._new_stroke = False
+            self.strokes[-1].append((tx, ty))
+            while sum(len(st) for st in self.strokes) > 300:
+                self.strokes.pop(0)
+        return tx, ty, drawing
 
     def _draw_arms(self, now, f, yo, pen_typing, cx, cy):
         """펜 추적 팔 또는 타이핑 팔 (환경 의존 코드가 많아 따로 격리)."""
@@ -4460,6 +5036,14 @@ class Mascot:
         # ── 오른손/오른팔: 펜 추적 또는 타이핑 파츠(어깨 축 회전) ────────
         if self.arm_pil is None or "arm_key" not in self.hop:
             return                      # 팔 파츠가 없으면 팔만 생략
+        if self._g_hands is not None:
+            # 몸짓 중 — 손은 머리를 그린 뒤에 그린다. 머리가 창을 거의 다
+            # 채워서, 손을 조금만 들어도 머리 뒤로 숨어 버리기 때문이다.
+            # 팔은 몸짓을 하더라도 그린 획 수와 펜 소리는 계속 센다.
+            self._track_pen(now, f, cx, cy)
+            if self.pensnd is not None and self._pen_grain and "pen" not in f:
+                self.pensnd.tick(now, enabled=True)
+            return
         if pen_typing and "pen" not in f and "arm_right_typing" in self.hop:
             # 양손 타이핑: 왼손을 먼저(아래), 오른팔-타자를 나중(위) 그림
             self._draw_left(now, f)
@@ -4473,28 +5057,7 @@ class Mascot:
             if self._pen_grain and self.pensnd is not None:
                 self.pensnd.tick(now, enabled=False)    # 타이핑 중엔 펜 소리 정지
         else:
-            if "pen" in f:
-                target = self._quad_xy(*f["pen"])
-                drawing = True
-            else:
-                ml, mt, mr, mb = monitor_at(cx, cy)
-                u = min(1.0, max(0.0, (cx - ml) / max(mr - ml, 1)))
-                v = min(1.0, max(0.0, (cy - mt) / max(mb - mt, 1)))
-                target = self._quad_xy(u, v)
-                drawing = self.mouse_pressed
-            self._pen_xy[0] += (target[0] - self._pen_xy[0]) * 0.55
-            self._pen_xy[1] += (target[1] - self._pen_xy[1]) * 0.55
-            tx, ty = self._pen_xy
-            if drawing and not getattr(self, "_stroke_prev", False):
-                self.stat["strokes"] = self.stat.get("strokes", 0) + 1
-            self._stroke_prev = drawing
-            if drawing:
-                if self._new_stroke or not self.strokes:
-                    self.strokes.append([])
-                    self._new_stroke = False
-                self.strokes[-1].append((tx, ty))
-                while sum(len(st) for st in self.strokes) > 300:
-                    self.strokes.pop(0)
+            tx, ty, drawing = self._track_pen(now, f, cx, cy)
             px, py = self._pos("arm_pen")
             btx, bty = self.pen_base_tip
             ddx, ddy = tx - btx, ty - bty
@@ -4503,9 +5066,10 @@ class Mascot:
             # 어깨가 1~2px 오르내리는 것은 그린 위치만 옮겨 표현한다.
             sx, sy = self.arm_top
             hx_, hy_ = self.arm_bottom[0] + ddx, self.arm_bottom[1] + ddy
-            arm_img = self._stretched_arm(hx_ - sx, hy_ - sy)
-            c.create_image((sx + hx_) / 2, (sy + hy_) / 2 + yo * 0.25,
-                           image=arm_img, anchor="center")
+            arm = self._stretched_arm(hx_ - sx, hy_ - sy)
+            if arm is not None:
+                c.create_image(sx - arm[1][0], sy - arm[1][1] + yo * 0.25,
+                               image=arm[0], anchor="nw")
             self._pen_draw = (px + ddx, py + ddy)
             if not self.cfg.get("pen_over_head"):
                 self._draw_pen_hand()
@@ -4544,17 +5108,27 @@ class Mascot:
     def _draw_head(self, now, yo, pdx, pdy, blinking, smiling, sleeping):
         """머리 + 얼굴 (자는 중이면 목을 축으로 기울인 합성본)."""
         c = self.canvas
+        hyo = yo + self._g_hdy          # 끄덕임은 머리만 움직인다
+        tilt = None
         if sleeping and self._tilt_max >= 2:       # 꾸벅 — 살짝 기울여 잔다
             m = self._tilt_max
             tilt = -(m * 0.78 + m * 0.22 * math.sin(now * 0.55))
+        elif abs(self._g_tilt) >= 0.5 and self._tilt_max >= 2:
+            m = self._tilt_max
+            tilt = max(-m, min(m, self._g_tilt))
+        if tilt is not None:
             p = self.TILT_PAD
-            img, tdx = self._sleep_head(tilt)
-            c.create_image(tdx - p, self.oy - p + yo, anchor="nw", image=img)
-            self._draw_snot(now, yo, tilt, tdx)
+            mode = ("sleep" if sleeping
+                    else "smile" if (smiling and self._tilt_base_smile is not None)
+                    else "awake")
+            img, tdx = self._sleep_head(tilt, mode)
+            c.create_image(tdx - p, self.oy - p + hyo, anchor="nw", image=img)
+            if sleeping:
+                self._draw_snot(now, hyo, tilt, tdx)
         else:
             hx, hy = self._pos("head")
-            self._put("head", hx, hy + yo)
-            self._draw_face(yo, pdx, pdy, blinking, smiling)
+            self._put("head", hx, hy + hyo)
+            self._draw_face(hyo, pdx, pdy, blinking, smiling)
 
     def _draw_face(self, yo, pdx, pdy, blinking, smiling=False):
         """눈동자(시선) 또는 감은 눈/웃는 얼굴 + 눈 위 덮개들."""

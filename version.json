@@ -1,14 +1,14 @@
 {
- "version": 1785013775,
+ "version": 1785050540,
  "files": {
-  "mascot.py": "9a47691ccbc7dd08d878267c56c84ad054375f5207b753cf90fcf87ffb375b2f",
+  "mascot.py": "36162d4b1be12a7d4f3197ed78a1b684f5c067ad297ad6bdaae629f4c0eda806",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
   "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
   "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
   "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
-  "parts_saga/config.json": "6dd1126e2d4b2326b1c97ca464c2bc8a0c00d9e0a51ff9e792cfb85807566eee",
+  "parts_saga/config.json": "4d408f8802b3abdc4a5f0a5ce2a23083c8988609f1cf51a9cca2c9a34b68c854",
   "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
   "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
   "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
@@ -78,7 +78,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "우클릭 메뉴·환경설정·작업 종료 화면의 글자가 화면 배율에 맞게 나옵니다.",
-  "할 일 목록 말풍선을 우클릭하면 '크기 조절'로 목록 크기를 바꿀 수 있습니다."
+  "캐릭터가 상황에 따라 움직입니다 — 인사, 박수, 기지개, 고개짓, 리듬 타기.",
+  "그리거나 타자 치는 중에도 동작이 끊기지 않습니다."
  ]
 }
