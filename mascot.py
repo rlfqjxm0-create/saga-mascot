@@ -4113,6 +4113,18 @@ class Mascot:
             i = min(len(lv) - 1, int((1.0 - n[5] / max(n[6], 1)) * len(lv)))
             self.canvas.create_image(n[0], n[1], image=lv[i], anchor="center")
 
+    def _greet_tick(self, now, state):
+        """작업이 시작돼 타이머 초가 흐르기 시작하면 손을 흔들어 인사한다.
+
+        잠깐 쉬었다 돌아올 때마다 하면 성가시므로 쿨다운을 둔다.
+        """
+        if state == self._last_state:
+            return
+        if state == "work" and now >= self.gest_wave_next:
+            self.gest_wave_next = now + 600
+            self._gest_start("wave")
+        self._last_state = state
+
     def _gest_schedule(self, now):
         """스스로 나오는 몸짓 — 리듬 타기와 기지개."""
         if self.gest_groove_next == 0.0:      # 켜자마자 움직이면 놀란다
@@ -4859,6 +4871,11 @@ class Mascot:
             breathe = math.sin(now * 1.1) * 2.5     # 자는 동안은 느리고 깊게
         else:
             breathe = math.sin(now * 2.0) * 1.5
+        # 몸짓 값은 여기서 먼저 지운다. _gest_tick 안에서만 지우면, 그 구역이
+        # 세 번 터져 꺼졌을 때 마지막 자세가 그대로 남아 캐릭터가 굳는다.
+        self._g_dy = self._g_hdy = self._g_tilt = 0.0
+        self._g_hands = None
+        self._g_eyes_shut = self._g_smile = False
         self._safe("gesture", self._gest_tick, now, sleeping)
         squash = 3 if now < self.squash_until else 0
         yo = breathe + squash + self._g_dy
@@ -4906,13 +4923,7 @@ class Mascot:
         except Exception:
             state, _ = "idle", self._log_error("timer_tick")
         # 아래는 모두 구역 격리 — 하나가 터져도 캐릭터 본체는 그려진다
-        if state != self._last_state:
-            # 작업이 시작돼 타이머 초가 흐르기 시작하면 손을 흔들어 인사한다.
-            # 잠깐 쉬었다 돌아올 때마다 하면 성가시므로 쿨다운을 둔다.
-            if state == "work" and now >= self.gest_wave_next:
-                self.gest_wave_next = now + 600
-                self._gest_start("wave")
-            self._last_state = state
+        self._safe("greet", self._greet_tick, now, state)
         self._safe("fun_tick", self._fun_tick, now, state, sleeping)
         if self.timer_on:
             self._safe("timer", self._draw_timer, state, sleeping, now)
@@ -5036,7 +5047,7 @@ class Mascot:
         # ── 오른손/오른팔: 펜 추적 또는 타이핑 파츠(어깨 축 회전) ────────
         if self.arm_pil is None or "arm_key" not in self.hop:
             return                      # 팔 파츠가 없으면 팔만 생략
-        if self._g_hands is not None:
+        if self._g_hands is not None and self._fail.get("gesture_arms", 0) < 3:
             # 몸짓 중 — 손은 머리를 그린 뒤에 그린다. 머리가 창을 거의 다
             # 채워서, 손을 조금만 들어도 머리 뒤로 숨어 버리기 때문이다.
             # 팔은 몸짓을 하더라도 그린 획 수와 펜 소리는 계속 센다.
@@ -5117,15 +5128,21 @@ class Mascot:
             m = self._tilt_max
             tilt = max(-m, min(m, self._g_tilt))
         if tilt is not None:
-            p = self.TILT_PAD
-            mode = ("sleep" if sleeping
-                    else "smile" if (smiling and self._tilt_base_smile is not None)
-                    else "awake")
-            img, tdx = self._sleep_head(tilt, mode)
-            c.create_image(tdx - p, self.oy - p + hyo, anchor="nw", image=img)
-            if sleeping:
-                self._draw_snot(now, hyo, tilt, tdx)
-        else:
+            # 기울인 머리를 못 만들면 안 기울인 머리라도 그린다. 여기서 그냥
+            # 터지면 머리 구역이 꺼져 얼굴이 통째로 사라진다.
+            try:
+                p = self.TILT_PAD
+                mode = ("sleep" if sleeping
+                        else "smile" if (smiling and self._tilt_base_smile is not None)
+                        else "awake")
+                img, tdx = self._sleep_head(tilt, mode)
+                c.create_image(tdx - p, self.oy - p + hyo, anchor="nw", image=img)
+                if sleeping:
+                    self._draw_snot(now, hyo, tilt, tdx)
+            except Exception:
+                tilt = None
+                self._log_error("head_tilt")
+        if tilt is None:
             hx, hy = self._pos("head")
             self._put("head", hx, hy + hyo)
             self._draw_face(hyo, pdx, pdy, blinking, smiling)
