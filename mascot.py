@@ -3961,7 +3961,10 @@ class Mascot:
     # 그리고 두 손(늘어나는 팔이 따라온다)뿐이라 이 넷의 조합으로 짠다.
     GESTURES = {"wave": 2.0, "clap": 1.9, "nod": 1.2,
                 "shake": 1.3, "stretch": 3.0, "groove": 3.6}
-    STRETCH_EVERY = 30 * 60      # 기지개 간격 (타이머를 켜고 30분마다)
+    STRETCH_EVERY = 20 * 60      # 기지개 간격 (타이머를 켜고 20분마다)
+    # 기지개를 켜며 하는 말. 캐릭터별로 config의 "stretch_talk"로 덮어쓴다.
+    STRETCH_TALK = ("같이 쭉 펴 볼까요?", "어깨 한 번 풀어요.",
+                    "잠깐 기지개 켜요.", "허리도 한 번 펴 봐요.")
     # 박수 자세 (캔버스 px 기준). 팔을 아래에서 위로 올려 붙이는 모양이
     # 되도록 어깨를 몸 아래쪽에 두고, 손은 턱 바로 밑에서 만나게 한다.
     CLAP_SWING = 26.0            # 손끝이 벌어지는 각도(도)
@@ -3982,6 +3985,9 @@ class Mascot:
         if name == "groove":              # 음표는 두세 개만 — 많으면 지저분하다
             self._note_left = random.randint(2, 3)
             self._note_next = now + 0.35
+        elif name == "stretch" and self.can_talk and self.bubble is None:
+            pool = self.cfg.get("stretch_talk") or self.STRETCH_TALK
+            self._say(random.choice(list(pool)), 4.5)
 
     def _gest_tick(self, now, sleeping):
         """이번 프레임의 머리·몸·손 이동량을 정한다 (draw 맨 앞에서 호출)."""
