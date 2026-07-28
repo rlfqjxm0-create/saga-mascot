@@ -329,6 +329,7 @@ DEFAULT_SETTINGS = {
     "show_timer": None,   # None = config 기본값 따름
     "trail": False,       # 타블렛 낙서 표시
     "topmost": True,      # 항상 위
+    "stretch_hint": 3,    # 스트레칭 알림에 '눌러 주세요' 안내를 붙일 남은 횟수
     "scale_pct": 100,     # 캐릭터 크기(%)
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
@@ -1955,6 +1956,14 @@ class Mascot:
         self._ws_data = None
         self._ws_read = 0.0
         self._ws_lost = False        # 기존 타이머가 꺼져 자체 측정으로 넘어갔는지
+        self._solo_from = 0.0        # 혼자 재기 시작한 시점의 누적 시간
+        # ── 스트레칭 알림 (누를 때까지 안 꺼진다) ────────────────────────
+        self.stretch_pending = False # 알림이 아직 살아 있는가
+        self.stretch_shown = 0.0     # 화면에 실제로 보인 시간 (안 보이면 안 흐름)
+        self.stretch_replay = 0.0    # 다음으로 기지개를 다시 켤 시각
+        self._stretch_line = ""      # 알림 말풍선 문구
+        self._stretch_last = 0.0     # 지난 프레임 시각 (보인 시간 계산용)
+        self._stretch_hover = False  # 커서가 캐릭터 위에 있는가
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
@@ -3102,7 +3111,7 @@ class Mascot:
             on_card = (g["x0"] <= px <= g["x1"] and g["y0"] - 17 <= py <= g["y1"])
             btn = getattr(self, "_end_btn", None)
             if self.fun and btn and btn[0] <= px <= btn[2] and btn[1] <= py <= btn[3]:
-                self._celebrate()                      # 작업 종료 버튼
+                self._end_workday()                    # 작업 종료 버튼
             elif self.has_clock and on_card:
                 self._toggle_clock()
             elif self.can_talk and not on_card and py > self.oy:
@@ -3270,6 +3279,9 @@ class Mascot:
                 self.pokesnd.play()
             except Exception:
                 pass
+        if self.stretch_pending:          # 스트레칭 알림을 끄는 클릭
+            self._stretch_done(now)
+            return
         # 세 번에 한 번쯤은 몸으로도 반응한다 (매번 하면 금방 질린다)
         if random.random() < 0.35:
             self._gest_start(random.choice(("wave", "nod", "shake")))
@@ -3395,6 +3407,7 @@ class Mascot:
                 if not self._ws_lost:
                     self._ws_lost = True
                     self._t_last = now
+                    self._solo_from = self.work_secs   # 여기서부터 혼자 잰 시간
                 return self._own_tick(now, idle)
             if self._ws_lost:         # 기존 타이머가 돌아왔다 — 다시 따라간다
                 self._ws_lost = False
@@ -3570,6 +3583,8 @@ class Mascot:
                                  smooth=True, fill=leaf, outline=stem, width=2)
 
     def _status_of(self, state, sleeping):
+        if self.stretch_pending and self.stretch_shown >= self.TAP_CARD_AT:
+            return DOT_OTHER, "스트레칭!"
         if state == "off":
             return DOT_OFF, "타이머 꺼짐"
         if self._ws_lost and state == "work":
@@ -3946,13 +3961,23 @@ class Mascot:
 
 
     def _end_workday(self):
-        """캐릭터 쪽에서 누른 작업 종료 — 기존 타이머에도 알려 기록으로 남긴다."""
-        try:
-            with open(os.path.join(os.path.dirname(self.ws_path),
-                                   ".mascot_cmd"), "w", encoding="utf-8") as fp:
-                fp.write("end")
-        except Exception:
-            self._log_error("end_cmd")
+        """캐릭터 쪽에서 누른 작업 종료 — 기존 타이머에도 알려 기록으로 남긴다.
+
+        '혼자 측정 중'이었다면 그동안 캐릭터가 잰 시간을 함께 넘긴다. 기존
+        타이머는 그 시간을 모르기 때문에, 안 넘기면 그만큼이 통째로 빠진다.
+        명령 파일은 기존 타이머가 읽어 갈 때까지 남아 있으므로, 지금 꺼져
+        있어도 다음에 켜질 때 기록된다.
+        """
+        if self.ws_path is not None:
+            solo = (max(0, int(self.work_secs - self._solo_from))
+                    if self._ws_lost else 0)
+            path = os.path.join(os.path.dirname(self.ws_path), ".mascot_cmd")
+            try:
+                with open(path, "w", encoding="utf-8") as fp:
+                    json.dump({"cmd": "end", "solo_secs": solo,
+                               "ts": time.time()}, fp)
+            except Exception:
+                self._log_error("end_cmd")
         self._celebrate()
 
     # ── 제스처 ───────────────────────────────────────────────────────────
@@ -3985,7 +4010,8 @@ class Mascot:
         if name == "groove":              # 음표는 두세 개만 — 많으면 지저분하다
             self._note_left = random.randint(2, 3)
             self._note_next = now + 0.35
-        elif name == "stretch" and self.can_talk and self.bubble is None:
+        elif (name == "stretch" and self.can_talk and self.bubble is None
+                and not self.stretch_pending):
             pool = self.cfg.get("stretch_talk") or self.STRETCH_TALK
             self._say(random.choice(list(pool)), 4.5)
 
@@ -4131,13 +4157,113 @@ class Mascot:
             self._gest_start("wave")
         self._last_state = state
 
+    # 알림을 끄고 나서 하는 말. config의 "stretch_done_talk"로 덮어쓴다.
+    STRETCH_DONE = ("시원하다!", "좀 낫네요.", "개운해요.")
+    HINT_SUFFIX = " (눌러 주세요)"     # config의 "stretch_hint_suffix"로 덮어쓴다
+    TAP_HINT_AT = 30.0           # 이만큼 안 누르면 누르라는 표시가 뜬다(초)
+    TAP_CARD_AT = 60.0           # 이만큼 안 누르면 카드 문구까지 바뀐다(초)
+
+    def _stretch_raise(self, now):
+        """스트레칭 알림을 띄운다. 누를 때까지 안 꺼진다."""
+        if self.stretch_pending:
+            return                          # 이미 떠 있으면 겹쳐 쌓지 않는다
+        self.stretch_pending = True
+        self.stretch_shown = 0.0
+        self.stretch_replay = 0.0
+        self._stretch_last = now
+        line = random.choice(list(self.cfg.get("stretch_talk")
+                                  or self.STRETCH_TALK))
+        # 처음 몇 번만 '눌러 주세요'를 붙인다. 매번 붙이면 잔소리가 된다.
+        left = int(self.us.get("stretch_hint", 3) or 0)
+        if left > 0:
+            self.us["stretch_hint"] = left - 1
+            self._save_settings()
+            line += self.cfg.get("stretch_hint_suffix") or self.HINT_SUFFIX
+        self._stretch_line = line
+
+    def _stretch_done(self, now):
+        """캐릭터를 눌러 알림을 껐다."""
+        self.stretch_pending = False
+        self.stretch_shown = 0.0
+        self.gest = None
+        self.bubble = None
+        pool = self.cfg.get("stretch_done_talk") or self.STRETCH_DONE
+        self._say(random.choice(list(pool)), 3.0)
+        self.smile_until = now + 3.0
+        self._safe("burst", self._burst, 10, 26)
+
+    def _on_screen(self):
+        """캐릭터가 실제로 보이는가 — 전체화면 프로그램에 덮였는지 확인.
+
+        안 보이는 동안 알림 시간이 흐르면, 나중에 화면을 나왔을 때 한참 전
+        알림이 그대로 떠 있게 된다. 그래서 보이는 동안만 시간을 센다.
+        """
+        if not IS_WIN or self.us.get("topmost", True):
+            return True                     # 항상 위면 덮일 일이 없다
+        try:
+            u = ctypes.windll.user32
+            fg = u.GetForegroundWindow()
+            if not fg or fg == self._main_hwnd:
+                return True
+            r = (ctypes.c_long * 4)()        # left, top, right, bottom
+            u.GetWindowRect(fg, ctypes.byref(r))
+            x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+            return not (r[0] <= x and r[1] <= y
+                        and r[2] >= x + self.W and r[3] >= y + self.H)
+        except Exception:
+            return True
+
+    def _stretch_tick(self, now, sleeping):
+        """알림이 떠 있는 동안 말풍선을 붙잡고 기지개를 되풀이한다."""
+        self._stretch_hover = False
+        if not self.stretch_pending:
+            return
+        dt = min(max(now - self._stretch_last, 0.0), 1.0)
+        self._stretch_last = now
+        if sleeping or not self._on_screen():
+            return          # 자리를 비웠거나 가려져 있으면 시간도 연출도 멈춘다
+        self.stretch_shown += dt
+        # 사라지지 않게 계속 붙잡아 두되, 다른 말이 떠 있으면 기다린다.
+        # 안 그러면 할 일 완료 같은 반응이 바로 덮여 안 보인다.
+        if self.bubble is None or self.bubble[0] == self._stretch_line:
+            self._say(self._stretch_line, 3.0)
+        if self.gest is None and now >= self.stretch_replay:
+            # 쉬지 않고 이어 붙이면 부산스러워서 한 박자 쉬었다 다시 켠다
+            self.stretch_replay = now + self.GESTURES["stretch"] + 4.5
+            self._gest_start("stretch", force=True)
+        cx, cy = cursor_pos()
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        self._stretch_hover = (x <= cx <= x + self.W
+                               and y + self.oy <= cy <= y + self.H)
+
+    def _draw_tap_ring(self, now):
+        """여기를 누르라는 표시 — 물결처럼 원이 퍼진다.
+
+        색상키 창이라 서서히 옅어지게는 못 만든다. 대신 퍼질수록 선을 얇게
+        해서 사라지는 것처럼 보이게 한다.
+        """
+        if not (self.stretch_pending and self.stretch_shown >= self.TAP_HINT_AT):
+            return
+        c = self.canvas
+        col = self.card.get("text", "#7a6a9e")   # 흰 몸통 위에서도 보이게 진한 색
+        hx0, hy0, hx1, hy1 = self._head_box
+        cx = (hx0 + hx1) / 2
+        cy = self.oy + hy1 - (hy1 - hy0) * 0.06
+        speed = 1.7 if self._stretch_hover else 0.95   # 커서를 올리면 빨라진다
+        for k in range(2):
+            p = ((now * speed) + k * 0.5) % 1.0
+            r = 11 + 32 * p
+            w = max(1, round(4.0 * (1.0 - p)))
+            c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=col, width=w)
+        c.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=col, outline="")
+
     def _gest_schedule(self, now):
         """스스로 나오는 몸짓 — 리듬 타기와 기지개."""
         if self.gest_groove_next == 0.0:      # 켜자마자 움직이면 놀란다
-            self.gest_groove_next = now + random.uniform(300, 900)
+            self.gest_groove_next = now + random.uniform(120, 300)
         elif now >= self.gest_groove_next:
-            self.gest_groove_next = now + random.uniform(1200, 1800)
-            self._gest_start("groove")        # 1시간에 2~3번
+            self.gest_groove_next = now + random.uniform(480, 900)
+            self._gest_start("groove")        # 1시간에 네댓 번
         if not self.timer_on:
             return
         if self.gest_stretch_next == 0.0:
@@ -4328,6 +4454,7 @@ class Mascot:
         self.hat_until = now + 14.0
         self.smile_until = now + 5.0            # 말풍선이 떠 있는 동안 웃는 얼굴
         self._gest_start("clap", force=True)
+        self.stretch_pending = False      # 일을 끝냈으니 알림도 내린다
         self._reset_records()                   # 작업 종료 = 이번 '오늘'의 끝
         self._say("수고하셨습니다!", 5.0)
         cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff", "#ffa9a9"]
@@ -4882,6 +5009,7 @@ class Mascot:
         self._g_dy = self._g_hdy = self._g_tilt = 0.0
         self._g_hands = None
         self._g_eyes_shut = self._g_smile = False
+        self._safe("stretch", self._stretch_tick, now, sleeping)
         self._safe("gesture", self._gest_tick, now, sleeping)
         squash = 3 if now < self.squash_until else 0
         yo = breathe + squash + self._g_dy
@@ -4919,6 +5047,7 @@ class Mascot:
             and (self.blink_cfg is not None or self.has.get("eyes_closed"))
         smiling = bool(self.has.get("smile")
                        and (now < self.smile_until or self._g_smile
+                            or self._stretch_hover
                             or f.get("smile", False)))
         if smiling:
             blinking = False
@@ -5010,6 +5139,8 @@ class Mascot:
         # ── 귀여운 연출: 고깔모자 → 폭죽 → 말풍선 (맨 위) ────────────────
         if self.fun:
             self._safe("hat", self._draw_hat, yo)
+        if self.stretch_pending:
+            self._safe("tap_ring", self._draw_tap_ring, now)
         if self.can_talk:
             self._safe("particles", self._draw_particles)
             self._safe("bubble", self._draw_bubble, yo)
