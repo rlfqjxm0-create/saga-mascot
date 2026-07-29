@@ -1,7 +1,7 @@
 {
- "version": 1785260237,
+ "version": 1785360477,
  "files": {
-  "mascot.py": "898d604752627f3e02c8c6d0d279d3aa1f987aec629b9201863ae4972e1b0bbc",
+  "mascot.py": "3bd32d6a673f18a88a0f1f90a6469478a5440cd723f15088c7fd708207a285ce",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
@@ -59,6 +59,24 @@
   "parts_saga/sounds/pen/clip_5.wav": "52237409b942b76ba313bd20bb8b3222b40a8a87fd33f941c7fd2485b8aa35c8",
   "parts_saga/sounds/pen/clip_6.wav": "ffdb7c929f56e1f27bca1322413e3355497e013248727ccbe940965686b6144e",
   "parts_saga/sounds/poke/poke.wav": "5b4691361a56af9c93ba9ea7429715d60941784d82afcfc715a07b733b4ff213",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/alt.wav": "31983a24e5a0190043efcee356d5ad0ecf1d120c761b2dcfc38bac5737cfae77",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/back.wav": "8531c65d5c8ae0d39ae927e95c67c9793152ac5a621804c583d017aed3f7008d",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/caps.wav": "9dcb05127433771017532e0a541d5638da3af030c638d8e0b3c20b309d0e9459",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/config.json": "5b2bbf306ce70af4e7a45032415c8715d8e4d9f00cc066d5387daf9450ae813d",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/ctrl.wav": "774c006c24f814da12892c82ace950c7b92338df2e7a55302e862e145015be11",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/ent.wav": "afa9cec54153d8d1ab42e1d214284460df2b70ed7873b79baf567ab63e78c8f1",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key1.wav": "407def7e5bf7e28aaa3ac09459d5e19e14ca14ecfae57170f6ff69668df411dd",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key2.wav": "2635f94f603db8edb3168fab9eb1a65bccad687da02b1839fbb34efeb53faf96",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key3.wav": "dd8da01ec673428c328be0041c30d6bbe49eb4405227dc2e82cad771b0ac95ce",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key4.wav": "dd7cceade8de830a7c606aacfa8451b46e42c5c451f89f9b71fd7a183f77bdd9",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key5.wav": "d545f9c8f4366a545903dc287baa88ecfe4a5b7506d65ac06a2e4c58a43a307b",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/key6.wav": "e50d1dba65b5b7594f2679f26dd28c753a4ad31f6e6c297df6b179089351c37a",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/LICENSE.txt": "2e8578f16b6ea265412166e8b4b1da045fcc11f28db03d664908410124a2f01e",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/nO.wav": "db617f92a4c31cc41036dd3247d69d235c87049d9a28b91d2c0abc90879ffd20",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/rshift.wav": "7b815321b8331d225734dc8ecf406d5a7f66d1b94771a606b3e787b0878fae82",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/shift.wav": "f12bb02567af36e47d0cc855c0a57ac47f80558a95fdf0818ce3c1a23d342d75",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/space1.wav": "6788d6cf3dc21af5fc4c424138802e762c8d992ffca6c2d531cc9a2f23264cc4",
+  "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/space2.wav": "a58659e4e01840ef28332f832af34582980a7c69009f28877d10dc1bb8cefc5c",
   "parts_saga/sounds/Razer Huntman TE - Revolt/config.json": "e55ae83c67b963e9319103455e45e2f56014260aec60cf0b525c8cbff83b8194",
   "parts_saga/sounds/Razer Huntman TE - Revolt/Razer huntman TE.wav": "a9d8bc23f71821e4cdb7212c37275d9f0fc66d9c285e55e13d6829b7f7b438e1",
   "parts_saga/sounds/tealios-v2_Akira/back.wav": "72c5142e29793443f094aad7be3401059752bb956187b58e9c0e145a65937301",
@@ -78,7 +96,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "스트레칭 알림은 캐릭터를 한 번 눌러야 꺼집니다. 누를 때까지 기다려요.",
-  "리듬 타는 모습이 더 자주 나옵니다."
+  "타자 소리 팩 'Razer Green'이 추가됐습니다.",
+  "환경설정의 소리 팩을 누르면 전체 목록이 펼쳐집니다."
  ]
 }

@@ -1964,6 +1964,7 @@ class Mascot:
         self._stretch_line = ""      # 알림 말풍선 문구
         self._stretch_last = 0.0     # 지난 프레임 시각 (보인 시간 계산용)
         self._stretch_hover = False  # 커서가 캐릭터 위에 있는가
+        self._settings_open = None   # 환경설정에서 펼쳐 놓은 목록의 키
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
@@ -3401,9 +3402,13 @@ class Mascot:
                 except Exception:
                     self._ws_data = None
             d = self._ws_data
-            if not d or now - float(d.get("ts", 0)) > 8:
-                # 기존 타이머가 꺼졌다 — 멈추지 말고 캐릭터가 이어서 잰다.
-                # (마지막으로 받은 누적 시간에서 계속 더한다)
+            # 기존 타이머가 꺼졌거나(프로세스 종료), 떠 있어도 '작업 종료' 상태라
+            # 시간을 세지 않는 경우 모두 캐릭터가 이어서 잰다.
+            # (세션이 꺼진 걸 몰라서 아무도 안 세는 사이 작업 시간이 통째로
+            #  사라지던 문제 — 캐릭터 화면에는 옛 누적값이 그대로 보여 더 헷갈렸다)
+            ws_down    = (not d) or (now - float(d.get("ts", 0)) > 8)
+            ws_no_sess = bool(d) and not d.get("session_on", True)
+            if ws_down or ws_no_sess:
                 if not self._ws_lost:
                     self._ws_lost = True
                     self._t_last = now
@@ -5340,10 +5345,11 @@ class Mascot:
 
     # ── 환경설정 창 ──────────────────────────────────────────────────────
     def open_settings(self):
-        """캔버스로 직접 그린 설정 창 — 그룹 카드 · 토글 · 스테퍼 · 슬라이더."""
+        """캔버스로 직접 그린 설정 창 — 그룹 카드 · 토글 · 스테퍼 · 목록."""
         if self._settings_win is not None and self._settings_win.winfo_exists():
             self._settings_win.lift()
             return
+        self._settings_open = None       # 항상 접힌 상태로 열린다
         cd = self.card
         PANEL, SOFT, LINE = cd["panel"], cd["soft"], cd["line"]
         W, PAD, ROW, IN = (self._ui(372), self._ui(20),
@@ -5415,13 +5421,18 @@ class Mascot:
             cv.create_text(PAD + 18, y, anchor="w", text=title,
                            font=(FONT, FS(9), "bold"), fill=cd["fill"])
             y += 16
-            h = ROW * len(rows) + 14
-            rrect(PAD, y, W - PAD, y + h, 16, fill="#ffffff",
-                  outline=LINE, width=1)
+            # 행을 먼저 그리고 흰 카드를 뒤로 내린다. 펼친 목록이 있으면 높이가
+            # 달라지는데, 카드를 먼저 그리려면 높이를 미리 알아야 해서다.
             ry = y + 7 + ROW / 2
+            extra = 0
             for fn in rows:
-                fn(ry)
-                ry += ROW
+                e = fn(ry) or 0
+                ry += ROW + e
+                extra += e
+            h = ROW * len(rows) + 14 + extra
+            bg = rrect(PAD, y, W - PAD, y + h, 16, fill="#ffffff",
+                       outline=LINE, width=1)
+            cv.tag_lower(bg)
             return y + h + 20
 
         def label(y, text):
@@ -5507,6 +5518,67 @@ class Mascot:
                     st[k] = o[(i + s) % len(o)]
                 hits.append((cx - 13, y - 14, cx + 13, y + 14, cyc))
 
+        def fit_window(*_):
+            """창이 화면 밖으로 나가 저장 버튼이 잘리지 않게 위치 보정."""
+            if not win.winfo_exists():
+                return
+            win.update_idletasks()
+            wh, ww = win.winfo_height(), win.winfo_width()
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            px = min(max(self.root.winfo_rootx() - 70, 10), max(sw - ww - 10, 10))
+            py = min(max(self.root.winfo_rooty() - 30, 10), max(sh - wh - 60, 10))
+            win.geometry(f"+{int(px)}+{int(py)}")
+
+        def open_picker(y, text, key, options):
+            """눌러서 펼치는 목록 — 좌우로 넘기지 않고 전부 보여 준다.
+
+            늘어난 높이를 돌려주면 group이 흰 카드를 그만큼 늘려 준다.
+            """
+            label(y, text)
+            if not options:
+                cv.create_text(RX, y, anchor="e", text="(없음)",
+                               font=(FONT, FS(8)), fill=cd["sub"])
+                return 0
+            cur = st.get(key, options[0])
+            if cur not in options:
+                cur = options[0]
+            bx0, bx1 = RX - 176, RX
+            opened = (self._settings_open == key)
+            rrect(bx0, y - 14, bx1, y + 14, 14, fill=SOFT,
+                  outline=cd["border"], width=1)
+            nm = cur if len(cur) <= 20 else cur[:19] + "…"
+            cv.create_text(bx0 + 12, y, anchor="w", text=nm,
+                           font=(FONT, FS(8)), fill=cd["text"])
+            ax, dy = bx1 - 15, (-3 if opened else 3)
+            cv.create_line(ax - 5, y - dy, ax, y + dy, ax + 5, y - dy,
+                           width=2, capstyle="round", joinstyle="round",
+                           fill=cd["fill"])
+
+            def flip(k=key):
+                self._settings_open = None if self._settings_open == k else k
+            hits.append((bx0, y - 14, bx1, y + 14, flip))
+            if not opened:
+                return 0
+            ih = max(20, round(23 * self.ui_k))
+            top = y + 16
+            for i, opt in enumerate(options):
+                iy = top + ih / 2 + i * ih
+                on = (opt == cur)
+                if on:
+                    rrect(bx0, iy - ih / 2 + 2, bx1, iy + ih / 2 - 2, 9,
+                          fill=cd["fill"], outline="")
+                nm2 = opt if len(opt) <= 26 else opt[:25] + "…"
+                cv.create_text(bx0 + 14, iy, anchor="w", text=nm2,
+                               font=(FONT, FS(8), "bold") if on
+                               else (FONT, FS(8)),
+                               fill="#ffffff" if on else cd["text"])
+
+                def pick(k=key, v=opt):
+                    st[k] = v
+                    self._settings_open = None
+                hits.append((bx0, iy - ih / 2, bx1, iy + ih / 2, pick))
+            return 16 + ih * len(options)
+
         def draw():
             cv.delete("all")
             hits.clear()
@@ -5524,11 +5596,13 @@ class Mascot:
                 lambda ry: slider(ry, "펜 소리 볼륨", "pen_volume", 0, 100),
                 lambda ry: slider(ry, "클릭 소리 볼륨", "poke_volume", 0, 100),
                 lambda ry: toggle(ry, "타자 소리", "sound"),
-                lambda ry: picker(ry, "소리 팩", "sound_pack", self.sound_packs),
+                lambda ry: open_picker(ry, "소리 팩", "sound_pack",
+                                       self.sound_packs),
             ])
             disp = []
             if len(self.skins) > 1:
-                disp.append(lambda ry: picker(ry, "패션", "skin", self.skin_names))
+                disp.append(lambda ry: open_picker(ry, "패션", "skin",
+                                                  self.skin_names))
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
                 lambda ry: stepper(ry, "글자 크기", "font_pct", 70, 160, 10, "%"),
@@ -5563,6 +5637,9 @@ class Mascot:
                            font=(FONT, FS(10), "bold"), fill="#ffffff")
             hits.append((bx0, y, bx1, y + 40, save))
             cv.config(height=y + 40 + 22)
+            # 목록을 펼치면 창이 길어진다 — 저장 버튼이 화면 밖으로 나가지
+            # 않게 위치를 다시 잡는다 (그리는 중에 재진입하지 않도록 예약)
+            win.after_idle(fit_window)
 
         def set_slider(key, x, sx0, sx1, lo, hi):
             frac = min(1.0, max(0.0, (x - sx0) / max(sx1 - sx0, 1)))
@@ -5617,13 +5694,7 @@ class Mascot:
         cv.bind("<Button-1>", on_click)
         cv.bind("<B1-Motion>", on_drag)
         draw()
-        # 화면 밖으로 나가 저장 버튼이 잘리지 않게 위치 보정
-        win.update_idletasks()
-        wh, ww = win.winfo_height(), win.winfo_width()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        px = min(max(self.root.winfo_rootx() - 70, 10), max(sw - ww - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 30, 10), max(sh - wh - 60, 10))
-        win.geometry(f"+{int(px)}+{int(py)}")
+        fit_window()
 
 
     def _sanitize_settings(self):
