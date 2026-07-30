@@ -3798,7 +3798,10 @@ class Mascot:
         days = self._hist_load()
         if not days:
             return None
-        today = self._my_workday()
+        # 기준일은 '지금'이 아니라 이번 작업이 기록된 날이어야 한다.
+        # 밤을 새워 경계를 넘으면 기록은 시작한 날에 들어가는데 여기서 지금
+        # 날짜를 쓰면, 오늘 기록을 '어제'로 보여 주고 연속도 끊긴 것으로 센다.
+        today = self._session_day()
 
         def shift(key, n):
             t = time.mktime(time.strptime(key, "%Y-%m-%d")) + n * 86400
@@ -3812,90 +3815,6 @@ class Mascot:
             streak += 1
             i += 1
         return {"yday": int(yday), "week": int(week), "streak": streak}
-
-    # 기록 카드에 쓸 한글 글꼴 후보 (윈도우 → 맥 순)
-    CARD_FONTS = (r"C:\Windows\Fonts\malgun.ttf",
-                  r"C:\Windows\Fonts\malgunbd.ttf",
-                  "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-                  "/Library/Fonts/AppleGothic.ttf",
-                  "/System/Library/Fonts/Supplemental/AppleGothic.ttf")
-
-    def _card_font(self, size, bold=False):
-        from PIL import ImageFont
-        names = self.CARD_FONTS
-        if bold:
-            names = tuple(n for n in names if "bd" in n) + names
-        for n in names:
-            try:
-                return ImageFont.truetype(n, size)
-            except Exception:
-                continue
-        return None
-
-    def _save_day_card(self, rows, total_txt):
-        """하루 기록을 그림 한 장으로 저장하고 그 폴더를 연다.
-
-        캔버스를 그대로 찍을 수 없어(투명 색상키 창) 그림으로 새로 그린다.
-        글꼴을 하나도 못 찾으면 한글이 깨지므로 저장하지 않고 알린다.
-        """
-        import subprocess
-        from PIL import Image, ImageDraw
-        name = str(self.cfg.get("name") or self.char)
-        f_big = self._card_font(46, True)
-        f_mid = self._card_font(27)
-        f_key = self._card_font(24)
-        f_val = self._card_font(26, True)
-        if not all((f_big, f_mid, f_key, f_val)):
-            self._say("글꼴을 못 찾아서 저장하지 못했어요.", 4.0)
-            return None
-        cd = self.card
-        W, PAD = 760, 44
-        H = 250 + 62 * len(rows) + 70
-        im = Image.new("RGB", (W, H), cd.get("panel", "#f7f4f8"))
-        d = ImageDraw.Draw(im)
-        d.rounded_rectangle([PAD, 40, W - PAD, 210], 26,
-                            fill=cd.get("soft", "#fdf3f7"),
-                            outline=cd.get("border", "#f0aac6"), width=3)
-        d.text((W / 2, 96), f"{name}의 작업 기록", font=f_mid,
-               fill=cd.get("sub", "#999"), anchor="mm")
-        d.text((W / 2, 152), total_txt, font=f_big,
-               fill=cd.get("text", "#333"), anchor="mm")
-        y = 240
-        d.rounded_rectangle([PAD, y, W - PAD, y + 62 * len(rows) + 20], 22,
-                            fill="#ffffff", outline=cd.get("line", "#eee"), width=2)
-        y += 10
-        for i, (k, v) in enumerate(rows):
-            cy = y + 31 + i * 62
-            if i:
-                d.line([PAD + 30, cy - 31, W - PAD - 30, cy - 31],
-                       fill=cd.get("line", "#eee"), width=2)
-            d.text((PAD + 34, cy), k, font=f_key,
-                   fill=cd.get("sub", "#999"), anchor="lm")
-            d.text((W - PAD - 34, cy), v, font=f_val,
-                   fill=cd.get("text", "#333"), anchor="rm")
-        d.text((W / 2, H - 34), self._session_day(), font=f_key,
-               fill=cd.get("sub", "#999"), anchor="mm")
-
-        base = os.path.expanduser("~/Pictures")
-        if not os.path.isdir(base):
-            base = os.path.expanduser("~")
-        out = os.path.join(base, f"{name} 작업기록")
-        os.makedirs(out, exist_ok=True)
-        day = self._session_day()
-        path = os.path.join(out, f"{day}.png")
-        n = 2
-        while os.path.exists(path):
-            path = os.path.join(out, f"{day}-{n}.png")
-            n += 1
-        im.save(path)
-        try:                                   # 저장한 폴더를 열어 준다
-            if IS_MAC:
-                subprocess.Popen(["open", "-R", path])
-            else:
-                os.startfile(out)
-        except Exception:
-            pass
-        return path
 
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
@@ -5111,7 +5030,7 @@ class Mascot:
 
         u = self._ui
         W, PAD, ROW = u(350), u(22), u(34)
-        HEAD_H = u(78)
+        HEAD_H = u(100)
         body_h = ROW * len(rows) + u(20)
         H = u(22) + HEAD_H + u(22) + body_h + u(26) + u(42) + u(24)
         win = tk.Toplevel(self.root)
@@ -5136,6 +5055,10 @@ class Mascot:
                        font=self._uf(12, True), fill=cd["text"])
         cv.create_text(W / 2, y + u(54), text=hm(total) + " 작업했어요",
                        font=self._uf(9), fill=cd["sub"])
+        # 캡쳐해서 모아 두면 나중에 어느 날 것인지 알아보기 어려워서 넣는다
+        cv.create_text(W / 2, y + u(80),
+                       text=f"{self.cfg.get('name', self.char)} · {self._session_day()}",
+                       font=self._uf(8), fill=cd["sub"])
         y += HEAD_H + u(22)
 
         rr(PAD, y, W - PAD, y + body_h, u(16), fill="#ffffff",
@@ -5161,22 +5084,10 @@ class Mascot:
             self._timer_save()
             win.destroy()
 
-        gap = u(10)
-        save_on = bool(self.cfg.get("save_card"))
-        n_btn = 3 if save_on else 2
-        bw = (W - PAD * 2 - gap * (n_btn - 1)) / n_btn
-        btns, bx = [], PAD
-        for _ in range(n_btn):
-            btns.append((bx, y, bx + bw, y + u(42)))
-            bx += bw + gap
-        i = 0
-        b_save = None
-        if save_on:
-            b_save = btns[i]; i += 1
-            rr(*b_save, u(16), fill="#f4f1f5", outline="")
-            cv.create_text((b_save[0] + b_save[2]) / 2, y + u(21), text="그림 저장",
-                           font=self._uf(10, True), fill=cd["sub"])
-        b1 = btns[i]; b2 = btns[i + 1]
+        gap = u(12)
+        bw = (W - PAD * 2 - gap) / 2
+        b1 = (PAD, y, PAD + bw, y + u(42))
+        b2 = (PAD + bw + gap, y, W - PAD, y + u(42))
         rr(*b1, u(16), fill="#f4f1f5", outline="")
         cv.create_text((b1[0] + b1[2]) / 2, y + u(21), text="새로 시작",
                        font=self._uf(10, True), fill=cd["sub"])
@@ -5184,21 +5095,10 @@ class Mascot:
         cv.create_text((b2[0] + b2[2]) / 2, y + u(21), text="닫기",
                        font=self._uf(10, True), fill="#ffffff")
 
-        def hit(b, e):
-            return b and b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3]
-
         def on_click(e):
-            if hit(b_save, e):
-                try:
-                    path = self._save_day_card(rows, hm(total))
-                except Exception:
-                    path, _ = None, self._log_error("save_card")
-                if path:
-                    self._say("그림으로 저장했어요!", 4.0)
-                win.destroy()
-            elif hit(b1, e):
+            if b1[0] <= e.x <= b1[2] and b1[1] <= e.y <= b1[3]:
                 reset_and_close()
-            elif hit(b2, e):
+            elif b2[0] <= e.x <= b2[2] and b2[1] <= e.y <= b2[3]:
                 win.destroy()
         cv.bind("<Button-1>", on_click)
         win.update_idletasks()

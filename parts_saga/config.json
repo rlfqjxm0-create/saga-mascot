@@ -108,7 +108,6 @@
  "history": true,
  "deadline_on": true,
  "goal_cheer": true,
- "save_card": true,
  "soft_overlay": true,
  "pen_monitor_pick": true
 }
