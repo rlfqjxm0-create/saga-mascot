@@ -1,14 +1,14 @@
 {
- "version": 1785447136,
+ "version": 1785449062,
  "files": {
-  "mascot.py": "6928bfd7feeb4d9567fb9b724e2bb91f0eb2f3ebd1198e24d5491683f7cbef87",
+  "mascot.py": "48fa18f2be1f032f8cbf8da2d61b435e63b7bb90392455e0735d1612ecbc8e94",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
   "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
   "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
   "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
-  "parts_saga/config.json": "3ccade151a27bfe3ddc8b397f5e44c2d5ea515966a853a3026ae2679811c6160",
+  "parts_saga/config.json": "b602e1c2f9ca69c4b9e016c3f1440e8ebd2a86b4dc95191fed45ca53c214580e",
   "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
   "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
   "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
@@ -96,7 +96,11 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "작업 종료 브리핑에 캐릭터 이름과 날짜가 표시됩니다.",
-  "어제 대비와 연속 일수가 잘못 세어지던 문제를 고쳤습니다."
+  "환경설정 아래에서 건의 사항과 버그를 바로 보낼 수 있어요. 불편한 점이나 있었으면 하는 기능을 적어 주세요.",
+  "마감을 말풍선으로 등록할 수 있어요. 캐릭터 우클릭 → 마감 추가. 여러 개 넣을 수 있고 날짜가 가까우면 색이 바뀝니다.",
+  "할 일·마감 말풍선은 끌어서 옮기고, 우클릭으로 수정·삭제·크기 조절을 합니다.",
+  "캐릭터가 상황에 따라 움직입니다 — 인사, 박수, 기지개, 고개짓, 리듬 타기.",
+  "20분마다 기지개를 켜며 스트레칭을 권합니다. 캐릭터를 한 번 눌러야 꺼집니다.",
+  "작업 종료 브리핑에 어제 대비·최근 7일·연속 일수와 캐릭터 이름·날짜가 나옵니다."
  ]
 }

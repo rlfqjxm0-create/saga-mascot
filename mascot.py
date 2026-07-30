@@ -19,6 +19,7 @@ config.json 주요 키: scale, screen_quad, blink, trail_color, pen_tip,
   timer({"enabled": true, "idle_sec": 60})
 조작: 캐릭터 드래그 = 위치 이동, 우클릭 = 메뉴.
 """
+import base64 as _b64
 import ctypes
 import json
 import math
@@ -2012,6 +2013,8 @@ class Mascot:
         self._stretch_last = 0.0     # 지난 프레임 시각 (보인 시간 계산용)
         self._stretch_hover = False  # 커서가 캐릭터 위에 있는가
         self._settings_open = None   # 환경설정에서 펼쳐 놓은 목록의 키
+        self._fb_msg = ""            # 건의 보내기 결과 문구
+        self._fb_last = 0.0          # 마지막으로 보낸 시각 (연타 방지)
         self.zero_at = 0.0           # 작업 종료를 누른 시점의 누적 — 여기서부터 다시 센다
         self.goal_cheered = ""       # 목표 달성을 축하한 작업일
         # ── 마감 목록 (할 일 목록과 같은 말풍선 구조, 여러 개 등록) ──────
@@ -3816,6 +3819,112 @@ class Mascot:
             i += 1
         return {"yday": int(yday), "week": int(week), "streak": streak}
 
+    # ── 만든 사람에게 보내는 한마디 ──────────────────────────────────────
+    FB_MAX = 800                 # 한 번에 보낼 수 있는 글자 수
+    FB_COOL = 30                 # 연달아 보내는 것 방지 (초)
+
+    FB_KEY = b"ena-mascot-feedback"
+
+    @staticmethod
+    def _unmask(blob):
+        """가려 놓은 주소를 푼다.
+
+        보안 수단이 아니라, 배포 레포가 공개라서 자동 스캐너가 주소를 찾아
+        웹훅을 폐기해 버리는 것을 막으려는 것이다. 프로그램을 뜯으면 누구나
+        볼 수 있으니, 문제가 생기면 웹훅을 새로 만들어 다시 배포하면 된다.
+        """
+        try:
+            raw = _b64.b64decode(str(blob).encode())
+            k = Mascot.FB_KEY
+            return bytes(c ^ k[i % len(k)] for i, c in enumerate(raw)).decode()
+        except Exception:
+            return ""
+
+    def _fb_url(self):
+        url = str(self.cfg.get("feedback_url") or "").strip()
+        return url or self._unmask(self.cfg.get("feedback_url_enc") or "")
+
+    def _fb_path(self):
+        return os.path.join(self.state_dir, ".feedback_queue.json")
+
+    def _fb_send(self, text):
+        """건의를 보낸다. 실패하면 파일에 담아 두었다가 다음에 다시 보낸다.
+
+        보내는 것은 사용자가 적은 글과 캐릭터 이름·버전뿐이다. 컴퓨터 정보나
+        작업 기록 같은 것은 보내지 않는다.
+        """
+        text = str(text).strip()[:self.FB_MAX]
+        if not text:
+            return False, "내용을 적어 주세요."
+        now = time.time()
+        if now - getattr(self, "_fb_last", 0) < self.FB_COOL:
+            return False, "잠시 뒤에 다시 보내 주세요."
+        self._fb_last = now
+        self._fb_queue_add(text)
+        threading.Thread(target=self._fb_flush, daemon=True).start()
+        return True, "보냈어요. 고마워요!"
+
+    def _fb_queue_add(self, text):
+        try:
+            items = self._fb_queue_load()
+            items.append({"text": text, "ts": time.time(),
+                          "char": self.cfg.get("name", self.char),
+                          "ver": self._my_version()})
+            with open(self._fb_path(), "w", encoding="utf-8") as fp:
+                json.dump(items[-20:], fp, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _my_version(self):
+        """배포 매니페스트에 적힌 버전 (없으면 빈 문자열)."""
+        try:
+            with open(os.path.join(os.path.dirname(self.dir), "version.json"),
+                      encoding="utf-8") as fp:
+                return str(json.load(fp).get("version") or "")
+        except Exception:
+            return ""
+
+    def _fb_queue_load(self):
+        try:
+            with open(self._fb_path(), encoding="utf-8") as fp:
+                v = json.load(fp)
+            return v if isinstance(v, list) else []
+        except Exception:
+            return []
+
+    def _fb_flush(self):
+        """쌓인 건의를 보낸다 (백그라운드). 못 보내면 그대로 남겨 둔다."""
+        import urllib.request
+        url = self._fb_url()
+        items = self._fb_queue_load()
+        if not (url and items):
+            return
+        left = []
+        for it in items:
+            when = time.strftime("%Y-%m-%d %H:%M",
+                                 time.localtime(it.get("ts", time.time())))
+            head = (f"**{it.get('char', '')}** · {when}"
+                    f" · v{it.get('ver', '')}")
+            body = head + "\n" + str(it.get("text", ""))
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps({"content": body[:1900]}).encode(),
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": "mascot-feedback"}, method="POST")
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    if r.status >= 300:
+                        left.append(it)
+            except Exception:
+                left.append(it)
+        try:
+            if left:
+                with open(self._fb_path(), "w", encoding="utf-8") as fp:
+                    json.dump(left, fp, ensure_ascii=False)
+            elif os.path.exists(self._fb_path()):
+                os.remove(self._fb_path())
+        except Exception:
+            pass
+
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
 
@@ -5123,34 +5232,44 @@ class Mascot:
         head_h = u(66)
         # 줄바꿈: 캔버스 폰트로 실제 폭을 재서 접는다
         probe = tk.Canvas(self.root)
-        font = self._uf(9)
         inner = W - PAD * 2 - u(46)
 
-        def too_wide(s):
-            tid = probe.create_text(0, 0, text=s, font=font, anchor="w")
-            x0, _, x1, _ = probe.bbox(tid)
-            probe.delete(tid)
-            return x1 - x0 > inner
+        def wrap(font):
+            """그 글꼴로 접었을 때의 줄들 — (텍스트, 첫줄여부)."""
+            def too_wide(t):
+                tid = probe.create_text(0, 0, text=t, font=font, anchor="w")
+                x0, _, x1, _ = probe.bbox(tid)
+                probe.delete(tid)
+                return x1 - x0 > inner
+            out = []
+            for note in notes:
+                cur, head = "", True
+                for word in str(note).split():
+                    trial = (cur + " " + word).strip()
+                    if cur and too_wide(trial):
+                        out.append((cur, head))
+                        cur, head = word, False
+                    else:
+                        cur = trial
+                if cur:
+                    out.append((cur, head))
+            return out
 
-        lines = []            # (텍스트, 첫줄여부) — 첫 줄에만 점을 찍는다
-        for note in notes:
-            cur, head = "", True
-            for word in str(note).split():
-                trial = (cur + " " + word).strip()
-                if cur and too_wide(trial):
-                    lines.append((cur, head))
-                    cur, head = word, False
-                else:
-                    cur = trial
-            if cur:
-                lines.append((cur, head))
+        font = self._uf(9)
+        lines = wrap(font)
         probe.destroy()
         if not lines:
             self._update_win = None
             return
         row_h = u(22)
         body_h = u(14) + row_h * len(lines) + u(14)
-        H = u(20) + head_h + u(16) + body_h + u(20) + u(40) + u(20)
+        # 안내가 길면 창이 화면보다 커져 '확인' 버튼이 잘린다. 위쪽은 스크롤로
+        # 넘기고 버튼은 아래에 따로 붙여 언제나 누를 수 있게 한다.
+        BTN_H = u(40) + u(20) * 2
+        content_h = u(20) + head_h + u(16) + body_h + u(20)
+        view_h = min(content_h,
+                     max(u(160), self.root.winfo_screenheight() - BTN_H - u(90)))
+        H = view_h + BTN_H
 
         win = tk.Toplevel(self.root)
         self._update_win = win
@@ -5158,9 +5277,30 @@ class Mascot:
         win.attributes("-topmost", True)
         win.resizable(False, False)
         win.configure(bg=cd["panel"])
-        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
-                       highlightthickness=0)
-        cv.pack()
+        scrolling = content_h > view_h
+        top = tk.Frame(win, bg=cd["panel"])
+        top.pack()
+        cv = tk.Canvas(top, width=W, height=view_h, bg=cd["panel"],
+                       highlightthickness=0,
+                       scrollregion=(0, 0, W, content_h))
+        cv.pack(side="left")
+        total_w = W
+        if scrolling:                          # 넘칠 때만 스크롤바를 붙인다
+            sb = tk.Scrollbar(top, orient="vertical", command=cv.yview)
+            sb.pack(side="right", fill="y")
+            cv.config(yscrollcommand=sb.set)
+            win.update_idletasks()
+            total_w = W + max(sb.winfo_reqwidth(), u(14))
+        bar = tk.Canvas(win, width=total_w, height=BTN_H, bg=cd["panel"],
+                        highlightthickness=0)
+        bar.pack()
+        if scrolling:
+            def on_wheel(e):
+                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+            for wgt in (win, cv, bar):
+                wgt.bind("<MouseWheel>", on_wheel)
+                wgt.bind("<Button-4>", lambda e: cv.yview_scroll(-1, "units"))
+                wgt.bind("<Button-5>", lambda e: cv.yview_scroll(1, "units"))
 
         def rr(x0, y0, x1, y1, r, **kw):
             pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
@@ -5186,22 +5326,26 @@ class Mascot:
             cv.create_text(PAD + u(32), ly, anchor="w", text=text,
                            font=font, fill=cd["text"])
             ly += row_h
-        y += body_h + u(20)
-
-        b = (PAD, y, W - PAD, y + u(40))
-        rr(*b, u(14), fill=cd["fill"], outline="")
-        cv.create_text(W / 2, y + u(20), text="확인",
-                       font=self._uf(10, True), fill="#ffffff")
+        by = u(20)
+        b = (PAD, by, total_w - PAD, by + u(40))
+        pts = [b[0] + u(14), b[1], b[2] - u(14), b[1], b[2], b[1], b[2],
+               b[1] + u(14), b[2], b[3] - u(14), b[2], b[3], b[2] - u(14), b[3],
+               b[0] + u(14), b[3], b[0], b[3], b[0], b[3] - u(14),
+               b[0], b[1] + u(14), b[0], b[1]]
+        bar.create_polygon(pts, smooth=True, fill=cd["fill"], outline="")
+        bar.create_text(total_w / 2, by + u(20), text="확인",
+                        font=self._uf(10, True), fill="#ffffff")
 
         def close(_e=None):
             self._update_win = None
             win.destroy()
-        cv.bind("<Button-1>", lambda e: close()
-                if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
+        bar.bind("<Button-1>", lambda e: close()
+                 if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
         win.protocol("WM_DELETE_WINDOW", close)
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
+        px = min(max(self.root.winfo_rootx() - 40, 10),
+                 max(sw - total_w - 10, 10))
         py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
         win.geometry(f"+{int(px)}+{int(py)}")
 
@@ -5911,6 +6055,7 @@ class Mascot:
             self._settings_win.lift()
             return
         self._settings_open = None       # 항상 접힌 상태로 열린다
+        self._fb_msg = ""
         cd = self.card
         PANEL, SOFT, LINE = cd["panel"], cd["soft"], cd["line"]
         W, PAD, ROW, IN = (self._ui(372), self._ui(20),
@@ -5934,6 +6079,12 @@ class Mascot:
         apps_var = tk.StringVar(value=str(st.get("work_apps", "")))
         apps_entry = tk.Entry(win, textvariable=apps_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
+                              highlightthickness=0, borderwidth=0)
+        fb_on = bool(self._fb_url())
+        fb_text = None
+        if fb_on:
+            fb_text = tk.Text(win, font=(FONT, FS(8)), relief="flat",
+                              bg="#ffffff", fg=cd["text"], wrap="word",
                               highlightthickness=0, borderwidth=0)
         hits, sliders = [], []
         RX = W - PAD - IN            # 오른쪽 컨트롤 기준선
@@ -6090,6 +6241,25 @@ class Mascot:
             py = min(max(self.root.winfo_rooty() - 30, 10), max(sh - wh - 60, 10))
             win.geometry(f"+{int(px)}+{int(py)}")
 
+        def text_w(t, font):
+            tid = cv.create_text(-4000, -4000, text=t, font=font, anchor="w")
+            x0, _, x1, _ = cv.bbox(tid)
+            cv.delete(tid)
+            return x1 - x0
+
+        def fit_text(t, size, room, min_size):
+            """상자 안에 들어가는 (글자, 글꼴). 줄여도 넘치면 끝을 잘라 …로."""
+            t = str(t)
+            n = size
+            while n > min_size and text_w(t, (FONT, FS(n))) > room:
+                n -= 1
+            font = (FONT, FS(n))
+            if text_w(t, font) <= room:
+                return t, font
+            while len(t) > 1 and text_w(t + "…", font) > room:
+                t = t[:-1]
+            return t + "…", font
+
         def open_picker(y, text, key, options):
             """눌러서 펼치는 목록 — 좌우로 넘기지 않고 전부 보여 준다.
 
@@ -6107,9 +6277,12 @@ class Mascot:
             opened = (self._settings_open == key)
             rrect(bx0, y - 14, bx1, y + 14, 14, fill=SOFT,
                   outline=cd["border"], width=1)
-            nm = cur if len(cur) <= 20 else cur[:19] + "…"
+            # 글자 수로 자르면 한글·괄호가 섞였을 때 상자 밖으로 넘친다.
+            # 실제 폭을 재서 글꼴을 줄이고, 그래도 넘치면 끝을 자른다.
+            room = (bx1 - 26) - (bx0 + 12)
+            nm, nf = fit_text(cur, 8, room, 6)
             cv.create_text(bx0 + 12, y, anchor="w", text=nm,
-                           font=(FONT, FS(8)), fill=cd["text"])
+                           font=nf, fill=cd["text"])
             ax, dy = bx1 - 15, (-3 if opened else 3)
             cv.create_line(ax - 5, y - dy, ax, y + dy, ax + 5, y - dy,
                            width=2, capstyle="round", joinstyle="round",
@@ -6128,10 +6301,9 @@ class Mascot:
                 if on:
                     rrect(bx0, iy - ih / 2 + 2, bx1, iy + ih / 2 - 2, 9,
                           fill=cd["fill"], outline="")
-                nm2 = opt if len(opt) <= 26 else opt[:25] + "…"
+                nm2, nf2 = fit_text(opt, 8, (bx1 - 14) - (bx0 + 14), 6)
                 cv.create_text(bx0 + 14, iy, anchor="w", text=nm2,
-                               font=(FONT, FS(8), "bold") if on
-                               else (FONT, FS(8)),
+                               font=(nf2[0], nf2[1], "bold") if on else nf2,
                                fill="#ffffff" if on else cd["text"])
 
                 def pick(k=key, v=opt):
@@ -6139,6 +6311,12 @@ class Mascot:
                     self._settings_open = None
                 hits.append((bx0, iy - ih / 2, bx1, iy + ih / 2, pick))
             return 16 + ih * len(options)
+
+        def send_feedback():
+            ok, msg = self._fb_send(fb_text.get("1.0", "end"))
+            self._fb_msg = msg
+            if ok:
+                fb_text.delete("1.0", "end")
 
         def draw():
             cv.delete("all")
@@ -6201,6 +6379,33 @@ class Mascot:
                              width=W - PAD * 2 - IN * 2, height=24)
             y += 50 + 22
 
+
+            if fb_on:
+                cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
+                               fill=cd["fill"], outline="")
+                cv.create_text(PAD + 18, y, anchor="w",
+                               text="건의 사항 · 버그 보내기",
+                               font=(FONT, FS(9), "bold"), fill=cd["fill"])
+                # 제목이 길어 오른쪽에 붙이면 겹친다 — 설명은 아랫줄로
+                y += 15
+                cv.create_text(PAD + 18, y, anchor="w",
+                               text="불편한 점, 추가되었으면 하는 기능 등",
+                               font=(FONT, FS(8)), fill=cd["sub"])
+                y += 15
+                rrect(PAD, y, W - PAD, y + 96, 16, fill="#ffffff",
+                      outline=LINE, width=1)
+                cv.create_window(LX, y + 12, anchor="nw", window=fb_text,
+                                 width=W - PAD * 2 - IN * 2, height=52)
+                sb = (W - PAD - IN - 92, y + 68, W - PAD - IN, y + 68 + 26)
+                rrect(*sb, 13, fill=cd["fill"], outline="")
+                cv.create_text((sb[0] + sb[2]) / 2, (sb[1] + sb[3]) / 2,
+                               text="보내기", font=(FONT, FS(8), "bold"),
+                               fill="#ffffff")
+                cv.create_text(LX, (sb[1] + sb[3]) / 2, anchor="w",
+                               text=self._fb_msg or "",
+                               font=(FONT, FS(8)), fill=cd["sub"])
+                hits.append((*sb, send_feedback))
+                y += 96 + 22
 
             cv.create_text(W / 2, y, text="패션 · 크기 · 타이머는 저장 시 재시작",
                            font=(FONT, FS(8)), fill=cd["sub"])
