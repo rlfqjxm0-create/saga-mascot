@@ -330,6 +330,8 @@ DEFAULT_SETTINGS = {
     "trail": False,       # 타블렛 낙서 표시
     "topmost": True,      # 항상 위
     "stretch_hint": 3,    # 스트레칭 알림에 '눌러 주세요' 안내를 붙일 남은 횟수
+    "day_start": 6,       # 하루가 바뀌는 시각 (0이면 달력 날짜 그대로)
+    "pen_monitor": "자동", # 펜을 따라갈 화면 (자동 = 커서가 있는 화면)
     "scale_pct": 100,     # 캐릭터 크기(%)
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
@@ -1351,6 +1353,34 @@ def _mac_front_app():
         return ""
 
 
+def list_monitors():
+    """붙어 있는 화면들의 사각형 목록 — 왼쪽 위부터 차례로.
+
+    듀얼 모니터에서 '어느 화면의 마우스를 따라갈지' 고르게 하려고 쓴다.
+    """
+    out = []
+    if IS_WIN:
+        try:
+            proto = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                       ctypes.c_void_p,
+                                       ctypes.POINTER(_RECT), ctypes.c_double)
+
+            def cb(hmon, hdc, lprc, data):
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    r = mi.rcMonitor
+                    out.append((r.left, r.top, r.right, r.bottom))
+                return 1
+            ctypes.windll.user32.EnumDisplayMonitors(None, None, proto(cb), 0)
+        except Exception:
+            pass
+    if not out:
+        out.append(monitor_at(0, 0))
+    out.sort(key=lambda r: (r[1], r[0]))
+    return out
+
+
 def monitor_at(x, y):
     if IS_WIN:
         try:
@@ -1691,8 +1721,11 @@ class TodoPanel:
             c.create_line(tipx, tipy, base, by, fill=outline, width=2)
 
 
-    def render(self, todos):
-        """할 일을 위에서 아래로 쌓아 그린다. 창 높이도 함께 맞춘다."""
+    def render(self, todos, tints=None):
+        """항목을 위에서 아래로 쌓아 그린다. 창 높이도 함께 맞춘다.
+
+        tints를 주면 그 항목의 테두리·글자 색을 바꾼다 (마감이 급할 때 등).
+        """
         c, cd = self.canvas, self.card
         c.delete("all")
         self.items = []
@@ -1716,13 +1749,15 @@ class TodoPanel:
             self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
                         fill="#e6e2e8", outline="")      # 그림자
             self._tail(x0 + 2, x1 + 2, y + h, r, "#e6e2e8", dx=0, dy=3)
+            tint = (tints[i] if tints and i < len(tints) and tints[i]
+                    else None)
             self._rrect(x0, y, x1, y + h, r, fill="#ffffff",
-                        outline=cd["border"], width=2)
-            self._tail(x0, x1, y + h, r, "#ffffff", cd["border"])
+                        outline=tint or cd["border"], width=2)
+            self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
             mid = y + h / 2
             t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
-                              font=("Malgun Gothic", self.FS), fill=cd["text"],
-                              justify="center")
+                              font=("Malgun Gothic", self.FS),
+                              fill=tint or cd["text"], justify="center")
             tb = c.bbox(t)          # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
             if tb:
                 c.move(t, 0, round(mid - (tb[1] + tb[3]) / 2) - 1)
@@ -1831,6 +1866,18 @@ def _end_anchors(im):
     top, bot = bb[1], bb[3] - 1
     return ((mid(top, min(top + 3, im.height)), float(top)),
             (mid(max(top, bot - 2), bot + 1), float(bot)))
+
+
+ROLLOVER_HOURS = 6           # 작업일 경계 기본값 — 새벽 6시 이전은 전날로 친다
+
+
+def _workday(ts=None, hour=ROLLOVER_HOURS):
+    """그 시각이 속한 작업일 (YYYY-MM-DD).
+
+    hour 이전이면 전날로 친다. 0으로 두면 달력 날짜 그대로.
+    """
+    t = time.localtime((ts if ts is not None else time.time()) - hour * 3600)
+    return time.strftime("%Y-%m-%d", t)
 
 
 def _screen_scale(root=None):
@@ -1965,6 +2012,15 @@ class Mascot:
         self._stretch_last = 0.0     # 지난 프레임 시각 (보인 시간 계산용)
         self._stretch_hover = False  # 커서가 캐릭터 위에 있는가
         self._settings_open = None   # 환경설정에서 펼쳐 놓은 목록의 키
+        self.zero_at = 0.0           # 작업 종료를 누른 시점의 누적 — 여기서부터 다시 센다
+        self.goal_cheered = ""       # 목표 달성을 축하한 작업일
+        # ── 마감 목록 (할 일 목록과 같은 말풍선 구조, 여러 개 등록) ──────
+        self.dues = []               # [{"name": ..., "date": "YYYY-MM-DD"}]
+        self.due_pos = None
+        self.due_flip = False
+        self.due_zoom = 100
+        self.due_panel = None
+        self._due_shown = ""         # 마지막으로 그린 날짜 (자정 넘으면 다시 그림)
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
@@ -2007,7 +2063,10 @@ class Mascot:
             self.root.attributes("-transparentcolor", TRANSPARENT)
         self.canvas_bg = bg
         sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"{self.W}x{self.H}+{sw - self.W - 50}+{sh - self.H - 70}")
+        self.ui_prefs_path = os.path.join(self.state_dir, ".ui_prefs.json")
+        self.win_pos = self._load_win_pos(sw, sh)
+        wx, wy = self.win_pos
+        self.root.geometry(f"{self.W}x{self.H}+{wx}+{wy}")
 
         kw = {"bg": bg} if bg else {}
         self.canvas = tk.Canvas(self.root, width=self.W, height=self.H,
@@ -2015,8 +2074,7 @@ class Mascot:
         self.canvas.pack()
         if IS_MAC:                            # 제목 표시줄 제거 후 위치 재적용
             self._mac_borderless()
-            self.root.geometry(
-                f"{self.W}x{self.H}+{sw - self.W - 50}+{sh - self.H - 70}")
+            self.root.geometry(f"{self.W}x{self.H}+{wx}+{wy}")
 
         self._tw_cache = {}          # 상태 텍스트 폭 캐시 (캔버스로 측정)
 
@@ -2037,6 +2095,18 @@ class Mascot:
                                         self.ui_k, self.todo_zoom,
                                         self._todo_zoomed)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
+
+        # ── 마감 목록 (config의 "deadline_on") ───────────────────────────
+        if self.cfg.get("deadline_on"):
+            self._due_load()
+            self.due_panel = TodoPanel(
+                self.root, self.card, bg, self._due_remove, self._due_moved,
+                self._due_edit,
+                self.due_pos or (self.W + 4, 0),   # 기본은 캐릭터 오른쪽
+                self.due_flip, self._due_flipped, self.ui_k, self.due_zoom,
+                self._due_zoomed)
+            self.due_panel._moved_by_user = bool(self.due_pos)
+            self.root.after(280, self._due_refresh)
 
         # ── 귀여운 이벤트 (선물 캐릭터 전용 — config의 "fun") ────────────
         self.fun = bool(self.cfg.get("fun"))
@@ -2152,6 +2222,9 @@ class Mascot:
         menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
         if self.todo_on:
             menu.add_command(label="할 일 추가", command=self.add_todo)
+        if self.cfg.get("deadline_on"):
+            menu.add_command(label="마감 추가", command=self.add_due)
+        if self.todo_on or self.cfg.get("deadline_on"):
             menu.add_separator()
         if self.ws_path is not None:
             menu.add_command(label="작업 종료", command=self._end_workday)
@@ -2218,6 +2291,69 @@ class Mascot:
             self.tick()
 
     # ── 파츠 로드 (모든 좌표는 표시 배율 + y 오프셋 적용) ─────────────────
+    # 밑그림 위에만 놓이는지 검사할 파츠들 (얼굴 위에 얹히는 것들)
+    COVER_CHECK = ("pupils", "lashes", "eyes_closed", "hair", "smile")
+
+    def _find_covered_parts(self):
+        """'밑그림에 완전히 덮이는' 파츠 이름들.
+
+        캐릭터마다 그림이 달라서 사람이 정하지 않고 실제 픽셀로 확인한다.
+        한 픽셀이라도 밑그림 밖으로 나가면 그 파츠는 배경과 닿으므로 제외한다.
+        """
+        if not self.cfg.get("soft_overlay"):
+            return set()
+        from PIL import ImageChops
+        try:
+            base = "head" if (self.has_part("head")) else "body_open"
+            cw, ch = self.layout["canvas"]
+
+            def mask(name, thr):
+                path = os.path.join(self.parts_dir, f"{name}.png")
+                a = Image.open(path).convert("RGBA").getchannel("A")
+                sheet = Image.new("L", (cw, ch), 0)
+                sheet.paste(a.point(lambda v: 255 if v >= thr else 0),
+                            tuple(self.layout[name]["pos"]))
+                return sheet
+
+            solid = mask(base, 250)
+            out = set()
+            for n in self.COVER_CHECK:
+                if not self.has_part(n) or n == base:
+                    continue
+                outside = ImageChops.subtract(mask(n, 1), solid)
+                if outside.getbbox() is None:
+                    out.add(n)
+            return out
+        except Exception:
+            self._log_error("cover_check")
+            return set()
+
+    def _covered_by_base(self, lay, path):
+        """그 그림이 밑그림(머리/몸통) 안에만 들어가는가 — 소품처럼 파일 경로로."""
+        if not self.cfg.get("soft_overlay"):
+            return False
+        from PIL import ImageChops
+        try:
+            base = "head" if self.has_part("head") else "body_open"
+            cw, ch = self.layout["canvas"]
+            solid = Image.new("L", (cw, ch), 0)
+            ba = Image.open(os.path.join(self.parts_dir,
+                                         f"{base}.png")).convert("RGBA")
+            solid.paste(ba.getchannel("A").point(lambda v: 255 if v >= 250 else 0),
+                        tuple(self.layout[base]["pos"]))
+            mine = Image.new("L", (cw, ch), 0)
+            ia = Image.open(path).convert("RGBA")
+            mine.paste(ia.getchannel("A").point(lambda v: 255 if v else 0),
+                       tuple(lay["pos"]))
+            return ImageChops.subtract(mine, solid).getbbox() is None
+        except Exception:
+            return False
+
+    def has_part(self, name):
+        """그 파츠의 PNG와 layout이 둘 다 있는가 (파츠 불러오기 전에도 쓴다)."""
+        return (name in self.layout
+                and os.path.exists(os.path.join(self.parts_dir, f"{name}.png")))
+
     def _hard(self, im):
         """반투명 가장자리 픽셀 이분화 — 색상키 투명의 어두운 테두리(fringe) 방지.
 
@@ -2346,13 +2482,20 @@ class Mascot:
     def _load_parts(self):
         s = self.s
 
+        # 밑그림에 완전히 덮이는 얼굴 파츠는 가장자리를 이분화하지 않는다.
+        # 이분화는 투명한 배경과 닿을 때 생기는 회색 테두리를 막으려는 것인데,
+        # 배경에 닿지 않는 파츠에서는 얇은 선만 잘려 나간다(속눈썹은 픽셀의
+        # 1/4가 사라졌다). Tk는 아래 그림과 알파 합성을 해 주므로 그냥 둬도
+        # 테두리가 지지 않는다.
+        self._soft_parts = self._find_covered_parts()
+
         def load_pil(name):
             im = Image.open(os.path.join(self.parts_dir,
                                          f"{name}.png")).convert("RGBA")
             if s != 1.0:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
-            return self._hard(im)
+            return im if name in self._soft_parts else self._hard(im)
 
         self.im = {}
         self.has = {}
@@ -2379,7 +2522,12 @@ class Mascot:
             if s != 1.0:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
-            pil_cache["prop"] = self._hard(im)
+            # 소품도 머리 안에만 있으면 이분화하지 않는다 (안경테 계단 방지)
+            if self._covered_by_base(self._prop_layout[pick],
+                                     os.path.join(self.prop_dir, f"{pick}.png")):
+                pil_cache["prop"] = im
+            else:
+                pil_cache["prop"] = self._hard(im)
             self.im["prop"] = ImageTk.PhotoImage(pil_cache["prop"])
             self.has["prop"] = True
             self.prop_name = pick
@@ -3106,6 +3254,8 @@ class Mascot:
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
     def _on_release(self, e):
+        if self._dragged:
+            self._safe("win_pos", self._save_win_pos)
         if self._press is not None and not self._dragged:
             px, py, _, _ = self._press
             g = self._card_geom()
@@ -3143,6 +3293,21 @@ class Mascot:
         except Exception:
             pass
 
+    def _todo_upload(self, text):
+        """완료한 할 일을 워크스페이스 '오늘의 할일'에 완료 상태로 올린다.
+
+        여기서 직접 서버에 보내지 않고 줄 단위로 파일에 적어 둔다. 기존
+        타이머가 읽어 올려 주므로, 지금 꺼져 있어도 다음에 켜질 때 올라간다.
+        날짜(작업일 경계 06:00) 계산도 그쪽 기준 하나로 통일한다.
+        """
+        text = str(text).strip()
+        if not (text and self.ws_path and self.cfg.get("workspace_todo")):
+            return
+        path = os.path.join(os.path.dirname(self.ws_path), ".mascot_todo")
+        with open(path, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps({"goal": text[:500], "ts": time.time()},
+                                ensure_ascii=False) + os.linesep)
+
     def _todo_zoomed(self, pct):
         """할 일 목록 배율을 기억하고 바로 다시 그린다."""
         # 자리는 저장하지 않는다 — 직접 옮긴 적이 없다면 다음에 켤 때도
@@ -3168,6 +3333,15 @@ class Mascot:
         self._last_pos = None                # 다음 틱에 위치 재적용
         self._todo_save()
 
+    def _due_tick(self):
+        """마감 말풍선을 캐릭터 옆에 붙여 두고, 날짜가 바뀌면 다시 그린다."""
+        if self.due_panel is None:
+            return
+        if time.strftime("%Y-%m-%d") != self._due_shown:
+            self._due_refresh()
+            return
+        self.due_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
+
     def _todo_refresh(self):
         if self.todo_panel is None:
             return
@@ -3178,8 +3352,10 @@ class Mascot:
         """우클릭 > 완료 — 그 할 일이 사라지고 캐릭터가 축하해 준다."""
         if not (0 <= idx < len(self.todos)):
             return
+        done_text = self.todos[idx]
         del self.todos[idx]
         self._todo_save()
+        self._safe("todo_up", self._todo_upload, done_text)
         self._todo_refresh()
         now = time.time()
         self.smile_until = now + 4.0        # 웃는 표정 (파츠 없으면 그냥 넘어감)
@@ -3316,6 +3492,8 @@ class Mascot:
                 self._ms.stop()
             if self.todo_panel is not None:
                 self.todo_panel.destroy()
+            if self.due_panel is not None:
+                self.due_panel.destroy()
             # 살아있음 신호를 지운다. 안 지우면 에이전트가 최대 8초 동안
             # '아직 떠 있다'고 착각해서, 그 사이 아이콘을 눌러도 캐릭터가
             # 안 뜨고 클릭이 그냥 삼켜진다.
@@ -3335,6 +3513,8 @@ class Mascot:
             with open(self.state_path, encoding="utf-8") as fp:
                 st = json.load(fp)
             self.work_secs = float(st.get("seconds", 0))
+            self.zero_at = float(st.get("zero_at", 0) or 0)
+            self.goal_cheered = str(st.get("goal_cheered", "") or "")
             saved = st.get("stat")
             if isinstance(saved, dict):
                 self.stat.update({k: saved.get(k, v) for k, v in self.stat.items()})
@@ -3350,9 +3530,423 @@ class Mascot:
         try:
             with open(self.state_path, "w", encoding="utf-8") as fp:
                 json.dump({"seconds": round(self.work_secs),
+                           "zero_at": round(self.zero_at),
+                           "goal_cheered": self.goal_cheered,
                            "stat": self.stat, "rec": self.rec}, fp)
         except Exception:
             pass
+
+    HIST_DAYS = 60               # 하루 기록을 며칠치 보관할지
+
+    def _day_hour(self):
+        """하루가 바뀌는 시각 (환경설정). 사람마다 생활 리듬이 달라서 연다."""
+        try:
+            return max(0, min(12, int(self.us.get("day_start", 6))))
+        except Exception:
+            return 6
+
+    def _my_workday(self, ts=None):
+        """이 캐릭터 기준의 작업일. 기록은 '시작한 시각'으로 날짜를 정한다.
+
+        끝낸 시각으로 정하면 밤 10시~새벽 4시 작업이 다음 날로 밀려서,
+        이틀치 작업이 하루에 뭉치고 앞날이 빈 날이 된다.
+        """
+        return _workday(ts, self._day_hour())
+
+    def _session_day(self):
+        """이번 작업의 날짜 — 처음 일한 시각 기준 (없으면 지금)."""
+        first = self.stat.get("first") or 0
+        return self._my_workday(first if first else None)
+    GOAL_TALK = ("목표 달성! 오늘 대단했어.", "목표 채웠어! 잘했어.",
+                 "오늘 목표 끝! 멋지다.")
+
+    def _goal_tick(self, now):
+        """목표 시간을 채우면 한 번 축하한다 (작업일마다 한 번)."""
+        if not (self.cfg.get("goal_cheer") and self.can_cheer):
+            return
+        today = self._my_workday()        # 축하는 '지금'이 어느 작업일인지로
+        if self.goal_cheered == today:
+            return
+        goal = max(float(self.us.get("goal_hours", 6)), 0.5) * 3600
+        if self._shown_secs() < goal:
+            return
+        self.goal_cheered = today
+        self._timer_save()
+        self.hat_until = now + 12.0
+        self.smile_until = now + 5.0
+        self._gest_start("clap", force=True)
+        pool = self.cfg.get("goal_talk") or self.GOAL_TALK
+        self._say(random.choice(list(pool)), 6.0)
+        self._safe("burst", self._burst, 40, 66)
+
+    # ── 마감 목록 ────────────────────────────────────────────────────────
+    DUE_NEAR, DUE_SOON = 1, 3        # 이 날짜 안이면 색이 바뀐다
+
+    def _due_load(self):
+        try:
+            with open(os.path.join(self.state_dir, ".dues.json"),
+                      encoding="utf-8") as fp:
+                d = json.load(fp)
+            items = d.get("items", []) if isinstance(d, dict) else []
+            self.dues = [{"name": str(i.get("name", ""))[:60],
+                          "date": str(i.get("date", ""))}
+                         for i in items if str(i.get("date", "")).strip()][:20]
+            if isinstance(d, dict):
+                p_ = d.get("pos")
+                if isinstance(p_, (list, tuple)) and len(p_) == 2:
+                    self.due_pos = (int(p_[0]), int(p_[1]))
+                self.due_flip = bool(d.get("flip"))
+                self.due_zoom = TodoPanel._near_zoom(d.get("zoom", 100))
+        except Exception:
+            self.dues = []
+
+    def _due_save(self):
+        try:
+            with open(os.path.join(self.state_dir, ".dues.json"), "w",
+                      encoding="utf-8") as fp:
+                json.dump({"items": self.dues, "pos": self.due_pos,
+                           "flip": self.due_flip, "zoom": self.due_zoom},
+                          fp, ensure_ascii=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _days_to(datestr):
+        """그 날짜까지 남은 날 수. 마감은 달력 날짜로 센다."""
+        try:
+            t = time.mktime(time.strptime(str(datestr), "%Y-%m-%d"))
+        except Exception:
+            return None
+        today = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+        return int(round((t - today) / 86400))
+
+    def _due_lines(self):
+        """말풍선에 넣을 글과 색 — 가까운 마감부터 위로."""
+        rows = []
+        for d in self.dues:
+            n = self._days_to(d.get("date"))
+            if n is None:
+                continue
+            tag = "D-DAY" if n == 0 else (f"D-{n}" if n > 0 else f"D+{-n}")
+            name = (d.get("name") or "").strip()
+            rows.append((n, (name + "\n" + tag) if name else tag))
+        rows.sort(key=lambda r: r[0])
+        texts = [t for _, t in rows]
+        tints = ["#d64a63" if n <= self.DUE_NEAR else
+                 "#e08a3c" if n <= self.DUE_SOON else None for n, _ in rows]
+        return texts, tints
+
+    def _due_refresh(self):
+        if self.due_panel is None:
+            return
+        texts, tints = self._due_lines()
+        self.due_panel.render(texts, tints)
+        self.due_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
+        self._due_shown = time.strftime("%Y-%m-%d")
+
+    def _due_moved(self, x, y):
+        self.due_pos = (int(x - self.root.winfo_rootx()),
+                        int(y - self.root.winfo_rooty()))
+        if self.due_panel is not None:
+            self.due_panel.offset = self.due_pos
+            self.due_panel._moved_by_user = True
+        self._last_pos = None
+        self._due_save()
+
+    def _due_flipped(self, flip):
+        self.due_flip = bool(flip)
+        self._due_save()
+        self._due_refresh()
+
+    def _due_zoomed(self, pct):
+        self.due_zoom = int(pct)
+        self._due_save()
+        self._last_pos = None
+        self._due_refresh()
+
+    def _due_remove(self, idx):
+        """말풍선 우클릭 > 완료 — 그 마감을 목록에서 지운다."""
+        order = sorted(range(len(self.dues)),
+                       key=lambda i: (self._days_to(self.dues[i]["date"])
+                                      if self._days_to(self.dues[i]["date"])
+                                      is not None else 99999))
+        if not (0 <= idx < len(order)):
+            return
+        self.dues.pop(order[idx])
+        self._due_save()
+        self._due_refresh()
+        self._say("하나 끝났네!", 3.0)
+
+    def _due_edit(self, idx):
+        order = sorted(range(len(self.dues)),
+                       key=lambda i: (self._days_to(self.dues[i]["date"])
+                                      if self._days_to(self.dues[i]["date"])
+                                      is not None else 99999))
+        if 0 <= idx < len(order):
+            self.add_due(edit=order[idx])
+
+    def add_due(self, edit=None):
+        """마감 입력 창 — 이름과 날짜. 엔터로 저장, Esc로 닫기."""
+        if getattr(self, "_due_win", None) is not None                 and self._due_win.winfo_exists():
+            self._due_win.destroy()
+        cd, u = self.card, self._ui
+        W, H = u(320), u(176)
+        win = tk.Toplevel(self.root)
+        self._due_win = win
+        win.title("마감 수정" if edit is not None else "마감 추가")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=cd["panel"])
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0)
+        cv.pack()
+
+        def rr(x0, y0, x1, y1, r, **kw):
+            pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
+                   x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
+            return cv.create_polygon(pts, smooth=True, **kw)
+
+        rr(u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
+           outline=cd["border"], width=2)
+        cv.create_text(W / 2, u(28), text="언제까지 끝낼까요?",
+                       font=self._uf(10, True), fill=cd["text"])
+        cur = self.dues[edit] if (edit is not None
+                                  and edit < len(self.dues)) else {}
+        nv = tk.StringVar(value=cur.get("name", ""))
+        dv = tk.StringVar(value=cur.get("date", time.strftime("%Y-%m-%d")))
+        ents = []
+        for i, (lab, var) in enumerate((("이름", nv), ("날짜", dv))):
+            ry = u(58) + i * u(38)
+            cv.create_text(u(22), ry + u(13), anchor="w", text=lab,
+                           font=self._uf(9), fill=cd["sub"])
+            e = tk.Entry(win, textvariable=var, font=self._uf(10),
+                         relief="flat", bg="#ffffff", fg=cd["text"],
+                         highlightthickness=1, highlightbackground=cd["border"],
+                         highlightcolor=cd["fill"])
+            cv.create_window(u(58), ry, anchor="nw", window=e,
+                             width=W - u(80), height=u(26))
+            ents.append(e)
+        cv.create_text(W / 2, u(150), text="날짜는 2026-08-15 처럼 · Esc로 닫기",
+                       font=self._uf(8), fill=cd["sub"])
+
+        def commit(_e=None):
+            name = nv.get().strip()[:60]
+            date = dv.get().strip()
+            if self._days_to(date) is None:      # 날짜가 틀리면 그 칸으로
+                ents[1].focus_set()
+                ents[1].selection_range(0, "end")
+                return
+            item = {"name": name, "date": date}
+            if edit is not None and edit < len(self.dues):
+                self.dues[edit] = item
+                self._due_save()
+                self._due_refresh()
+                win.destroy()
+                return
+            self.dues.append(item)
+            del self.dues[20:]
+            self._due_save()
+            self._due_refresh()
+            win.destroy()
+
+        for e in ents:
+            e.bind("<Return>", commit)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
+        py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
+        win.geometry(f"+{int(px)}+{int(py)}")
+        ents[0].focus_force()
+
+    def _hist_load(self):
+        """날짜별 하루 기록 {"2026-07-30": {...}}."""
+        try:
+            with open(os.path.join(self.state_dir, ".history.json"),
+                      encoding="utf-8") as fp:
+                d = json.load(fp)
+            return d.get("days", {}) if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _hist_add(self):
+        """작업 종료 때 그날 기록에 더한다. 하루에 여러 번 끝내면 합산된다."""
+        if not self.cfg.get("history"):
+            return
+        days = self._hist_load()
+        key = self._session_day()
+        cur = days.get(key) or {}
+        s_ = self.stat
+        days[key] = {
+            "work": int(cur.get("work", 0)) + int(self._shown_secs()),
+            "strokes": int(cur.get("strokes", 0)) + int(s_.get("strokes", 0)),
+            "keys": int(cur.get("keys", 0)) + int(s_.get("keys", 0)),
+            "best": max(int(cur.get("best", 0)), int(s_.get("best", 0))),
+            "runs": int(cur.get("runs", 0)) + 1,
+        }
+        for k in sorted(days)[:-self.HIST_DAYS]:      # 오래된 것부터 버린다
+            days.pop(k, None)
+        try:
+            with open(os.path.join(self.state_dir, ".history.json"), "w",
+                      encoding="utf-8") as fp:
+                json.dump({"days": days}, fp, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _hist_summary(self):
+        """브리핑에 붙일 요약 — 어제 대비 · 최근 7일 · 연속 일수."""
+        days = self._hist_load()
+        if not days:
+            return None
+        today = self._my_workday()
+
+        def shift(key, n):
+            t = time.mktime(time.strptime(key, "%Y-%m-%d")) + n * 86400
+            return time.strftime("%Y-%m-%d", time.localtime(t))
+
+        yday = days.get(shift(today, -1), {}).get("work", 0)
+        week = sum(int(days.get(shift(today, -i), {}).get("work", 0))
+                   for i in range(7))
+        streak, i = 0, 0
+        while int(days.get(shift(today, -i), {}).get("work", 0)) >= 600:
+            streak += 1
+            i += 1
+        return {"yday": int(yday), "week": int(week), "streak": streak}
+
+    # 기록 카드에 쓸 한글 글꼴 후보 (윈도우 → 맥 순)
+    CARD_FONTS = (r"C:\Windows\Fonts\malgun.ttf",
+                  r"C:\Windows\Fonts\malgunbd.ttf",
+                  "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+                  "/Library/Fonts/AppleGothic.ttf",
+                  "/System/Library/Fonts/Supplemental/AppleGothic.ttf")
+
+    def _card_font(self, size, bold=False):
+        from PIL import ImageFont
+        names = self.CARD_FONTS
+        if bold:
+            names = tuple(n for n in names if "bd" in n) + names
+        for n in names:
+            try:
+                return ImageFont.truetype(n, size)
+            except Exception:
+                continue
+        return None
+
+    def _save_day_card(self, rows, total_txt):
+        """하루 기록을 그림 한 장으로 저장하고 그 폴더를 연다.
+
+        캔버스를 그대로 찍을 수 없어(투명 색상키 창) 그림으로 새로 그린다.
+        글꼴을 하나도 못 찾으면 한글이 깨지므로 저장하지 않고 알린다.
+        """
+        import subprocess
+        from PIL import Image, ImageDraw
+        name = str(self.cfg.get("name") or self.char)
+        f_big = self._card_font(46, True)
+        f_mid = self._card_font(27)
+        f_key = self._card_font(24)
+        f_val = self._card_font(26, True)
+        if not all((f_big, f_mid, f_key, f_val)):
+            self._say("글꼴을 못 찾아서 저장하지 못했어요.", 4.0)
+            return None
+        cd = self.card
+        W, PAD = 760, 44
+        H = 250 + 62 * len(rows) + 70
+        im = Image.new("RGB", (W, H), cd.get("panel", "#f7f4f8"))
+        d = ImageDraw.Draw(im)
+        d.rounded_rectangle([PAD, 40, W - PAD, 210], 26,
+                            fill=cd.get("soft", "#fdf3f7"),
+                            outline=cd.get("border", "#f0aac6"), width=3)
+        d.text((W / 2, 96), f"{name}의 작업 기록", font=f_mid,
+               fill=cd.get("sub", "#999"), anchor="mm")
+        d.text((W / 2, 152), total_txt, font=f_big,
+               fill=cd.get("text", "#333"), anchor="mm")
+        y = 240
+        d.rounded_rectangle([PAD, y, W - PAD, y + 62 * len(rows) + 20], 22,
+                            fill="#ffffff", outline=cd.get("line", "#eee"), width=2)
+        y += 10
+        for i, (k, v) in enumerate(rows):
+            cy = y + 31 + i * 62
+            if i:
+                d.line([PAD + 30, cy - 31, W - PAD - 30, cy - 31],
+                       fill=cd.get("line", "#eee"), width=2)
+            d.text((PAD + 34, cy), k, font=f_key,
+                   fill=cd.get("sub", "#999"), anchor="lm")
+            d.text((W - PAD - 34, cy), v, font=f_val,
+                   fill=cd.get("text", "#333"), anchor="rm")
+        d.text((W / 2, H - 34), self._session_day(), font=f_key,
+               fill=cd.get("sub", "#999"), anchor="mm")
+
+        base = os.path.expanduser("~/Pictures")
+        if not os.path.isdir(base):
+            base = os.path.expanduser("~")
+        out = os.path.join(base, f"{name} 작업기록")
+        os.makedirs(out, exist_ok=True)
+        day = self._session_day()
+        path = os.path.join(out, f"{day}.png")
+        n = 2
+        while os.path.exists(path):
+            path = os.path.join(out, f"{day}-{n}.png")
+            n += 1
+        im.save(path)
+        try:                                   # 저장한 폴더를 열어 준다
+            if IS_MAC:
+                subprocess.Popen(["open", "-R", path])
+            else:
+                os.startfile(out)
+        except Exception:
+            pass
+        return path
+
+    def _load_win_pos(self, sw, sh):
+        """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
+
+        모니터 구성이 바뀌면 저장된 자리가 화면 밖일 수 있으므로, 창이 화면에
+        조금이라도 걸치는지 확인하고 아니면 기본 자리로 되돌린다.
+        """
+        base = (sw - self.W - 50, sh - self.H - 70)
+        if not self.cfg.get("remember_pos"):
+            return base
+        try:
+            with open(self.ui_prefs_path, encoding="utf-8") as fp:
+                d = json.load(fp)
+            x, y = int(d["win_x"]), int(d["win_y"])
+        except Exception:
+            return base
+        vx = self.root.winfo_vrootx() if hasattr(self.root, "winfo_vrootx") else 0
+        vy = self.root.winfo_vrooty() if hasattr(self.root, "winfo_vrooty") else 0
+        vw = max(self.root.winfo_vrootwidth(), sw)
+        vh = max(self.root.winfo_vrootheight(), sh)
+        if (x + self.W < vx + 40 or x > vx + vw - 40
+                or y + self.H < vy + 40 or y > vy + vh - 40):
+            return base                      # 그 자리에 이제 화면이 없다
+        return (x, y)
+
+    def _save_win_pos(self):
+        """지금 자리를 기억해 둔다 — 끌어 놓을 때마다 바로 (강제 종료 대비)."""
+        if not self.cfg.get("remember_pos"):
+            return
+        try:
+            self.root.update_idletasks()      # 방금 옮긴 자리가 반영된 뒤 읽는다
+            d = {}
+            if os.path.exists(self.ui_prefs_path):
+                with open(self.ui_prefs_path, encoding="utf-8") as fp:
+                    d = json.load(fp) or {}
+            d["win_x"] = int(self.root.winfo_x())
+            d["win_y"] = int(self.root.winfo_y())
+            with open(self.ui_prefs_path, "w", encoding="utf-8") as fp:
+                json.dump(d, fp)
+        except Exception:
+            pass
+
+    def _shown_secs(self):
+        """카드에 보여 줄 시간. 작업 종료를 누른 뒤로 다시 센 만큼만.
+
+        누적 자체(work_secs)는 그대로 두고 기준점만 옮긴다. 기존 타이머가
+        보내 주는 값을 덮어쓰면 다음 갱신에 바로 되돌아오기 때문이다.
+        """
+        if self.work_secs < self.zero_at:     # 작업일이 넘어가 누적이 줄었다
+            self.zero_at = 0.0
+        return max(0.0, self.work_secs - self.zero_at)
 
     def _reset_records(self):
         """새 세션 — 기록 갱신 축하를 처음부터 다시 센다."""
@@ -3362,6 +3956,7 @@ class Mascot:
 
     def _timer_reset(self):
         self.work_secs = 0.0
+        self.zero_at = 0.0
         self._reset_records()
         self._timer_save()
 
@@ -4460,6 +5055,10 @@ class Mascot:
         self.smile_until = now + 5.0            # 말풍선이 떠 있는 동안 웃는 얼굴
         self._gest_start("clap", force=True)
         self.stretch_pending = False      # 일을 끝냈으니 알림도 내린다
+        self._safe("history", self._hist_add)
+        if self.cfg.get("reset_on_end"):  # 시간을 0으로 되돌린다
+            self.zero_at = self.work_secs
+            self._timer_save()
         self._reset_records()                   # 작업 종료 = 이번 '오늘'의 끝
         self._say("수고하셨습니다!", 5.0)
         cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff", "#ffa9a9"]
@@ -4480,7 +5079,7 @@ class Mascot:
             return
         cd = self.card
         s = self.stat
-        total = int(self.work_secs)
+        total = int(self._shown_secs())
         goal = max(float(self.us.get("goal_hours", 6)), 0.5) * 3600
         pct = min(int(total / goal * 100), 999)
 
@@ -4499,6 +5098,16 @@ class Mascot:
                 ("딴짓 / 휴식", f"{hm(s.get('other', 0))} / {hm(s.get('idle', 0))}"),
                 ("키 입력", f"{int(s.get('keys', 0)):,}회"),
                 ("그린 획", f"{int(s.get('strokes', 0)):,}획")]
+        hs = self._hist_summary() if self.cfg.get("history") else None
+        if hs:
+            gap = total - hs["yday"]
+            sign = "+" if gap >= 0 else "-"
+            rows.append(("어제", hm(hs["yday"]) if hs["yday"] else "기록 없음"))
+            if hs["yday"]:
+                rows.append(("어제보다", f"{sign}{hm(abs(gap))}"))
+            rows.append(("최근 7일", hm(hs["week"])))
+            if hs["streak"] >= 2:
+                rows.append(("연속", f"{hs['streak']}일째"))
 
         u = self._ui
         W, PAD, ROW = u(350), u(22), u(34)
@@ -4552,10 +5161,22 @@ class Mascot:
             self._timer_save()
             win.destroy()
 
-        gap = u(12)
-        bw = (W - PAD * 2 - gap) / 2
-        b1 = (PAD, y, PAD + bw, y + u(42))
-        b2 = (PAD + bw + gap, y, W - PAD, y + u(42))
+        gap = u(10)
+        save_on = bool(self.cfg.get("save_card"))
+        n_btn = 3 if save_on else 2
+        bw = (W - PAD * 2 - gap * (n_btn - 1)) / n_btn
+        btns, bx = [], PAD
+        for _ in range(n_btn):
+            btns.append((bx, y, bx + bw, y + u(42)))
+            bx += bw + gap
+        i = 0
+        b_save = None
+        if save_on:
+            b_save = btns[i]; i += 1
+            rr(*b_save, u(16), fill="#f4f1f5", outline="")
+            cv.create_text((b_save[0] + b_save[2]) / 2, y + u(21), text="그림 저장",
+                           font=self._uf(10, True), fill=cd["sub"])
+        b1 = btns[i]; b2 = btns[i + 1]
         rr(*b1, u(16), fill="#f4f1f5", outline="")
         cv.create_text((b1[0] + b1[2]) / 2, y + u(21), text="새로 시작",
                        font=self._uf(10, True), fill=cd["sub"])
@@ -4563,10 +5184,21 @@ class Mascot:
         cv.create_text((b2[0] + b2[2]) / 2, y + u(21), text="닫기",
                        font=self._uf(10, True), fill="#ffffff")
 
+        def hit(b, e):
+            return b and b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3]
+
         def on_click(e):
-            if b1[0] <= e.x <= b1[2] and b1[1] <= e.y <= b1[3]:
+            if hit(b_save, e):
+                try:
+                    path = self._save_day_card(rows, hm(total))
+                except Exception:
+                    path, _ = None, self._log_error("save_card")
+                if path:
+                    self._say("그림으로 저장했어요!", 4.0)
+                win.destroy()
+            elif hit(b1, e):
                 reset_and_close()
-            elif b2[0] <= e.x <= b2[2] and b2[1] <= e.y <= b2[3]:
+            elif hit(b2, e):
                 win.destroy()
         cv.bind("<Button-1>", on_click)
         win.update_idletasks()
@@ -4741,7 +5373,7 @@ class Mascot:
         cd = self.card
         active = state == "work"
         dot, status = self._status_of(state, sleeping)
-        t = int(self.work_secs)
+        t = int(self._shown_secs())
         label = f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
         g = self._card_geom()
         x0, y0, x1, y1 = g["x0"], g["y0"], g["x1"], g["y1"]
@@ -4787,6 +5419,8 @@ class Mascot:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
             row1 = y0 + 20
             status_dot(x0 + pad + 5, row1)
+            # 마감은 카드가 아니라 말풍선 목록으로 보여 준다. 카드에 딱지를
+            # 넣었더니 그 폭만큼 상태·시간 글자가 줄어 읽기 힘들어졌다.
             avail = (x1 - pad) - (x0 + pad + 16)
             f_time = self._fit(label, 13, avail * 0.62, True)
             f_stat = self._fit(status, 8,
@@ -4796,7 +5430,7 @@ class Mascot:
             c.create_text(x1 - pad, row1, anchor="e", text=label,
                           font=f_time, fill=cd["text"])
             goal = max(float(self.us["goal_hours"]), 0.5) * 3600
-            frac = min(self.work_secs / goal, 1.0)
+            frac = min(self._shown_secs() / goal, 1.0)
             row2 = y0 + 45
             bx0, bx1 = x0 + pad + 2, x1 - pad - 36
             c.create_line(bx0, row2, bx1, row2, width=6, capstyle="round",
@@ -4895,7 +5529,8 @@ class Mascot:
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
-        if self.shadow is not None or self.todo_panel is not None:
+        if (self.shadow is not None or self.todo_panel is not None
+                or self.due_panel is not None):
             pos = (self.root.winfo_rootx(), self.root.winfo_rooty())
             if pos != self._last_pos:
                 self._last_pos = pos
@@ -4904,6 +5539,8 @@ class Mascot:
                     self.shadow.place(*pos, self._main_hwnd)
                 if self.todo_panel is not None:
                     self.todo_panel.place(*pos)
+            if self.due_panel is not None:
+                self._safe("due", self._due_tick)
             elif self.shadow is not None and now - self._z_check > 8.0:
                 self._z_check = now          # z순서만 가끔 재고정
                 self.shadow.place(*pos, self._main_hwnd)
@@ -5016,6 +5653,7 @@ class Mascot:
         self._g_eyes_shut = self._g_smile = False
         self._safe("stretch", self._stretch_tick, now, sleeping)
         self._safe("gesture", self._gest_tick, now, sleeping)
+        self._safe("goal", self._goal_tick, now)
         squash = 3 if now < self.squash_until else 0
         yo = breathe + squash + self._g_dy
         if self.fun and now < self.click_bounce:      # 클릭 반응: 콩 하고 튐
@@ -5151,6 +5789,27 @@ class Mascot:
             self._safe("bubble", self._draw_bubble, yo)
         self._safe("pet_shadow", self._update_pet_shadow)
 
+    AUTO_MON = "자동 (커서가 있는 화면)"
+
+    def monitor_names(self):
+        """환경설정에 보여 줄 화면 목록. 열 때마다 다시 잰다(연결이 바뀌므로)."""
+        out = [self.AUTO_MON]
+        for i, r in enumerate(list_monitors(), 1):
+            out.append(f"{i}번 화면 {r[2] - r[0]}x{r[3] - r[1]}")
+        return out
+
+    def _pen_mon_rect(self):
+        """펜이 따라갈 화면. 자동이거나 그 화면이 사라졌으면 None."""
+        raw = str(self.us.get("pen_monitor", "") or "")
+        if not raw or raw.startswith("자동"):
+            return None
+        try:
+            n = int(raw.split("번")[0])
+        except Exception:
+            return None
+        mons = list_monitors()
+        return mons[n - 1] if 1 <= n <= len(mons) else None
+
     def _track_pen(self, now, f, cx, cy):
         """펜 끝이 따라갈 자리를 구하고 그린 획 수·낙서 선을 기록한다.
 
@@ -5161,7 +5820,9 @@ class Mascot:
             target = self._quad_xy(*f["pen"])
             drawing = True
         else:
-            ml, mt, mr, mb = monitor_at(cx, cy)
+            # 듀얼 모니터에서 어느 화면을 따라갈지 골랐으면 그 화면 기준으로,
+            # 아니면 커서가 놓인 화면 기준으로 손 위치를 잡는다.
+            ml, mt, mr, mb = self._pen_mon_rect() or monitor_at(cx, cy)
             u = min(1.0, max(0.0, (cx - ml) / max(mr - ml, 1)))
             v = min(1.0, max(0.0, (cy - mt) / max(mb - mt, 1)))
             target = self._quad_xy(u, v)
@@ -5584,13 +6245,25 @@ class Mascot:
             hits.clear()
             sliders.clear()
             y = header(24)
-            y = group(y, "타이머", [
+            timer_rows = [
                 lambda ry: stepper(ry, "목표 작업시간", "goal_hours", 0.5, 16, 0.5, "h"),
                 lambda ry: stepper(ry, "휴식 전환", "idle_sec", 5, 600, 5, "초"),
                 lambda ry: stepper(ry, "잠들기", "sleep_min", 1, 120, 1, "분"),
+            ]
+            if self.cfg.get("history"):
+                timer_rows.append(
+                    lambda ry: stepper(ry, "하루 바뀌는 시각", "day_start",
+                                       0, 12, 1, "시"))
+            timer_rows += [
                 lambda ry: toggle(ry, "작업 타이머 표시", "show_timer"),
                 lambda ry: toggle(ry, "작업 프로그램에서만 측정", "work_apps_only"),
-            ])
+            ]
+            mons = self.monitor_names()
+            if self.cfg.get("pen_monitor_pick") and len(mons) > 2:
+                timer_rows.append(
+                    lambda ry: open_picker(ry, "펜 따라갈 화면",
+                                           "pen_monitor", mons))
+            y = group(y, "타이머", timer_rows)
             y = group(y, "소리", [
                 lambda ry: slider(ry, "타자 소리 볼륨", "sound_volume", 0, 100),
                 lambda ry: slider(ry, "펜 소리 볼륨", "pen_volume", 0, 100),
@@ -5627,6 +6300,7 @@ class Mascot:
             cv.create_window(LX, y + 13, anchor="nw", window=apps_entry,
                              width=W - PAD * 2 - IN * 2, height=24)
             y += 50 + 22
+
 
             cv.create_text(W / 2, y, text="패션 · 크기 · 타이머는 저장 시 재시작",
                            font=(FONT, FS(8)), fill=cd["sub"])
@@ -5672,6 +6346,7 @@ class Mascot:
             new["goal_hours"] = float(new["goal_hours"])
             new["idle_sec"] = max(float(new["idle_sec"]), 5.0)
             new["sleep_min"] = max(1, int(new["sleep_min"]))
+            new["day_start"] = max(0, min(12, int(new.get("day_start", 6))))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
             new["font_pct"] = max(70, min(160, int(new["font_pct"])))
             for k in ("sound_volume", "pen_volume", "poke_volume"):

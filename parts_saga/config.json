@@ -103,5 +103,12 @@
   "개운해!",
   "다시 반짝반짝!"
  ],
- "stretch_hint_suffix": " — 눌러줘!"
+ "stretch_hint_suffix": " — 눌러줘!",
+ "remember_pos": true,
+ "history": true,
+ "deadline_on": true,
+ "goal_cheer": true,
+ "save_card": true,
+ "soft_overlay": true,
+ "pen_monitor_pick": true
 }
