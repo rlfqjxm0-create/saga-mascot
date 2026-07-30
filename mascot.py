@@ -4275,7 +4275,7 @@ class Mascot:
             self.gest_stretch_next = now + self.STRETCH_EVERY
         elif now >= self.gest_stretch_next:
             self.gest_stretch_next = now + self.STRETCH_EVERY
-            self._gest_start("stretch")       # 타이머를 켜고 30분마다
+            self._stretch_raise(now)          # 타이머를 켜고 20분마다
 
     def _talk_gesture(self, text):
         """대사에 어울리는 고개짓 — 부정하는 말이면 도리도리, 아니면 끄덕임."""
