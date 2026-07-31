@@ -1,7 +1,7 @@
 {
- "version": 1785474862,
+ "version": 1785477061,
  "files": {
-  "mascot.py": "8d2028f20792036f633cb390898f69aa6a66e4a37f08f178309067783663ec98",
+  "mascot.py": "c616cad3a0252abd41632bd31e72bcd81701a7b1043d2e42b83a79102ce5b6ec",
   "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
   "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
   "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
@@ -96,6 +96,7 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "스트레칭 알림을 끄려고 캐릭터를 눌러도 최장 집중 기록이 끊기지 않습니다."
+  "작업 표시줄 오른쪽 알림 영역에 캐릭터 아이콘이 생겼습니다. 눌러서 부르거나, 오른쪽 클릭으로 메뉴를 열 수 있어요.",
+  "이 안내창 위쪽 화살표로 지난 업데이트 내용도 다시 볼 수 있습니다."
  ]
 }

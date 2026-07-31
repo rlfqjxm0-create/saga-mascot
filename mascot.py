@@ -1493,7 +1493,34 @@ def update_notice(char_dir, state_dir):
         if seen is not None:          # 설치 후 첫 실행은 알릴 '변경'이 없다
             msg = msg or "새 버전으로 업데이트 됐어요!"
             notes = notes or vnotes
+        _update_log_add(state_dir, ver, vnotes or notes)
     return msg, notes
+
+
+UPDATE_LOG = ".update_log.json"   # 지난 업데이트 안내 보관 (최근 20개)
+
+
+def _update_log_add(state_dir, ver, notes):
+    """이번 안내를 기록에 남긴다. 못 보고 지나가도 나중에 되짚어 볼 수 있게."""
+    notes = [str(x) for x in (notes or []) if str(x).strip()]
+    if not notes:
+        return
+    path = os.path.join(state_dir, UPDATE_LOG)
+    try:
+        try:
+            with open(path, encoding="utf-8") as fp:
+                log = json.load(fp)
+            log = log if isinstance(log, list) else []
+        except Exception:
+            log = []
+        if log and log[-1].get("ver") == ver:
+            log[-1]["notes"] = notes          # 같은 버전이면 갱신만
+        else:
+            log.append({"ver": ver, "notes": notes})
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(log[-20:], fp, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def _parts_broken(char_dir):
@@ -1851,6 +1878,158 @@ def _arc(center, point, deg):
     vx, vy = point[0] - center[0], point[1] - center[1]
     return (center[0] + vx * math.cos(a) - vy * math.sin(a),
             center[1] + vx * math.sin(a) + vy * math.cos(a))
+
+
+class TrayIcon:
+    """윈도우 알림 영역(트레이)에 캐릭터 머리 아이콘을 올린다.
+
+    창이 테두리 없는 창이라 작업 표시줄에 안 잡히는데, 그러면 캐릭터를
+    화면 밖으로 밀어 놓았을 때 되찾을 방법이 없다. 트레이에 두면 언제든
+    부를 수 있다.
+
+    메시지 창과 메시지 루프는 별도 스레드에서 돈다. Tk 쪽 일은 직접
+    건드리지 않고 큐에 넣어, 그리기 루프가 꺼내 처리한다(다른 스레드에서
+    Tk를 만지면 터진다).
+    """
+    _CLASS = "EnaMascotTrayWnd"
+    _SEQ = 0                     # 한 프로세스에 여러 캐릭터가 떠도 안 겹치게
+    WM_TRAY = 0x0400 + 42        # WM_APP+42
+
+    def __init__(self, ico_path, tip, on_click, on_menu):
+        self.ok = False
+        if not IS_WIN:
+            return
+        self._ico, self._tip = ico_path, (tip or "")[:120]
+        self._on_click, self._on_menu = on_click, on_menu
+        self._hwnd = None
+        self._added = False
+        self._stop = False
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+        for _ in range(50):          # 창이 만들어질 때까지 잠깐 기다린다
+            if self._hwnd or self._stop:
+                break
+            time.sleep(0.02)
+        self.ok = bool(self._hwnd)
+
+    # ── 트레이 스레드 ────────────────────────────────────────────────
+    def _run(self):
+        import ctypes.wintypes as wt
+        u = ctypes.windll.user32
+        self._taskbar_msg = u.RegisterWindowMessageW("TaskbarCreated")
+
+        # 64비트에서는 반환값·핸들이 c_long에 안 들어간다. 형을 안 정하면
+        # DefWindowProc에 넘길 때 OverflowError가 나고 창이 먹통이 된다.
+        LRESULT = ctypes.c_ssize_t
+        WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT,
+                                     wt.WPARAM, wt.LPARAM)
+        u.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        u.DefWindowProcW.restype = LRESULT
+        u.CreateWindowExW.restype = wt.HWND
+        u.RegisterClassW.restype = ctypes.c_ushort
+
+        def proc(hwnd, msg, wp, lp):
+            if msg == self.WM_TRAY:
+                low = lp & 0xFFFF
+                if low in (0x0202, 0x0203):          # 왼쪽 클릭 / 더블클릭
+                    self._safe_call(self._on_click)
+                elif low in (0x0205, 0x007B):        # 오른쪽 클릭
+                    self._safe_call(self._on_menu)
+                return 0
+            if msg == self._taskbar_msg:             # 탐색기가 다시 뜸
+                self._added = False
+                self._add()
+                return 0
+            if msg == 0x0002:                        # WM_DESTROY
+                u.PostQuitMessage(0)
+                return 0
+            return u.DefWindowProcW(hwnd, msg, wp, lp)
+
+        self._proc = WNDPROC(proc)                   # 참조를 붙잡아 둔다
+
+        class WNDCLASS(ctypes.Structure):
+            _fields_ = [("style", wt.UINT), ("lpfnWndProc", WNDPROC),
+                        ("cbClsExtra", ctypes.c_int),
+                        ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", wt.HINSTANCE), ("hIcon", wt.HICON),
+                        ("hCursor", wt.HANDLE), ("hbrBackground", wt.HBRUSH),
+                        ("lpszMenuName", wt.LPCWSTR), ("lpszClassName", wt.LPCWSTR)]
+
+        try:
+            hinst = ctypes.windll.kernel32.GetModuleHandleW(None)
+            TrayIcon._SEQ += 1
+            name = f"{self._CLASS}{os.getpid()}_{TrayIcon._SEQ}"
+            wc = WNDCLASS()
+            wc.lpfnWndProc = self._proc
+            wc.hInstance = hinst
+            wc.lpszClassName = name
+            if not u.RegisterClassW(ctypes.byref(wc)):
+                # 1410 = 이미 등록된 클래스. 그 경우는 그대로 써도 된다.
+                if ctypes.windll.kernel32.GetLastError() != 1410:
+                    self._stop = True
+                    return
+            self._hwnd = u.CreateWindowExW(0, name, name, 0, 0, 0, 0, 0,
+                                           None, None, hinst, None)
+            if not self._hwnd:
+                self._stop = True
+                return
+            self._add()
+            msg = wt.MSG()
+            while u.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                u.TranslateMessage(ctypes.byref(msg))
+                u.DispatchMessageW(ctypes.byref(msg))
+        except Exception:
+            self._stop = True
+
+    def _safe_call(self, fn):
+        try:
+            fn()
+        except Exception:
+            pass
+
+    def _nid(self):
+        import ctypes.wintypes as wt
+
+        class NID(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD), ("hWnd", wt.HWND),
+                        ("uID", wt.UINT), ("uFlags", wt.UINT),
+                        ("uCallbackMessage", wt.UINT), ("hIcon", wt.HICON),
+                        ("szTip", wt.WCHAR * 128), ("dwState", wt.DWORD),
+                        ("dwStateMask", wt.DWORD), ("szInfo", wt.WCHAR * 256),
+                        ("uVersion", wt.UINT), ("szInfoTitle", wt.WCHAR * 64),
+                        ("dwInfoFlags", wt.DWORD),
+                        ("guidItem", ctypes.c_byte * 16),
+                        ("hBalloonIcon", wt.HICON)]
+        n = NID()
+        n.cbSize = ctypes.sizeof(NID)
+        n.hWnd = self._hwnd
+        n.uID = 1
+        return n
+
+    def _add(self):
+        u = ctypes.windll.user32
+        try:
+            hicon = u.LoadImageW(None, self._ico, 1, 0, 0, 0x00000010 | 0x00008000)
+            n = self._nid()
+            n.uFlags = 0x01 | 0x02 | 0x04            # MESSAGE | ICON | TIP
+            n.uCallbackMessage = self.WM_TRAY
+            n.hIcon = hicon
+            n.szTip = self._tip
+            if ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(n)):
+                self._added = True
+        except Exception:
+            pass
+
+    def close(self):
+        if not (IS_WIN and self._hwnd):
+            return
+        try:
+            if self._added:
+                ctypes.windll.shell32.Shell_NotifyIconW(2, ctypes.byref(self._nid()))
+                self._added = False
+            ctypes.windll.user32.PostMessageW(self._hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        except Exception:
+            pass
 
 
 def _end_anchors(im):
@@ -2239,7 +2418,11 @@ class Mascot:
             menu.add_command(label="타이머 초기화", command=self._timer_reset)
         menu.add_separator()
         menu.add_command(label="종료", command=self.close)
+        self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
         self.canvas.bind("<Button-3>", lambda e: menu.tk_popup(e.x_root, e.y_root))
+        self.tray = None
+        self._tray_q = []            # 트레이 스레드가 넣고 그리기 루프가 뺀다
+        self._safe("tray", self._tray_setup)
 
         # ── 타자 소리 / 펜 소리 ──────────────────────────────────────────
         self.sndpack = None
@@ -3494,6 +3677,8 @@ class Mascot:
                 self._kb.stop()
             if self._ms is not None:
                 self._ms.stop()
+            if self.tray is not None:
+                self.tray.close()
             if self.todo_panel is not None:
                 self.todo_panel.destroy()
             if self.due_panel is not None:
@@ -3929,6 +4114,88 @@ class Mascot:
                 os.remove(self._fb_path())
         except Exception:
             pass
+
+    def _tray_ico_path(self):
+        """트레이에 쓸 머리 아이콘 파일을 만들어 두고 그 경로를 준다.
+
+        선물 exe에는 .ico가 안 들어 있을 수 있어서, 파츠로 그때그때 만든다.
+        만들어 둔 것이 파츠보다 새것이면 다시 만들지 않는다.
+        """
+        out = os.path.join(self.state_dir, ".tray.ico")
+        base = "head" if self.has_part("head") else "body_open"
+        src = os.path.join(self.parts_dir, f"{base}.png")
+        try:
+            if (os.path.exists(out) and os.path.exists(src)
+                    and os.path.getmtime(out) >= os.path.getmtime(src)):
+                return out
+        except OSError:
+            pass
+        try:
+            cw, ch = self.layout["canvas"]
+            sheet = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+
+            def put(name):
+                pth = os.path.join(self.parts_dir, f"{name}.png")
+                if os.path.exists(pth) and name in self.layout:
+                    sheet.alpha_composite(Image.open(pth).convert("RGBA"),
+                                          tuple(self.layout[name]["pos"]))
+            put(base)
+            put("pupils")
+            for n in (self.layout.get("overlays") or []):
+                if n in ("lashes", "hair"):
+                    put(n)
+            hb = Image.open(src).convert("RGBA").split()[3].getbbox()
+            hx, hy = self.layout[base]["pos"]
+            crop = sheet.crop((hx + hb[0], hy + hb[1], hx + hb[2], hy + hb[3]))
+            bb = crop.split()[3].getbbox()
+            if bb:
+                crop = crop.crop(bb)
+            side = int(max(crop.size) * 1.06)
+            sq = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+            sq.alpha_composite(crop, ((side - crop.width) // 2,
+                                      (side - crop.height) // 2))
+            sq.resize((256, 256), Image.LANCZOS).save(
+                out, sizes=[(16, 16), (20, 20), (24, 24), (32, 32), (48, 48)])
+            return out
+        except Exception:
+            self._log_error("tray_ico")
+            return ""
+
+    def _tray_setup(self):
+        """트레이 아이콘 올리기 — 왼쪽 클릭은 부르기, 오른쪽은 메뉴."""
+        if not (IS_WIN and self.cfg.get("tray", True)):
+            return
+        ico = self._tray_ico_path()
+        if not ico:
+            return
+        name = str(self.cfg.get("name", self.char))
+        self.tray = TrayIcon(ico, f"{name} 타이머",
+                             lambda: self._tray_q.append("call"),
+                             lambda: self._tray_q.append("menu"))
+
+    def _tray_tick(self):
+        """트레이에서 누른 것을 그리기 루프에서 처리한다 (스레드 분리)."""
+        while self._tray_q:
+            what = self._tray_q.pop(0)
+            if what == "menu":
+                x, y = cursor_pos()
+                self._menu.tk_popup(int(x), int(y))
+            else:
+                self._tray_call()
+
+    def _tray_call(self):
+        """캐릭터를 불러온다 — 화면 밖이면 보이는 자리로 끌어온다."""
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        if not self.us.get("topmost", True):
+            self.root.after(1200, lambda: self.root.attributes("-topmost", False))
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        ml, mt, mr, mb = monitor_at(*cursor_pos())
+        if not (ml - 20 <= x <= mr - 40 and mt - 20 <= y <= mb - 60):
+            self.root.geometry(f"+{mr - self.W - 60}+{mb - self.H - 90}")
+            self._safe("win_pos", self._save_win_pos)
+        self._say("여기 있어요!", 2.2)
 
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
@@ -5239,60 +5506,35 @@ class Mascot:
         py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
         win.geometry(f"+{int(px)}+{int(py)}")
 
+    def _update_pages(self):
+        """보여 줄 안내 묶음들 — 오래된 것부터. 기록이 없으면 방금 것만."""
+        pages = []
+        try:
+            with open(os.path.join(self.state_dir, UPDATE_LOG),
+                      encoding="utf-8") as fp:
+                got = json.load(fp)
+            if isinstance(got, list):
+                pages = [g for g in got if g.get("notes")]
+        except Exception:
+            pass
+        if not pages and self._update_notes:
+            pages = [{"ver": 0, "notes": list(self._update_notes)}]
+        return pages
+
     def _show_update_popup(self):
-        """자동 업데이트로 무엇이 바뀌었는지 알려 주는 안내 창.
+        """무엇이 바뀌었는지 알려 주는 창.
 
-        version.json의 notes를 그대로 보여 준다. 친구가 받는 쪽에서는 뭐가
-        달라졌는지 알 길이 없어서, 말풍선만으로는 안내가 부족했다.
+        지난 안내도 화살표로 넘겨 볼 수 있다. 못 보고 지나간 사이에 다음
+        업데이트가 오면 예전 것이 덮여 사라지던 문제 때문이다.
         """
-        notes = list(self._update_notes or [])
+        pages = self._update_pages()
         self._update_notes = []
-        if not notes or self._update_win is not None:
+        if not pages or self._update_win is not None:
             return
-        cd = self.card
-        u = self._ui
+        cd, u = self.card, self._ui
         W, PAD = u(330), u(20)
-        head_h = u(66)
-        # 줄바꿈: 캔버스 폰트로 실제 폭을 재서 접는다
-        probe = tk.Canvas(self.root)
-        inner = W - PAD * 2 - u(46)
-
-        def wrap(font):
-            """그 글꼴로 접었을 때의 줄들 — (텍스트, 첫줄여부)."""
-            def too_wide(t):
-                tid = probe.create_text(0, 0, text=t, font=font, anchor="w")
-                x0, _, x1, _ = probe.bbox(tid)
-                probe.delete(tid)
-                return x1 - x0 > inner
-            out = []
-            for note in notes:
-                cur, head = "", True
-                for word in str(note).split():
-                    trial = (cur + " " + word).strip()
-                    if cur and too_wide(trial):
-                        out.append((cur, head))
-                        cur, head = word, False
-                    else:
-                        cur = trial
-                if cur:
-                    out.append((cur, head))
-            return out
-
-        font = self._uf(9)
-        lines = wrap(font)
-        probe.destroy()
-        if not lines:
-            self._update_win = None
-            return
-        row_h = u(22)
-        body_h = u(14) + row_h * len(lines) + u(14)
-        # 안내가 길면 창이 화면보다 커져 '확인' 버튼이 잘린다. 위쪽은 스크롤로
-        # 넘기고 버튼은 아래에 따로 붙여 언제나 누를 수 있게 한다.
-        BTN_H = u(40) + u(20) * 2
-        content_h = u(20) + head_h + u(16) + body_h + u(20)
-        view_h = min(content_h,
-                     max(u(160), self.root.winfo_screenheight() - BTN_H - u(90)))
-        H = view_h + BTN_H
+        head_h = u(78)
+        page = [len(pages) - 1]          # 처음에는 가장 최근 것
 
         win = tk.Toplevel(self.root)
         self._update_win = win
@@ -5300,77 +5542,149 @@ class Mascot:
         win.attributes("-topmost", True)
         win.resizable(False, False)
         win.configure(bg=cd["panel"])
-        scrolling = content_h > view_h
         top = tk.Frame(win, bg=cd["panel"])
         top.pack()
-        cv = tk.Canvas(top, width=W, height=view_h, bg=cd["panel"],
-                       highlightthickness=0,
-                       scrollregion=(0, 0, W, content_h))
+        cv = tk.Canvas(top, width=W, bg=cd["panel"], highlightthickness=0)
         cv.pack(side="left")
-        total_w = W
-        if scrolling:                          # 넘칠 때만 스크롤바를 붙인다
-            sb = tk.Scrollbar(top, orient="vertical", command=cv.yview)
-            sb.pack(side="right", fill="y")
-            cv.config(yscrollcommand=sb.set)
-            win.update_idletasks()
-            total_w = W + max(sb.winfo_reqwidth(), u(14))
-        bar = tk.Canvas(win, width=total_w, height=BTN_H, bg=cd["panel"],
-                        highlightthickness=0)
+        sb = tk.Scrollbar(top, orient="vertical", command=cv.yview)
+        cv.config(yscrollcommand=sb.set)
+        bar = tk.Canvas(win, bg=cd["panel"], highlightthickness=0)
         bar.pack()
-        if scrolling:
-            def on_wheel(e):
-                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
-            for wgt in (win, cv, bar):
-                wgt.bind("<MouseWheel>", on_wheel)
-                wgt.bind("<Button-4>", lambda e: cv.yview_scroll(-1, "units"))
-                wgt.bind("<Button-5>", lambda e: cv.yview_scroll(1, "units"))
+        hits = []
 
-        def rr(x0, y0, x1, y1, r, **kw):
-            pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
-                   x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-            return cv.create_polygon(pts, smooth=True, **kw)
+        def rr(c, x0, y0, x1, y1, r, **kw):
+            pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r,
+                   x1, y1, x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r,
+                   x0, y0 + r, x0, y0]
+            return c.create_polygon(pts, smooth=True, **kw)
 
-        y = u(20)
-        rr(PAD, y, W - PAD, y + head_h, u(16), fill=cd["soft"],
-           outline=cd["border"], width=2)
-        cv.create_text(W / 2, y + u(24), text="새 버전으로 업데이트 됐어요",
-                       font=self._uf(11, True), fill=cd["text"])
-        cv.create_text(W / 2, y + u(46), text="이번에 바뀐 점이에요",
-                       font=self._uf(9), fill=cd["sub"])
-        y += head_h + u(16)
-
-        rr(PAD, y, W - PAD, y + body_h, u(14), fill="#ffffff",
-           outline=cd["line"], width=1)
-        ly = y + u(14) + u(11)
-        for text, is_first in lines:
-            if is_first:
-                cv.create_oval(PAD + u(16), ly - u(3), PAD + u(22), ly + u(3),
-                               fill=cd["fill"], outline="")
-            cv.create_text(PAD + u(32), ly, anchor="w", text=text,
-                           font=font, fill=cd["text"])
-            ly += row_h
-        by = u(20)
-        b = (PAD, by, total_w - PAD, by + u(40))
-        pts = [b[0] + u(14), b[1], b[2] - u(14), b[1], b[2], b[1], b[2],
-               b[1] + u(14), b[2], b[3] - u(14), b[2], b[3], b[2] - u(14), b[3],
-               b[0] + u(14), b[3], b[0], b[3], b[0], b[3] - u(14),
-               b[0], b[1] + u(14), b[0], b[1]]
-        bar.create_polygon(pts, smooth=True, fill=cd["fill"], outline="")
-        bar.create_text(total_w / 2, by + u(20), text="확인",
-                        font=self._uf(10, True), fill="#ffffff")
+        def wrap(font, notes):
+            inner = W - PAD * 2 - u(46)
+            out = []
+            for note in notes:
+                cur, head = "", True
+                for word in str(note).split():
+                    t = (cur + " " + word).strip()
+                    tid = cv.create_text(-4000, -4000, text=t, font=font,
+                                         anchor="w")
+                    x0, _, x1, _ = cv.bbox(tid)
+                    cv.delete(tid)
+                    if cur and x1 - x0 > inner:
+                        out.append((cur, head))
+                        cur, head = word, False
+                    else:
+                        cur = t
+                if cur:
+                    out.append((cur, head))
+            return out
 
         def close(_e=None):
             self._update_win = None
             win.destroy()
-        bar.bind("<Button-1>", lambda e: close()
-                 if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
+
+        def flip(d):
+            page[0] += d
+            render()
+
+        def render():
+            cv.delete("all")
+            bar.delete("all")
+            hits.clear()
+            i = max(0, min(page[0], len(pages) - 1))
+            page[0] = i
+            font = self._uf(9)
+            lines = wrap(font, pages[i].get("notes") or [])
+            row_h = u(22)
+            body_h = u(14) + row_h * len(lines) + u(14)
+            content_h = u(20) + head_h + u(16) + body_h + u(20)
+            btn_h = u(40) + u(40)
+            view_h = min(content_h,
+                         max(u(160),
+                             self.root.winfo_screenheight() - btn_h - u(90)))
+            scrolling = content_h > view_h
+            cv.config(height=view_h, scrollregion=(0, 0, W, content_h))
+            if scrolling:
+                sb.pack(side="right", fill="y")
+            else:
+                sb.pack_forget()
+            win.update_idletasks()
+            total_w = W + (max(sb.winfo_reqwidth(), u(14)) if scrolling else 0)
+            bar.config(width=total_w, height=btn_h)
+
+            y = u(20)
+            rr(cv, PAD, y, W - PAD, y + head_h, u(16), fill=cd["soft"],
+               outline=cd["border"], width=2)
+            cv.create_text(W / 2, y + u(24), text="새 버전으로 업데이트 됐어요",
+                           font=self._uf(11, True), fill=cd["text"])
+            try:
+                v = int(pages[i].get("ver") or 0)
+                when = time.strftime("%Y-%m-%d", time.localtime(v)) if v else ""
+            except Exception:
+                when = ""
+            sub = when or "이번에 바뀐 점이에요"
+            if len(pages) > 1:
+                sub += "   (%d / %d)" % (i + 1, len(pages))
+            cv.create_text(W / 2, y + u(46), text=sub,
+                           font=self._uf(9), fill=cd["sub"])
+            if len(pages) > 1:               # 지난 안내로 넘기는 화살표
+                for sign, cx in ((-1, PAD + u(20)), (1, W - PAD - u(20))):
+                    on = (i > 0) if sign < 0 else (i < len(pages) - 1)
+                    col = cd["fill"] if on else cd["line"]
+                    cy = y + head_h / 2
+                    for dy in (-u(5), u(5)):
+                        cv.create_line(cx - sign * u(3), cy + dy,
+                                       cx + sign * u(3), cy, width=2,
+                                       capstyle="round", fill=col)
+                    if on:
+                        hits.append((cx - u(14), cy - u(14), cx + u(14),
+                                     cy + u(14), (lambda d: lambda: flip(d))(sign)))
+            y += head_h + u(16)
+            rr(cv, PAD, y, W - PAD, y + body_h, u(14), fill="#ffffff",
+               outline=cd["line"], width=1)
+            ly = y + u(14) + u(11)
+            for text, is_first in lines:
+                if is_first:
+                    cv.create_oval(PAD + u(16), ly - u(3),
+                                   PAD + u(22), ly + u(3),
+                                   fill=cd["fill"], outline="")
+                cv.create_text(PAD + u(32), ly, anchor="w", text=text,
+                               font=font, fill=cd["text"])
+                ly += row_h
+            cv.yview_moveto(0)
+
+            by = u(20)
+            b = (PAD, by, total_w - PAD, by + u(40))
+            rr(bar, b[0], b[1], b[2], b[3], u(14), fill=cd["fill"], outline="")
+            bar.create_text(total_w / 2, by + u(20), text="확인",
+                            font=self._uf(10, True), fill="#ffffff")
+            bar.bind("<Button-1>", lambda e: close()
+                     if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
+            if scrolling:
+                def on_wheel(e):
+                    cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+                for wgt in (win, cv, bar):
+                    wgt.bind("<MouseWheel>", on_wheel)
+            else:
+                for wgt in (win, cv, bar):
+                    wgt.unbind("<MouseWheel>")
+
+        def on_click(e):
+            cy = cv.canvasy(e.y)             # 스크롤된 만큼 좌표를 맞춘다
+            for x0, y0, x1, y1, fn in list(hits):
+                if x0 <= e.x <= x1 and y0 <= cy <= y1:
+                    fn()
+                    return
+
+        cv.bind("<Button-1>", on_click)
         win.protocol("WM_DELETE_WINDOW", close)
+        render()
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         px = min(max(self.root.winfo_rootx() - 40, 10),
-                 max(sw - total_w - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
-        win.geometry(f"+{int(px)}+{int(py)}")
+                 max(sw - win.winfo_width() - 10, 10))
+        py = min(max(self.root.winfo_rooty() - 20, 10),
+                 max(sh - win.winfo_height() - 60, 10))
+        win.geometry("+%d+%d" % (int(px), int(py)))
 
     def _uf(self, size, bold=False):
         """별도 창(환경설정·브리핑·메뉴)용 글꼴 — 화면 배율을 그대로 따른다.
@@ -5725,6 +6039,8 @@ class Mascot:
         self._g_dy = self._g_hdy = self._g_tilt = 0.0
         self._g_hands = None
         self._g_eyes_shut = self._g_smile = False
+        if self._tray_q:
+            self._safe("tray_tick", self._tray_tick)
         self._safe("stretch", self._stretch_tick, now, sleeping)
         self._safe("gesture", self._gest_tick, now, sleeping)
         self._safe("goal", self._goal_tick, now)
