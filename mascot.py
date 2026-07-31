@@ -2025,6 +2025,7 @@ class Mascot:
         self.due_panel = None
         self._due_shown = ""         # 마지막으로 그린 날짜 (자정 넘으면 다시 그림)
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
+        self._pid_written = False    # PID 파일을 남겼는가
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
 
@@ -3502,8 +3503,12 @@ class Mascot:
             # 안 뜨고 클릭이 그냥 삼켜진다.
             if self.ws_path is not None:
                 try:
-                    os.remove(os.path.join(os.path.dirname(self.ws_path),
-                                           ".mascot_live"))
+                    base = os.path.dirname(self.ws_path)
+                    os.remove(os.path.join(base, ".mascot_live"))
+                    try:
+                        os.remove(os.path.join(base, ".mascot_pid"))
+                    except OSError:
+                        pass
                 except OSError:
                     pass
         finally:
@@ -4002,9 +4007,27 @@ class Mascot:
                 s = s[:-len(ext)]
         return "".join(ch for ch in s if ch.isalnum())
 
+    def _fg_is_self(self):
+        """앞 창이 이 프로그램 자신의 창인가 (캐릭터·설정·말풍선 모두 포함)."""
+        if not IS_WIN:
+            return False
+        try:
+            u = ctypes.windll.user32
+            pid = ctypes.c_ulong()
+            u.GetWindowThreadProcessId(u.GetForegroundWindow(),
+                                       ctypes.byref(pid))
+            return pid.value == os.getpid()
+        except Exception:
+            return False
+
     def _fg_is_work(self, now):
-        """앞 창이 작업 프로그램인지 (1초 캐시)."""
-        if now - self._fg_checked > 1.0:
+        """앞 창이 작업 프로그램인지 (1초 캐시).
+
+        캐릭터를 누르면 잠깐 이 창이 앞으로 온다. 그걸 '작업 아님'으로 세면
+        스트레칭 알림을 끄려고 누른 것만으로 최장 집중 기록이 끊긴다.
+        자기 창일 때는 직전 판정을 그대로 유지한다.
+        """
+        if now - self._fg_checked > 1.0 and not self._fg_is_self():
             self._fg_checked = now
             fg = self._app_key(foreground_process())
             apps = [self._app_key(a) for a in
@@ -5594,9 +5617,16 @@ class Mascot:
         if self.ws_path is not None and now - self._beat_t > 2.0:
             self._beat_t = now
             try:
-                with open(os.path.join(os.path.dirname(self.ws_path),
-                                       ".mascot_live"), "w") as fp:
+                base = os.path.dirname(self.ws_path)
+                with open(os.path.join(base, ".mascot_live"), "w") as fp:
                     fp.write(str(now))
+                # PID는 따로 남긴다. 살아있음 신호에 같이 적으면 옛 타이머가
+                # 그 파일을 숫자로 못 읽어 '캐릭터가 죽었다'고 보고 스스로
+                # 종료해 버린다.
+                if not self._pid_written:
+                    self._pid_written = True
+                    with open(os.path.join(base, ".mascot_pid"), "w") as fp:
+                        fp.write(str(os.getpid()))
             except Exception:
                 pass
 
