@@ -2395,6 +2395,11 @@ class Mascot:
         self._update_msg, self._update_notes = update_notice(self.dir,
                                                              self.state_dir)
         self._update_win = None      # 업데이트 안내 팝업 (한 번만)
+        # 펜 추적 진단 (config의 pen_diag를 켠 캐릭터만). 어느 화면으로
+        # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
+        self._diag_left = self.PEN_DIAG_MAX if self.cfg.get("pen_diag") else 0
+        self._diag_last = None       # 마지막으로 기록한 화면 사각형
+        self._diag_at = 0.0          # 마지막으로 기록한 시각
         self.shadow_img_type = None  # 타자 자세용 그림자 (깃펜 없음)
         self._shadow_base = None
         self._shadow_typing = False
@@ -2530,6 +2535,7 @@ class Mascot:
         self._last_pos = None
 
         self._apply_autostart()          # exe 배포본이면 시작프로그램 등록
+        self._pen_diag_head()            # config의 pen_diag가 켜졌을 때만
 
         if os.environ.get("MASCOT_DEBUG") == "1":
             self.root.after(4000, self._dump_debug)
@@ -6290,6 +6296,53 @@ class Mascot:
         mons = list_monitors()
         return mons[n - 1] if 1 <= n <= len(mons) else None
 
+    # 점으로 시작해야 한다 — 파츠 폴더에 생기는 파일이라, 점이 없으면
+    # make_manifest가 배포 payload에 그대로 실어 보낸다.
+    PEN_DIAG = ".pen_diag.txt"    # 진단 기록 파일
+    PEN_DIAG_MAX = 150            # 이 줄 수까지만 남긴다
+
+    def _pen_diag_head(self):
+        """진단 기록 첫머리 — 프로그램이 본 화면 구성 그대로."""
+        if self._diag_left <= 0:
+            return
+        try:
+            lines = [
+                "=== %s / %s ===" % (time.strftime("%Y-%m-%d %H:%M:%S"),
+                                     self.char),
+                "IS_WIN=%s IS_MAC=%s" % (IS_WIN, IS_MAC),
+                "mac_monitors() = %r" % (mac_monitors(),),
+                "list_monitors() = %r" % (list_monitors(),),
+                "Tk 화면 = %dx%d" % (self.root.winfo_screenwidth(),
+                                    self.root.winfo_screenheight()),
+                "pen_monitor 설정 = %r" % (self.us.get("pen_monitor"),),
+                "_pen_mon_rect() = %r" % (self._pen_mon_rect(),),
+                "시작 커서 = %r" % (cursor_pos(),),
+                "-- 아래는 마우스를 옮길 때마다 한 줄씩 --",
+            ]
+            with open(os.path.join(self.state_dir, self.PEN_DIAG), "w",
+                      encoding="utf-8") as fp:
+                fp.write("\n".join(lines) + "\n")
+        except Exception:
+            self._diag_left = 0
+
+    def _pen_diag_row(self, cx, cy, rect, u, v):
+        """커서가 어느 화면으로 잡혔고 타블렛 어디를 짚는지 한 줄 남긴다."""
+        if self._diag_left <= 0:
+            return
+        now = time.time()
+        key = tuple(rect)
+        if key == self._diag_last and now - self._diag_at < 3.0:
+            return                    # 같은 화면이면 3초에 한 줄만
+        self._diag_last, self._diag_at = key, now
+        self._diag_left -= 1
+        try:
+            with open(os.path.join(self.state_dir, self.PEN_DIAG), "a",
+                      encoding="utf-8") as fp:
+                fp.write("%s 커서=(%d,%d) 잡힌화면=%r 타블렛=(%.2f, %.2f)\n"
+                         % (time.strftime("%H:%M:%S"), cx, cy, key, u, v))
+        except Exception:
+            self._diag_left = 0
+
     def _track_pen(self, now, f, cx, cy):
         """펜 끝이 따라갈 자리를 구하고 그린 획 수·낙서 선을 기록한다.
 
@@ -6305,6 +6358,8 @@ class Mascot:
             ml, mt, mr, mb = self._pen_mon_rect() or monitor_at(cx, cy)
             u = min(1.0, max(0.0, (cx - ml) / max(mr - ml, 1)))
             v = min(1.0, max(0.0, (cy - mt) / max(mb - mt, 1)))
+            if self._diag_left > 0:
+                self._pen_diag_row(cx, cy, (ml, mt, mr, mb), u, v)
             target = self._quad_xy(u, v)
             drawing = self.mouse_pressed
         self._pen_xy[0] += (target[0] - self._pen_xy[0]) * 0.55
