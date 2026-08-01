@@ -1,23 +1,23 @@
 {
- "version": 1785566397,
+ "version": 1785575648,
  "files": {
-  "mascot.py": "b5a0e79a81f19364fb2494e847cad9ce95a541ae529864060fe5bd300663f6f8",
-  "parts_saga/arm_key.png": "29123aea72331ca66007ffade5df135dccce3cb0fe5167c51b5f15aa59c36192",
-  "parts_saga/arm_pen.png": "956e14a30c5e5a7e907a45d92f74b6b50c0c292cd8aca2bf5afd404e53dddc1e",
-  "parts_saga/arm_right.png": "65c01bf658d10b9d984d1bc519f524f2e01ee0f2b82a6d6f472d88c368783500",
-  "parts_saga/arm_right_typing.png": "01e0b4446393f08e676f2ecaada24ab34d66d0b44c722fd4a08a86fd5bd841a4",
-  "parts_saga/back.png": "5ae2b0cc887bd8cf87e8f5163ff1e432dd9fb1c9c08d6f9e210e1d5481c12c87",
-  "parts_saga/body_open.png": "09da4ae3293082663a79f03381604762170cb66e457b8e69b67c44e9f6abcd83",
-  "parts_saga/config.json": "b602e1c2f9ca69c4b9e016c3f1440e8ebd2a86b4dc95191fed45ca53c214580e",
-  "parts_saga/desk.png": "fac4643481b3082d36532deee5b6a81a1c60acd2c52359bb053ff6158576ee5c",
-  "parts_saga/eyes_closed.png": "552e4c83a23547ac3e3cb0dbb320877c3e49e96e191c057b68296b0eff52be17",
-  "parts_saga/hair.png": "055c51de71d799a7266f0012e9561f996fd49aad597951cd96a3ea388f91c51f",
+  "mascot.py": "48ccf6cd106b4ed45e04d6322e5b5a4646ed98667430bcc91b7e426223b30909",
+  "parts_saga/arm_key.png": "77641097db051ac9a94a8ada77efd2dabcfca095402a443e1b8a7e30bc231011",
+  "parts_saga/arm_pen.png": "4f1f9b24580480c1b6c9f7ae84036e9fa5085662b1f42daaf5e5eed1c64fed9f",
+  "parts_saga/arm_right.png": "382923c4c3bbf1ad279786d7deca43430bc21b63e3e8ad884b7214dc3f27e890",
+  "parts_saga/arm_right_typing.png": "e1d73c9a776a6e7a423a2ed6e049a05527cee41925de91f6698cd18059b84663",
+  "parts_saga/back.png": "031796db86640c7b58bda15db5ddd28dd9baf06b9559946329577a83f4cb59b9",
+  "parts_saga/body_open.png": "62dad19c5efd04eaf91d4a8da988baa5108d59e4ade5c8bb40961bb25801fb3a",
+  "parts_saga/config.json": "9c680c05f13eaa7083e6439ea9809cec3ae18f39b68b8f49c7b6cef0d7c144fc",
+  "parts_saga/desk.png": "9f68036c34468799104eaedf3d5f1fbc903753679dd8b8042ef4d8ad31117db7",
+  "parts_saga/eyes_closed.png": "b89f4ab24d450dd059a1f4417a9093592dabd1f4c5bbd86a20c22966af9adcd4",
+  "parts_saga/hair.png": "0c613bf582e3c4ce864e55f244abc8ecebf4cc0adf7575b192b7293971b0a3ad",
   "parts_saga/hat.png": "4bd1da80b760cff3694c7b21350e8dce6a177026846dcd737d796ad7560f277f",
-  "parts_saga/head.png": "392f666a9219ff4defefafab263346a44c09b9f523db7d09aded4b0b90af7294",
-  "parts_saga/lashes.png": "e2a4e6b192d55c593bca8294c0cd8ae3991fdbc418e405d85089c43c58c8b0a5",
-  "parts_saga/layout.json": "bf29efebc03db7c998ae4b93f0cee8f7d03038403714ef91fbe81d32f4674826",
-  "parts_saga/pupils.png": "44e9ea344b58969a19398d473af26ab98a43e3f321da1d7b7ebcf09e6bfa2a3b",
-  "parts_saga/smile.png": "9df47cf3101e68023c6ae84af133f08603db1be32ae96af088417874c50e42c9",
+  "parts_saga/head.png": "8a829eec7d8dbba1efc44ac6f188d8383df55ec4f3fdc71e14e26149c100b14a",
+  "parts_saga/lashes.png": "8dca231d6662941086fcceb77b8bf59c33ef40b608630460221520cc9214f523",
+  "parts_saga/layout.json": "9b744bdf0d9dde163f0ac66f8de1982fda4870c81c6bd3006a900c7fbf787bc1",
+  "parts_saga/pupils.png": "a1ef09ef89e598394a03278af78c1337f74044e545f6744dd04d3632e22c4956",
+  "parts_saga/smile.png": "140f963e21bfd663d7e774dd11bef3fe56bb9858b6d6f37fd79d161a915c6ae1",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/key1.wav": "34ca127f328b29dfee7e5d777636cad708371d6bdadcfc3d05d988c1555fa97e",
@@ -96,7 +96,9 @@
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
  "notes": [
-  "스트레칭 알림 간격을 직접 고를 수 있어요. 환경설정 → 타이머 → '스트레칭 알림'",
-  "끄기 · 10 · 20 · 30 · 45 · 60 · 90분 중에서 고르면 됩니다."
+  "사가 그림을 새로 받았어요 (팔·몸통·책상).",
+  "맥에서도 화면이 여러 대면 '펜 따라갈 화면'을 고를 수 있어요.",
+  "박수와 기지개에서 팔이 몸에 붙는 자리를 위로 올렸어요.",
+  "설정 창이 길어지면 스크롤로 볼 수 있어요. 저장 버튼은 늘 아래에 있습니다."
  ]
 }

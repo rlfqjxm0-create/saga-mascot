@@ -3,20 +3,20 @@
  "scale": 0.28,
  "screen_quad": [
   [
-   360,
-   1256
+   361,
+   1199
   ],
   [
-   625,
-   1248
+   604,
+   1192
   ],
   [
-   618,
-   1352
+   597,
+   1289
   ],
   [
-   350,
-   1360
+   352,
+   1296
   ]
  ],
  "blink": null,
@@ -110,5 +110,19 @@
  "goal_cheer": true,
  "soft_overlay": true,
  "pen_monitor_pick": true,
- "feedback_url_enc": "DRoVXR5bXEwLHV4FChcATAIMBkoPEURCFhYBBxtCDRZKVVdSUV5VWFUaWFJDU11CHF9dVEsaFzNGUCYGeT4LPjwoOn8KNlMmOlAHWSwXIHobJjcgMABrCyAPVyAmKBoCBxhHCykrUFokfCICCTMyMywcVAQDYAsNBw=="
+ "feedback_url_enc": "DRoVXR5bXEwLHV4FChcATAIMBkoPEURCFhYBBxtCDRZKVVdSUV5VWFUaWFJDU11CHF9dVEsaFzNGUCYGeT4LPjwoOn8KNlMmOlAHWSwXIHobJjcgMABrCyAPVyAmKBoCBxhHCykrUFokfCICCTMyMywcVAQDYAsNBw==",
+ "part_offsets": {
+  "arm_right": [
+   -14,
+   0
+  ],
+  "arm_right_typing": [
+   -14,
+   0
+  ],
+  "arm_key": [
+   2,
+   0
+  ]
+ }
 }

@@ -1355,6 +1355,55 @@ def _mac_front_app():
         return ""
 
 
+def mac_monitors():
+    """맥에 붙어 있는 화면들의 사각형 목록.
+
+    파이썬 추가 설치 없이 CoreGraphics를 직접 불러 쓴다. 실패하면 빈 목록을
+    돌려주고, 부르는 쪽이 예전처럼 주 화면 하나로 넘어간다.
+    """
+    out = []
+    if not IS_MAC:
+        return out
+
+    class _CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+    class _CGSize(ctypes.Structure):
+        _fields_ = [("w", ctypes.c_double), ("h", ctypes.c_double)]
+
+    class _CGRect(ctypes.Structure):
+        _fields_ = [("origin", _CGPoint), ("size", _CGSize)]
+
+    for path in ("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
+                 "/System/Library/Frameworks/ApplicationServices.framework"
+                 "/ApplicationServices"):
+        try:
+            cg = ctypes.cdll.LoadLibrary(path)
+            n = ctypes.c_uint32(0)
+            ids = (ctypes.c_uint32 * 16)()
+            cg.CGGetActiveDisplayList.argtypes = [
+                ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32 * 16),
+                ctypes.POINTER(ctypes.c_uint32)]
+            if cg.CGGetActiveDisplayList(16, ctypes.byref(ids),
+                                         ctypes.byref(n)) != 0:
+                continue
+            cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+            cg.CGDisplayBounds.restype = _CGRect
+            got = []
+            for i in range(min(n.value, 16)):
+                r = cg.CGDisplayBounds(ids[i])
+                x, y = int(round(r.origin.x)), int(round(r.origin.y))
+                w, h = int(round(r.size.w)), int(round(r.size.h))
+                if w > 0 and h > 0:
+                    got.append((x, y, x + w, y + h))
+            if got:
+                out = got
+                break
+        except Exception:
+            continue
+    return out
+
+
 def list_monitors():
     """붙어 있는 화면들의 사각형 목록 — 왼쪽 위부터 차례로.
 
@@ -1377,6 +1426,8 @@ def list_monitors():
             ctypes.windll.user32.EnumDisplayMonitors(None, None, proto(cb), 0)
         except Exception:
             pass
+    elif IS_MAC:
+        out.extend(mac_monitors())
     if not out:
         out.append(monitor_at(0, 0))
     out.sort(key=lambda r: (r[1], r[0]))
@@ -1396,7 +1447,11 @@ def monitor_at(x, y):
             pass
         u = ctypes.windll.user32
         return 0, 0, u.GetSystemMetrics(0), u.GetSystemMetrics(1)
-    if _TK_ROOT is not None:      # 맥: 주 화면 기준 (다중 모니터는 추후)
+    if IS_MAC:                    # 맥: 점이 들어 있는 화면을 찾는다
+        for r in mac_monitors():
+            if r[0] <= x < r[2] and r[1] <= y < r[3]:
+                return r
+    if _TK_ROOT is not None:      # 못 찾으면 주 화면 기준
         try:
             return (0, 0, _TK_ROOT.winfo_screenwidth(),
                     _TK_ROOT.winfo_screenheight())
@@ -2157,6 +2212,12 @@ class Mascot:
         self.us["skin"] = self.skin_name
         with open(os.path.join(self.parts_dir, "layout.json"), encoding="utf-8") as fp:
             self.layout = json.load(fp)
+        # 파츠 자리 미세 보정 (캔버스 px). layout.json은 PSD에서 다시 뽑을 때마다
+        # 덮어써지므로, 손으로 맞춘 값은 config에 둬야 남는다.
+        for name, off in (self.cfg.get("part_offsets") or {}).items():
+            spot = self.layout.get(name)
+            if isinstance(spot, dict) and spot.get("pos"):
+                spot["pos"] = [spot["pos"][0] + off[0], spot["pos"][1] + off[1]]
 
         s = self.s = float(self.cfg.get("scale", 1.0)) * self.us["scale_pct"] / 100.0
         self.timer_on = bool(tcfg.get("enabled")) \
@@ -4915,9 +4976,10 @@ class Mascot:
     # 박수 자세 (캔버스 px 기준). 팔을 아래에서 위로 올려 붙이는 모양이
     # 되도록 어깨를 몸 아래쪽에 두고, 손은 턱 바로 밑에서 만나게 한다.
     CLAP_SWING = 26.0            # 손끝이 벌어지는 각도(도)
-    CLAP_SHY = 70.0              # 박수용 어깨를 얼마나 내릴지
+    CLAP_SHY = 22.0              # 박수용 어깨를 얼마나 내릴지 (작을수록 위)
     CLAP_LEN = 0.95              # 박수에서 쓰는 팔 길이 (원래 길이 대비)
     WAVE_SHY = -8.0              # 손 흔들 때 어깨를 얼마나 올릴지
+    STRETCH_SHY = -22.0          # 기지개에서 어깨 높이 (작을수록 위)
 
     def _gest_start(self, name, force=False):
         """동작을 시작한다. 이미 하고 있으면 무시 — 겹치면 손이 튄다."""
@@ -5283,7 +5345,8 @@ class Mascot:
             jx = math.sin(now * 52.0) * 11 * s * tre
             jy = math.sin(now * 47.0 + 1.1) * 9 * s * tre
             self._g_hands = {"r": (-110 * s * u + jx, -260 * s * u + jy),
-                             "l": (110 * s * u - jx, -260 * s * u + jy)}
+                             "l": (110 * s * u - jx, -260 * s * u + jy),
+                             "sh_dy": self.STRETCH_SHY}
             self._g_dy = -7 * u
             self._g_eyes_shut = u > 0.25      # 시원하게 눈을 감는다
             return
@@ -6447,8 +6510,16 @@ class Mascot:
         if st.get("sound_pack") not in self.sound_packs and self.sound_packs:
             st["sound_pack"] = self.sound_packs[0]
 
-        cv = tk.Canvas(win, width=W, height=640, bg=PANEL, highlightthickness=0)
-        cv.pack()
+        # 내용이 길어지면 화면 밖으로 나가므로, 위쪽은 스크롤되는 칸으로 두고
+        # 저장 버튼은 아래 띠에 따로 붙여 늘 보이게 한다.
+        top = tk.Frame(win, bg=PANEL)
+        top.pack()
+        cv = tk.Canvas(top, width=W, height=640, bg=PANEL, highlightthickness=0)
+        cv.pack(side="left")
+        vbar = tk.Scrollbar(top, orient="vertical", command=cv.yview)
+        cv.config(yscrollcommand=vbar.set, yscrollincrement=self._ui(6))
+        bar = tk.Canvas(win, width=W, height=1, bg=PANEL, highlightthickness=0)
+        bar.pack()
         apps_var = tk.StringVar(value=str(st.get("work_apps", "")))
         apps_entry = tk.Entry(win, textvariable=apps_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
@@ -6459,14 +6530,14 @@ class Mascot:
             fb_text = tk.Text(win, font=(FONT, FS(8)), relief="flat",
                               bg="#ffffff", fg=cd["text"], wrap="word",
                               highlightthickness=0, borderwidth=0)
-        hits, sliders = [], []
+        hits, sliders, bar_hits = [], [], []
         RX = W - PAD - IN            # 오른쪽 컨트롤 기준선
         LX = PAD + IN                # 왼쪽 라벨 기준선
 
-        def rrect(x0, y0, x1, y1, r, **kw):
+        def rrect(x0, y0, x1, y1, r, on=None, **kw):
             pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-            return cv.create_polygon(pts, smooth=True, **kw)
+            return (on or cv).create_polygon(pts, smooth=True, **kw)
 
         def header(y):
             """캐릭터 귀 + 이름 헤더."""
@@ -6782,25 +6853,56 @@ class Mascot:
                 hits.append((*sb, send_feedback))
                 y += 96 + 22
 
-            cv.create_text(W / 2, y, text="패션 · 크기 · 타이머는 저장 시 재시작",
-                           font=(FONT, FS(8)), fill=cd["sub"])
-            y += 22
-            bx0, bx1 = W / 2 - 64, W / 2 + 64
-            rrect(bx0, y, bx1, y + 40, 18, fill=cd["fill"], outline="")
-            cv.create_text(W / 2, y + 20, text="저장",
-                           font=(FONT, FS(10), "bold"), fill="#ffffff")
-            hits.append((bx0, y, bx1, y + 40, save))
-            cv.config(height=y + 40 + 22)
-            # 목록을 펼치면 창이 길어진다 — 저장 버튼이 화면 밖으로 나가지
-            # 않게 위치를 다시 잡는다 (그리는 중에 재진입하지 않도록 예약)
+            # 화면에 들어가는 만큼만 보여 주고 나머지는 스크롤로 넘긴다.
+            # 창 높이를 내용에 맞춰 늘리기만 하면 아래가 잘려 저장을 못 누른다.
+            room = self.root.winfo_screenheight() - self._ui(190)
+            view_h = int(min(y, max(self._ui(240), room)))
+            cv.config(height=view_h, scrollregion=(0, 0, W, y))
+            scrolling = y > view_h + 1
+            if scrolling:
+                vbar.pack(side="right", fill="y")
+            else:
+                vbar.pack_forget()
+                cv.yview_moveto(0)
+            draw_bar(scrolling)
+            # 목록을 펼치면 창 높이가 달라진다 — 화면 밖으로 나가지 않게 위치를
+            # 다시 잡는다 (그리는 중에 재진입하지 않도록 예약)
             win.after_idle(fit_window)
+
+        def draw_bar(scrolling):
+            """아래에 늘 붙어 있는 띠 — 스크롤해도 저장 버튼이 사라지지 않는다."""
+            bar.delete("all")
+            bar_hits.clear()
+            win.update_idletasks()
+            tw = W + (vbar.winfo_reqwidth() if scrolling else 0)
+            bar.config(width=tw, height=self._ui(78))
+            bar.create_line(0, 1, tw, 1, fill=LINE)
+            bar.create_text(tw / 2, self._ui(17),
+                            text="패션 · 크기 · 타이머는 저장 시 재시작",
+                            font=(FONT, FS(8)), fill=cd["sub"])
+            by = self._ui(30)
+            bx0, bx1 = tw / 2 - 64, tw / 2 + 64
+            rrect(bx0, by, bx1, by + 40, 18, on=bar, fill=cd["fill"], outline="")
+            bar.create_text(tw / 2, by + 20, text="저장",
+                            font=(FONT, FS(10), "bold"), fill="#ffffff")
+            bar_hits.append((bx0, by, bx1, by + 40, save))
 
         def set_slider(key, x, sx0, sx1, lo, hi):
             frac = min(1.0, max(0.0, (x - sx0) / max(sx1 - sx0, 1)))
             step = 5 if hi > 20 else 1
             st[key] = int(round((lo + (hi - lo) * frac) / step) * step)
 
+        def on_bar_click(e):
+            for x0, y0, x1, y1, fn in bar_hits:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    fn()
+                    return
+
+        def on_wheel(e):
+            cv.yview_scroll(-3 if e.delta > 0 else 3, "units")
+
         def on_click(e):
+            e.y = int(cv.canvasy(e.y))       # 스크롤한 만큼 좌표를 맞춘다
             for x0, y0, x1, y1, fn in hits:
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                     fn()
@@ -6814,6 +6916,7 @@ class Mascot:
                     return
 
         def on_drag(e):
+            e.y = int(cv.canvasy(e.y))
             for sx0, sx1, sy, key, lo, hi in sliders:
                 if sy - 16 <= e.y <= sy + 16:
                     set_slider(key, e.x, sx0, sx1, lo, hi)
@@ -6848,6 +6951,9 @@ class Mascot:
 
         cv.bind("<Button-1>", on_click)
         cv.bind("<B1-Motion>", on_drag)
+        bar.bind("<Button-1>", on_bar_click)
+        for _w in (win, cv, bar):
+            _w.bind("<MouseWheel>", on_wheel)
         draw()
         fit_window()
 
