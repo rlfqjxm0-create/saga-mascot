@@ -2384,6 +2384,13 @@ class Mascot:
         self.notes = []              # 음표 [x, y, vx, vy, 종류, 남은프레임, 총]
         self._note_next = 0.0        # 다음 음표가 튀어나올 시각
         self._note_left = 0          # 이번 리듬 타기에 남은 음표 수
+        self.fx_imgs = {}            # 종류별 파티클 그림 (음표·하트·땀…)
+        self._doze_woke = False      # 이번 꾸벅에서 이미 깼는가
+        self._yawn_next = 0.0        # 다음 하품을 볼 수 있는 시각
+        self._doze_next = 0.0        # 다음 꾸벅
+        self._think_next = 0.0       # 다음 생각
+        self._sway_next = 0.0        # 다음 좌우 흔들기
+        self._heart_next = 0.0       # 다음 하트 (작업 중에만)
         self._fail = {}              # 구역별 실패 횟수 (3회면 그 구역만 끔)
         self._sleeping = False       # 자는 중이면 프레임을 줄인다
         # 기록 갱신 축하 — '오늘'의 기준은 시각이 아니라 한 세션
@@ -2745,11 +2752,22 @@ class Mascot:
         self._soft_parts = self._find_covered_parts()
 
         def load_pil(name):
+            """파츠 원본을 표시 배율로 줄여 둔다 (이분화는 하지 않는다).
+
+            이분화를 미리 해 두면, 몸짓이 그 계단진 그림을 다시 돌리고 늘리면서
+            손상이 두 번 겹쳐 선이 뭉텅뭉텅 끊긴다. 그래서 부드러운 원본을
+            들고 있다가 화면에 올리는 마지막 순간에 한 번만 이분화한다.
+            들고 있는 그림 수는 그대로라 메모리는 늘지 않는다.
+            """
             im = Image.open(os.path.join(self.parts_dir,
                                          f"{name}.png")).convert("RGBA")
             if s != 1.0:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
+            return im
+
+        def firm(name, im):
+            """화면에 바로 올릴 그림 — 배경에 닿는 파츠만 이분화한다."""
             return im if name in self._soft_parts else self._hard(im)
 
         self.im = {}
@@ -2764,7 +2782,7 @@ class Mascot:
                               and name in self.layout)
             if self.has[name]:
                 pil_cache[name] = load_pil(name)
-                self.im[name] = ImageTk.PhotoImage(pil_cache[name])
+                self.im[name] = ImageTk.PhotoImage(firm(name, pil_cache[name]))
 
         # 소품(prop1..N) — 켤 때마다 하나만 랜덤으로. 고른 것을 "prop"으로
         # 이름 붙여 두면 overlays 순서대로 얼굴 위에 함께 그려진다.
@@ -2778,12 +2796,12 @@ class Mascot:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
             # 소품도 머리 안에만 있으면 이분화하지 않는다 (안경테 계단 방지)
-            if self._covered_by_base(self._prop_layout[pick],
-                                     os.path.join(self.prop_dir, f"{pick}.png")):
-                pil_cache["prop"] = im
-            else:
-                pil_cache["prop"] = self._hard(im)
-            self.im["prop"] = ImageTk.PhotoImage(pil_cache["prop"])
+            covered = self._covered_by_base(
+                self._prop_layout[pick],
+                os.path.join(self.prop_dir, f"{pick}.png"))
+            pil_cache["prop"] = im
+            self.im["prop"] = ImageTk.PhotoImage(im if covered
+                                                 else self._hard(im))
             self.has["prop"] = True
             self.prop_name = pick
             if "prop" not in (self.layout.get("overlays") or []):
@@ -3259,7 +3277,13 @@ class Mascot:
         return {"x0": x0, "y0": y0, "x1": x0 + w, "y1": y0 + h, "w": w, "h": h}
 
     def _resample(self):
-        return Image.NEAREST if self.cfg.get("hard_alpha") else Image.BICUBIC
+        """돌리고 늘릴 때 쓰는 보간.
+
+        예전에는 이분화한 그림을 다시 돌렸기 때문에 NEAREST를 썼다(어차피
+        계단이니 빠른 쪽으로). 지금은 부드러운 원본에서 돌린 뒤 마지막에
+        이분화하므로, 여기서 부드럽게 보간해야 선이 살아난다.
+        """
+        return Image.BICUBIC
 
     def _draw_back(self, now, yo):
         """몸 뒤 파츠 — config의 back_motion에 따라 살짝 움직인다.
@@ -3623,6 +3647,8 @@ class Mascot:
                                    f"{left}개 남았어요!"]))
         self._say(msg, 3.0)
         self._safe("todo_pop", self._burst, 18)
+        for _ in range(2):                  # 잘했다는 하트
+            self._safe("fx", self._spawn_note, now, "heart")
 
     def _todo_edit(self, idx):
         """우클릭 > 수정 — 그 할 일의 글을 고친다."""
@@ -3835,7 +3861,12 @@ class Mascot:
         self._timer_save()
         self.hat_until = now + 12.0
         self.smile_until = now + 5.0
-        self._gest_start("clap", force=True)
+        # 목표를 채운 날은 만세 또는 박수 — 둘 중 하나가 번갈아 나오게 한다.
+        # 새 동작이 꺼진 캐릭터에서는 만세가 무시되므로 그대로 박수가 된다.
+        if random.random() < 0.5:
+            self._gest_start("cheer", force=True)
+        if self.gest != "cheer":
+            self._gest_start("clap", force=True)
         pool = self.cfg.get("goal_talk") or self.GOAL_TALK
         self._say(random.choice(list(pool)), 6.0)
         self._safe("burst", self._burst, 40, 66)
@@ -4753,6 +4784,8 @@ class Mascot:
         """작업 종료보다 약한 축하 — 말풍선 + 폭죽 조금 (팝업 없음)."""
         now = time.time()
         self._rec_next = now + 90             # 연달아 뜨지 않게
+        for _ in range(2):                    # 기록 갱신은 반짝임
+            self._safe("fx", self._spawn_note, now, "spark")
         self._say(text, 4.5)
         self._gest_start("clap", force=True)
         if self.has.get("smile"):
@@ -4789,7 +4822,10 @@ class Mascot:
             y0 = y0 + dy
             region = self._pet_mask.crop((x0, y0, x0 + pil.width, y0 + pil.height))
             blank = Image.new("RGBA", pil.size, (0, 0, 0, 0))
-            hit = ImageTk.PhotoImage(Image.composite(pil, blank, region))
+            cut = Image.composite(pil, blank, region)
+            if name not in self._soft_parts:
+                cut = self._hard(cut)
+            hit = ImageTk.PhotoImage(cut)
             self._pet_cache[key] = hit
         return hit
 
@@ -4971,7 +5007,11 @@ class Mascot:
     # 움직일 수 있는 것은 머리(목을 축으로 회전 + 상하), 몸 전체(상하),
     # 그리고 두 손(늘어나는 팔이 따라온다)뿐이라 이 넷의 조합으로 짠다.
     GESTURES = {"wave": 2.0, "clap": 1.9, "nod": 1.2,
-                "shake": 1.3, "stretch": 3.0, "groove": 3.6}
+                "shake": 1.3, "stretch": 3.0, "groove": 3.6,
+                "yawn": 2.8, "doze": 3.0, "think": 3.6, "startle": 1.1,
+                "cheer": 2.4, "sway": 3.8}
+    # 아래 여섯은 config의 "gestures_plus"를 켠 캐릭터에서만 나온다.
+    GEST_PLUS = ("yawn", "doze", "think", "startle", "cheer", "sway")
     STRETCH_EVERY = 20 * 60      # 기지개 간격 기본값 (환경설정에서 바꾼다)
     # 환경설정에서 고를 수 있는 간격. 사람마다 집중 리듬이 달라 넓게 뒀다.
     STRETCH_CHOICES = ("끄기", "10분마다", "20분마다", "30분마다",
@@ -4991,12 +5031,29 @@ class Mascot:
         """동작을 시작한다. 이미 하고 있으면 무시 — 겹치면 손이 튄다."""
         if not self.gestures_on or name not in self.GESTURES:
             return
+        if name in self.GEST_PLUS and not self.cfg.get("gestures_plus"):
+            return
         now = time.time()
         if not force and self.gest is not None \
                 and now < self.gest_t0 + self.gest_dur:
             return
         self.gest, self.gest_t0 = name, now
         self.gest_dur = self.GESTURES[name]
+        # 프레임마다 지워야 하는 값은 여기서 되돌린다. 자세 계산 안에서만
+        # 만지면, 그 구역이 꺼졌을 때 마지막 값이 남아 자세가 굳는다.
+        self._doze_woke = False
+        if name == "yawn":
+            self._safe("fx", self._spawn_note, now, "yawn")
+        elif name == "startle":
+            self._safe("fx", self._spawn_note, now, "bang")
+        elif name == "cheer":
+            self._note_left = random.randint(2, 3)
+            self._note_next = now + 0.25
+        elif name == "think":
+            self._note_left = random.randint(1, 2)
+            self._note_next = now + 0.5
+            if self.can_talk and self.bubble is None:
+                self._say("...", 2.6)
         if name == "groove":              # 음표는 두세 개만 — 많으면 지저분하다
             self._note_left = random.randint(2, 3)
             self._note_next = now + 0.35
@@ -5031,18 +5088,54 @@ class Mascot:
             self._g_eyes_shut = self._g_smile = False
             self._log_error("gesture")
 
-    NOTE_STEPS = 7               # 음표가 사라지기까지의 단계 수
+    NOTE_STEPS = 7               # 파티클이 사라지기까지의 단계 수
+
+    def _fx_cloud(self, size, color="#8f8f97", lobes=5):
+        """하품 구름 — 덩어리를 합친 실루엣의 바깥 테두리만 남긴다.
+
+        호를 여러 개 겹쳐 그리면 안쪽 선까지 남아 별처럼 보인다. 그래서
+        실루엣을 만든 뒤 한 겹 깎아내 그 차이(테두리)만 쓰고, 덩어리가
+        만나는 오목한 자리에 작은 구멍을 뚫어 손그림 같은 틈을 낸다.
+        """
+        from PIL import ImageChops, ImageDraw, ImageFilter
+        n = int(size) + 4
+        lw = max(2, round(size * 0.062))
+        c = n * 0.5
+        rr = n * 0.26
+        dd = rr * 0.95
+        sil = Image.new("L", (n, n), 0)
+        sd = ImageDraw.Draw(sil)
+        sd.ellipse([c - dd, c - dd, c + dd, c + dd], fill=255)  # 가운데 구멍 방지
+        for k in range(lobes):
+            a = math.radians(-90 + k * (360.0 / lobes))
+            lx, ly = c + dd * math.cos(a), c + dd * math.sin(a)
+            sd.ellipse([lx - rr, ly - rr, lx + rr, ly + rr], fill=255)
+        ring = ImageChops.subtract(sil, sil.filter(ImageFilter.MinFilter(2 * lw + 1)))
+        half = math.radians(180.0 / lobes)
+        v = rr * rr - (dd * math.sin(half)) ** 2
+        if v > 0:
+            dn = dd * math.cos(half) + math.sqrt(v)
+            gd = ImageDraw.Draw(ring)
+            for k in range(lobes):
+                a = math.radians(-90 + 180.0 / lobes + k * (360.0 / lobes))
+                gx, gy = c + dn * math.cos(a), c + dn * math.sin(a)
+                g = lw * 0.9
+                gd.ellipse([gx - g, gy - g, gx + g, gy + g], fill=0)
+        out = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        out.paste(Image.new("RGBA", (n, n), color), (0, 0), ring)
+        return out
 
     def _build_notes(self):
-        """음표 그림. 글꼴에 기대지 않고 도형으로 그린다 — 맥에서도 같은 모양.
+        """머리 위로 떠오르는 작은 그림들 — 음표·하트·땀·물음표·반짝임·느낌표.
 
-        색상키 창에서는 반투명이 그대로 안 나온다(반투명 픽셀이 배경색과 섞여
-        거뭇해진다). 그래서 옅어지는 대신 픽셀을 점점 솎아내 사라지게 한다.
+        글꼴에 기대지 않고 도형으로 그린다 — 맥에서도 같은 모양. 색상키 창에서는
+        반투명이 그대로 안 나온다(반투명 픽셀이 배경색과 섞여 거뭇해진다).
+        그래서 옅어지는 대신 픽셀을 점점 솎아내 사라지게 한다.
         """
-        self.note_imgs = []
+        self.fx_imgs = {}
         try:
             from PIL import ImageDraw, ImageFilter
-            h = max(14, round(self.W * 0.095))
+            h = max(20, round(self.W * 0.135))
             col = self.card.get("fill", "#f2a7c5")
             st = max(2, round(h * 0.085))          # 기둥 굵기
             rx, ry = h * 0.21, h * 0.165           # 음표 머리 반지름
@@ -5053,9 +5146,10 @@ class Mascot:
             def stem(d, x, y0, y1):
                 d.rectangle([x - st, y0, x, y1], fill=col)
 
-            shapes = []
+            notes = []
             # ① 홑음표 — 머리 + 기둥 + 휘어진 깃발
             w0 = round(h * 0.70)
+
             def draw0(d):
                 cx, cy = rx + 1, h - ry - 1
                 top = h * 0.10
@@ -5066,57 +5160,129 @@ class Mascot:
                            (cx + rx + h * 0.10, top + h * 0.30),
                            (cx + rx + h * 0.13, top + h * 0.17),
                            (cx + rx, top + h * 0.24)], fill=col)
-            shapes.append((w0, draw0))
-            # ② 두 음표 — 기둥 위를 굵은 대로 이었다 (참고 그림처럼 살짝 기울게)
+            notes.append((w0, draw0))
+            # ② 두 음표 — 기둥 위를 굵은 대로 이었다
             w1 = round(h * 1.05)
+
             def draw1(d):
                 ax, ay = rx + 1, h - ry - 1
                 bx, by = w1 - rx - 1, h - ry - h * 0.16
                 ta, tb = h * 0.20, h * 0.06
-                head(d, ax, ay); head(d, bx, by)
+                head(d, ax, ay)
+                head(d, bx, by)
                 stem(d, ax + rx, ta, ay)
                 stem(d, bx + rx, tb, by)
                 d.polygon([(ax + rx - st, ta), (bx + rx, tb),
                            (bx + rx, tb + h * 0.20),
                            (ax + rx - st, ta + h * 0.20)], fill=col)
-            shapes.append((w1, draw1))
+            notes.append((w1, draw1))
 
-            for w, fn in shapes:
-                base = Image.new("RGBA", (w + 4, h + 4), (0, 0, 0, 0))
-                fn(ImageDraw.Draw(base))
-                # 어떤 배경에서도 보이게 흰 테두리를 한 겹 두른다
-                rim = base.split()[3].filter(ImageFilter.MaxFilter(3))
-                out = Image.new("RGBA", base.size, (255, 255, 255, 0))
-                out.putalpha(rim)
-                out.alpha_composite(base)
-                lv = []
-                for k in range(self.NOTE_STEPS):
-                    keep = 1.0 - k / float(self.NOTE_STEPS)
-                    im = out.copy()
-                    a = im.split()[3].load()
-                    px = im.load()
-                    for y in range(im.height):
-                        for x in range(im.width):
-                            if a[x, y] and random.random() > keep:
-                                px[x, y] = (0, 0, 0, 0)
-                    lv.append(ImageTk.PhotoImage(self._hard(im)))
-                self.note_imgs.append(lv)
+            # ③ 하트
+            wh = round(h * 0.92)
+
+            def drawh(d, c="#ff8fb0"):
+                r = wh * 0.26
+                d.ellipse([0, h * 0.14, 2 * r, h * 0.14 + 2 * r], fill=c)
+                d.ellipse([wh - 2 * r, h * 0.14, wh, h * 0.14 + 2 * r], fill=c)
+                d.polygon([(1, h * 0.34), (wh - 1, h * 0.34),
+                           (wh / 2, h * 0.97)], fill=c)
+
+            # ④ 땀방울
+            ws = max(6, round(h * 0.50))
+
+            def draws(d, c="#7fc4f2"):
+                d.ellipse([0, h * 0.40, ws, h * 0.40 + ws], fill=c)
+                d.polygon([(ws / 2, h * 0.04), (ws * 0.06, h * 0.62),
+                           (ws * 0.94, h * 0.62)], fill=c)
+
+            # ⑤ 물음표
+            wq = max(8, round(h * 0.66))
+
+            def drawq(d, c=col):
+                lw = max(2, round(h * 0.13))
+                d.arc([lw / 2, h * 0.04, wq - lw / 2, h * 0.52],
+                      150, 30, fill=c, width=lw)
+                d.line([(wq * 0.74, h * 0.40), (wq * 0.50, h * 0.64)],
+                       fill=c, width=lw)
+                d.ellipse([wq * 0.5 - lw * 0.9, h * 0.76,
+                           wq * 0.5 + lw * 0.9, h * 0.76 + lw * 1.8], fill=c)
+
+            # ⑥ 반짝임 (네 갈래 별)
+            wk = max(8, round(h * 0.78))
+
+            def drawk(d, c="#ffcf5e"):
+                cx, cy = wk / 2, h / 2
+                a = min(wk, h) * 0.46
+                b = a * 0.26
+                d.polygon([(cx, cy - a), (cx + b, cy - b), (cx + a, cy),
+                           (cx + b, cy + b), (cx, cy + a), (cx - b, cy + b),
+                           (cx - a, cy), (cx - b, cy - b)], fill=c)
+
+            # ⑦ 느낌표
+            wb = max(5, round(h * 0.34))
+
+            def drawb(d, c="#ff9770"):
+                d.polygon([(wb * 0.10, h * 0.04), (wb * 0.90, h * 0.04),
+                           (wb * 0.68, h * 0.62), (wb * 0.32, h * 0.62)],
+                          fill=c)
+                d.ellipse([wb * 0.12, h * 0.74,
+                           wb * 0.88, h * 0.74 + wb * 0.76], fill=c)
+
+            # ⑧ 하품 구름 — '하품 중'을 알리는 표시라 다른 것보다 크게.
+            hy = wy = round(h * 1.5)
+            cloud = self._fx_cloud(hy)
+
+            groups = {"note": notes, "heart": [(wh, drawh)],
+                      "yawn": [(wy, cloud, hy)],
+                      "sweat": [(ws, draws)], "question": [(wq, drawq)],
+                      "spark": [(wk, drawk)], "bang": [(wb, drawb)]}
+            for kind, group in groups.items():
+                made = []
+                for spec in group:
+                    w, fn = spec[0], spec[1]
+                    kh = spec[2] if len(spec) > 2 else h   # 종류마다 높이가 다를 수 있다
+                    base = Image.new("RGBA", (int(w) + 4, int(kh) + 4),
+                                     (0, 0, 0, 0))
+                    if isinstance(fn, Image.Image):   # 미리 만들어 둔 그림
+                        base.alpha_composite(fn)
+                    else:
+                        fn(ImageDraw.Draw(base))
+                    # 어떤 배경에서도 보이게 흰 테두리를 한 겹 두른다
+                    rim = base.split()[3].filter(ImageFilter.MaxFilter(3))
+                    out = Image.new("RGBA", base.size, (255, 255, 255, 0))
+                    out.putalpha(rim)
+                    out.alpha_composite(base)
+                    lv = []
+                    for k in range(self.NOTE_STEPS):
+                        keep = 1.0 - k / float(self.NOTE_STEPS)
+                        im = out.copy()
+                        a = im.split()[3].load()
+                        px = im.load()
+                        for y in range(im.height):
+                            for x in range(im.width):
+                                if a[x, y] and random.random() > keep:
+                                    px[x, y] = (0, 0, 0, 0)
+                        lv.append(ImageTk.PhotoImage(self._hard(im)))
+                    made.append(lv)
+                self.fx_imgs[kind] = made
         except Exception:
-            self.note_imgs = []
+            self.fx_imgs = {}
             self._log_error("notes")
 
-    def _spawn_note(self, now):
-        """머리 위로 음표 하나를 푱 하고 띄운다."""
-        if not self.note_imgs:
+    def _spawn_note(self, now, kind="note"):
+        """머리 위로 작은 그림 하나를 푱 하고 띄운다."""
+        lvs = self.fx_imgs.get(kind) or self.fx_imgs.get("note")
+        if not lvs:
             return
         hx0, hy0, hx1, hy1 = self._head_box
         side = random.choice((-1, 1))
         x = (hx0 + hx1) / 2 + side * (hx1 - hx0) * random.uniform(0.22, 0.44)
         y = self.oy + hy0 + (hy1 - hy0) * random.uniform(0.05, 0.22)
         life = random.randint(34, 52)
+        # 그림 목록을 그대로 들고 있는다 — 종류가 늘어도 번호가 꼬이지 않는다.
         self.notes.append([x, y, side * random.uniform(0.25, 0.7),
                            random.uniform(1.1, 1.8),
-                           random.randrange(len(self.note_imgs)), life, life])
+                           random.choice(lvs), life, life])
 
     def _step_notes(self):
         alive = []
@@ -5131,7 +5297,7 @@ class Mascot:
 
     def _draw_notes(self):
         for n in self.notes:
-            lv = self.note_imgs[n[4]]
+            lv = n[4]
             i = min(len(lv) - 1, int((1.0 - n[5] / max(n[6], 1)) * len(lv)))
             self.canvas.create_image(n[0], n[1], image=lv[i], anchor="center")
 
@@ -5183,6 +5349,7 @@ class Mascot:
             self._save_settings()
             line += self.cfg.get("stretch_hint_suffix") or self.HINT_SUFFIX
         self._stretch_line = line
+        self._gest_start("startle")       # 알림이 뜰 때 한 번 움찔
 
     def _stretch_done(self, now):
         """캐릭터를 눌러 알림을 껐다."""
@@ -5267,6 +5434,7 @@ class Mascot:
         elif now >= self.gest_groove_next:
             self.gest_groove_next = now + random.uniform(480, 900)
             self._gest_start("groove")        # 1시간에 네댓 번
+        self._gest_extra(now)
         if not self.timer_on:
             return
         every = self._stretch_secs()
@@ -5284,6 +5452,46 @@ class Mascot:
         elif now >= self.gest_stretch_next:
             self.gest_stretch_next = now + every
             self._stretch_raise(now)           # 정해 둔 간격마다
+
+    def _gest_extra(self, now):
+        """새 몸짓의 방아쇠 — 하품·꾸벅·생각. (움찔은 놀랄 일이 있을 때만)
+
+        타이머 상태(_last_state)를 보고 어울리는 때에만 낸다. 처음 켠 직후에
+        바로 나오면 놀라므로 첫 시각은 넉넉히 뒤로 잡는다.
+        """
+        if not self.cfg.get("gestures_plus"):
+            return
+        state = self._last_state
+        if self._yawn_next == 0.0:
+            self._yawn_next = now + random.uniform(600, 1200)
+            self._doze_next = now + random.uniform(420, 900)
+            self._think_next = now + random.uniform(300, 700)
+            self._sway_next = now + random.uniform(300, 700)
+            self._heart_next = now + random.uniform(240, 480)
+            return
+        if state == "work" and now >= self._heart_next:
+            # 작업 중에는 흐뭇하게 지켜본다는 뜻으로 하트를 종종 띄운다
+            self._heart_next = now + random.uniform(540, 660)
+            for _ in range(random.randint(1, 2)):
+                self._spawn_note(now, "heart")
+        if now >= self._yawn_next:
+            self._yawn_next = now + random.uniform(900, 1800)
+            hour = time.localtime(now).tm_hour
+            # 새벽이거나 오래 앉아 있었을 때만 — 아무 때나 하면 뜬금없다
+            if 0 <= hour < 6 or self._shown_secs() > 3 * 3600:
+                self._gest_start("yawn")
+                return
+        if state != "work" and now >= self._doze_next:
+            self._doze_next = now + random.uniform(420, 900)
+            self._gest_start("doze")
+            return
+        if state in ("idle", "other") and now >= self._think_next:
+            self._think_next = now + random.uniform(300, 700)
+            self._gest_start("think")
+            return
+        if now >= self._sway_next:
+            self._sway_next = now + random.uniform(420, 900)
+            self._gest_start("sway")
 
     def _talk_gesture(self, text):
         """대사에 어울리는 고개짓 — 부정하는 말이면 도리도리, 아니면 끄덕임."""
@@ -5307,6 +5515,9 @@ class Mascot:
         tm = self._tilt_max or 0.0
         s = self.s
         g = self.gest
+        if g in self.GEST_PLUS:
+            self._pose_plus(g, p, now, s, tm)
+            return
         if g == "nod":                        # 끄덕끄덕 — 머리만 아래위로
             self._g_hdy = abs(math.sin(p * math.pi * 4)) * 18 * s * ease
             return
@@ -5398,6 +5609,88 @@ class Mascot:
             self._g_hands = out
             self._g_hdy = -4.0
             return
+
+    @staticmethod
+    def _hold(p, rise, fall):
+        """0에서 1로 올랐다가 붙잡아 두고 다시 0으로 — 정점을 버티는 곡선."""
+        if p < rise:
+            u = p / max(rise, 1e-6)
+        elif p < fall:
+            u = 1.0
+        else:
+            u = max(0.0, (1.0 - p) / max(1.0 - fall, 1e-6))
+        return math.sin(min(1.0, u) * math.pi / 2)
+
+    def _pose_plus(self, g, p, now, s, tm):
+        """새로 넣은 넷 — 하품·꾸벅·생각·움찔."""
+        if g == "yawn":
+            # 하품 — 눈을 감고 고개를 살짝 든 채 한 손을 입가로 올린다.
+            u = self._hold(p, 0.30, 0.72)
+            self._g_eyes_shut = u > 0.2
+            self._g_tilt = -tm * 0.45 * u
+            self._g_hdy = -5 * s * u
+            self._g_dy = -3 * u
+            # 손이 크게 움직이는 동작이라 손을 써도 팔뿌리가 드러나지 않는다.
+            self._g_hands = {"r": (-34 * s * u, -150 * s * u),
+                             "sh_dy": 6.0, "hide_pen": True}
+            return
+        if g == "doze":
+            # 꾸벅 — 고개가 점점 빨리 떨어졌다가 화들짝 들리며 부르르 떤다.
+            if p < 0.72:
+                u = (p / 0.72) ** 1.7
+                self._g_eyes_shut = True
+            else:
+                k = (p - 0.72) / 0.28
+                u = max(0.0, 1.0 - k * 2.4)
+                self._g_tilt = math.sin(k * math.pi * 5) * tm * 0.5 * (1 - k)
+                if not self._doze_woke:
+                    self._doze_woke = True
+                    self._spawn_note(now, "bang")
+            self._g_hdy = 26 * s * u
+            self._g_dy = 4 * u
+            return
+        if g == "think":
+            # 턱 괴고 생각 — 한 손을 턱에 대고 고개를 기울인 채 멈춘다.
+            u = self._hold(p, 0.22, 0.78)
+            self._g_tilt = tm * 0.55 * u
+            self._g_hdy = 3 * s * u
+            self._g_hands = {"r": (-22 * s * u, -116 * s * u),
+                             "sh_dy": 8.0, "hide_pen": True}
+            if self._note_left > 0 and now >= self._note_next:
+                self._note_left -= 1
+                self._note_next = now + random.uniform(0.9, 1.4)
+                self._spawn_note(now, "question")
+            return
+        if g == "cheer":
+            # 만세 — 두 팔을 번쩍 들고 몸이 통통. 기지개와 달리 떨지 않는다.
+            u = self._hold(p, 0.18, 0.76)
+            self._g_dy = -10 * u - abs(math.sin(p * math.pi * 6)) * 5 * u
+            self._g_tilt = math.sin(p * math.pi * 2) * tm * 0.30 * u
+            self._g_smile = True
+            self._g_hands = {"r": (-124 * s * u, -300 * s * u),
+                             "l": (124 * s * u, -300 * s * u),
+                             "sh_dy": -14.0, "hide_pen": True}
+            if self._note_left > 0 and now >= self._note_next:
+                self._note_left -= 1
+                self._note_next = now + random.uniform(0.35, 0.6)
+                self._spawn_note(now, "spark")
+            return
+        if g == "sway":
+            # 좌우로 흔들기 — 리듬 타기보다 느리고 폭이 크다. 손은 쓰지 않는다
+            # (제자리 근처에서 손을 쓰면 평소 머리에 가려 있던 팔이 드러난다).
+            ease = math.sin(min(1.0, p * 3.0) * math.pi / 2) * \
+                math.sin(min(1.0, (1.0 - p) * 3.0) * math.pi / 2)
+            beat = math.sin(p * math.pi * 3)
+            self._g_tilt = beat * tm * ease
+            self._g_dy = -abs(beat) * 6 * ease
+            self._g_hdy = -abs(beat) * 3 * ease
+            return
+        if g == "startle":
+            # 움찔 — 짧게 튀어 올랐다가 떨림이 잦아든다.
+            k = math.exp(-p * 4.0)
+            self._g_dy = -15 * math.sin(min(1.0, p * 2.2) * math.pi) - 2 * k
+            self._g_tilt = math.sin(p * math.pi * 9) * tm * 0.7 * k
+            self._g_hdy = -6 * s * k
 
     def _gest_shoulder(self, top, dy=16.0):
         """제스처용 어깨 — 원래 접합점보다 몸 안쪽으로 묻어 둔 자리.
@@ -6151,6 +6444,11 @@ class Mascot:
         wy = self.root.winfo_rooty() + self.H // 2
         pdx = max(-5, min(5, (cx - wx) / 60))
         pdy = max(-3, min(4, (cy - wy) / 90))
+        # 몸짓 중에는 눈동자를 가운데로 모은다. 고개를 기울이면 미리 합쳐 둔
+        # 머리(눈동자가 가운데에 구워져 있다)로 그려지는데, 기울기가 0 근처를
+        # 오갈 때마다 두 방식이 번갈아 쓰여 눈동자가 대각선으로 튄다.
+        if self.gest is not None:
+            pdx = pdy = 0.0
 
         pen_typing = (now - self.last_pointer > 2.0) and (now - self.last_key < 1.8)
         if "pen" in f or f.get("type"):
@@ -6285,7 +6583,13 @@ class Mascot:
         return out
 
     def _pen_mon_rect(self):
-        """펜이 따라갈 화면. 자동이거나 그 화면이 사라졌으면 None."""
+        """펜이 따라갈 화면. 자동이거나 그 화면이 사라졌으면 None.
+
+        고르는 칸을 없앤 캐릭터는 저장돼 있던 값도 무시하고 늘 자동으로 둔다.
+        안 그러면 예전에 골라 둔 화면에 묶인 채 되돌릴 방법이 없어진다.
+        """
+        if not self.cfg.get("pen_monitor_pick"):
+            return None
         raw = str(self.us.get("pen_monitor", "") or "")
         if not raw or raw.startswith("자동"):
             return None
@@ -6470,7 +6774,11 @@ class Mascot:
             # 터지면 머리 구역이 꺼져 얼굴이 통째로 사라진다.
             try:
                 p = self.TILT_PAD
+                # 눈을 감은 채 고개를 기울이는 동작(하품·꾸벅)이 있다. 눈 뜬
+                # 판으로 그리면 감으라고 해도 눈이 떠진다 — 잘 때 쓰는 판이
+                # 곧 눈감은 판이라 그것을 쓴다.
                 mode = ("sleep" if sleeping
+                        else "shut" if blinking
                         else "smile" if (smiling and self._tilt_base_smile is not None)
                         else "awake")
                 img, tdx = self._sleep_head(tilt, mode)
