@@ -332,6 +332,7 @@ DEFAULT_SETTINGS = {
     "topmost": True,      # 항상 위
     "stretch_hint": 3,    # 스트레칭 알림에 '눌러 주세요' 안내를 붙일 남은 횟수
     "day_start": 6,       # 하루가 바뀌는 시각 (0이면 달력 날짜 그대로)
+    "stretch_every": "20분마다",   # 스트레칭 알림 간격 ("끄기"면 안 뜸)
     "pen_monitor": "자동", # 펜을 따라갈 화면 (자동 = 커서가 있는 화면)
     "scale_pct": 100,     # 캐릭터 크기(%)
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
@@ -4904,7 +4905,10 @@ class Mascot:
     # 그리고 두 손(늘어나는 팔이 따라온다)뿐이라 이 넷의 조합으로 짠다.
     GESTURES = {"wave": 2.0, "clap": 1.9, "nod": 1.2,
                 "shake": 1.3, "stretch": 3.0, "groove": 3.6}
-    STRETCH_EVERY = 20 * 60      # 기지개 간격 (타이머를 켜고 20분마다)
+    STRETCH_EVERY = 20 * 60      # 기지개 간격 기본값 (환경설정에서 바꾼다)
+    # 환경설정에서 고를 수 있는 간격. 20분이 잦다는 이야기가 있어 넓게 뒀다.
+    STRETCH_CHOICES = ("끄기", "10분마다", "20분마다", "30분마다",
+                       "45분마다", "60분마다", "90분마다")
     # 기지개를 켜며 하는 말. 캐릭터별로 config의 "stretch_talk"로 덮어쓴다.
     STRETCH_TALK = ("같이 쭉 펴 볼까요?", "어깨 한 번 풀어요.",
                     "잠깐 기지개 켜요.", "허리도 한 번 펴 봐요.")
@@ -5081,6 +5085,19 @@ class Mascot:
     TAP_HINT_AT = 30.0           # 이만큼 안 누르면 누르라는 표시가 뜬다(초)
     TAP_CARD_AT = 60.0           # 이만큼 안 누르면 카드 문구까지 바뀐다(초)
 
+    def _stretch_secs(self):
+        """스트레칭 알림 간격(초). 0이면 알리지 않는다.
+
+        환경설정에는 '30분마다'처럼 사람이 읽는 말로 저장돼 있어 숫자만 뽑는다.
+        """
+        raw = str(self.us.get("stretch_every", "") or "")
+        if raw.startswith("끄"):
+            return 0
+        num = "".join(ch for ch in raw if ch.isdigit())
+        if not num:
+            return self.STRETCH_EVERY
+        return max(5, min(180, int(num))) * 60
+
     def _stretch_raise(self, now):
         """스트레칭 알림을 띄운다. 누를 때까지 안 꺼진다."""
         if self.stretch_pending:
@@ -5184,11 +5201,21 @@ class Mascot:
             self._gest_start("groove")        # 1시간에 네댓 번
         if not self.timer_on:
             return
+        every = self._stretch_secs()
+        if not every:                          # 환경설정에서 껐다
+            self.gest_stretch_next = 0.0
+            if self.stretch_pending:           # 떠 있던 알림도 조용히 거둔다
+                self.stretch_pending = False
+                self.gest = None
+                self.bubble = None
+            return
         if self.gest_stretch_next == 0.0:
-            self.gest_stretch_next = now + self.STRETCH_EVERY
+            self.gest_stretch_next = now + every
+        elif self.gest_stretch_next > now + every:
+            self.gest_stretch_next = now + every   # 간격을 줄이면 바로 반영
         elif now >= self.gest_stretch_next:
-            self.gest_stretch_next = now + self.STRETCH_EVERY
-            self._stretch_raise(now)          # 타이머를 켜고 20분마다
+            self.gest_stretch_next = now + every
+            self._stretch_raise(now)           # 정해 둔 간격마다
 
     def _talk_gesture(self, text):
         """대사에 어울리는 고개짓 — 부정하는 말이면 도리도리, 아니면 끄덕임."""
@@ -6673,6 +6700,8 @@ class Mascot:
                 lambda ry: stepper(ry, "목표 작업시간", "goal_hours", 0.5, 16, 0.5, "h"),
                 lambda ry: stepper(ry, "휴식 전환", "idle_sec", 5, 600, 5, "초"),
                 lambda ry: stepper(ry, "잠들기", "sleep_min", 1, 120, 1, "분"),
+                lambda ry: open_picker(ry, "스트레칭 알림", "stretch_every",
+                                       list(self.STRETCH_CHOICES)),
             ]
             if self.cfg.get("history"):
                 timer_rows.append(
