@@ -504,6 +504,7 @@ class SoundPack:
             if isinstance(v, str) and v and v not in names:
                 names.append(v)
         self.raw = []             # (WAVEFORMATEX, 원본PCM, 샘플폭)
+        slot = {}                 # 파일 이름 -> raw 안에서의 번호
         for name in names:
             path = os.path.join(folder, name)
             if not (name.lower().endswith(".wav") and os.path.exists(path)):
@@ -512,9 +513,18 @@ class SoundPack:
                 ch, sw, fr = w.getnchannels(), w.getsampwidth(), w.getframerate()
                 data = w.readframes(w.getnframes())
             wfx = _WAVEFORMATEX(1, ch, fr, fr * ch * sw, ch * sw, sw * 8, 0)
+            slot[name] = len(self.raw)
             self.raw.append((wfx, data, sw))
         if not self.raw:
             raise ValueError("재생 가능한 wav가 없음")
+        # 팩은 스캔코드마다 쓸 음원을 config.json에 적어 둔다. 스페이스·백스페이스
+        # 처럼 소리가 다른 키를 위한 것인데, 지금까지는 이 표를 버리고 아무 음원이나
+        # 골라 썼다 (스페이스 소리가 엉뚱한 글자 키에서 났다).
+        self.by_code = {}
+        for code, fname in (cfg.get("defines") or {}).items():
+            i = slot.get(fname)
+            if i is not None:
+                self.by_code[str(code)] = i
         self._active = []         # (핸들, WAVEHDR) — 재생 끝나면 정리
         self._lock = threading.Lock()
         self.set_volume(volume)
@@ -529,10 +539,13 @@ class SoundPack:
         for wfx, data, sw in self.raw:
             self.sounds.append((wfx, _scaled_buffer(data, gain, sw), len(data)))
 
-    def play(self, key):
+    def play(self, key, code=None):
         if not self.sounds:
             return
-        wfx, buf, ln = self.sounds[hash(str(key)) % len(self.sounds)]
+        i = self.by_code.get(str(code)) if code is not None else None
+        if i is None or i >= len(self.sounds):
+            i = hash(str(key)) % len(self.sounds)   # 표에 없는 키는 아무거나
+        wfx, buf, ln = self.sounds[i]
         wm = ctypes.windll.winmm
         h = ctypes.c_void_p()
         if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF, ctypes.byref(wfx), 0, 0, 0):
@@ -1107,7 +1120,14 @@ class _MacSoundPool:
 
 
 class MacSoundPack(_MacSoundPool):
-    """맥용 Mechvibes 팩 재생기 (SoundPack과 같은 인터페이스)."""
+    """맥용 Mechvibes 팩 재생기 (SoundPack과 같은 인터페이스).
+
+    맥은 어느 키를 눌렀는지 알 수 없어(카운터만 읽는다) 키별 구분은 못 한다.
+    인자만 맞춰 두고 무시한다.
+    """
+
+    def play(self, key, code=None):
+        return super().play(key)
 
     def __init__(self, folder, volume=60):
         with open(os.path.join(folder, "config.json"), encoding="utf-8") as fp:
@@ -3459,9 +3479,41 @@ class Mascot:
         sp = self.sndpack
         if first and not dial and sp is not None:
             try:
-                sp.play(key)
+                sp.play(key, self._scan_code(key))
             except Exception:
                 pass
+
+    def _scan_code(self, key):
+        """누른 키의 PS/2 스캔코드 — 사운드 팩의 defines가 쓰는 번호.
+
+        확장키(방향키 등)는 Mechvibes와 같게 3584를 더한 번호로 맞춘다.
+        """
+        if not IS_WIN:
+            return None
+        vk = getattr(key, "vk", None)
+        if vk is None:
+            vk = getattr(getattr(key, "value", None), "vk", None)
+        if not vk:
+            ch = getattr(key, "char", None)   # vk가 없으면 글자로 되짚는다
+            if not (isinstance(ch, str) and len(ch) == 1):
+                return None
+            try:
+                fn = ctypes.windll.user32.VkKeyScanW
+                fn.argtypes = [ctypes.c_wchar]   # 코드가 아니라 글자를 넘긴다
+                fn.restype = ctypes.c_short      # 못 찾으면 -1
+                got = fn(ch)
+            except Exception:
+                return None
+            if got == -1:
+                return None
+            vk = got & 0xFF
+        try:
+            sc = ctypes.windll.user32.MapVirtualKeyW(int(vk), 4)  # VK_TO_VSC_EX
+        except Exception:
+            return None
+        if not sc:
+            return None
+        return 3584 + (sc & 0xFF) if sc > 0xFF else sc
 
     def _poll_mac_input(self):
         """맥: 리스너 콜백 대신 카운터 변화를 읽어 같은 상태를 만든다."""
