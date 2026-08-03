@@ -1732,6 +1732,7 @@ class TodoPanel:
         self._moved_by_user = bool(offset)
         self.offset = tuple(offset) if offset else (-(self.W + 4), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
+        self._hwnd_cache = None  # 창 핸들 (z순서 조정용)
         self.top = tk.Toplevel(master)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
@@ -1870,6 +1871,7 @@ class TodoPanel:
         self.canvas.config(height=y)
         self.top.geometry(f"{self.W}x{int(y)}")
         self.top.deiconify()
+        self.raise_above()          # 방금 띄운 창이 캐릭터 뒤로 가지 않게
 
     def _press(self, e):
         self._pressed = (e.x, e.y, e.x_root, e.y_root)
@@ -1931,6 +1933,35 @@ class TodoPanel:
         if self.on_flip is not None:
             self.on_flip(self.flip)
 
+    def _hwnd(self):
+        """이 창의 윈도우 핸들 (한 번 구해 두고 재사용)."""
+        if self._hwnd_cache is None:
+            try:
+                self._hwnd_cache = (int(self.top.wm_frame(), 16)
+                                    if IS_WIN else 0)
+            except Exception:
+                self._hwnd_cache = 0
+        return self._hwnd_cache
+
+    def raise_above(self):
+        """캐릭터 창보다 위로 올린다.
+
+        말풍선 창과 캐릭터 창이 둘 다 '항상 위'라, 캐릭터를 누르거나 창 순서가
+        한 번 뒤집히면 캐릭터가 말풍선을 덮어 할 일이 안 보인다. 그래서 자리를
+        잡을 때마다 다시 맨 앞으로 올려 둔다.
+        """
+        try:
+            if IS_WIN:
+                h = self._hwnd()
+                if h:
+                    # HWND_TOP(0), NOSIZE | NOMOVE | NOACTIVATE
+                    ctypes.windll.user32.SetWindowPos(
+                        h, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+                    return
+            self.top.lift()
+        except Exception:
+            pass
+
     def place(self, x, y):
         """본체 창 기준 저장된 자리에 붙인다 (끌어서 옮긴 위치)."""
         if self._moved and self._pressed is not None:
@@ -1940,6 +1971,7 @@ class TodoPanel:
             self.top.geometry(f"+{int(x + dx)}+{int(y + dy)}")
         except Exception:
             pass
+        self.raise_above()
 
     def destroy(self):
         try:
@@ -2553,6 +2585,7 @@ class Mascot:
         self._main_hwnd = int(self.root.wm_frame(), 16) if IS_WIN else 0
         self.shadow = None
         self._z_check = 0.0
+        self._panel_z = 0.0          # 말풍선 창을 다시 올린 시각
         if self.shadow_img is not None and IS_WIN:
             # 그림자 이미지가 P만큼 여백을 두므로, 창을 (offset - P)에 놓아 정렬
             self.shadow = ShadowLayer(self.root, self.shadow_img,
@@ -3784,6 +3817,7 @@ class Mascot:
         now = time.time()
         self.click_bounce = now + 0.45
         self.squash_until = now + 0.12
+        self._panel_z = 0.0          # 눌러서 캐릭터가 앞으로 나왔다 — 바로 되돌린다
         if self.pokesnd is not None:
             try:
                 self.pokesnd.play()
@@ -6361,6 +6395,13 @@ class Mascot:
                     self.shadow.place(*pos, self._main_hwnd)
                 if self.todo_panel is not None:
                     self.todo_panel.place(*pos)
+            # 캐릭터를 누르면 그 창이 맨 앞으로 올라와 말풍선을 덮는다.
+            # 놓친 경우를 위해 짧은 주기로도 다시 올려 둔다.
+            if now - self._panel_z > 1.0:
+                self._panel_z = now
+                for _p in (self.todo_panel, self.due_panel):
+                    if _p is not None:
+                        _p.raise_above()
             if self.due_panel is not None:
                 self._safe("due", self._due_tick)
             elif self.shadow is not None and now - self._z_check > 8.0:
