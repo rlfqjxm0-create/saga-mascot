@@ -1871,7 +1871,8 @@ class TodoPanel:
         self.canvas.config(height=y)
         self.top.geometry(f"{self.W}x{int(y)}")
         self.top.deiconify()
-        self.raise_above()          # 방금 띄운 창이 캐릭터 뒤로 가지 않게
+        # 크기 변경이 실제로 반영된 뒤에 올린다 (바로 부르면 변경이 버려진다)
+        self.top.after_idle(self.raise_above)
 
     def _press(self, e):
         self._pressed = (e.x, e.y, e.x_root, e.y_root)
@@ -1971,7 +1972,10 @@ class TodoPanel:
             self.top.geometry(f"+{int(x + dx)}+{int(y + dy)}")
         except Exception:
             pass
-        self.raise_above()
+        # 여기서 raise_above를 부르면 안 된다. Tk는 위치 변경을 미뤄 두었다가
+        # 나중에 적용하는데, 그 전에 SetWindowPos로 창을 직접 건드리면 미뤄 둔
+        # 이동이 버려져 말풍선이 캐릭터를 따라오지 못한다. z순서는 그리기
+        # 루프가 주기적으로 맞춘다.
 
     def destroy(self):
         try:
@@ -6397,7 +6401,7 @@ class Mascot:
                     self.todo_panel.place(*pos)
             # 캐릭터를 누르면 그 창이 맨 앞으로 올라와 말풍선을 덮는다.
             # 놓친 경우를 위해 짧은 주기로도 다시 올려 둔다.
-            if now - self._panel_z > 1.0:
+            if now - self._panel_z > 0.5:
                 self._panel_z = now
                 for _p in (self.todo_panel, self.due_panel):
                     if _p is not None:
