@@ -2462,6 +2462,10 @@ class Mascot:
         # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
         self._diag_left = self.PEN_DIAG_MAX if self.cfg.get("pen_diag") else 0
         self._diag_last = None       # 마지막으로 기록한 화면 사각형
+        # 머리 자리 진단 (config의 head_diag를 켠 캐릭터만)
+        self._hd_left = self.HEAD_DIAG_MAX if self.cfg.get("head_diag") else 0
+        self._hd_head = False        # 첫머리를 남겼는가
+        self._hd_at = 0.0
         self._diag_at = 0.0          # 마지막으로 기록한 시각
         self.shadow_img_type = None  # 타자 자세용 그림자 (깃펜 없음)
         self._shadow_base = None
@@ -3045,12 +3049,18 @@ class Mascot:
             if abs(self._tilt_fit(self._rot_head(-deg))) <= 8:
                 self._tilt_max = float(deg)
                 break
+        # 창 안에 들어가도 '보기에' 자연스러운 각도는 캐릭터마다 다르다.
+        # 기뽀처럼 머리 밑변이 평평하고 몸과 겹치는 부분이 얇으면, 조금만
+        # 기울여도 머리가 벗겨져 굴러떨어지는 것처럼 보인다(제보).
+        self._tilt_max *= max(0.0, min(1.0, float(self.cfg.get("tilt_scale", 1.0))))
 
     def _rot_head(self, deg, mode="sleep"):
         p = self.TILT_PAD
         base = {"awake": self._tilt_base_awake,
                 "smile": self._tilt_base_smile}.get(mode) or self._tilt_base
-        return base.rotate(deg, center=(self._neck[0] + p, self._neck[1] + p),
+        # _neck은 화면 좌표(ox 포함)인데 합성판은 ox가 없다 — 빼고 돌린다
+        return base.rotate(deg, center=(self._neck[0] - self.ox + p,
+                                        self._neck[1] + p),
                            resample=self._resample())
 
     def _tilt_fit(self, im):
@@ -3059,7 +3069,9 @@ class Mascot:
         bb = im.split()[3].getbbox()
         if not bb:
             return 0
-        return max((p + 2) - bb[0], 0) - max(bb[2] - (p + self.W - 2), 0)
+        # 그릴 때 ox만큼 오른쪽으로 밀리므로 그것까지 계산에 넣는다
+        return (max(p + 2 - self.ox - bb[0], 0)
+                - max(bb[2] + self.ox - (p + self.W - 2), 0))
 
     def _sleep_head(self, deg, mode="sleep"):
         """기울어진 머리 — (이미지, 창 안으로 미는 보정값), 1도 단위 캐시."""
@@ -6855,6 +6867,42 @@ class Mascot:
         self._put("arm_pen", px, py)
         self._pen_draw = None
 
+    HEAD_DIAG = ".head_diag.txt"     # 머리 자리 진단 기록
+    HEAD_DIAG_MAX = 120
+
+    def _head_diag(self, kind, got, want, extra=""):
+        """머리가 제자리에서 벗어난 프레임을 남긴다.
+
+        '머리가 몸에서 빠진다'는 제보를 내 컴퓨터에서 재현하지 못해, 실제로
+        쓰는 컴퓨터에서 어떤 값이 나오는지 받아 보려고 둔다.
+        """
+        if self._hd_left <= 0:
+            return
+        try:
+            path = os.path.join(self.state_dir, self.HEAD_DIAG)
+            if not self._hd_head:
+                self._hd_head = True
+                with open(path, "w", encoding="utf-8") as fp:
+                    fp.write("=== %s / %s ===\n" % (
+                        time.strftime("%Y-%m-%d %H:%M:%S"), self.char))
+                    fp.write("배율=%.3f 크기설정=%s 창=%dx%d oy=%s ox=%s\n" % (
+                        self.s, self.us.get("scale_pct"), self.W, self.H,
+                        self.oy, self.ox))
+                    fp.write("기울기상한=%s 목=%s 머리상자=%s pad=%d\n" % (
+                        self._tilt_max, self._neck, self._head_box,
+                        self.TILT_PAD))
+                    fp.write("-- 아래는 머리가 제자리를 벗어난 프레임 --\n")
+            now = time.time()
+            if now - self._hd_at < 0.25:      # 너무 촘촘히 남기지 않는다
+                return
+            self._hd_at = now
+            self._hd_left -= 1
+            with open(path, "a", encoding="utf-8") as fp:
+                fp.write("%s %-6s 그린자리=%s 기대=%s %s\n" % (
+                    time.strftime("%H:%M:%S"), kind, got, want, extra))
+        except Exception:
+            self._hd_left = 0
+
     def _draw_head(self, now, yo, pdx, pdy, blinking, smiling, sleeping):
         """머리 + 얼굴 (자는 중이면 목을 축으로 기울인 합성본)."""
         c = self.canvas
@@ -6879,7 +6927,17 @@ class Mascot:
                         else "smile" if (smiling and self._tilt_base_smile is not None)
                         else "awake")
                 img, tdx = self._sleep_head(tilt, mode)
-                c.create_image(tdx - p, self.oy - p + hyo, anchor="nw", image=img)
+                # 합성판은 파츠를 ox 없이 붙여 만든다. 캐릭터가 작아 카드보다
+                # 좁으면 ox만큼 오른쪽으로 밀어 놓는데, 여기서 그 값을 빼먹으면
+                # 고개를 기울일 때마다 머리만 ox만큼 왼쪽으로 튄다
+                # (크기 50%에서 29px — '머리가 몸에서 빠진다' 제보의 원인).
+                gx, gy = tdx - p + self.ox, self.oy - p + hyo
+                c.create_image(gx, gy, anchor="nw", image=img)
+                if self._hd_left > 0 and (abs(gx + p) > 3 or abs(tdx) > 3):
+                    self._head_diag("기울임", (round(gx), round(gy)),
+                                    (-p, round(self.oy - p)),
+                                    "tilt=%.2f mode=%s tdx=%d hyo=%.1f 자는중=%s"
+                                    % (tilt, mode, tdx, hyo, sleeping))
                 if sleeping:
                     self._draw_snot(now, hyo, tilt, tdx)
             except Exception:
@@ -6887,6 +6945,13 @@ class Mascot:
                 self._log_error("head_tilt")
         if tilt is None:
             hx, hy = self._pos("head")
+            if self._hd_left > 0:
+                want = self._pos("head")
+                if abs(hx - want[0]) > 3:
+                    self._head_diag("보통", (round(hx), round(hy + hyo)),
+                                    (round(want[0]), round(want[1])),
+                                    "g_tilt=%.2f 상한=%.1f" % (self._g_tilt,
+                                                              self._tilt_max))
             self._put("head", hx, hy + hyo)
             self._draw_face(hyo, pdx, pdy, blinking, smiling)
 
