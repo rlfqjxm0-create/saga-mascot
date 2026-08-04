@@ -2448,6 +2448,7 @@ class Mascot:
         self._sway_next = 0.0        # 다음 좌우 흔들기
         self._heart_next = 0.0       # 다음 하트 (작업 중에만)
         self._fail = {}              # 구역별 실패 횟수 (3회면 그 구역만 끔)
+        self._fail_at = {}           # 구역별 마지막 실패 시각 (한참 지나면 재시도)
         self._sleeping = False       # 자는 중이면 프레임을 줄인다
         # 기록 갱신 축하 — '오늘'의 기준은 시각이 아니라 한 세션
         # (작업 시작 ~ '작업 종료' 버튼). 종료하면 새 세션으로 다시 센다.
@@ -2475,6 +2476,7 @@ class Mascot:
         self._shadow_swap = 0.0      # 마지막으로 실제 교체한 시각
         self._pen_draw = None        # 펜 손을 머리 뒤에 그릴 때 쓰는 임시 보관
         self._pet_drawn = []         # 이번 프레임에 그린 반려동물 (그림자용)
+        self._tick_after = None      # 예약해 둔 다음 프레임 (종료할 때 취소)
         self._pet_sh_cache = {}
         self._pet_sh_on = False
         self._pet_sh_t = 0.0
@@ -3867,6 +3869,14 @@ class Mascot:
 
     def close(self):
         try:
+            # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
+            # 그 프레임이 없어진 창을 불러 'invalid command name' 이 뜬다.
+            if self._tick_after is not None:
+                try:
+                    self.root.after_cancel(self._tick_after)
+                except Exception:
+                    pass
+                self._tick_after = None
             if self.timer_on and self.ws_path is None:
                 self._timer_save()
             if self._kb is not None:
@@ -6195,11 +6205,18 @@ class Mascot:
         n = max(6, round(size * getattr(self, "font_k", 1.0)))
         return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
 
+    TW_CACHE_MAX = 400           # 글자 폭 캐시 상한
+
     def _mw(self, text, font):
         """그 글꼴로 글자를 그리면 폭이 얼마인지 (측정값 캐시)."""
         key = (text, font)
         w = self._tw_cache.get(key)
         if w is None:
+            # 카드의 시간 글자는 1초마다 달라져서 열쇠가 끝없이 쌓인다.
+            # 하루 켜 두면 9만 개(25MB)까지 갔다 — 다른 캐시처럼 상한을 둔다.
+            # 다시 재는 값이라 비워도 그림은 그대로다.
+            if len(self._tw_cache) > self.TW_CACHE_MAX:
+                self._tw_cache.clear()
             t = self.canvas.create_text(-3000, -3000, text=text, anchor="nw",
                                         font=font)
             bb = self.canvas.bbox(t)
@@ -6353,14 +6370,25 @@ class Mascot:
         self.canvas.create_image(x, y, image=im, anchor=anchor)
         return True
 
+    FAIL_FORGET = 300            # 이 시간(초) 넘게 안 터졌으면 실패 횟수를 잊는다
+
     def _safe(self, where, fn, *args):
-        """부분 실패가 화면 전체를 지우지 못하게 — 3번 터지면 그 구역만 끈다."""
-        if self._fail.get(where, 0) >= 3:
+        """부분 실패가 화면 전체를 지우지 못하게 — 3번 터지면 그 구역만 끈다.
+
+        다만 영영 꺼지면 안 된다. 아침에 잠깐 터진 것 때문에 저녁까지 팔이
+        안 나오는 식이 되기 때문이다. 마지막 실패가 한참 전이면 다시 센다.
+        """
+        n = self._fail.get(where, 0)
+        if n and time.time() - self._fail_at.get(where, 0) > self.FAIL_FORGET:
+            n = 0
+            self._fail[where] = 0
+        if n >= 3:
             return
         try:
             fn(*args)
         except Exception:
-            self._fail[where] = self._fail.get(where, 0) + 1
+            self._fail[where] = n + 1
+            self._fail_at[where] = time.time()
             self._log_error(where)
 
     def tick(self):
@@ -6368,8 +6396,8 @@ class Mascot:
         # 입력이 없으면 볼 것도 없으므로 프레임을 낮춰 CPU를 아낀다.
         # (자는 중 10fps / 5초 이상 무입력 15fps / 작업 중 30fps)
         quiet = time.time() - max(self.last_key, self.last_pointer)
-        self.root.after(100 if self._sleeping else (66 if quiet > 5.0 else 33),
-                        self.tick)
+        self._tick_after = self.root.after(
+            100 if self._sleeping else (66 if quiet > 5.0 else 33), self.tick)
         try:
             self._tick_body()
         except Exception:
@@ -6485,6 +6513,8 @@ class Mascot:
         self.canvas.create_image(tx, ty, image=e["cache"][k], anchor="center")
         return True
 
+    ARM_CACHE_MAX = 500          # 늘인 팔 그림 캐시 상한 (한 장이 꽤 크다)
+
     def _stretched_arm(self, dx, dy, which="r"):
         """어깨에서 손끝까지를 잇도록 늘이고 돌린 팔 그림.
 
@@ -6501,8 +6531,12 @@ class Mascot:
         key = (round(k * 25), round(deg), which)
         hit = self._arm_cache.get(key)
         if hit is None:
-            if len(self._arm_cache) > 1500:
-                self._arm_cache.clear()      # 안전장치 (실측 포화 ~580개)
+            if len(self._arm_cache) > self.ARM_CACHE_MAX:
+                # 통째로 비우면 다음 프레임부터 다시 수백 장을 만드느라
+                # 메모리가 계단처럼 뛴다(실측 200MB까지). 오래된 절반만
+                # 버리면 자주 쓰는 각도는 남아서 다시 만드는 양이 적다.
+                for _old in list(self._arm_cache)[:self.ARM_CACHE_MAX // 2]:
+                    del self._arm_cache[_old]
             w, h = src.size
             nh = max(8, round(h * k))
             im = src.resize((w, nh), Image.LANCZOS)
