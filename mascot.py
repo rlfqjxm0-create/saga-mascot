@@ -368,6 +368,7 @@ DEFAULT_SETTINGS = {
     "settings_pos": None,    # 환경설정 창을 옮겨 둔 자리 [x, y]. 없으면 캐릭터 옆
     "yt_url": "",            # 유튜브 노래 주소 (config의 youtube를 켠 캐릭터만)
     "yt_volume": 55,         # 노래 볼륨 (0~100)
+    "update_h": 0,           # 업데이트 안내 창 높이(px). 0이면 적당히 자동
     "yt_signed": False,      # 유튜브에 로그인해 둔 적이 있는가 (프리미엄 적용)
     "yt_asked": False,       # 로그인 창을 한 번이라도 권했는가
 }
@@ -1743,7 +1744,11 @@ def update_notice(char_dir, state_dir):
     msg, notes = _take_update_flag(state_dir)
     ver, vnotes, silent, link = None, [], False, None
     try:
-        p = os.path.join(os.path.dirname(char_dir), "version.json")
+        # 선물본은 부모 폴더의 version.json(런처가 받아 둔 것),
+        # 소스로 돌리는 캐릭터는 제 폴더의 .version.json 을 본다.
+        p = os.path.join(char_dir, ".version.json")
+        if not os.path.exists(p):
+            p = os.path.join(os.path.dirname(char_dir), "version.json")
         with open(p, encoding="utf-8") as fp:
             man = json.load(fp)
         ver = man.get("version")
@@ -1783,6 +1788,7 @@ def update_notice(char_dir, state_dir):
 
 
 UPDATE_LOG = ".update_log.json"   # 지난 업데이트 안내 보관 (최근 20개)
+UPDATE_READ = ".update_read"      # 어디까지 읽었는지 (빨간 점 판단용)
 
 
 def _update_log_add(state_dir, ver, notes, link=None):
@@ -2052,9 +2058,11 @@ class TodoPanel:
             return
         tw = self.W - round(30 * self.k)   # 글자가 들어갈 폭
         heights = []                          # 먼저 줄바꿈 높이를 잰다
-        for text in todos:
-            t = c.create_text(0, 0, anchor="nw", text=text, width=tw,
-                              font=("Malgun Gothic", self.FS))
+        # 높이도 그 칸의 글꼴로 재야 한다 — 굵은 글씨는 폭이 넓어서
+        # 보통 글꼴로 재면 말풍선이 한 줄 모자라게 나온다
+        for item in todos:
+            t = c.create_text(0, 0, anchor="nw", text=todo_text(item), width=tw,
+                              font=todo_font(item, self.FS))
             bb = c.bbox(t)
             heights.append(max(bb[3] - bb[1] + round(20 * self.k),
                                round(32 * self.k)))
@@ -2062,7 +2070,8 @@ class TodoPanel:
 
         y = self.PAD
         x0, x1 = round(8 * self.k), self.W - round(6 * self.k)
-        for i, (text, h) in enumerate(zip(todos, heights)):
+        for i, (item, h) in enumerate(zip(todos, heights)):
+            text = todo_text(item)
             r = round(13 * self.k)
             self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
                         fill="#e6e2e8", outline="")      # 그림자
@@ -2074,7 +2083,7 @@ class TodoPanel:
             self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
             mid = y + h / 2
             t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
-                              font=("Malgun Gothic", self.FS),
+                              font=todo_font(item, self.FS),
                               fill=tint or cd["text"], justify="center")
             tb = c.bbox(t)          # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
             if tb:
@@ -2198,6 +2207,40 @@ class TodoPanel:
             self.top.destroy()
         except Exception:
             pass
+
+
+def todo_text(item):
+    """할 일 한 칸의 글자. 예전 파일은 글자만 들어 있어서 둘 다 받는다."""
+    if isinstance(item, dict):
+        return str(item.get("t", ""))
+    return str(item)
+
+
+def todo_style(item):
+    """그 칸의 글자 꾸밈 — 굵기·기울임·크기 차이."""
+    if isinstance(item, dict):
+        try:
+            return (bool(item.get("b")), bool(item.get("i")),
+                    max(-4, min(8, int(item.get("s", 0) or 0))))
+        except (TypeError, ValueError):
+            return False, False, 0
+    return False, False, 0
+
+
+def todo_pack(text, bold, italic, size):
+    """저장할 모양으로 만든다. 꾸밈이 없으면 예전처럼 글자만 남긴다."""
+    text = str(text)[:200]
+    if not (bold or italic or size):
+        return text
+    return {"t": text, "b": bool(bold), "i": bool(italic), "s": int(size)}
+
+
+def todo_font(item, base, k=1.0):
+    """그 칸을 그릴 글꼴."""
+    bold, italic, size = todo_style(item)
+    name = ("bold " if bold else "") + ("italic" if italic else "")
+    return ("Malgun Gothic", max(6, round((base + size) * k)),
+            name.strip() or "")
 
 
 def _arc(center, point, deg):
@@ -2701,6 +2744,12 @@ class Mascot:
          self._update_link) = update_notice(self.dir,
                                                              self.state_dir)
         self._update_win = None      # 업데이트 안내 팝업 (한 번만)
+        self._dot_btn = None         # 안 본 업데이트 점 자리 (x, y, 반지름)
+        self._read_ver = None        # 어디까지 읽었는지 (파일에서 한 번만 읽음)
+        if not self._update_notes and not os.path.exists(
+                os.path.join(self.state_dir, UPDATE_READ)):
+            # 설치 직후 — 지난 소식을 '못 본 것'으로 세우지 않는다
+            self._safe("update_read", self._update_mark_read)
         # 펜 추적 진단 (config의 pen_diag를 켠 캐릭터만). 어느 화면으로
         # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
         self._diag_left = self.PEN_DIAG_MAX if self.cfg.get("pen_diag") else 0
@@ -2804,6 +2853,8 @@ class Mascot:
         if self.ws_path is not None:
             menu.add_command(label="작업 종료", command=self._end_workday)
         menu.add_command(label="환경설정", command=self.open_settings)
+        if self.cfg.get("update_dot"):
+            menu.add_command(label="업데이트 소식", command=self.open_update_news)
         if self.has_clock:
             menu.add_command(label="시계 펼치기 / 접기", command=self._toggle_clock)
         if self.timer_on and self.ws_path is None:
@@ -4090,7 +4141,12 @@ class Mascot:
             g = self._card_geom()
             on_card = (g["x0"] <= px <= g["x1"] and g["y0"] - 17 <= py <= g["y1"])
             mb = getattr(self, "_yt_btn", None)
+            dot = getattr(self, "_dot_btn", None)
             btn = getattr(self, "_end_btn", None)
+            if dot and (px - dot[0]) ** 2 + (py - dot[1]) ** 2 <= dot[2] ** 2:
+                self.open_update_news()
+                self._press = None
+                return
             # 음악 버튼이 카드 윗변에 걸쳐 있으므로 카드보다 먼저 본다
             if mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
                 self._safe("music", self._yt_toggle)
@@ -4107,7 +4163,15 @@ class Mascot:
             with open(self.todo_path, encoding="utf-8") as fp:
                 data = json.load(fp)
             items = data if isinstance(data, list) else data.get("items", [])
-            self.todos = [str(t)[:200] for t in items if str(t).strip()][:20]
+            keep = []
+            for t in items:
+                if isinstance(t, dict):
+                    if str(t.get("t", "")).strip():
+                        keep.append(todo_pack(t.get("t", ""), t.get("b"),
+                                              t.get("i"), t.get("s", 0) or 0))
+                elif str(t).strip():
+                    keep.append(str(t)[:200])
+            self.todos = keep[:20]
             if isinstance(data, dict):
                 p = data.get("pos")
                 if isinstance(p, (list, tuple)) and len(p) == 2:
@@ -4185,7 +4249,7 @@ class Mascot:
         """우클릭 > 완료 — 그 할 일이 사라지고 캐릭터가 축하해 준다."""
         if not (0 <= idx < len(self.todos)):
             return
-        done_text = self.todos[idx]
+        done_text = todo_text(self.todos[idx])
         del self.todos[idx]
         self._todo_save()
         self._safe("todo_up", self._todo_upload, done_text)
@@ -4224,13 +4288,21 @@ class Mascot:
     def add_todo(self, edit=None):
         """할 일 입력 창 — 엔터로 추가, Esc로 닫기. 연달아 여러 개 적을 수 있다.
 
+        굵기·기울임·글자 크기를 고를 수 있고, 고른 대로 입력칸에 바로 보인다.
+        Shift+엔터로 줄을 바꾼다 (말풍선에도 그대로 나온다).
         edit에 번호를 주면 그 할 일을 고치는 창이 된다(엔터 한 번으로 끝).
         """
-        if getattr(self, "_todo_win", None) is not None                 and self._todo_win.winfo_exists():
+        if getattr(self, "_todo_win", None) is not None \
+                and self._todo_win.winfo_exists():
             self._todo_win.destroy()        # 수정 창을 새로 열 수 있게 닫는다
         cd = self.card
         u = self._ui
-        W, H = u(300), u(118)
+        W, H = u(320), u(198)
+        cur = (self.todos[edit] if edit is not None and edit < len(self.todos)
+               else "")
+        bold, italic, size = todo_style(cur)
+        sty = {"b": bold, "i": italic, "s": size}
+
         win = tk.Toplevel(self.root)
         self._todo_win = win
         win.title("할 일 수정" if edit is not None else "할 일 추가")
@@ -4251,47 +4323,113 @@ class Mascot:
         cv.create_text(W / 2, u(28),
                        text="이렇게 바꿀까요?" if edit is not None else "무엇을 할까요?",
                        font=self._uf(10, True), fill=cd["text"])
-        var = tk.StringVar(value=self.todos[edit] if edit is not None
-                           and edit < len(self.todos) else "")
-        ent = tk.Entry(win, textvariable=var, font=self._uf(10),
-                       relief="flat", bg="#ffffff", fg=cd["text"],
-                       highlightthickness=1, highlightbackground=cd["border"],
-                       highlightcolor=cd["fill"])
-        cv.create_window(u(20), u(56), anchor="nw", window=ent,
-                         width=W - u(40), height=u(26))
-        cv.create_text(W / 2, u(100),
-                       text=("엔터로 저장 · Esc로 취소" if edit is not None
-                             else "엔터로 추가 · Esc로 닫기"),
+
+        # 여러 줄을 쓸 수 있게 Text를 쓴다. 캔버스에 얹는 위젯은 부모를
+        # 캔버스로 둬야 스크롤·크기 변화에서 삐져나오지 않는다 (지뢰 22).
+        txt = tk.Text(cv, font=self._uf(10), relief="flat", bg="#ffffff",
+                      fg=cd["text"], highlightthickness=1, wrap="word",
+                      highlightbackground=cd["border"],
+                      highlightcolor=cd["fill"], undo=True)
+        cv.create_window(u(20), u(56), anchor="nw", window=txt,
+                         width=W - u(40), height=u(58))
+        txt.insert("1.0", todo_text(cur))
+
+        def apply_font():
+            txt.config(font=todo_font({"b": sty["b"], "i": sty["i"],
+                                       "s": sty["s"], "t": ""}, 10,
+                                      getattr(self, "ui_k", 1.0)))
+
+        # ── 꾸밈 단추 ────────────────────────────────────────────────────
+        chips = {}
+
+        def chip(x0, x1, y0, label, key, font=None):
+            box = (x0, y0, x1, y0 + u(26))
+            shape = rr(*box, u(9), fill=cd["soft"], outline=cd["border"],
+                       width=1)
+            tid = cv.create_text((x0 + x1) / 2, y0 + u(13), text=label,
+                                 font=font or self._uf(9, True), fill=cd["sub"])
+            chips[key] = (shape, tid, box)
+            return box
+
+        def paint():
+            for key, (shape, tid, _) in chips.items():
+                if key not in ("b", "i"):
+                    continue
+                on = sty[key]
+                cv.itemconfig(shape, fill=cd["fill"] if on else cd["soft"],
+                              outline=cd["fill"] if on else cd["border"])
+                cv.itemconfig(tid, fill="#ffffff" if on else cd["sub"])
+            cv.itemconfig(chips["size"][1], text="크기 %+d" % sty["s"]
+                          if sty["s"] else "크기 보통")
+            apply_font()
+
+        y0 = u(124)
+        chip(u(20), u(74), y0, "굵게", "b", self._uf(9, True))
+        chip(u(80), u(140), y0, "기울임", "i",
+             ("Malgun Gothic", max(7, round(9 * getattr(self, "ui_k", 1.0))),
+              "italic"))
+        chip(u(150), u(180), y0, "－", "minus")
+        chip(u(184), u(250), y0, "크기 보통", "size")
+        chip(u(254), u(284), y0, "＋", "plus")
+
+        def on_chip(e):
+            for key, (_, _, box) in chips.items():
+                if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+                    if key in ("b", "i"):
+                        sty[key] = not sty[key]
+                    elif key == "minus":
+                        sty["s"] = max(-4, sty["s"] - 1)
+                    elif key == "plus":
+                        sty["s"] = min(8, sty["s"] + 1)
+                    elif key == "size":
+                        sty["s"] = 0
+                    paint()
+                    txt.focus_set()
+                    return
+
+        cv.bind("<Button-1>", on_chip)
+        cv.create_text(W / 2, u(176),
+                       text=("엔터로 저장 · Shift+엔터 줄바꿈 · Esc로 취소"
+                             if edit is not None
+                             else "엔터로 추가 · Shift+엔터 줄바꿈 · Esc로 닫기"),
                        font=self._uf(8), fill=cd["sub"])
+        paint()
 
         def commit(_e=None):
-            text = var.get().strip()
+            text = txt.get("1.0", "end").strip()
+            item = todo_pack(text, sty["b"], sty["i"], sty["s"])
             if edit is not None:                 # 수정: 한 번 고치고 닫는다
                 if text and edit < len(self.todos):
-                    self.todos[edit] = text[:200]
+                    self.todos[edit] = item
                     self._todo_save()
                     self._todo_refresh()
                 win.destroy()
-                return
+                return "break"
             if text:
-                self.todos.append(text[:200])
+                self.todos.append(item)
                 del self.todos[20:]
                 self._todo_save()
                 self._todo_refresh()
-                var.set("")
+                txt.delete("1.0", "end")
             else:
                 win.destroy()
+            return "break"
 
-        ent.bind("<Return>", commit)
+        def on_return(e):
+            if e.state & 0x0001:        # Shift — 줄바꿈은 그대로 둔다
+                return None
+            return commit()
+
+        txt.bind("<Return>", on_return)
         win.bind("<Escape>", lambda _e: win.destroy())
-        if edit is not None:
-            ent.select_range(0, "end")       # 바로 고쳐 쓸 수 있게 전체 선택
         win.update_idletasks()
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
         py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
         win.geometry(f"+{int(px)}+{int(py)}")
-        ent.focus_force()
+        txt.focus_force()
+        if edit is not None:
+            txt.tag_add("sel", "1.0", "end-1c")   # 바로 고쳐 쓸 수 있게
 
     def _on_poke(self):
         """캐릭터 클릭 반응 — 콩 튀고 한마디. (반응 파츠는 나중에 교체 가능)"""
@@ -5276,6 +5414,31 @@ class Mascot:
                              bx + 7.0, by, fill=ink, outline="")
         self._yt_btn = (bx, by, r)
 
+    def _draw_update_dot(self):
+        """안 본 업데이트가 있으면 카드 오른쪽 위에 작은 빨간 점.
+
+        점 자체가 버튼이다. 한 번 누르면 안내가 열리고 그 순간 읽음이 된다.
+        """
+        if not self._update_unread():
+            return
+        g = self._card_geom()
+        r = 5.5
+        # 카드 오른쪽 위 모서리에 걸치듯 얹는다. 안쪽으로 넣으면 시간 글자를
+        # 덮어서, 모서리 곡선 위가 유일하게 비어 있는 자리다.
+        cx = min(g["x1"] - 6, self.W - r - 3)
+        cy = max(g["y0"] + 6, r + 3)
+        c = self.canvas
+        # 어떤 카드 색 위에서도 보이도록 흰 테를 한 겹 두른다
+        c.create_oval(cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2,
+                      fill="#ffffff", outline="")
+        c.create_oval(cx - r, cy - r, cx + r, cy + r,
+                      fill="#e5484d", outline="")
+        self._dot_btn = (cx, cy, r + 7)
+
+    def open_update_news(self):
+        """업데이트 소식 다시 보기 — 점을 눌렀을 때도 이 길로 온다."""
+        self._safe("update_popup", self._show_update_popup)
+
     def add_music(self):
         """유튜브 노래 주소를 넣는 창. 엔터로 저장 후 바로 재생."""
         if getattr(self, "_yt_win", None) is not None \
@@ -5926,7 +6089,7 @@ class Mascot:
             self._update_msg = None
             self.next_talk = now + 120
             if self._update_notes:                # 무엇이 바뀌었는지 팝업으로
-                self._safe("update_popup", self._show_update_popup)
+                self._safe("update_popup", self._show_update_popup, False)
         self._rec_tick(now, state)
         if (self.bubble is None and now >= self.next_talk
                 and not sleeping and now > self.celebrate_until):
@@ -7498,6 +7661,55 @@ class Mascot:
         py2 = min(max(self.root.winfo_rooty() - u(120), 10), max(sh - H - 60, 10))
         win.geometry("+%d+%d" % (int(px2), int(py2)))
 
+    # ── 안 본 업데이트 표시 (빨간 점) ────────────────────────────────
+    # 켜짐/꺼짐을 저장하지 않는다. '어디까지 읽었나' 숫자 하나만 두고 점은
+    # 볼 때마다 계산한다 — 저장된 상태가 없으니 켜진 채로 굳을 수가 없다.
+    def _update_latest(self, pages=None):
+        """기록에 있는 가장 최신 안내 번호. 없으면 0."""
+        try:
+            vs = [int(g.get("ver") or 0)
+                  for g in (pages if pages is not None else self._update_pages())]
+            return max([v for v in vs if v > 0] or [0])
+        except Exception:
+            return 0
+
+    def _update_read_ver(self):
+        """어디까지 읽었는지. 파일이 없으면 메모리 값, 그것도 없으면 0."""
+        got = getattr(self, "_read_ver", None)
+        if got is not None:
+            return got
+        v = 0
+        try:
+            with open(os.path.join(self.state_dir, UPDATE_READ),
+                      encoding="utf-8") as fp:
+                v = int(json.load(fp).get("ver") or 0)
+        except Exception:
+            v = 0
+        self._read_ver = v
+        return v
+
+    def _update_mark_read(self):
+        """지금까지의 안내를 다 읽은 것으로 둔다.
+
+        저장이 실패해도 메모리 값은 올린다 — 최악이 '다음에 켤 때 한 번 더
+        뜨는 것'이 되게. 점이 안 사라지는 것보다 그쪽이 낫다.
+        """
+        v = max(self._update_latest(), self._update_read_ver())
+        self._read_ver = v
+        try:
+            with open(os.path.join(self.state_dir, UPDATE_READ), "w",
+                      encoding="utf-8") as fp:
+                json.dump({"ver": v}, fp)
+        except Exception:
+            pass
+
+    def _update_unread(self):
+        """안 본 안내가 있는가 — 그릴 때마다 계산한다."""
+        if not self.cfg.get("update_dot"):
+            return False
+        latest = self._update_latest()
+        return latest > 0 and latest > self._update_read_ver()
+
     def _update_pages(self):
         """보여 줄 안내 묶음들 — 오래된 것부터. 기록이 없으면 방금 것만."""
         pages = []
@@ -7514,36 +7726,69 @@ class Mascot:
                       "link": getattr(self, "_update_link", None)}]
         return pages
 
-    def _show_update_popup(self):
+    @staticmethod
+    def _note_split(note):
+        """안내 한 덩이를 (제목, 본문)으로 나눈다.
+
+        줄바꿈이 들어 있으면 첫 줄이 제목이다. 없으면 첫 문장을 제목으로
+        삼는다 — 배포할 때 첫 문장을 '무엇이 생겼는지'로 쓰는 관습에 맞춘 것.
+        """
+        s = str(note).strip()
+        if "\n" in s:
+            a, b = s.split("\n", 1)
+            return a.strip(), b.strip()
+        import re
+        m = re.match(r"^(.{4,70}?[.!?])\s+(\S.*)$", s, re.S)
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+        return s, ""
+
+    def _show_update_popup(self, mark=True):
         """무엇이 바뀌었는지 알려 주는 창.
 
         지난 안내도 화살표로 넘겨 볼 수 있다. 못 보고 지나간 사이에 다음
         업데이트가 오면 예전 것이 덮여 사라지던 문제 때문이다.
+        내용이 길어질 수 있으므로 처음에는 적당한 높이로 띄우고, 창 아래를
+        잡아 끌어 늘릴 수 있게 한다. 그 높이는 다음에도 기억한다.
         """
         pages = self._update_pages()
         self._update_notes = []
+        # 사람이 직접 열었으면 그 순간 읽음으로 찍는다 — 닫을 때가 아니라.
+        # 그리다 터져도, X로 닫아도 이미 읽은 것이 된다.
+        # 반대로 저절로 뜬 창은 읽음으로 치지 않는다. 자리를 비운 사이에
+        # 떴을 수도 있어서, 그때는 점을 남겨 둬야 나중에 다시 볼 수 있다.
+        if mark:
+            self._safe("update_read", self._update_mark_read)
         if not pages or self._update_win is not None:
             return
         cd, u = self.card, self._ui
         W, PAD = u(330), u(20)
         head_h = u(78)
+        btn_h = u(40) + u(40)
         page = [len(pages) - 1]          # 처음에는 가장 최근 것
 
         win = tk.Toplevel(self.root)
         self._update_win = win
         win.title("업데이트")
         win.attributes("-topmost", True)
-        win.resizable(False, False)
+        win.resizable(False, True)       # 세로만 조절 (가로는 글줄이 흐트러진다)
         win.configure(bg=cd["panel"])
         top = tk.Frame(win, bg=cd["panel"])
-        top.pack()
+        top.pack(fill="both", expand=True)
         cv = tk.Canvas(top, width=W, bg=cd["panel"], highlightthickness=0)
-        cv.pack(side="left")
+        cv.pack(side="left", fill="both", expand=True)
         sb = tk.Scrollbar(top, orient="vertical", command=cv.yview)
         cv.config(yscrollcommand=sb.set)
-        bar = tk.Canvas(win, bg=cd["panel"], highlightthickness=0)
-        bar.pack()
+        bar = tk.Canvas(win, width=W, height=btn_h, bg=cd["panel"],
+                        highlightthickness=0)
+        bar.pack(fill="x")
         hits = []
+        state = {"content": 0, "saved_at": 0.0}
+
+        F_TITLE = self._uf(10, True)
+        F_BODY = self._uf(9)
+        ROW_T, ROW_B = u(25), u(21)
+        GAP_TB, GAP_ITEM = u(10), u(16)   # 제목→본문, 항목→항목
 
         def rr(c, x0, y0, x1, y1, r, **kw):
             pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r,
@@ -7551,33 +7796,43 @@ class Mascot:
                    x0, y0 + r, x0, y0]
             return c.create_polygon(pts, smooth=True, **kw)
 
-        def wrap(font, notes):
-            inner = W - PAD * 2 - u(46)
-            out = []
-            for note in notes:
-                cur, head = "", True
-                for word in str(note).split():
-                    t = (cur + " " + word).strip()
-                    tid = cv.create_text(-4000, -4000, text=t, font=font,
-                                         anchor="w")
-                    x0, _, x1, _ = cv.bbox(tid)
-                    cv.delete(tid)
-                    if cur and x1 - x0 > inner:
-                        out.append((cur, head))
-                        cur, head = word, False
-                    else:
-                        cur = t
-                if cur:
-                    out.append((cur, head))
+        def wrap_one(text, font, inner):
+            """한 덩이를 그 글꼴 기준으로 줄바꿈한다."""
+            out, cur = [], ""
+            for word in str(text).split():
+                t = (cur + " " + word).strip()
+                tid = cv.create_text(-4000, -4000, text=t, font=font,
+                                     anchor="w")
+                x0, _, x1, _ = cv.bbox(tid)
+                cv.delete(tid)
+                if cur and x1 - x0 > inner:
+                    out.append(cur)
+                    cur = word
+                else:
+                    cur = t
+            if cur:
+                out.append(cur)
             return out
 
-        def close(_e=None):
-            self._update_win = None
-            win.destroy()
-
-        def flip(d):
-            page[0] += d
-            render()
+        def layout(notes):
+            """(종류, 글자) 목록과 전체 높이."""
+            inner = W - PAD * 2 - u(46)
+            rows, h = [], u(14)
+            for i, note in enumerate(notes):
+                if i:
+                    rows.append(("gap", ""))
+                    h += GAP_ITEM
+                title, body = self._note_split(note)
+                for j, t in enumerate(wrap_one(title, F_TITLE, inner)):
+                    rows.append(("title" if j == 0 else "title2", t))
+                    h += ROW_T
+                if body:
+                    rows.append(("gap2", ""))
+                    h += GAP_TB
+                    for t in wrap_one(body, F_BODY, inner):
+                        rows.append(("body", t))
+                        h += ROW_B
+            return rows, h + u(14)
 
         def render():
             cv.delete("all")
@@ -7585,27 +7840,13 @@ class Mascot:
             hits.clear()
             i = max(0, min(page[0], len(pages) - 1))
             page[0] = i
-            font = self._uf(9)
-            lines = wrap(font, pages[i].get("notes") or [])
-            row_h = u(22)
-            body_h = u(14) + row_h * len(lines) + u(14)
+            rows, body_h = layout(pages[i].get("notes") or [])
             link = pages[i].get("link") or {}
             url = str(link.get("url") or "")
             get_h = u(96) + u(14) if url.startswith("https://") else 0
             content_h = u(20) + head_h + u(16) + get_h + body_h + u(20)
-            btn_h = u(40) + u(40)
-            view_h = min(content_h,
-                         max(u(160),
-                             self.root.winfo_screenheight() - btn_h - u(90)))
-            scrolling = content_h > view_h
-            cv.config(height=view_h, scrollregion=(0, 0, W, content_h))
-            if scrolling:
-                sb.pack(side="right", fill="y")
-            else:
-                sb.pack_forget()
-            win.update_idletasks()
-            total_w = W + (max(sb.winfo_reqwidth(), u(14)) if scrolling else 0)
-            bar.config(width=total_w, height=btn_h)
+            state["content"] = content_h
+            cv.config(scrollregion=(0, 0, W, content_h))
 
             y = u(20)
             rr(cv, PAD, y, W - PAD, y + head_h, u(16), fill=cd["soft"],
@@ -7633,7 +7874,8 @@ class Mascot:
                                        capstyle="round", fill=col)
                     if on:
                         hits.append((cx - u(14), cy - u(14), cx + u(14),
-                                     cy + u(14), (lambda d: lambda: flip(d))(sign)))
+                                     cy + u(14),
+                                     (lambda d: lambda: flip(d))(sign)))
             y += head_h + u(16)
             if get_h:
                 # 새 프로그램을 받아야 하는 업데이트 — 받는 곳을 맨 위에.
@@ -7648,7 +7890,6 @@ class Mascot:
                 cv.create_text((gb[0] + gb[2]) / 2, (gb[1] + gb[3]) / 2,
                                text=str(link.get("label") or "새 버전 받기"),
                                font=self._uf(11, True), fill="#ffffff")
-                # 주소도 그대로 보여 준다 — 눌러도 열리고, 보고 옮겨 적어도 된다
                 short = url.replace("https://", "")
                 cv.create_text(W / 2, y + u(78), text=short,
                                font=self._fit(short, 8, W - PAD * 2 - u(24)),
@@ -7663,34 +7904,60 @@ class Mascot:
 
                 hits.append((PAD, y, W - PAD, y + u(96), go))
                 y += u(96) + u(14)
+
             rr(cv, PAD, y, W - PAD, y + body_h, u(14), fill="#ffffff",
                outline=cd["line"], width=1)
-            ly = y + u(14) + u(11)
-            for text, is_first in lines:
-                if is_first:
-                    cv.create_oval(PAD + u(16), ly - u(3),
-                                   PAD + u(22), ly + u(3),
-                                   fill=cd["fill"], outline="")
-                cv.create_text(PAD + u(32), ly, anchor="w", text=text,
-                               font=font, fill=cd["text"])
-                ly += row_h
+            ly = y + u(14)
+            for kind, text in rows:
+                if kind == "gap":
+                    ly += GAP_ITEM
+                    continue
+                if kind == "gap2":
+                    ly += GAP_TB
+                    continue
+                if kind == "title":
+                    cv.create_oval(PAD + u(16), ly + u(9), PAD + u(22),
+                                   ly + u(15), fill=cd["fill"], outline="")
+                if kind in ("title", "title2"):
+                    cv.create_text(PAD + u(32), ly + u(12), anchor="w",
+                                   text=text, font=F_TITLE, fill=cd["text"])
+                    ly += ROW_T
+                else:
+                    cv.create_text(PAD + u(32), ly + u(10), anchor="w",
+                                   text=text, font=F_BODY, fill=cd["sub"])
+                    ly += ROW_B
             cv.yview_moveto(0)
 
             by = u(20)
-            b = (PAD, by, total_w - PAD, by + u(40))
+            b = (PAD, by, W - PAD, by + u(40))
             rr(bar, b[0], b[1], b[2], b[3], u(14), fill=cd["fill"], outline="")
             bar.create_text((b[0] + b[2]) / 2, by + u(20), text="확인",
                             font=self._uf(10, True), fill="#ffffff")
             bar.bind("<Button-1>", lambda e: close()
                      if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
-            if scrolling:
-                def on_wheel(e):
-                    cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
-                for wgt in (win, cv, bar):
-                    wgt.bind("<MouseWheel>", on_wheel)
-            else:
-                for wgt in (win, cv, bar):
-                    wgt.unbind("<MouseWheel>")
+            fit_bar()
+
+        def fit_bar():
+            """내용이 창보다 길면 스크롤바를 붙이고, 아니면 뗀다."""
+            try:
+                if state["content"] > cv.winfo_height() + 2:
+                    if not sb.winfo_ismapped():
+                        sb.pack(side="right", fill="y")
+                elif sb.winfo_ismapped():
+                    sb.pack_forget()
+            except Exception:
+                pass
+
+        def close(_e=None):
+            # 어떤 식으로 닫든(확인·X·Esc) 읽은 것으로 둔다
+            self._safe("update_read", self._update_mark_read)
+            save_h()
+            self._update_win = None
+            win.destroy()
+
+        def flip(d):
+            page[0] += d
+            render()
 
         def on_click(e):
             cy = cv.canvasy(e.y)             # 스크롤된 만큼 좌표를 맞춘다
@@ -7699,11 +7966,51 @@ class Mascot:
                     fn()
                     return
 
+        def on_wheel(e):
+            if state["content"] > cv.winfo_height():
+                cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+
+        def on_resize(_e=None):
+            """사람이 창을 늘렸다 — 스크롤바를 다시 보고 높이를 기억한다.
+
+            여기서 after로 미뤄 두면 창이 없어진 뒤 그 예약이 불려
+            'invalid command name'이 난다. 예약 대신 시간으로 조인다.
+            """
+            fit_bar()
+            now = time.time()
+            if now - state["saved_at"] > 0.35:
+                state["saved_at"] = now
+                save_h()
+
+        def save_h():
+            try:
+                if not win.winfo_exists():
+                    return
+                h = int(win.geometry().split("+")[0].split("x")[1])
+                if h > u(200) and abs(h - int(self.us.get("update_h", 0) or 0)) > 4:
+                    self.us["update_h"] = h
+                    self._save_settings()
+            except Exception:
+                pass
+
         cv.bind("<Button-1>", on_click)
+        for wgt in (win, cv, bar):
+            wgt.bind("<MouseWheel>", on_wheel)
+        win.bind("<Escape>", close)
         win.protocol("WM_DELETE_WINDOW", close)
         render()
         win.update_idletasks()
+
+        # 처음 높이 — 내용이 길어도 적당한 크기로 띄운다
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        want = int(self.us.get("update_h", 0) or 0)
+        if want < u(240):
+            want = min(state["content"] + btn_h, u(560))
+        H = max(u(240), min(want, int(sh * 0.85)))
+        win.geometry("%dx%d" % (W + u(16), H))
+        win.update_idletasks()
+        fit_bar()
+        win.bind("<Configure>", on_resize)
         px = min(max(self.root.winfo_rootx() - 40, 10),
                  max(sw - win.winfo_width() - 10, 10))
         py = min(max(self.root.winfo_rooty() - 20, 10),
@@ -8163,6 +8470,10 @@ class Mascot:
             # 남으면, 버튼이 안 보이는데도 그 자리를 누르면 음악이 켜진다.
             self._yt_btn = None
             self._safe("music_btn", self._draw_music_btn)
+            # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
+            # 남으면 점이 안 보이는데도 그 자리를 누르면 창이 뜬다
+            self._dot_btn = None
+            self._safe("update_dot", self._draw_update_dot)
 
         # ── 몸 (+머리 없는 캐릭터는 여기서 얼굴까지) ─────────────────────
         # 개는 머리를 팔 위에 그려야 어깨가 안 튀어나오므로, 얼굴을 팔 뒤로 미룬다.
