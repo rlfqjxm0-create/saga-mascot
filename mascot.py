@@ -3013,8 +3013,6 @@ class Mascot:
         return (name in self.layout
                 and os.path.exists(os.path.join(self.parts_dir, f"{name}.png")))
 
-    OUTLINE_K = 0.78             # 가장자리 한 줄을 이만큼 어둡게 (1이면 안 함)
-
     def _hard(self, im):
         """반투명 가장자리 픽셀 이분화 — 색상키 투명의 어두운 테두리(fringe) 방지.
 
@@ -3035,7 +3033,7 @@ class Mascot:
             # 만들면 그 자리의 어두운 색이 드러나 검은 얼룩이 된다
             # (도로롱 머리카락 사건). 구멍 메우기도 같은 이유로 하지 않는다.
             im.putalpha(solid)
-            return self._rim(im, solid)
+            return im
         near = solid.filter(ImageFilter.GaussianBlur(2))
         inner = ImageChops.multiply(
             a.point(lambda v: 255 if 0 < v < 128 else 0),
@@ -3049,37 +3047,8 @@ class Mascot:
             blended = Image.composite(rgb, base, a)
             fixed = Image.composite(blended, rgb, inner)
             im = Image.merge("RGBA", (*fixed.split(), im.getchannel("A")))
-        final = self._fill_holes(ImageChops.lighter(solid, inner))
-        im.putalpha(final)
-        return self._rim(im, final)
-
-    def _rim(self, im, solid):
-        """가장자리 한 줄을 제 색보다 진하게 칠한다.
-
-        색상키 투명은 반투명을 못 내서(알파를 켜고 끄기만 한다) 바깥선이
-        톱니처럼 남는다. 그 한 줄을 어둡게 하면 '깨진 자리'가 아니라
-        '그린 선'으로 읽혀서 계단이 훨씬 덜 보인다.
-
-        검정을 덧칠하는 게 아니라 그 자리의 색을 어둡게 하는 것이라, 머리카락
-        가장자리는 머리카락 색으로, 옷 가장자리는 옷 색으로 나온다.
-        config의 outline을 0으로 두면 이 처리를 끈다.
-        """
-        k = self.cfg.get("outline", self.OUTLINE_K)
-        if not k or k >= 1.0:
-            return im
-        try:
-            from PIL import ImageChops, ImageFilter
-            edge = ImageChops.subtract(solid, solid.filter(ImageFilter.MinFilter(3)))
-            if edge.getbbox() is None:
-                return im
-            rgb = im.convert("RGB")
-            dark = rgb.point(lambda v: int(v * k))
-            out = Image.composite(dark, rgb, edge)
-            return self._avoid_key(
-                Image.merge("RGBA", (*out.split(), im.getchannel("A"))))
-        except Exception:
-            self._log_error("rim")
-            return im
+        im.putalpha(self._fill_holes(ImageChops.lighter(solid, inner)))
+        return im
 
     @staticmethod
     def _avoid_key(im):

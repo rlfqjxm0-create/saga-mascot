@@ -1,7 +1,7 @@
 {
- "version": 1786253974,
+ "version": 1786311941,
  "files": {
-  "mascot.py": "19cc8a2be1a48288e97148fd24e798c5a318c91790d94821c19ec3ab807d2156",
+  "mascot.py": "b005417f71f3cb771e79b58596e30c667ef215cba9e99fa2d31dcc88bd6e66d4",
   "parts_saga/arm_key.png": "77641097db051ac9a94a8ada77efd2dabcfca095402a443e1b8a7e30bc231011",
   "parts_saga/arm_pen.png": "4f1f9b24580480c1b6c9f7ae84036e9fa5085662b1f42daaf5e5eed1c64fed9f",
   "parts_saga/arm_right.png": "382923c4c3bbf1ad279786d7deca43430bc21b63e3e8ad884b7214dc3f27e890",
@@ -170,10 +170,6 @@
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
- "notes": [
-  "작업 종료를 누르면 나오는 '오늘의 작업' 화면이 새로워졌어요. 왼쪽 시계에 오늘 일한 시간대가 칠해집니다 — 옅은 색이 오전, 진한 색이 오후예요. 오른쪽에는 작업 시간과 앉았다 일어난 시각, 가장 오래 집중한 시간, 몇 번에 나눠 일했는지가 나와요.",
-  "할 일 글자를 꾸밀 수 있어요. 할 일 추가 창에서 굵게·기울임·글자 크기를 고르면 말풍선에 그대로 나옵니다. Shift+엔터로 줄을 바꿀 수 있고, 말풍선을 우클릭해 '수정'을 눌러도 같은 것을 고칠 수 있어요.",
-  "그린 선과 키 입력, 집중 구간, 목표 달성률을 네 칸으로 보여 줘요. 아래 '최근 7일' 막대로 요즘 페이스를 볼 수 있는데, 점선이 환경설정에서 정한 목표 시간이고 오늘 것은 진하게 칠해집니다. 하루도 안 한 날은 얇은 선으로 남아요.",
-  "캐릭터 가장자리가 계단처럼 깨져 보이던 걸 줄였어요. 환경설정 창은 아래쪽 끝을 잡아 끌어 높이를 줄일 수 있고, 그 크기와 자리를 기억해요."
- ]
+ "notes": [],
+ "silent": true
 }
