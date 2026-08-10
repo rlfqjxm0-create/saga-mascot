@@ -1696,6 +1696,24 @@ UPDATE_REPOS = {                 # 선물 캐릭터 자동 업데이트 배포 �
 UPDATE_FLAG = ".updated"          # 업데이트 알림 신호 파일
 
 
+def _save_json(path, data, **kw):
+    """중간에 꺼져도 파일이 반쪽으로 남지 않게 — 임시 파일에 쓰고 갈아 끼운다.
+
+    open(path, "w")는 여는 순간 내용을 지운다. 그 직후에 프로세스가 사라지면
+    (윈도우 종료·강제 종료·정전·업데이트 재시작) 0바이트 파일이 남는데,
+    읽는 쪽은 예외를 삼키고 기본값으로 돌아가므로 작업 기록·할 일·설정이
+    아무 말 없이 통째로 사라진다. os.replace는 윈도우에서도 원자적이라
+    갈아 끼우기 전까지 옛 파일이 그대로 남아 있다.
+    """
+    kw.setdefault("ensure_ascii", False)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, **kw)
+        fp.flush()
+        os.fsync(fp.fileno())
+    os.replace(tmp, path)
+
+
 def mark_updated(state_dir, restart, notes=None):
     """업데이트 사실을 남긴다. restart=True면 껐다 켜야 반영되는 경우.
 
@@ -1703,10 +1721,8 @@ def mark_updated(state_dir, restart, notes=None):
     """
     try:
         items = [str(s).strip() for s in (notes or []) if str(s).strip()]
-        with open(os.path.join(state_dir, UPDATE_FLAG), "w",
-                  encoding="utf-8") as fp:
-            json.dump({"restart": bool(restart), "notes": items[:6]}, fp,
-                      ensure_ascii=False)
+        _save_json(os.path.join(state_dir, UPDATE_FLAG),
+                   {"restart": bool(restart), "notes": items[:6]})
     except Exception:
         pass
 
@@ -1778,8 +1794,7 @@ def update_notice(char_dir, state_dir):
         pass
     if seen != ver:
         try:
-            with open(seen_path, "w", encoding="utf-8") as fp:
-                json.dump({"version": ver}, fp)
+            _save_json(seen_path, {"version": ver})
         except Exception:
             pass
         if seen is not None and not silent:   # 설치 후 첫 실행은 알릴 '변경'이 없다
@@ -1814,8 +1829,7 @@ def _update_log_add(state_dir, ver, notes, link=None):
             log[-1] = entry                   # 같은 버전이면 갱신만
         else:
             log.append(entry)
-        with open(path, "w", encoding="utf-8") as fp:
-            json.dump(log[-20:], fp, ensure_ascii=False)
+        _save_json(path, log[-20:])
     except Exception:
         pass
 
@@ -2479,9 +2493,18 @@ def _screen_scale(root=None):
     return 1.0
 
 
+HELLO_FILE = ".hello"        # 두 번째로 실행됐다는 신호 (먼저 뜬 캐릭터가 읽는다)
+
+
 def already_running(char):
-    """같은 캐릭터가 이미 떠 있으면 True. 실패하면 False(그냥 실행)."""
+    """같은 캐릭터가 이미 떠 있으면 True. 실패하면 False(그냥 실행).
+
+    이 프로세스가 이미 자물쇠를 쥐고 있으면 False다. 안 그러면 같은
+    프로세스에서 두 번 물었을 때 자기 자신을 보고 '이미 떠 있다'고 답한다.
+    """
     if not IS_WIN:
+        return False
+    if globals().get("_INSTANCE_LOCK"):
         return False
     try:
         name = "ena-mascot-" + str(char)
@@ -2498,6 +2521,18 @@ def already_running(char):
     return False
 
 
+def say_hello(state_dir):
+    """이미 떠 있는 캐릭터에게 '나를 또 눌렀어'라고 알린다.
+
+    바로가기를 두 번 누르는 일이 잦은데, 조용히 꺼지면 사람은 '안 켜졌다'고
+    보고 계속 누른다. 먼저 뜬 캐릭터가 이 파일을 보고 대답하게 한다.
+    """
+    try:
+        _save_json(os.path.join(state_dir, HELLO_FILE), {"ts": time.time()})
+    except Exception:
+        pass
+
+
 class Mascot:
     # 타이머 카드가 잘리지 않는 최소 창 폭 (카드 200 + 그림자·여백)
     CARD_MIN_W = 210
@@ -2510,6 +2545,13 @@ class Mascot:
         # 설정·타이머 기록 저장 위치 (자동 업데이트로 교체되지 않는 곳으로 분리 가능)
         self.state_dir = state_dir or self.dir
         os.makedirs(self.state_dir, exist_ok=True)
+        # 같은 캐릭터가 이미 떠 있으면 여기서 물러난다. 둘이 같이 뜨면 두
+        # 프로세스가 같은 기록 파일에 번갈아 써서 작업 시간·할 일이 서로를
+        # 덮어쓴다 (나중에 닫힌 쪽이 이긴다). 그냥 꺼지면 사람은 안 켜진 줄
+        # 알므로, 먼저 뜬 쪽이 대답하도록 신호를 남기고 끝낸다.
+        if not preview and already_running(self.char):
+            say_hello(self.state_dir)
+            raise SystemExit(0)
         # 업데이트가 끊겨 파츠가 섞였으면 복구 (알림 신호도 여기서 남는다)
         repair_parts(self.dir, self.state_dir)
         with open(os.path.join(self.dir, "config.json"), encoding="utf-8") as fp:
@@ -2612,6 +2654,9 @@ class Mascot:
         self._due_shown = ""         # 마지막으로 그린 날짜 (자정 넘으면 다시 그림)
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
         self._pid_written = False    # PID 파일을 남겼는가
+        self._hello_at = 0.0         # 또 실행됐는지 마지막으로 살핀 시각
+        self._fs_at = 0.0            # 전체화면 여부를 마지막으로 물어본 시각
+        self._fs_hidden = False      # 전체화면 프로그램 때문에 비켜 있는가
         self.has_clock = self.timer_on and self.ws_path is not None
         self.clock_open = bool(self.us.get("clock_open")) if self.has_clock else False
 
@@ -3190,8 +3235,7 @@ class Mascot:
             pool = [n for n in avail if n != last] or avail
         pick = random.choice(pool)
         try:
-            with open(path, "w", encoding="utf-8") as fp:
-                json.dump({"used": used + [pick], "last": pick}, fp)
+            _save_json(path, {"used": used + [pick], "last": pick})
         except Exception:
             pass
         return pick
@@ -4162,10 +4206,9 @@ class Mascot:
 
     def _todo_save(self):
         try:
-            with open(self.todo_path, "w", encoding="utf-8") as fp:
-                json.dump({"items": self.todos, "pos": self.todo_pos,
-                           "flip": self.todo_flip, "zoom": self.todo_zoom},
-                          fp, ensure_ascii=False)
+            _save_json(self.todo_path,
+                       {"items": self.todos, "pos": self.todo_pos,
+                        "flip": self.todo_flip, "zoom": self.todo_zoom})
         except Exception:
             pass
 
@@ -4543,13 +4586,13 @@ class Mascot:
     def _timer_save(self):
         try:
             self.stat["mins"] = sorted(self._act)
-            with open(self.state_path, "w", encoding="utf-8") as fp:
-                json.dump({"seconds": round(self.work_secs),
-                           "zero_at": round(self.zero_at),
-                           "day_key": self.day_key,
-                           "day_base": round(self.day_base),
-                           "goal_cheered": self.goal_cheered,
-                           "stat": self.stat, "rec": self.rec}, fp)
+            _save_json(self.state_path,
+                       {"seconds": round(self.work_secs),
+                        "zero_at": round(self.zero_at),
+                        "day_key": self.day_key,
+                        "day_base": round(self.day_base),
+                        "goal_cheered": self.goal_cheered,
+                        "stat": self.stat, "rec": self.rec})
         except Exception:
             pass
 
@@ -4624,11 +4667,9 @@ class Mascot:
 
     def _due_save(self):
         try:
-            with open(os.path.join(self.state_dir, ".dues.json"), "w",
-                      encoding="utf-8") as fp:
-                json.dump({"items": self.dues, "pos": self.due_pos,
-                           "flip": self.due_flip, "zoom": self.due_zoom},
-                          fp, ensure_ascii=False)
+            _save_json(os.path.join(self.state_dir, ".dues.json"),
+                       {"items": self.dues, "pos": self.due_pos,
+                        "flip": self.due_flip, "zoom": self.due_zoom})
         except Exception:
             pass
 
@@ -4821,9 +4862,8 @@ class Mascot:
         # 마일스톤은 '처음부터 지금까지'라 거기서 빼면 뒷걸음질친다.
         try:
             cum = round(self._cum_m() + dist, 2)
-            with open(os.path.join(self.state_dir, ".history.json"), "w",
-                      encoding="utf-8") as fp:
-                json.dump({"days": days, "cum_m": cum}, fp, ensure_ascii=False)
+            _save_json(os.path.join(self.state_dir, ".history.json"),
+                       {"days": days, "cum_m": cum})
         except Exception:
             pass
         # 이번 세션 몫은 여기서 0으로 되돌린다. 안 그러면 하루에 두 번
@@ -4923,8 +4963,7 @@ class Mascot:
             items.append({"text": text, "ts": time.time(),
                           "char": self.cfg.get("name", self.char),
                           "ver": self._my_version()})
-            with open(self._fb_path(), "w", encoding="utf-8") as fp:
-                json.dump(items[-20:], fp, ensure_ascii=False)
+            _save_json(self._fb_path(), items[-20:])
         except Exception:
             pass
 
@@ -4971,8 +5010,7 @@ class Mascot:
                 left.append(it)
         try:
             if left:
-                with open(self._fb_path(), "w", encoding="utf-8") as fp:
-                    json.dump(left, fp, ensure_ascii=False)
+                _save_json(self._fb_path(), left)
             elif os.path.exists(self._fb_path()):
                 os.remove(self._fb_path())
         except Exception:
@@ -5638,6 +5676,139 @@ class Mascot:
             self._safe("win_pos", self._save_win_pos)
         self._say("여기 있어요!", 2.2)
 
+    def _hello_tick(self, now):
+        """바로가기를 또 눌렀으면 대답한다. 뒤에 뜬 쪽은 이미 물러난 뒤다."""
+        if now - self._hello_at < 1.0:
+            return
+        self._hello_at = now
+        p = os.path.join(self.state_dir, HELLO_FILE)
+        if not os.path.exists(p):
+            return
+        try:
+            fresh = now - os.path.getmtime(p) < 30
+            os.remove(p)
+        except OSError:
+            return           # 못 지우면 계속 불리므로 대답하지 않는다
+        if fresh:            # 예전에 남아 있던 신호에는 대답하지 않는다
+            self._tray_call()
+
+    # 윈도우가 '알림을 띄우면 안 되는 상태'로 보는 값들
+    # (2=전체화면 프로그램, 3=D3D 전체화면, 4=프레젠테이션 모드)
+    FS_STATES = (2, 3, 4)
+
+    def _fullscreen_busy(self):
+        """게임·영상이 캐릭터가 있는 화면을 전체화면으로 덮고 있는가.
+
+        두 가지를 다 만족해야 한다.
+
+        1) 윈도우가 '알림 띄우면 안 되는 상태'라고 답할 것. 창 크기로만 재면
+           '최대화'와 구분이 안 되는데, 이 API는 최대화에는 반응하지 않는다
+           (실측: 최대화 5, 전체화면 2).
+        2) 앞에 있는 창이 '캐릭터가 놓인 화면'을 통째로 덮을 것. 1)은 주
+           모니터만 보기 때문에(실측), 이것 없이는 주 모니터에서 게임을 켰을
+           때 다른 화면에 있던 캐릭터까지 사라진다.
+
+        그래서 보조 모니터에서 전체화면으로 켠 경우는 잡지 못한다. 잘못
+        숨기는 것보다 안 숨기는 쪽이 낫다고 보고 이렇게 뒀다.
+        """
+        return IS_WIN and self._fs_state_busy() and self._fs_covers_me()
+
+    def _fs_state_busy(self):
+        """윈도우가 '지금 알림을 띄우면 안 된다'고 답하는가."""
+        try:
+            sh = getattr(self, "_shell32", None)
+            if sh is None:
+                # 공용 windll이 아니라 따로 연다 (지뢰 21: argtypes 간섭)
+                sh = self._shell32 = ctypes.WinDLL("shell32")
+            st = ctypes.c_int(0)
+            if sh.SHQueryUserNotificationState(ctypes.byref(st)) != 0:
+                return False
+            return st.value in self.FS_STATES
+        except Exception:
+            return False
+
+    def _fs_covers_me(self):
+        """앞에 있는 창이 캐릭터가 놓인 화면을 통째로 덮고 있는가.
+
+        최대화한 창은 작업표시줄을 안 덮으므로 여기서 걸러진다
+        (실측: 화면 아래끝 2143 / 최대화 창 아래끝 2106 / 전체화면 2143).
+        """
+        try:
+            u = ctypes.windll.user32
+            fg = u.GetForegroundWindow()
+            if not fg or fg == self._main_hwnd:
+                return False
+            r = (ctypes.c_long * 4)()          # left, top, right, bottom
+            u.GetWindowRect(fg, ctypes.byref(r))
+            x = self.root.winfo_rootx() + self.W // 2
+            y = self.root.winfo_rooty() + self.H // 2
+            ml, mt, mr, mb = monitor_at(x, y)
+            return r[0] <= ml and r[1] <= mt and r[2] >= mr and r[3] >= mb
+        except Exception:
+            return False
+
+    def _fs_windows(self):
+        """같이 숨겼다 같이 보여야 하는 창들 (본체·그림자·말풍선 패널)."""
+        out = [self.root]
+        for holder in (self.shadow, self.todo_panel, self.due_panel):
+            top = getattr(holder, "top", None)
+            if top is not None:
+                out.append(top)
+        return out
+
+    def _fs_tick(self, now):
+        """전체화면 프로그램(게임·영상) 위에 얹혀 있지 않게 잠깐 비켜 준다.
+
+        '항상 위'라서 게임이나 영화 위에 캐릭터가 그대로 남는다. 사람이
+        설정을 뒤져 끄게 하지 말고, 전체화면인 동안만 스스로 물러난다.
+        """
+        if not IS_WIN or not self.us.get("topmost", True):
+            if self._fs_hidden:
+                self._fs_show()
+            return
+        if now - self._fs_at < 0.8:
+            return
+        self._fs_at = now
+        busy = self._fullscreen_busy()
+        if busy and not self._fs_hidden:
+            self._fs_hidden = True
+            for w in self._fs_windows():
+                try:
+                    w.withdraw()
+                except Exception:
+                    pass
+            if self._fx is not None:
+                try:
+                    self._fx.hide()
+                except Exception:
+                    pass
+        elif not busy and self._fs_hidden:
+            self._fs_show()
+
+    def _fs_show(self):
+        """비켜 있던 창들을 되돌린다. 자리와 z순서를 다시 잡아 준다."""
+        self._fs_hidden = False
+        for w in self._fs_windows():
+            try:
+                w.deiconify()
+            except Exception:
+                pass
+        try:
+            self.root.attributes("-topmost", bool(self.us.get("topmost", True)))
+        except Exception:
+            pass
+        # 그림자는 그림이 바뀔 때만 다시 올린다. 숨은 동안 레이어 내용이
+        # 날아갔을 수 있으니 되돌아올 때 한 번 밀어 넣는다 (지뢰 23).
+        if self.shadow is not None:
+            try:
+                self.shadow.set_image(self._shadow_base or self.shadow_img)
+            except Exception:
+                pass
+        # 되돌린 직후에 창을 직접 건드리면 Tk가 미뤄 둔 이동이 버려진다
+        # (지뢰 15). 다음 프레임에서 따라오게 자리 기억만 지운다.
+        self._last_pos = None
+        self._panel_z = 0.0
+
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
 
@@ -5674,8 +5845,7 @@ class Mascot:
                     d = json.load(fp) or {}
             d["win_x"] = int(self.root.winfo_x())
             d["win_y"] = int(self.root.winfo_y())
-            with open(self.ui_prefs_path, "w", encoding="utf-8") as fp:
-                json.dump(d, fp)
+            _save_json(self.ui_prefs_path, d)
         except Exception:
             pass
 
@@ -7721,9 +7891,7 @@ class Mascot:
         v = max(self._update_latest(), self._update_read_ver())
         self._read_ver = v
         try:
-            with open(os.path.join(self.state_dir, UPDATE_READ), "w",
-                      encoding="utf-8") as fp:
-                json.dump({"ver": v}, fp)
+            _save_json(os.path.join(self.state_dir, UPDATE_READ), {"ver": v})
         except Exception:
             pass
 
@@ -8203,8 +8371,14 @@ class Mascot:
             return
         try:
             import traceback
-            with open(os.path.join(self.state_dir, ".error.log"), "a",
-                      encoding="utf-8") as fp:
+            path = os.path.join(self.state_dir, ".error.log")
+            # 몇 달을 쓰면 계속 쌓이기만 한다. 커지면 옛것을 버리고 새로 쓴다.
+            try:
+                if os.path.getsize(path) > 512 * 1024:
+                    os.replace(path, path + ".1")
+            except OSError:
+                pass
+            with open(path, "a", encoding="utf-8") as fp:
                 fp.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {where}\n")
                 fp.write(f"char={self.char} frozen={getattr(sys, 'frozen', False)} "
                          f"scale={self.s:.3f} oy={self.oy} WH={self.W}x{self.H}\n")
@@ -8251,7 +8425,8 @@ class Mascot:
         # (자는 중 10fps / 5초 이상 무입력 15fps / 작업 중 30fps)
         quiet = time.time() - max(self.last_key, self.last_pointer)
         self._tick_after = self.root.after(
-            100 if self._sleeping else (66 if quiet > 5.0 else 33), self.tick)
+            100 if (self._sleeping or self._fs_hidden)
+            else (66 if quiet > 5.0 else 33), self.tick)
         try:
             self._tick_body()
         except Exception:
@@ -8280,11 +8455,25 @@ class Mascot:
         if now >= self.next_blink:
             self.blink_until = now + 0.12
             self.next_blink = now + random.uniform(2.5, 5.5)
+        # 또 실행했는가 / 전체화면 프로그램이 떴는가
+        self._safe("hello", self._hello_tick, now)
+        # 전체화면 비켜 주기는 _safe에 맡기지 않는다. 세 번 터져 그 구역이
+        # 꺼지면 '숨은 채로 굳어' 캐릭터가 영영 안 보인다 (지뢰 14).
+        # 터지면 무조건 되돌려 놓는다 — 최악이 '게임 위에 잠깐 보이는 것'.
+        try:
+            self._fs_tick(now)
+        except Exception:
+            self._log_error("fullscreen")
+            try:
+                self._fs_show()
+            except Exception:
+                pass
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
-        if (self.shadow is not None or self.todo_panel is not None
-                or self.due_panel is not None):
+        if not self._fs_hidden and (self.shadow is not None
+                                    or self.todo_panel is not None
+                                    or self.due_panel is not None):
             pos = (self.root.winfo_rootx(), self.root.winfo_rooty())
             if pos != self._last_pos:
                 self._last_pos = pos
@@ -9628,8 +9817,7 @@ class Mascot:
 
     def _save_settings(self):
         try:
-            with open(self.settings_path, "w", encoding="utf-8") as fp:
-                json.dump(self.us, fp, ensure_ascii=False, indent=1)
+            _save_json(self.settings_path, self.us, indent=1)
         except Exception:
             pass
 
