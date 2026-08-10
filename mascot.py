@@ -338,6 +338,9 @@ CARD_FILL = "#f2a7b3"
 DOT_ON, DOT_OFF = "#7ccf8f", "#cfcfcf"
 
 # 환경설정 기본값 (캐릭터 폴더의 .settings.json에 저장)
+# 예전 기본 작업 프로그램 목록. 이 값 그대로면 새 목록으로 갈아 준다.
+OLD_WORK_APPS = "clipstudiopaint.exe, photoshop.exe, sai2.exe, krita.exe"
+
 DEFAULT_SETTINGS = {
     "goal_hours": 6.0,    # 목표 작업시간
     "idle_sec": 15.0,     # 휴식 전환(초)
@@ -351,7 +354,7 @@ DEFAULT_SETTINGS = {
     "scale_pct": 100,     # 캐릭터 크기(%)
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
-    "work_apps": "clipstudiopaint.exe, photoshop.exe, sai2.exe, krita.exe",
+    "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
     "sleep_min": 10,      # 이 시간(분) 동안 무입력이면 수면 모드
     "shadow": True,       # 캐릭터 뒤 옅은 그림자
     "clock_open": False,  # 시계형 카드에서 시계 펼침 상태
@@ -2523,6 +2526,10 @@ class Mascot:
                 saved = json.load(fp)
             self._font_pct_saved = "font_pct" in saved
             self.us.update(saved)
+            # 목록을 손대지 않고 예전 기본값 그대로 쓰던 사람은 새 목록으로.
+            # 직접 고친 사람은 건드리지 않는다.
+            if str(self.us.get("work_apps", "")).strip() == OLD_WORK_APPS:
+                self.us["work_apps"] = DEFAULT_SETTINGS["work_apps"]
         except Exception:
             pass
         self._sanitize_settings()
@@ -2592,6 +2599,9 @@ class Mascot:
         self._fb_msg = ""            # 건의 보내기 결과 문구
         self._fb_last = 0.0          # 마지막으로 보낸 시각 (연타 방지)
         self.zero_at = 0.0           # 작업 종료를 누른 시점의 누적 — 여기서부터 다시 센다
+        self.day_key = ""            # 지금 세고 있는 작업일
+        self.day_base = 0.0          # 그 작업일이 시작될 때의 누적
+        self._day_at = 0.0           # 마지막으로 날짜를 확인한 시각
         self.goal_cheered = ""       # 목표 달성을 축하한 작업일
         # ── 마감 목록 (할 일 목록과 같은 말풍선 구조, 여러 개 등록) ──────
         self.dues = []               # [{"name": ..., "date": "YYYY-MM-DD"}]
@@ -4513,6 +4523,8 @@ class Mascot:
                 st = json.load(fp)
             self.work_secs = float(st.get("seconds", 0))
             self.zero_at = float(st.get("zero_at", 0) or 0)
+            self.day_key = str(st.get("day_key", "") or "")
+            self.day_base = float(st.get("day_base", 0) or 0)
             self.goal_cheered = str(st.get("goal_cheered", "") or "")
             saved = st.get("stat")
             if isinstance(saved, dict):
@@ -4534,6 +4546,8 @@ class Mascot:
             with open(self.state_path, "w", encoding="utf-8") as fp:
                 json.dump({"seconds": round(self.work_secs),
                            "zero_at": round(self.zero_at),
+                           "day_key": self.day_key,
+                           "day_base": round(self.day_base),
                            "goal_cheered": self.goal_cheered,
                            "stat": self.stat, "rec": self.rec}, fp)
         except Exception:
@@ -4777,17 +4791,22 @@ class Mascot:
         except Exception:
             return {}
 
-    def _hist_add(self):
-        """작업 종료 때 그날 기록에 더한다. 하루에 여러 번 끝내면 합산된다."""
+    def _hist_add(self, key=None):
+        """그날 기록을 남긴다. 작업 종료 때와 작업일이 바뀔 때 부른다.
+
+        작업 시간은 '더하기'가 아니라 '덮어쓰기'다 — 하루에 몇 번을 끝내도
+        같은 값이 되어 겹칠 수가 없다. 획·클릭처럼 세션마다 0으로 되돌리는
+        값들은 더해서 하루치를 만든다.
+        """
         if not self.cfg.get("history"):
             return
         days = self._hist_load()
-        key = self._session_day()
+        key = key or self._session_day()
         cur = days.get(key) or {}
         s_ = self.stat
         dist = self._dist_m()
         days[key] = {
-            "work": int(cur.get("work", 0)) + int(self._shown_secs()),
+            "work": max(int(cur.get("work", 0)), int(self._today_secs())),
             "strokes": int(cur.get("strokes", 0)) + int(s_.get("strokes", 0)),
             "keys": int(cur.get("keys", 0)) + int(s_.get("keys", 0)),
             "best": max(int(cur.get("best", 0)), int(s_.get("best", 0))),
@@ -5670,6 +5689,39 @@ class Mascot:
             self.zero_at = 0.0
         return max(0.0, self.work_secs - self.zero_at)
 
+    def _today_secs(self):
+        """오늘(작업일) 일한 시간.
+
+        카드에 보이는 값(_shown_secs)은 '작업 종료 뒤로 다시 센 만큼'이라
+        여러 번 끝내면 줄어든다. 기록과 브리핑은 하루 단위여야 하므로
+        작업일이 시작될 때의 누적을 빼서 따로 낸다.
+        """
+        if self.work_secs < self.day_base:   # 연동 쪽이 초기화됐다
+            self.day_base = 0.0
+        return max(0.0, self.work_secs - self.day_base)
+
+    def _day_roll(self, now):
+        """작업일이 바뀌면 지난 하루를 기록에 옮겨 담고 0부터 다시 센다.
+
+        작업 종료를 안 누르고 그냥 끄는 날이 있어서, 버튼에만 기대면 그날이
+        통째로 빈다. 지우기 전에 기록으로 먼저 옮기므로 시간이 사라지지 않는다.
+        """
+        if now - self._day_at < 30:
+            return
+        self._day_at = now
+        key = self._my_workday()
+        if key == self.day_key:
+            return
+        if self.day_key and self._today_secs() >= 60:
+            # 지난 하루를 그 날짜로 남긴다 (기록은 덮어쓰기라 겹치지 않는다)
+            self._safe("history", self._hist_add, self.day_key)
+        self.day_key = key
+        self.day_base = self.work_secs
+        self.zero_at = self.work_secs       # 카드도 오늘치부터
+        self.stat["day"] = key
+        self._act.clear()
+        self._safe("timer_save", self._timer_save)
+
     def _reset_records(self):
         """새 세션 — 기록 갱신 축하를 처음부터 다시 센다."""
         self.rec = {"strokes": [], "focus": 0.0}
@@ -5679,6 +5731,7 @@ class Mascot:
     def _timer_reset(self):
         self.work_secs = 0.0
         self.zero_at = 0.0
+        self.day_base = 0.0
         self._reset_records()
         self._timer_save()
 
@@ -5727,6 +5780,7 @@ class Mascot:
 
     def _timer_tick(self, now, idle):
         """상태 반환: work(측정)/other(작업앱 아님)/idle(휴식)/off(연동 끊김)."""
+        self._safe("day_roll", self._day_roll, now)
         if self.ws_path is not None:
             # 워크스페이스 워크타이머 연동: 에이전트의 라이브 파일을 읽어 표시만 한다
             if now - self._ws_read > 1.0:
@@ -5790,7 +5844,7 @@ class Mascot:
         m = lt.tm_hour * 60 + lt.tm_min
         if m != getattr(self, "_act_min", -1):
             self._act_min = m
-            day = self._session_day()
+            day = self._my_workday()
             if day != s.get("day"):       # 작업일이 바뀌면 시계를 비운다
                 s["day"] = day
                 self._act.clear()
@@ -7237,7 +7291,7 @@ class Mascot:
     def _brief_data(self):
         """브리핑에 그릴 값 한 벌. 기록에 넣기 전에 찍어 둔다."""
         s = self.stat
-        total = int(self._shown_secs())
+        total = int(self._today_secs())     # 카드의 누적이 아니라 '오늘'
         goal = max(float(self.us.get("goal_hours", 6)), 0.5) * 3600
         days = self._hist_load() if self.cfg.get("history") else {}
         today = self._session_day()
@@ -7595,6 +7649,7 @@ class Mascot:
         def reset_and_close():
             self.work_secs = 0.0
             self.zero_at = 0.0
+            self.day_base = 0.0
             for kk in ("work", "other", "idle", "best", "_run", "first", "last",
                        "px"):
                 self.stat[kk] = 0.0
