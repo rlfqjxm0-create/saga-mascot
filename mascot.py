@@ -2686,6 +2686,7 @@ class Mascot:
         self._upd_start = time.time()   # 첫 확인은 켠 뒤 조금 있다가
         self._upd_busy = False       # 확인하는 중인가
         self._upd_restart = False    # 받아야 할 새 버전이 올라와 있는가
+        self._upd_etag = ""          # 지난번에 받은 표 (바뀐 것만 받으려고)
         self._fs_at = 0.0            # 전체화면 여부를 마지막으로 물어본 시각
         self._fs_hidden = False      # 전체화면 프로그램 때문에 비켜 있는가
         self.has_clock = self.timer_on and self.ws_path is not None
@@ -8009,10 +8010,12 @@ class Mascot:
     # ── 안 본 업데이트 표시 (빨간 점) ────────────────────────────────
     # 켜짐/꺼짐을 저장하지 않는다. '어디까지 읽었나' 숫자 하나만 두고 점은
     # 볼 때마다 계산한다 — 저장된 상태가 없으니 켜진 채로 굳을 수가 없다.
-    # 확인하는 것은 version.json 하나뿐이라 가볍다. 4시간으로 뒀더니 배포한
-    # 뒤 반나절이 지나도 안 뜨는 일이 생겨 30분으로 줄였다. raw 쪽 캐시가
-    # 최대 5분이라 그보다 더 짧게 잡을 이유는 없다.
-    UPDATE_POLL = 30 * 60        # 켜 둔 채로 새 소식을 확인하는 간격
+    # '바뀌었을 때만 받아오기' — 지난번에 받은 ETag를 같이 보내면, 바뀐 게
+    # 없을 때 서버가 304(바뀐 것 없음)만 돌려주고 본문은 안 보낸다.
+    # 실측: 보통 요청 24,509바이트 / 안 바뀌었을 때 0바이트.
+    # 그래서 자주 물어봐도 부담이 없다. raw 쪽 캐시가 5분이라 그보다 짧게
+    # 잡으면 어차피 같은 답이 온다 — 그 값에 맞춰 5분으로 둔다.
+    UPDATE_POLL = 5 * 60         # 켜 둔 채로 새 소식을 확인하는 간격
     UPDATE_FIRST = 90            # 켠 뒤 첫 확인까지 (시작을 방해하지 않게)
     LOCAL_POLL = 60              # 제 폴더의 안내 파일을 다시 보는 간격
 
@@ -8053,16 +8056,32 @@ class Mascot:
         threading.Thread(target=self._update_check, daemon=True).start()
 
     def _update_check(self):
-        """배포 레포의 version.json만 받아 본다 (백그라운드). 실패는 넘긴다."""
+        """배포 레포의 version.json을 물어본다 (백그라운드). 실패는 넘긴다.
+
+        지난번에 받은 표(ETag)를 같이 보낸다. 바뀐 게 없으면 서버가
+        '바뀐 것 없음(304)'만 돌려주고 본문은 아예 안 보내므로, 자주
+        물어봐도 실제로 내려받는 것은 새 배포가 있을 때뿐이다.
+        """
+        import urllib.error
         import urllib.request
         try:
             repo = UPDATE_REPOS.get(self.char)
             url = ("https://raw.githubusercontent.com/%s/main/version.json"
                    % repo)
-            req = urllib.request.Request(
-                url, headers={"User-Agent": "mascot-poll"})
-            with urllib.request.urlopen(req, timeout=12) as r:
-                man = json.loads(r.read().decode("utf-8"))
+            head = {"User-Agent": "mascot-poll"}
+            if self._upd_etag:
+                head["If-None-Match"] = self._upd_etag
+            try:
+                with urllib.request.urlopen(
+                        urllib.request.Request(url, headers=head),
+                        timeout=12) as r:
+                    body = r.read()
+                    self._upd_etag = r.headers.get("ETag") or self._upd_etag
+            except urllib.error.HTTPError as e:
+                if e.code == 304:
+                    return                 # 바뀐 것 없음 — 받아온 것도 없다
+                raise
+            man = json.loads(body.decode("utf-8"))
             if isinstance(man, dict):
                 self._upd_q.append(man)
         except Exception:
