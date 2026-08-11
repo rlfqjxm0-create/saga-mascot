@@ -382,6 +382,7 @@ DEFAULT_SETTINGS = {
     "update_h": 0,           # 업데이트 안내 창 높이(px). 0이면 적당히 자동
     "yt_signed": False,      # 유튜브에 로그인해 둔 적이 있는가 (프리미엄 적용)
     "yt_asked": False,       # 로그인 창을 한 번이라도 권했는가
+    "shadow_on": False,      # 그림자를 한 번 켜 준 적이 있는가
 }
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
 
@@ -2087,6 +2088,15 @@ class TodoPanel:
 
 
     MEAS_MAX = 600               # 글자 폭 캐시 상한 (지뢰 18)
+    # 맑은 고딕에는 보통과 굵게 사이의 두께가 없다. 살짝 어긋나게 두 번 그려
+    # 그 중간 두께를 만든다 (실측 비교로 고른 값). 굵게도 같이 두 번 그려
+    # 두 단계가 구분되게 둔다. 두 글꼴의 글자 폭이 같아 자리는 안 밀린다.
+    HEAVY = 0.6
+
+    def _ptext(self, x, y, **kw):
+        """말풍선 글자 — 두 번 그려 조금 더 두껍게. 그린 것들을 돌려준다."""
+        return (self.canvas.create_text(x, y, **kw),
+                self.canvas.create_text(x + self.HEAVY, y, **kw))
 
     def _meas(self, text, font):
         """글자 폭·높이 — 캔버스로 재고 캐시한다."""
@@ -2205,17 +2215,19 @@ class TodoPanel:
                     total = sum(w for _t, _f, w in ln)
                     tx = (x0 + x1) / 2 - total / 2
                     for seg, font, w in ln:
-                        c.create_text(tx, ty + lh / 2, anchor="w", text=seg,
-                                      font=font, fill=tint or cd["text"])
+                        self._ptext(tx, ty + lh / 2, anchor="w", text=seg,
+                                    font=font, fill=tint or cd["text"])
                         tx += w
                     ty += lh
             else:
-                t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
+                ids = self._ptext((x0 + x1) / 2, mid, text=text, width=tw,
                                   font=todo_font(item, self.FS),
                                   fill=tint or cd["text"], justify="center")
-                tb = c.bbox(t)      # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
+                tb = c.bbox(ids[0])  # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
                 if tb:
-                    c.move(t, 0, round(mid - (tb[1] + tb[3]) / 2) - 1)
+                    dy = round(mid - (tb[1] + tb[3]) / 2) - 1
+                    for it in ids:               # 겹쳐 그린 두 장을 같이 옮긴다
+                        c.move(it, 0, dy)
             self.items.append(((x0, y, x1, y + h), i))   # 우클릭 영역 = 말풍선
             y += h + self.PAD
         self.canvas.config(height=y)
@@ -2756,6 +2768,12 @@ class Mascot:
         except Exception:
             pass
         self._sanitize_settings()
+        # 그림자는 켜 둔 모습이 기본이다. 예전에 꺼 둔 채로 저장된 사람도
+        # 한 번은 켜 준다 — 딱 한 번만이라, 그 뒤에 다시 끄면 꺼진 채로 둔다.
+        if not self.us.get("shadow_on"):
+            self.us["shadow_on"] = True
+            self.us["shadow"] = True
+            self._save_settings()
 
         # 패션(스킨) 슬롯 — 파츠만 다른 폴더에서 읽고 설정·기록은 그대로 공유
         self.skins = self.cfg.get("skins") or [{"name": "기본", "dir": ""}]
@@ -5092,7 +5110,14 @@ class Mascot:
                 continue
             tag = "D-DAY" if n == 0 else (f"D-{n}" if n > 0 else f"D+{-n}")
             name = (d.get("name") or "").strip()
-            rows.append((n, (name + "\n" + tag) if name else tag))
+            # 남은 날짜를 윗줄에 굵게, 마감 이름을 아랫줄에. 먼저 눈에 들어와야
+            # 하는 것은 '며칠 남았나'다.
+            if name:
+                item = todo_pack(tag + "\n" + name, False, False, 0,
+                                 [[len(tag), 1], [1 + len(name), 0]])
+            else:
+                item = todo_pack(tag, True, False, 0)
+            rows.append((n, item))
         rows.sort(key=lambda r: r[0])
         texts = [t for _, t in rows]
         tints = ["#d64a63" if n <= self.DUE_NEAR else
