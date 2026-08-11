@@ -329,6 +329,7 @@ LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
 # 떨어지게 짜여 있는데, 위에 레벨 줄이 생기면서 그 여백이 겹쳐 넓어 보였다
 # (실측: 글자 100/130/160% 모두 20px 안팎으로 고정).
 LV_TRIM = 5
+GOAL_ROW = 22                    # 시계형 카드에 목표 진행바가 쓰는 높이
 # 레벨을 몇 번째 판으로 세고 있는지. 이 숫자를 올리면 모두가 Lv1부터 다시
 # 시작한다 (저장된 lv_secs를 버린다). 함부로 올리지 말 것 — 친구들이 쌓은
 # 레벨이 통째로 사라진다.
@@ -2727,6 +2728,21 @@ def already_running(char):
     return False
 
 
+def release_instance_lock():
+    """중복 실행 자물쇠를 놓는다 — 스스로 다시 켤 때만 쓴다.
+
+    안 놓고 새 프로세스를 띄우면, 새 쪽이 '이미 떠 있다'고 보고 물러난 뒤
+    이쪽이 닫혀서 캐릭터가 통째로 사라진다.
+    """
+    h = globals().pop("_INSTANCE_LOCK", None)
+    if not h:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
+    except Exception:
+        pass
+
+
 def say_hello(state_dir):
     """이미 떠 있는 캐릭터에게 '나를 또 눌렀어'라고 알린다.
 
@@ -3885,7 +3901,8 @@ class Mascot:
             return 0
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
-            return base + self._yt_bar() + max(0, self._lv_row() - LV_TRIM)
+            return (base + self._yt_bar() + GOAL_ROW
+                    + max(0, self._lv_row() - LV_TRIM))
         extra = int(self.cfg.get("card_top", 22)) - 22        # 장식 여유 (토끼 귀)
         return (TIMER_H + extra + self._yt_bar()
                 + max(0, self._lv_row() - LV_TRIM))
@@ -4035,9 +4052,9 @@ class Mascot:
         lv = self._lv_row()
         lv = (lv - LV_TRIM) if lv else 0
         if self.has_clock and self.clock_open:
-            w, h = 148, 150 + lv      # 세로가 살짝 더 긴 직사각형
+            w, h = 148, 150 + lv + GOAL_ROW   # 세로가 살짝 더 긴 직사각형
         elif self.has_clock:
-            w, h = 196, 40 + lv
+            w, h = 196, 40 + lv + GOAL_ROW
         else:
             # 작업 종료 버튼은 우클릭 메뉴로 옮겼다 — 그 자리에 레벨·칭호가 온다
             w, h = 200, 62 + lv
@@ -8729,12 +8746,36 @@ class Mascot:
             cv.yview_moveto(0)
 
             by = u(20)
-            b = (PAD, by, W - PAD, by + u(40))
-            rr(bar, b[0], b[1], b[2], b[3], u(14), fill=cd["fill"], outline="")
-            bar.create_text((b[0] + b[2]) / 2, by + u(20), text="확인",
-                            font=self._uf(10, True), fill="#ffffff")
-            bar.bind("<Button-1>", lambda e: close()
-                     if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3] else None)
+            # 받아 둔 새 버전이 있으면 그 자리에서 다시 켤 수 있게 한다.
+            # 받는 것은 켤 때 런처가 하므로, 다시 켜야 실제로 반영된다.
+            redo = bool(getattr(self, "_upd_restart", False))
+            if redo:
+                half = (W - PAD * 2 - u(10)) / 2
+                b = (PAD, by, PAD + half, by + u(40))
+                b2 = (W - PAD - half, by, W - PAD, by + u(40))
+                rr(bar, b2[0], b2[1], b2[2], b2[3], u(14), fill=cd["fill"],
+                   outline="")
+                bar.create_text((b2[0] + b2[2]) / 2, by + u(20),
+                                text="지금 다시 켜기",
+                                font=self._uf(10, True), fill="#ffffff")
+                rr(bar, b[0], b[1], b[2], b[3], u(14), fill=cd["soft"],
+                   outline=cd["border"], width=2)
+                bar.create_text((b[0] + b[2]) / 2, by + u(20), text="나중에",
+                                font=self._uf(10, True), fill=cd["sub"])
+            else:
+                b, b2 = (PAD, by, W - PAD, by + u(40)), None
+                rr(bar, b[0], b[1], b[2], b[3], u(14), fill=cd["fill"],
+                   outline="")
+                bar.create_text((b[0] + b[2]) / 2, by + u(20), text="확인",
+                                font=self._uf(10, True), fill="#ffffff")
+
+            def hit(e):
+                if b2 and b2[0] <= e.x <= b2[2] and b2[1] <= e.y <= b2[3]:
+                    return do_restart()
+                if b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3]:
+                    close()
+
+            bar.bind("<Button-1>", hit)
             fit_bar()
 
         def fit_bar():
@@ -8747,6 +8788,18 @@ class Mascot:
                     sb.pack_forget()
             except Exception:
                 pass
+
+        def do_restart():
+            """읽음으로 찍고 창을 닫은 뒤 다시 켠다.
+
+            창을 먼저 없애야 한다 — 닫기 전에 프로세스를 갈아 치우면 그리다
+            만 창이 화면에 남는다.
+            """
+            self._safe("update_read", self._update_mark_read)
+            save_h()
+            self._update_win = None
+            win.destroy()
+            self.root.after(80, lambda: self._safe("restart", self._restart))
 
         def close(_e=None):
             # 어떤 식으로 닫든(확인·X·Esc) 읽은 것으로 둔다
@@ -8921,6 +8974,23 @@ class Mascot:
             c.create_text(bx + pad, cy + INK_DY, anchor="w", text=title,
                           font=f2, fill=self._shade(cd["fill"], 0.35))
 
+    def _goal_bar(self, bx0, right, row):
+        """목표 시간 진행바 + 퍼센트. 카드 종류와 상관없이 같은 모양으로."""
+        c, cd = self.canvas, self.card
+        goal = max(float(self.us["goal_hours"]), 0.5) * 3600
+        frac = min(self._shown_secs() / goal, 1.0)
+        txt = "%d%%" % int(frac * 100)
+        f = self._fit(txt, 7, 34, True)
+        bx1 = right - self._mw(txt, f) - 6
+        c.create_line(bx0, row, bx1, row, width=6, capstyle="round",
+                      fill=cd["track"])
+        if frac > 0.01:
+            c.create_line(bx0, row, bx0 + (bx1 - bx0) * frac, row, width=6,
+                          capstyle="round",
+                          fill="#7ccf8f" if frac >= 1.0 else cd["fill"])
+        c.create_text(right, row + INK_DY, anchor="e", text=txt, font=f,
+                      fill="#5aa86e" if frac >= 1.0 else cd["sub"])
+
     def _draw_timer(self, state, sleeping, now):
         c = self.canvas
         cd = self.card
@@ -8965,6 +9035,7 @@ class Mascot:
             c.create_text(cxm, clock_cy + R + 18 + INK_DY, text=label,
                           font=self._fit(label, 14, (x1 - x0) - 20, True),
                           fill=cd["text"])
+            self._goal_bar(x0 + 14, x1 - 12, clock_cy + R + 42)
         elif self.has_clock:
             # 접힘: 상태 + 시간 한 줄 (게이지 없음)
             row = y0 + 20
@@ -8977,6 +9048,7 @@ class Mascot:
                           font=f_stat, fill=cd["sub"])
             c.create_text(x1 - pad, row + INK_DY, anchor="e", text=label,
                           font=f_time, fill=cd["text"])
+            self._goal_bar(x0 + pad + 2, x1 - pad, row + 25)
         else:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
             row1 = y0 + 20
@@ -8991,20 +9063,7 @@ class Mascot:
                           font=f_stat, fill=cd["sub"])
             c.create_text(x1 - pad, row1 + INK_DY, anchor="e", text=label,
                           font=f_time, fill=cd["text"])
-            goal = max(float(self.us["goal_hours"]), 0.5) * 3600
-            frac = min(self._shown_secs() / goal, 1.0)
-            row2 = y0 + 45
-            bx0, bx1 = x0 + pad + 2, x1 - pad - 36
-            c.create_line(bx0, row2, bx1, row2, width=6, capstyle="round",
-                          fill=cd["track"])
-            if frac > 0.01:
-                c.create_line(bx0, row2, bx0 + (bx1 - bx0) * frac, row2,
-                              width=6, capstyle="round",
-                              fill="#7ccf8f" if frac >= 1.0 else cd["fill"])
-            c.create_text(x1 - pad, row2 + INK_DY, anchor="e",
-                          text=f"{int(frac * 100)}%",
-                          font=self._fit(f"{int(frac * 100)}%", 7, 34, True),
-                          fill="#5aa86e" if frac >= 1.0 else cd["sub"])
+            self._goal_bar(x0 + pad + 2, x1 - pad, y0 + 45)
             # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
@@ -10517,14 +10576,25 @@ class Mascot:
 
 
     def _restart(self):
+        """스스로 껐다 켠다. 저장 → 자물쇠 놓기 → 새로 띄우기 → 닫기 순서.
+
+        자물쇠를 안 놓으면 새로 뜬 쪽이 '이미 떠 있다'고 보고 물러나므로,
+        이쪽이 닫히는 순간 캐릭터가 하나도 안 남는다.
+        """
         import subprocess
         if self.timer_on:
             self._timer_save()
-        if getattr(sys, "frozen", False):
-            subprocess.Popen([sys.executable])
-        else:
-            subprocess.Popen([sys.executable, os.path.abspath(__file__),
-                              "--char", self.char_arg])
+        self._safe("todo_save", self._todo_save)
+        release_instance_lock()
+        try:
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable])
+            else:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__),
+                                  "--char", self.char_arg])
+        except Exception:
+            self._log_error("restart")
+            return                       # 못 띄웠으면 이쪽이라도 살려 둔다
         self.close()
 
     # ── 프리뷰 ───────────────────────────────────────────────────────────
