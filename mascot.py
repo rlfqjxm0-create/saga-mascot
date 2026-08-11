@@ -1992,6 +1992,7 @@ class TodoPanel:
         self.offset = tuple(offset) if offset else (-(self.W + 4), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
         self._hwnd_cache = None  # 창 핸들 (z순서 조정용)
+        self._mcache = {}        # 글자 폭·높이 캐시 (구간별 꾸밈 줄바꿈용)
         self.top = tk.Toplevel(master)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
@@ -2085,6 +2086,71 @@ class TodoPanel:
             c.create_line(tipx, tipy, base, by, fill=outline, width=2)
 
 
+    MEAS_MAX = 600               # 글자 폭 캐시 상한 (지뢰 18)
+
+    def _meas(self, text, font):
+        """글자 폭·높이 — 캔버스로 재고 캐시한다."""
+        key = (text, font)
+        got = self._mcache.get(key)
+        if got is None:
+            t = self.canvas.create_text(-4000, -4000, text=text or "가",
+                                        anchor="nw", font=font)
+            x0, y0, x1, y1 = self.canvas.bbox(t)
+            self.canvas.delete(t)
+            got = (0 if not text else x1 - x0, y1 - y0)
+            if len(self._mcache) > self.MEAS_MAX:
+                for old in list(self._mcache)[:self.MEAS_MAX // 2]:
+                    del self._mcache[old]
+            self._mcache[key] = got
+        return got
+
+    def _lay_runs(self, segs, base, size, max_w):
+        """구간별 꾸밈이 섞인 글을 폭에 맞춰 줄로 나눈다.
+
+        Tk 캔버스 글자는 한 덩어리에 한 글꼴뿐이라, 굵은 부분과 보통 부분을
+        따로 그려 이어 붙여야 한다. 그래서 줄바꿈도 직접 계산한다.
+        반환: ([[(글자, 글꼴, 폭)], ...], 줄 높이 목록)
+        """
+        lines, cur = [], []
+        cw, ch = 0.0, 0.0
+        heights = []
+
+        def newline():
+            lines.append(cur[:])
+            heights.append(ch)
+            del cur[:]
+
+        for text, b, i in segs:
+            font = run_font(b, i, base, size)
+            _w0, h0 = self._meas("", font)
+            for tok in wrap_tokens(text):
+                if tok == "\n":
+                    ch = max(ch, h0)
+                    newline()
+                    cw, ch = 0.0, 0.0
+                    continue
+                w, _h = self._meas(tok, font)
+                if w > max_w:                    # 한 낱말이 너무 길다 — 글자로
+                    for chx in tok:
+                        wc, _ = self._meas(chx, font)
+                        if cw + wc > max_w and cur:
+                            newline()
+                            cw, ch = 0.0, 0.0
+                        cur.append((chx, font, wc))
+                        cw += wc
+                        ch = max(ch, h0)
+                    continue
+                if cw + w > max_w and cur:
+                    newline()
+                    cw, ch = 0.0, 0.0
+                cur.append((tok, font, w))
+                cw += w
+                ch = max(ch, h0)
+        if cur or not lines:
+            ch = max(ch, self._meas("", run_font(False, False, base, size))[1])
+            newline()
+        return lines, heights
+
     def render(self, todos, tints=None):
         """항목을 위에서 아래로 쌓아 그린다. 창 높이도 함께 맞춘다.
 
@@ -2100,7 +2166,17 @@ class TodoPanel:
         heights = []                          # 먼저 줄바꿈 높이를 잰다
         # 높이도 그 칸의 글꼴로 재야 한다 — 굵은 글씨는 폭이 넓어서
         # 보통 글꼴로 재면 말풍선이 한 줄 모자라게 나온다
+        lays = []                             # 섞인 꾸밈이면 미리 줄을 나눠 둔다
         for item in todos:
+            segs = todo_runs(item)
+            if len(segs) > 1:                 # 한 칸 안에서 꾸밈이 바뀐다
+                _b, _i, sz = todo_style(item)
+                lines, hs = self._lay_runs(segs, self.FS, sz, tw)
+                lays.append((lines, hs))
+                heights.append(max(sum(hs) + round(20 * self.k),
+                                   round(32 * self.k)))
+                continue
+            lays.append(None)
             t = c.create_text(0, 0, anchor="nw", text=todo_text(item), width=tw,
                               font=todo_font(item, self.FS))
             bb = c.bbox(t)
@@ -2122,12 +2198,24 @@ class TodoPanel:
                         outline=tint or cd["border"], width=2)
             self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
             mid = y + h / 2
-            t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
-                              font=todo_font(item, self.FS),
-                              fill=tint or cd["text"], justify="center")
-            tb = c.bbox(t)          # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
-            if tb:
-                c.move(t, 0, round(mid - (tb[1] + tb[3]) / 2) - 1)
+            if lays[i] is not None:           # 꾸밈이 섞인 칸 — 조각을 이어 그린다
+                lines, hs = lays[i]
+                ty = mid - sum(hs) / 2
+                for ln, lh in zip(lines, hs):
+                    total = sum(w for _t, _f, w in ln)
+                    tx = (x0 + x1) / 2 - total / 2
+                    for seg, font, w in ln:
+                        c.create_text(tx, ty + lh / 2, anchor="w", text=seg,
+                                      font=font, fill=tint or cd["text"])
+                        tx += w
+                    ty += lh
+            else:
+                t = c.create_text((x0 + x1) / 2, mid, text=text, width=tw,
+                                  font=todo_font(item, self.FS),
+                                  fill=tint or cd["text"], justify="center")
+                tb = c.bbox(t)      # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
+                if tb:
+                    c.move(t, 0, round(mid - (tb[1] + tb[3]) / 2) - 1)
             self.items.append(((x0, y, x1, y + h), i))   # 우클릭 영역 = 말풍선
             y += h + self.PAD
         self.canvas.config(height=y)
@@ -2267,20 +2355,90 @@ def todo_style(item):
     return False, False, 0
 
 
-def todo_pack(text, bold, italic, size):
-    """저장할 모양으로 만든다. 꾸밈이 없으면 예전처럼 글자만 남긴다."""
+def todo_pack(text, bold, italic, size, runs=None):
+    """저장할 모양으로 만든다. 꾸밈이 없으면 예전처럼 글자만 남긴다.
+
+    runs는 [[글자수, 표시], ...] — 표시는 1=굵게, 2=기울임을 더한 값.
+    한 칸 안에서 일부만 굵게 한 경우에 쓴다. 통째로 같은 꾸밈이면 안 넣는다
+    (옛 버전에서도 읽히도록).
+    """
     text = str(text)[:200]
-    if not (bold or italic or size):
+    runs = [[int(n), int(f)] for n, f in (runs or []) if int(n) > 0]
+    mixed = len({f for _n, f in runs}) > 1
+    if not (bold or italic or size or mixed):
         return text
-    return {"t": text, "b": bool(bold), "i": bool(italic), "s": int(size)}
+    out = {"t": text, "b": bool(bold), "i": bool(italic), "s": int(size)}
+    if mixed:
+        out["r"] = runs
+    return out
+
+
+def todo_runs(item):
+    """[(글자, 굵게, 기울임)] — 구간별 꾸밈. 나뉘어 있지 않으면 한 덩어리."""
+    text = todo_text(item)
+    bold, italic, _s = todo_style(item)
+    if isinstance(item, dict) and item.get("r"):
+        out, i = [], 0
+        try:
+            for n, fl in item["r"]:
+                n, fl = int(n), int(fl)
+                seg = text[i:i + n]
+                i += n
+                if seg:
+                    out.append((seg, bool(fl & 1), bool(fl & 2)))
+            if i < len(text):                 # 저장된 길이가 모자라면 나머지
+                out.append((text[i:], bold, italic))
+            if out:
+                return out
+        except (TypeError, ValueError):
+            pass
+    return [(text, bold, italic)] if text else []
+
+
+def runs_pack(segs):
+    """[(글자, 굵게, 기울임)] → 저장용 [[글자수, 표시], ...] (같은 것끼리 합침)."""
+    out = []
+    for s, b, i in segs:
+        if not s:
+            continue
+        fl = (1 if b else 0) | (2 if i else 0)
+        if out and out[-1][1] == fl:
+            out[-1][0] += len(s)
+        else:
+            out.append([len(s), fl])
+    return out
+
+
+def run_font(bold, italic, base, size=0, k=1.0):
+    """구간 하나를 그릴 글꼴."""
+    name = ("bold " if bold else "") + ("italic" if italic else "")
+    return ("Malgun Gothic", max(6, round((base + size) * k)),
+            name.strip() or "")
 
 
 def todo_font(item, base, k=1.0):
     """그 칸을 그릴 글꼴."""
     bold, italic, size = todo_style(item)
-    name = ("bold " if bold else "") + ("italic" if italic else "")
-    return ("Malgun Gothic", max(6, round((base + size) * k)),
-            name.strip() or "")
+    return run_font(bold, italic, base, size, k)
+
+
+def wrap_tokens(s):
+    """줄바꿈에 쓸 조각들 — 공백은 앞 낱말에 붙이고, 개행은 따로 낸다."""
+    out, buf = [], ""
+    for ch in s:
+        if ch == "\n":
+            if buf:
+                out.append(buf)
+            out.append("\n")
+            buf = ""
+        elif ch == " ":
+            out.append(buf + ch)
+            buf = ""
+        else:
+            buf += ch
+    if buf:
+        out.append(buf)
+    return out
 
 
 def _arc(center, point, deg):
@@ -2975,6 +3133,7 @@ class Mascot:
         self.tray = None
         self._tray_q = []            # 트레이 스레드가 넣고 그리기 루프가 뺀다
         self._safe("tray", self._tray_setup)
+        self._safe("winicon", self._set_win_icon)
         # 바탕화면 스티커 — 저장해 둔 것을 띄운다 (안 쓰는 캐릭터면 그냥 지나감)
         self._stk = None
         self._stk_after = None
@@ -4404,10 +4563,86 @@ class Mascot:
                          width=W - u(40), height=u(58))
         txt.insert("1.0", todo_text(cur))
 
+        # ── 구간별 꾸밈 ──────────────────────────────────────────────────
+        # 다른 편집기처럼, 끌어서 고른 부분에만 굵기·기울임이 걸린다.
+        # 아무것도 안 골랐으면 글 전체에 건다(예전 방식과 같게).
+        uk = getattr(self, "ui_k", 1.0)
+        # 두 가지 방식이 섞이면 헷갈린다. 구간을 골라 바꾸기 전까지는
+        # '글 전체' 방식으로 두어, 단추를 먼저 누르고 타이핑해도 그대로
+        # 적용되게 한다. 한 번이라도 골라서 바꾸면 그때부터 구간별이다.
+        part = {"on": len(todo_runs(cur)) > 1}
+
+        def tag_font(bold, italic):
+            return run_font(bold, italic, 10, sty["s"], uk)
+
+        txt.tag_configure("b", font=tag_font(True, False))
+        txt.tag_configure("i", font=tag_font(False, True))
+        txt.tag_configure("bi", font=tag_font(True, True))
+
+        def retag():
+            """굵기/기울임 표시를 실제 글꼴로 다시 칠한다 (크기가 바뀔 때도)."""
+            txt.tag_configure("b", font=tag_font(True, False))
+            txt.tag_configure("i", font=tag_font(False, True))
+            txt.tag_configure("bi", font=tag_font(True, True))
+            n = len(txt.get("1.0", "end-1c"))
+            for j in range(n):                # 둘 다면 합친 표시로 바꿔 준다
+                a, z = "1.0+%dc" % j, "1.0+%dc" % (j + 1)
+                names = set(txt.tag_names(a))
+                both = {"b", "i"} <= names
+                txt.tag_remove("bi", a, z)
+                if both:
+                    txt.tag_add("bi", a, z)
+
+        def sel_range():
+            """지금 고른 구간. 안 골랐으면 None."""
+            try:
+                return txt.index("sel.first"), txt.index("sel.last")
+            except tk.TclError:
+                return None
+
+        def marks_of(a, z):
+            """그 구간이 이미 전부 그 표시인가."""
+            def all_has(tag):
+                j, n = 0, len(txt.get(a, z))
+                for j in range(n):
+                    if tag not in txt.tag_names("%s+%dc" % (a, j)):
+                        return False
+                return n > 0
+            return all_has
+
+        def whole_tags():
+            """'글 전체' 방식일 때 — 지금 글자 전부에 표시를 다시 맞춘다."""
+            for key in ("b", "i"):
+                txt.tag_remove(key, "1.0", "end")
+                if sty[key] and txt.get("1.0", "end-1c"):
+                    txt.tag_add(key, "1.0", "end-1c")
+
+        def toggle(key):
+            rng = sel_range()
+            if rng is None:                   # 고른 게 없으면 글 전체
+                sty[key] = not sty[key]
+                whole_tags()
+            else:
+                part["on"] = True             # 여기서부터 구간별
+                a, z = rng
+                if marks_of(a, z)(key):
+                    txt.tag_remove(key, a, z)
+                else:
+                    txt.tag_add(key, a, z)
+            apply_font()
+
         def apply_font():
-            txt.config(font=todo_font({"b": sty["b"], "i": sty["i"],
-                                       "s": sty["s"], "t": ""}, 10,
-                                      getattr(self, "ui_k", 1.0)))
+            """입력칸 글꼴을 지금 방식에 맞춘다.
+
+            글 전체 방식이면 칸 자체를 굵게/기울임으로 둔다 — 그래야 단추를
+            먼저 누르고 타이핑해도 눈에 보이고 그대로 저장된다.
+            """
+            if part["on"]:
+                txt.config(font=run_font(False, False, 10, sty["s"], uk))
+            else:
+                txt.config(font=run_font(sty["b"], sty["i"], 10, sty["s"], uk))
+                whole_tags()
+            retag()
 
         # ── 꾸밈 단추 ────────────────────────────────────────────────────
         chips = {}
@@ -4422,10 +4657,12 @@ class Mascot:
             return box
 
         def paint():
+            rng = sel_range()
             for key, (shape, tid, _) in chips.items():
                 if key not in ("b", "i"):
                     continue
-                on = sty[key]
+                # 고른 구간이 있으면 그 구간의 상태를, 없으면 글 전체 상태를
+                on = marks_of(*rng)(key) if rng else sty[key]
                 cv.itemconfig(shape, fill=cd["fill"] if on else cd["soft"],
                               outline=cd["fill"] if on else cd["border"])
                 cv.itemconfig(tid, fill="#ffffff" if on else cd["sub"])
@@ -4446,7 +4683,7 @@ class Mascot:
             for key, (_, _, box) in chips.items():
                 if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
                     if key in ("b", "i"):
-                        sty[key] = not sty[key]
+                        toggle(key)
                     elif key == "minus":
                         sty["s"] = max(-4, sty["s"] - 1)
                     elif key == "plus":
@@ -4466,8 +4703,24 @@ class Mascot:
         paint()
 
         def commit(_e=None):
-            text = txt.get("1.0", "end").strip()
-            item = todo_pack(text, sty["b"], sty["i"], sty["s"])
+            raw = txt.get("1.0", "end-1c")
+            text = raw.strip()
+            if part["on"]:                    # 구간별 — 표시를 그대로 읽는다
+                lead = len(raw) - len(raw.lstrip())
+                segs = [(chx,
+                         "b" in txt.tag_names("1.0+%dc" % (lead + j)),
+                         "i" in txt.tag_names("1.0+%dc" % (lead + j)))
+                        for j, chx in enumerate(text)]
+                runs = runs_pack(segs)
+                flags = {f for _n, f in runs}
+                if len(flags) <= 1:   # 결국 통째로 같으면 예전 방식으로 저장
+                    f = flags.pop() if flags else 0
+                    b_, i_ = bool(f & 1), bool(f & 2)
+                else:
+                    b_, i_ = sty["b"], sty["i"]
+            else:                             # 글 전체 — 고른 대로
+                runs, b_, i_ = [], sty["b"], sty["i"]
+            item = todo_pack(text, b_, i_, sty["s"], runs)
             if edit is not None:                 # 수정: 한 번 고치고 닫는다
                 if text and edit < len(self.todos):
                     self.todos[edit] = item
@@ -4491,11 +4744,25 @@ class Mascot:
             return commit()
 
         txt.bind("<Return>", on_return)
+        # 고른 구간이 바뀌면 단추 표시도 따라가야 한다 (다른 편집기처럼)
+        for ev in ("<ButtonRelease-1>", "<KeyRelease>", "<<Selection>>"):
+            txt.bind(ev, lambda _e: paint(), add="+")
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
         txt.focus_force()
         if edit is not None:
+            # 저장돼 있던 구간별 꾸밈을 입력칸에 그대로 되살린다
+            pos = 0
+            for seg, b_, i_ in todo_runs(cur):
+                a, z = "1.0+%dc" % pos, "1.0+%dc" % (pos + len(seg))
+                if b_:
+                    txt.tag_add("b", a, z)
+                if i_:
+                    txt.tag_add("i", a, z)
+                pos += len(seg)
+            retag()
             txt.tag_add("sel", "1.0", "end-1c")   # 바로 고쳐 쓸 수 있게
+            paint()
 
     def _on_poke(self):
         """캐릭터 클릭 반응 — 콩 튀고 한마디. (반응 파츠는 나중에 교체 가능)"""
@@ -5708,6 +5975,18 @@ class Mascot:
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
         ent.focus_force()
+
+    def _set_win_icon(self):
+        """별도 창(할 일·업데이트·환경설정…)의 제목표시줄 아이콘.
+
+        그냥 두면 Tk 기본 깃털이 뜬다. 트레이에 쓰는 그 캐릭터 얼굴을
+        그대로 쓴다. default= 로 걸면 나중에 뜨는 창까지 전부 따라온다.
+        """
+        if not IS_WIN:
+            return
+        ico = self._tray_ico_path()
+        if ico and os.path.exists(ico):
+            self.root.iconbitmap(default=ico)
 
     def _tray_setup(self):
         """트레이 아이콘 올리기 — 왼쪽 클릭은 부르기, 오른쪽은 메뉴."""

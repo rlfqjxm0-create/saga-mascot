@@ -1,7 +1,7 @@
 {
- "version": 1786422848,
+ "version": 1786424589,
  "files": {
-  "mascot.py": "0f27e761e4ce2c77d6f21d3207199609666419207c7b0a3ba3c1083ff78252d1",
+  "mascot.py": "6d2db28f58583ddab3fd742cd385ef676757a0e43e8b3c6cf3ac1b31b031b6f8",
   "parts_saga/arm_key.png": "77641097db051ac9a94a8ada77efd2dabcfca095402a443e1b8a7e30bc231011",
   "parts_saga/arm_pen.png": "4f1f9b24580480c1b6c9f7ae84036e9fa5085662b1f42daaf5e5eed1c64fed9f",
   "parts_saga/arm_right.png": "382923c4c3bbf1ad279786d7deca43430bc21b63e3e8ad884b7214dc3f27e890",
@@ -170,7 +170,6 @@
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
- "notes": [
-  "새 소식을 5분 안에 알려 드려요\n켜 둔 채로도 업데이트를 알아채는 기능이 훨씬 빨라졌습니다. 바뀐 것이 있을 때만 실제로 받아오는 방식이라(바뀐 게 없으면 주고받는 데이터가 0바이트예요) 자주 확인해도 인터넷에 부담이 없어요. 새 소식이 올라오면 캐릭터가 말풍선으로 알려 주고, 껐다 켜면 반영됩니다."
- ]
+ "notes": [],
+ "silent": true
 }
