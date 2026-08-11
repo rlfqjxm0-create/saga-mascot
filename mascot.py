@@ -1722,6 +1722,11 @@ UPDATE_REPOS = {                 # 선물 캐릭터 자동 업데이트 배포 �
 }
 
 
+# 지난 안내(news.json)를 받아 올 곳. 배포 레포가 없는 캐릭터(소스로 도는
+# 내 도로롱)도 같은 캐릭터의 배포 레포에서 소식만 받아 본다.
+NEWS_REPOS = dict(UPDATE_REPOS,
+                  parts_dororong="rlfqjxm0-create/dororong-mascot")
+
 UPDATE_FLAG = ".updated"          # 업데이트 알림 신호 파일
 
 
@@ -8408,6 +8413,8 @@ class Mascot:
                     self._upd_q.append(got)
             except Exception:
                 pass
+            # 지난 안내 목록은 이쪽도 배포 레포에서 받아 둔다
+            threading.Thread(target=self._news_fetch, daemon=True).start()
             return
         wait = self.UPDATE_FIRST if self._upd_at == 0 else self.UPDATE_POLL
         if now - self._upd_start < wait or self._upd_busy:
@@ -8438,7 +8445,7 @@ class Mascot:
         """
         import urllib.error
         import urllib.request
-        repo = UPDATE_REPOS.get(self.char)
+        repo = NEWS_REPOS.get(self.char)
         if not repo:
             return
         try:
@@ -8458,7 +8465,7 @@ class Mascot:
             if not isinstance(got, list):
                 return
             keep = [g for g in got if isinstance(g, dict) and g.get("notes")]
-            _save_json(os.path.join(self.state_dir, self.NEWS_FILE), keep[-30:])
+            _save_json(os.path.join(self.state_dir, self.NEWS_FILE), keep[-60:])
         except Exception:
             pass
 
