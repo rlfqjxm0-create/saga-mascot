@@ -2893,6 +2893,7 @@ class Mascot:
         self._upd_busy = False       # 확인하는 중인가
         self._upd_restart = False    # 받아야 할 새 버전이 올라와 있는가
         self._upd_etag = ""          # 지난번에 받은 표 (바뀐 것만 받으려고)
+        self._news_etag = ""         # 지난 안내 목록의 표
         self._fs_at = 0.0            # 전체화면 여부를 마지막으로 물어본 시각
         self._fs_hidden = False      # 전체화면 프로그램 때문에 비켜 있는가
         self.has_clock = self.timer_on and self.ws_path is not None
@@ -8414,6 +8415,52 @@ class Mascot:
         self._upd_at = self._upd_start = now
         self._upd_busy = True
         threading.Thread(target=self._update_check, daemon=True).start()
+        threading.Thread(target=self._news_fetch, daemon=True).start()
+
+    NEWS_FILE = ".update_news.json"   # 배포 쪽에서 받아 둔 지난 안내
+
+    def _news_load(self):
+        """받아 둔 지난 안내 (인터넷이 없어도 이걸로 보여 준다)."""
+        try:
+            with open(os.path.join(self.state_dir, self.NEWS_FILE),
+                      encoding="utf-8") as fp:
+                got = json.load(fp)
+            return [g for g in got if isinstance(g, dict) and g.get("notes")]
+        except Exception:
+            return []
+
+    def _news_fetch(self):
+        """배포 레포의 지난 안내 목록을 받아 둔다 (백그라운드).
+
+        친구 쪽 기록은 '그 컴퓨터가 켜져 있을 때 온 것'만 남는다. 늦게
+        설치했거나 조용한 배포만 받은 사람은 '업데이트 소식'이 텅 비어
+        있었다(개 제보). 배포 쪽 목록을 받아 두면 언제 설치했든 다 보인다.
+        """
+        import urllib.error
+        import urllib.request
+        repo = UPDATE_REPOS.get(self.char)
+        if not repo:
+            return
+        try:
+            head = {"User-Agent": "mascot-news"}
+            if self._news_etag:
+                head["If-None-Match"] = self._news_etag
+            url = "https://raw.githubusercontent.com/%s/main/news.json" % repo
+            try:
+                with urllib.request.urlopen(
+                        urllib.request.Request(url, headers=head),
+                        timeout=12) as r:
+                    body = r.read()
+                    self._news_etag = r.headers.get("ETag") or self._news_etag
+            except urllib.error.HTTPError as e:
+                return                     # 304(그대로) · 404(아직 없음)
+            got = json.loads(body.decode("utf-8"))
+            if not isinstance(got, list):
+                return
+            keep = [g for g in got if isinstance(g, dict) and g.get("notes")]
+            _save_json(os.path.join(self.state_dir, self.NEWS_FILE), keep[-30:])
+        except Exception:
+            pass
 
     def _update_check(self):
         """배포 레포의 version.json을 물어본다 (백그라운드). 실패는 넘긴다.
@@ -8521,7 +8568,11 @@ class Mascot:
         return latest > 0 and latest > self._update_read_ver()
 
     def _update_pages(self):
-        """보여 줄 안내 묶음들 — 오래된 것부터. 기록이 없으면 방금 것만."""
+        """보여 줄 안내 묶음들 — 오래된 것부터.
+
+        배포 쪽에서 받아 둔 목록과 이 컴퓨터에 쌓인 기록을 합친다. 같은
+        번호는 배포 쪽을 쓴다(문구를 고쳐 올렸을 수 있다).
+        """
         pages = []
         try:
             with open(os.path.join(self.state_dir, UPDATE_LOG),
@@ -8531,6 +8582,11 @@ class Mascot:
                 pages = [g for g in got if g.get("notes")]
         except Exception:
             pass
+        served = self._news_load()
+        if served:
+            vers = {g.get("ver") for g in served}
+            pages = served + [g for g in pages if g.get("ver") not in vers]
+            pages.sort(key=lambda g: g.get("ver") or 0)
         if not pages and self._update_notes:
             pages = [{"ver": 0, "notes": list(self._update_notes),
                       "link": getattr(self, "_update_link", None)}]
