@@ -8563,6 +8563,14 @@ class Mascot:
         """
         pages = self._update_pages()
         self._update_notes = []
+        if not pages and mark:
+            # 사람이 메뉴에서 직접 열었는데 쌓인 안내가 없는 경우.
+            # 그냥 돌아가면 '눌러도 아무 일이 안 일어난다'가 된다 (개 제보).
+            # 조용한 배포만 받아 온 사람은 기록이 비어 있는 게 정상이다.
+            pages = [{"ver": 0, "notes": [
+                "아직 온 소식이 없어요\n"
+                "새로 바뀐 점이 생기면 여기에 쌓입니다. "
+                "그때는 캐릭터가 말풍선으로도 알려 드려요."]}]
         # 사람이 직접 열었으면 그 순간 읽음으로 찍는다 — 닫을 때가 아니라.
         # 그리다 터져도, X로 닫아도 이미 읽은 것이 된다.
         # 반대로 저절로 뜬 창은 읽음으로 치지 않는다. 자리를 비운 사이에
@@ -8661,14 +8669,17 @@ class Mascot:
             y = u(20)
             rr(cv, PAD, y, W - PAD, y + head_h, u(16), fill=cd["soft"],
                outline=cd["border"], width=2)
-            cv.create_text(W / 2, y + u(24), text="새 버전으로 업데이트 됐어요",
+            empty = not pages[i].get("ver") and len(pages) == 1
+            cv.create_text(W / 2, y + u(24),
+                           text="업데이트 소식" if empty
+                           else "새 버전으로 업데이트 됐어요",
                            font=self._uf(11, True), fill=cd["text"])
             try:
                 v = int(pages[i].get("ver") or 0)
                 when = time.strftime("%Y-%m-%d", time.localtime(v)) if v else ""
             except Exception:
                 when = ""
-            sub = when or "이번에 바뀐 점이에요"
+            sub = when or ("" if empty else "이번에 바뀐 점이에요")
             if len(pages) > 1:
                 sub += "   (%d / %d)" % (i + 1, len(pages))
             cv.create_text(W / 2, y + u(46), text=sub,
