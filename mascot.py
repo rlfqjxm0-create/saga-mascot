@@ -2211,14 +2211,23 @@ class TodoPanel:
             if lays[i] is not None:           # 꾸밈이 섞인 칸 — 조각을 이어 그린다
                 lines, hs = lays[i]
                 ty = mid - sum(hs) / 2
+                ids = []
                 for ln, lh in zip(lines, hs):
                     total = sum(w for _t, _f, w in ln)
                     tx = (x0 + x1) / 2 - total / 2
                     for seg, font, w in ln:
-                        self._ptext(tx, ty + lh / 2, anchor="w", text=seg,
-                                    font=font, fill=tint or cd["text"])
+                        ids += self._ptext(tx, ty + lh / 2, anchor="w",
+                                           text=seg, font=font,
+                                           fill=tint or cd["text"])
                         tx += w
                     ty += lh
+                # 줄 높이를 더해 놓은 자리는 글자 상자 기준이라 위아래 여백이
+                # 어긋난다. 실제로 그려진 것을 재서 말풍선 한가운데로 맞춘다.
+                tb = c.bbox(*ids) if ids else None
+                if tb:
+                    dy = round(mid - (tb[1] + tb[3]) / 2)
+                    for it in ids:
+                        c.move(it, 0, dy)
             else:
                 ids = self._ptext((x0 + x1) / 2, mid, text=text, width=tw,
                                   font=todo_font(item, self.FS),
@@ -2845,6 +2854,7 @@ class Mascot:
         self._day_at = 0.0           # 마지막으로 날짜를 확인한 시각
         self.lv_secs = 0.0           # 레벨용 누적 작업 시간 (줄어들지 않는다)
         self._lv_seen = 0            # 마지막으로 알린 레벨 (0이면 아직 모름)
+        self._lv_work = None         # 직전 프레임의 누적 작업 시간 (증가분만 셈)
         self._lv_save_at = 0.0       # 레벨을 마지막으로 저장한 시각
         self.goal_cheered = ""       # 목표 달성을 축하한 작업일
         # ── 마감 목록 (할 일 목록과 같은 말풍선 구조, 여러 개 등록) ──────
@@ -3101,6 +3111,11 @@ class Mascot:
             else:
                 self._lv_load()      # 연동 중이면 레벨만 (기록은 에이전트 몫)
         self._lv_seen = self._level()
+        # 혼자 재는 캐릭터는 지금 누적을 기준으로 잡아 둔다 — 안 그러면 켤
+        # 때마다 첫 프레임 몫을 한 번씩 흘린다. 연동 중이면 첫 틱에 에이전트
+        # 누적이 통째로 들어오므로 그때 기준을 잡는다(None으로 둔다).
+        if self.ws_path is None:
+            self._lv_work = float(self.work_secs)
 
         # ── 창 드래그 이동 / 카드 클릭 토글 / 우클릭 메뉴 ────────────────
         self._press = None
@@ -4001,8 +4016,14 @@ class Mascot:
             self.shadow_img = img
 
     def _lv_row(self):
-        """카드 맨 위 레벨·칭호 줄이 차지하는 높이 (안 쓰면 0)."""
-        return LV_ROW if (self.timer_on and self.cfg.get("level", True)) else 0
+        """카드 맨 위 레벨·칭호 줄이 차지하는 높이 (안 쓰면 0).
+
+        글자 크기 설정을 키우면 칭호 알약도 커지므로 줄도 같이 키운다.
+        고정으로 두면 알약이 카드 윗변에 딱 붙어 답답해 보인다.
+        """
+        if not (self.timer_on and self.cfg.get("level", True)):
+            return 0
+        return max(LV_ROW, round(LV_ROW * getattr(self, "font_k", 1.0)))
 
     def _card_geom(self):
         """현재 타이머 카드의 위치·크기. 시계 펼침이면 세로 직사각형."""
@@ -4990,15 +5011,27 @@ class Mascot:
         except Exception:
             pass
 
-    def _lv_add(self, now, dt, working):
-        """일한 만큼 레벨 경험치를 쌓는다. 줄어드는 일은 없다.
+    def _lv_tick(self, now):
+        """레벨용 시간을 쌓는다 — 카드에 보이는 시간이 늘어난 만큼만.
 
-        `work_secs`를 그대로 쓰면 안 된다 — '타이머 초기화'로 0이 되고,
-        연동 중인 캐릭터는 그 값을 에이전트에게서 통째로 받아온다.
+        예전에는 프레임 간격(dt)을 따로 더했다. 그러면 카드는 에이전트가
+        준 누적을 보여 주고 레벨은 제가 센 값을 쓰게 되어 조금씩 어긋난다
+        (실제로 카드가 1:00:10인데 레벨은 37초 뒤에야 올랐다). 이제 늘어난
+        만큼만 그대로 옮겨 담아 둘이 같은 속도로 간다.
+
+        `work_secs`를 그대로 쓸 수는 없다 — '타이머 초기화'로 0이 되고,
+        연동 중인 캐릭터는 그 값을 에이전트에게서 통째로 받아오기 때문에
+        '늘어난 만큼'만 본다.
         """
-        if not working or dt <= 0:
-            return
-        self.lv_secs += min(dt, 2.0)
+        prev, cur = self._lv_work, float(self.work_secs)
+        self._lv_work = cur
+        if prev is None:
+            return                  # 첫 프레임 — 기준만 잡는다 (켤 때 안 튀게)
+        d = cur - prev
+        if d <= 0:
+            return                  # 줄었으면(초기화·연동 교체) 기준만 옮긴다
+        # 한 번에 크게 뛰면(연동 복구 등) 조금만 인정한다 — 레벨은 못 되돌린다
+        self.lv_secs += min(d, 120.0)
         if now - self._lv_save_at > 60:      # 강제 종료로 진행이 날아가지 않게
             self._lv_save_at = now
             self._safe("timer_save", self._timer_save)
@@ -5011,7 +5044,7 @@ class Mascot:
         if first or not self.can_talk:
             return                       # 처음 켠 순간에는 축하하지 않는다
         title = self._title(lv)
-        self._say("Lv %d! %s" % (lv, title) if title else "Lv %d!" % lv, 4.5)
+        self._say("Lv.%d! %s" % (lv, title) if title else "Lv.%d!" % lv, 4.5)
         self._safe("burst", self._burst, 18, 40)
 
     HIST_DAYS = 60               # 하루 기록을 며칠치 보관할지
@@ -6449,7 +6482,7 @@ class Mascot:
             st = self.stat
             st[state] = st.get(state, 0.0) + dt
             self._log_work(now, state, st, dt)
-            self._safe("level", self._lv_add, now, dt, state == "work")
+            self._safe("level", self._lv_tick, now)
             return state
 
         return self._own_tick(now, idle)
@@ -6497,7 +6530,7 @@ class Mascot:
         s = self.stat
         s[state] = s.get(state, 0.0) + dt
         self._log_work(now, state, s, dt)
-        self._safe("level", self._lv_add, now, dt, state == "work")
+        self._safe("level", self._lv_tick, now)
         if now - self._t_save > 30:
             self._t_save = now
             self._timer_save()
@@ -8844,15 +8877,17 @@ class Mascot:
     def _cf_n(n, bold=False):
         return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
 
-    def _draw_lv_row(self, x0, x1, cy):
-        """카드 맨 윗줄 — 'Lv 42  선 긋는 사람'.
+    LV_PAD = 4                   # 칭호 알약과 카드 윗변 사이 여백
+
+    def _draw_lv_row(self, x0, x1, cy, band):
+        """카드 맨 윗줄 — 'Lv.42  선 긋는 사람'.
 
         레벨은 진하게, 칭호는 옅게 해서 한 줄 안에서 위계를 준다. 둘을 한
         덩어리로 보고 가운데에 놓는다 (가운데를 글자 사이에 맞추면 칭호
         길이에 따라 좌우로 흔들린다).
         """
         c, cd = self.canvas, self.card
-        lv = "Lv %d" % self._level()
+        lv = "Lv.%d" % self._level()
         title = self._title()
         gap, pad = 6, 6
         # 알약의 좌우 여백까지 미리 빼고 글자 크기를 정한다. 안 그러면
@@ -8872,7 +8907,8 @@ class Mascot:
             # 알약을 깔아 '이건 이름표'라고 읽히게 한다. 테마색을 흰색에
             # 섞어 캐릭터마다 어울리는 파스텔이 나온다.
             bx = sx + w1 + gap
-            h = self._mh(f2) + 2
+            # 알약이 카드 윗변에 딱 붙지 않게, 줄 높이 안에서 여백을 남긴다
+            h = min(self._mh(f2) + 2, max(12, band - self.LV_PAD * 2))
             self._rrect(bx, cy - h / 2, bx + w2 + pad * 2, cy + h / 2,
                         h / 2, fill=self._mix("#ffffff", cd["fill"], 0.20),
                         outline="")
@@ -8897,7 +8933,10 @@ class Mascot:
         # 맨 윗줄 — 레벨과 칭호. 아래 칸들은 그만큼 내려간다.
         lvh = self._lv_row()
         if lvh:
-            self._safe("level_row", self._draw_lv_row, x0, x1, y0 + lvh / 2 + 2)
+            # 카드 윗변에서 여백만큼 내려온 자리를 줄의 한가운데로 삼는다
+            band = lvh - self.LV_PAD
+            self._safe("level_row", self._draw_lv_row,
+                       x0, x1, y0 + self.LV_PAD + band / 2, band)
             y0 += lvh
 
         def status_dot(px, py):
