@@ -325,6 +325,10 @@ KEY_ROT = (-7.0, 7.0)            # 타이핑 시 손 회전(어깨 축) 범위 (
 PEN_KB_ROT = (-6.0, 6.0)
 SHADOW_PAD = 16                  # 그림자 이미지 여백 (가장자리 파츠 잘림 방지)
 LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
+# 레벨 줄 아래 칸들을 이만큼 끌어올린다. 상태·시간 줄은 카드 윗변에서 20px
+# 떨어지게 짜여 있는데, 위에 레벨 줄이 생기면서 그 여백이 겹쳐 넓어 보였다
+# (실측: 글자 100/130/160% 모두 20px 안팎으로 고정).
+LV_TRIM = 5
 # 레벨을 몇 번째 판으로 세고 있는지. 이 숫자를 올리면 모두가 Lv1부터 다시
 # 시작한다 (저장된 lv_secs를 버린다). 함부로 올리지 말 것 — 친구들이 쌓은
 # 레벨이 통째로 사라진다.
@@ -3881,9 +3885,10 @@ class Mascot:
             return 0
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
-            return base + self._yt_bar() + self._lv_row()
+            return base + self._yt_bar() + max(0, self._lv_row() - LV_TRIM)
         extra = int(self.cfg.get("card_top", 22)) - 22        # 장식 여유 (토끼 귀)
-        return TIMER_H + extra + self._yt_bar() + self._lv_row()
+        return (TIMER_H + extra + self._yt_bar()
+                + max(0, self._lv_row() - LV_TRIM))
 
     def _bake_oy(self):
         """oy(카드 높이)에 의존하는 좌표들 — 시계 토글로 oy가 바뀌면 다시 부른다."""
@@ -4028,6 +4033,7 @@ class Mascot:
     def _card_geom(self):
         """현재 타이머 카드의 위치·크기. 시계 펼침이면 세로 직사각형."""
         lv = self._lv_row()
+        lv = (lv - LV_TRIM) if lv else 0
         if self.has_clock and self.clock_open:
             w, h = 148, 150 + lv      # 세로가 살짝 더 긴 직사각형
         elif self.has_clock:
@@ -8937,7 +8943,7 @@ class Mascot:
             band = lvh - self.LV_PAD
             self._safe("level_row", self._draw_lv_row,
                        x0, x1, y0 + self.LV_PAD + band / 2, band)
-            y0 += lvh
+            y0 += lvh - LV_TRIM
 
         def status_dot(px, py):
             pulse = 1.5 + math.sin(now * 4) * 1.5 if active else 0
