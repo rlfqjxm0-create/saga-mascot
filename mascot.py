@@ -325,6 +325,10 @@ KEY_ROT = (-7.0, 7.0)            # 타이핑 시 손 회전(어깨 축) 범위 (
 PEN_KB_ROT = (-6.0, 6.0)
 SHADOW_PAD = 16                  # 그림자 이미지 여백 (가장자리 파츠 잘림 방지)
 LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
+# 레벨을 몇 번째 판으로 세고 있는지. 이 숫자를 올리면 모두가 Lv1부터 다시
+# 시작한다 (저장된 lv_secs를 버린다). 함부로 올리지 말 것 — 친구들이 쌓은
+# 레벨이 통째로 사라진다.
+LV_EPOCH = 1
 # 한글 획은 글자 상자 안에서 아래로 쏠려 있어, 점(아이콘)과 같은 y에 놓으면
 # 1.5px 내려앉아 보인다(화면 픽셀로 실측). 그만큼 올려 눈으로 가운데를 맞춘다.
 INK_DY = -1.5
@@ -1685,6 +1689,21 @@ def monitor_at(x, y):
         except Exception:
             pass
     return 0, 0, 1920, 1080
+
+
+def monitor_work(x, y):
+    """그 점이 놓인 화면의 '작업 영역' (작업표시줄 제외). 창 자리 계산용."""
+    if IS_WIN:
+        try:
+            hmon = ctypes.windll.user32.MonitorFromPoint(_POINT(x, y), 2)
+            mi = _MONITORINFO()
+            mi.cbSize = ctypes.sizeof(_MONITORINFO)
+            if ctypes.windll.user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcWork
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
+    return monitor_at(x, y)
 
 
 UPDATE_REPOS = {                 # 선물 캐릭터 자동 업데이트 배포 레포
@@ -4472,11 +4491,7 @@ class Mascot:
 
         txt.bind("<Return>", on_return)
         win.bind("<Escape>", lambda _e: win.destroy())
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
-        win.geometry(f"+{int(px)}+{int(py)}")
+        self._place_near(win)
         txt.focus_force()
         if edit is not None:
             txt.tag_add("sel", "1.0", "end-1c")   # 바로 고쳐 쓸 수 있게
@@ -4597,13 +4612,7 @@ class Mascot:
             self.day_key = str(st.get("day_key", "") or "")
             self.day_base = float(st.get("day_base", 0) or 0)
             self.goal_cheered = str(st.get("goal_cheered", "") or "")
-            # 레벨은 따로 쌓는다. 처음 켜는 사람(키가 없음)은 지금까지의 누적
-            # 작업 시간을 그대로 물려받는다 — 몇 달 쓴 친구가 Lv1로 떨어지지
-            # 않게. work_secs는 이 시점엔 아직 예전 값 그대로다.
-            if "lv_secs" in st:
-                self.lv_secs = max(0.0, float(st.get("lv_secs") or 0))
-            else:
-                self.lv_secs = max(0.0, float(st.get("seconds") or 0))
+            self.lv_secs = self._lv_of(st)
             saved = st.get("stat")
             if isinstance(saved, dict):
                 self.stat.update({k: saved.get(k, v) for k, v in self.stat.items()})
@@ -4627,6 +4636,7 @@ class Mascot:
                         "day_key": self.day_key,
                         "day_base": round(self.day_base),
                         "lv_secs": round(self.lv_secs),
+                        "lv_epoch": LV_EPOCH,
                         "goal_cheered": self.goal_cheered,
                         "stat": self.stat, "rec": self.rec})
         except Exception:
@@ -4672,13 +4682,25 @@ class Mascot:
                 break
         return name
 
+    def _lv_of(self, st):
+        """저장된 기록에서 레벨용 시간을 꺼낸다.
+
+        판 번호(lv_epoch)가 다르면 0부터 다시 센다. 레벨을 처음 넣을 때
+        '지금까지 일한 시간'을 물려주었더니 누구는 Lv7에서 시작해 다 같이
+        출발하지 못했다. 이미 물려받아 저장된 사람도 이 번호로 되돌린다.
+        """
+        try:
+            if int(st.get("lv_epoch", 0)) == LV_EPOCH:
+                return max(0.0, float(st.get("lv_secs") or 0))
+        except (TypeError, ValueError):
+            pass
+        return 0.0
+
     def _lv_load(self):
         """연동 중인 캐릭터는 타이머 기록을 안 읽으므로 레벨만 되살린다."""
         try:
             with open(self.state_path, encoding="utf-8") as fp:
-                st = json.load(fp)
-            self.lv_secs = max(0.0, float(st.get("lv_secs",
-                                                 st.get("seconds", 0)) or 0))
+                self.lv_secs = self._lv_of(json.load(fp))
         except Exception:
             pass
 
@@ -4925,11 +4947,7 @@ class Mascot:
         for e in ents:
             e.bind("<Return>", commit)
         win.bind("<Escape>", lambda _e: win.destroy())
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
-        win.geometry(f"+{int(px)}+{int(py)}")
+        self._place_near(win)
         ents[0].focus_force()
 
     def _hist_load(self):
@@ -5687,11 +5705,7 @@ class Mascot:
             cd["track"], cd["sub"])
         ent.bind("<Return>", commit)
         win.bind("<Escape>", lambda _e: win.destroy())
-        win.update_idletasks()
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
-        px = min(max(self.root.winfo_rootx() - 40, 10), max(sw - W - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 20, 10), max(sh - H - 60, 10))
-        win.geometry(f"+{int(px)}+{int(py)}")
+        self._place_near(win)
         ent.focus_force()
 
     def _tray_setup(self):
@@ -5771,6 +5785,38 @@ class Mascot:
                     u.PostMessageW(hwnd, 0x0000, 0, 0)   # WM_NULL
                 except Exception:
                     pass
+
+    def _screen_box(self):
+        """캐릭터가 놓인 화면의 작업 영역 (왼쪽, 위, 오른쪽, 아래).
+
+        `winfo_screenwidth/height`는 주 모니터 크기만 알려 준다. 그 값으로
+        창 자리를 맞추면 보조 모니터에 있는 캐릭터를 눌러도 창이 주 모니터로
+        날아간다. 사람에게는 '눌러도 아무 일이 안 일어난다'로 보인다
+        (선물본에서 업데이트 소식이 안 뜬다는 제보의 진짜 원인).
+        """
+        try:
+            return monitor_work(self.root.winfo_rootx() + self.W // 2,
+                                self.root.winfo_rooty() + self.H // 2)
+        except Exception:
+            return (0, 0, self.root.winfo_screenwidth(),
+                    self.root.winfo_screenheight())
+
+    def _screen_h(self):
+        """캐릭터가 놓인 화면의 세로 크기 — 창 높이를 정할 때 쓴다."""
+        l, t, r, b = self._screen_box()
+        return max(400, b - t)
+
+    def _place_near(self, win, dx=40, dy=20):
+        """캐릭터 옆에, 캐릭터가 있는 화면 안으로 창을 놓는다."""
+        win.update_idletasks()
+        l, t, r, b = self._screen_box()
+        w = max(win.winfo_width(), win.winfo_reqwidth())
+        h = max(win.winfo_height(), win.winfo_reqheight())
+        px = min(max(self.root.winfo_rootx() - dx, l + 10),
+                 max(r - w - 10, l + 10))
+        py = min(max(self.root.winfo_rooty() - dy, t + 10),
+                 max(b - h - 20, t + 10))
+        win.geometry("+%d+%d" % (int(px), int(py)))
 
     def _tray_call(self):
         """캐릭터를 불러온다 — 화면 밖이면 보이는 자리로 끌어온다."""
@@ -7648,10 +7694,7 @@ class Mascot:
 
         # ── 창 크기: 화면에 안 들어가면 통째로 줄인다 ──────────────────
         H0 = 758 if show_dist else 674
-        tmp = tk.Toplevel(self.root)
-        tmp.withdraw()
-        sh = tmp.winfo_screenheight()
-        tmp.destroy()
+        sh = self._screen_h()
         k = min(1.0, (sh * 0.92) / max(self._ui(H0), 1))
 
         def u(px):
@@ -7961,29 +8004,44 @@ class Mascot:
 
         cv.bind("<Button-1>", on_click)
         win.bind("<Escape>", lambda _e: win.destroy())
-        win.update_idletasks()
-        sw = win.winfo_screenwidth()
-        px2 = min(max(self.root.winfo_rootx() - u(60), 10), max(sw - W - 10, 10))
-        py2 = min(max(self.root.winfo_rooty() - u(120), 10), max(sh - H - 60, 10))
-        win.geometry("+%d+%d" % (int(px2), int(py2)))
+        self._place_near(win, u(60), u(120))
 
     # ── 안 본 업데이트 표시 (빨간 점) ────────────────────────────────
     # 켜짐/꺼짐을 저장하지 않는다. '어디까지 읽었나' 숫자 하나만 두고 점은
     # 볼 때마다 계산한다 — 저장된 상태가 없으니 켜진 채로 굳을 수가 없다.
     UPDATE_POLL = 4 * 3600       # 켜 둔 채로 새 소식을 확인하는 간격
     UPDATE_FIRST = 120           # 켠 뒤 첫 확인까지 (시작을 방해하지 않게)
+    LOCAL_POLL = 60              # 제 폴더의 안내 파일을 다시 보는 간격
 
     def _update_poll(self, now):
         """켜 둔 채로도 새 소식을 알아챈다.
 
         지금까지는 켜는 순간에만 확인했다. 며칠씩 켜 두는 사람은 그동안
-        아무것도 못 받는다. 배포 레포의 version.json 하나만 보므로 가볍다.
-        받는 것은 런처가 다음에 켤 때 하므로, 여기서는 '알림'만 한다.
+        아무것도 못 받는다. 받는 것은 런처가 다음에 켤 때 하므로, 여기서는
+        '알림'만 한다.
+
+        선물본은 배포 레포의 version.json을 본다(네트워크). 소스로 도는
+        캐릭터는 원격이 없으므로 제 폴더의 .version.json을 본다 — 그쪽이
+        곧 '바뀐 점'을 넘기는 통로다(지뢰 29). 파일 하나라 자주 봐도 된다.
         """
-        if not (self.cfg.get("update_dot") and UPDATE_REPOS.get(self.char)):
+        if not self.cfg.get("update_dot"):
             return
         while self._upd_q:                   # 스레드가 넣은 것을 앞에서 꺼낸다
             self._safe("update_news", self._update_news, self._upd_q.pop(0))
+        repo = UPDATE_REPOS.get(self.char)
+        if repo is None:
+            if now - self._upd_start < self.LOCAL_POLL:
+                return
+            self._upd_at = self._upd_start = now
+            try:
+                with open(os.path.join(self.dir, ".version.json"),
+                          encoding="utf-8") as fp:
+                    got = json.load(fp)
+                if isinstance(got, dict):
+                    self._upd_q.append(got)
+            except Exception:
+                pass
+            return
         wait = self.UPDATE_FIRST if self._upd_at == 0 else self.UPDATE_POLL
         if now - self._upd_start < wait or self._upd_busy:
             return
@@ -8234,17 +8292,24 @@ class Mascot:
             cv.create_text(W / 2, y + u(46), text=sub,
                            font=self._uf(9), fill=cd["sub"])
             if len(pages) > 1:               # 지난 안내로 넘기는 화살표
-                for sign, cx in ((-1, PAD + u(20)), (1, W - PAD - u(20))):
+                # 선 두 개만 그렸더니 눈에 안 띄어 '지난 것을 볼 수 있다'는
+                # 걸 아무도 몰랐다. 누를 수 있는 동그란 단추로 만든다.
+                for sign, cx in ((-1, PAD + u(22)), (1, W - PAD - u(22))):
                     on = (i > 0) if sign < 0 else (i < len(pages) - 1)
-                    col = cd["fill"] if on else cd["line"]
                     cy = y + head_h / 2
+                    rad = u(13)
+                    cv.create_oval(cx - rad, cy - rad, cx + rad, cy + rad,
+                                   fill=cd["bg"] if on else "",
+                                   outline=cd["fill"] if on else cd["line"],
+                                   width=2 if on else 1)
+                    col = cd["fill"] if on else cd["line"]
                     for dy in (-u(5), u(5)):
                         cv.create_line(cx - sign * u(3), cy + dy,
-                                       cx + sign * u(3), cy, width=2,
+                                       cx + sign * u(3), cy, width=3 if on else 2,
                                        capstyle="round", fill=col)
                     if on:
-                        hits.append((cx - u(14), cy - u(14), cx + u(14),
-                                     cy + u(14),
+                        hits.append((cx - u(16), cy - u(16), cx + u(16),
+                                     cy + u(16),
                                      (lambda d: lambda: flip(d))(sign)))
             y += head_h + u(16)
             if get_h:
@@ -8372,7 +8437,7 @@ class Mascot:
         win.update_idletasks()
 
         # 처음 높이 — 내용이 길어도 적당한 크기로 띄운다
-        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        sh = self._screen_h()
         want = int(self.us.get("update_h", 0) or 0)
         if want < u(240):
             want = min(state["content"] + btn_h, u(560))
@@ -8381,11 +8446,7 @@ class Mascot:
         win.update_idletasks()
         fit_bar()
         win.bind("<Configure>", on_resize)
-        px = min(max(self.root.winfo_rootx() - 40, 10),
-                 max(sw - win.winfo_width() - 10, 10))
-        py = min(max(self.root.winfo_rooty() - 20, 10),
-                 max(sh - win.winfo_height() - 60, 10))
-        win.geometry("+%d+%d" % (int(px), int(py)))
+        self._place_near(win)
 
     def _uf(self, size, bold=False):
         """별도 창(환경설정·브리핑·메뉴)용 글꼴 — 화면 배율을 그대로 따른다.
@@ -8467,18 +8528,30 @@ class Mascot:
         c, cd = self.canvas, self.card
         lv = "Lv %d" % self._level()
         title = self._title()
-        avail = (x1 - x0) - 24
-        gap = 7
-        f1 = self._fit(lv, 9, avail * 0.45, True)
-        f2 = self._fit(title, 8, avail - self._mw(lv, f1) - gap) if title else f1
+        gap, pad = 6, 6
+        # 알약의 좌우 여백까지 미리 빼고 글자 크기를 정한다. 안 그러면
+        # 글자는 들어가는데 알약이 카드 밖으로 삐져나온다.
+        budget = (x1 - x0) - 28
+        f1 = self._fit(lv, 9, budget * 0.42, True)
         w1 = self._mw(lv, f1)
+        room = budget - w1 - gap - pad * 2
+        f2 = self._fit(title, 8, max(room, 20), True) if title else f1
         w2 = self._mw(title, f2) if title else 0
-        sx = (x0 + x1) / 2 - (w1 + (gap + w2 if title else 0)) / 2
+        total = w1 + (gap + w2 + pad * 2 if title else 0)
+        sx = (x0 + x1) / 2 - total / 2
         c.create_text(sx, cy + INK_DY, anchor="w", text=lv, font=f1,
                       fill=cd["text"])
         if title:
-            c.create_text(sx + w1 + gap, cy + INK_DY, anchor="w", text=title,
-                          font=f2, fill=cd["sub"])
+            # 칭호는 다른 글자와 같은 모양이라 그냥 두면 묻힌다. 뒤에 옅은
+            # 알약을 깔아 '이건 이름표'라고 읽히게 한다. 테마색을 흰색에
+            # 섞어 캐릭터마다 어울리는 파스텔이 나온다.
+            bx = sx + w1 + gap
+            h = self._mh(f2) + 2
+            self._rrect(bx, cy - h / 2, bx + w2 + pad * 2, cy + h / 2,
+                        h / 2, fill=self._mix("#ffffff", cd["fill"], 0.20),
+                        outline="")
+            c.create_text(bx + pad, cy + INK_DY, anchor="w", text=title,
+                          font=f2, fill=self._shade(cd["fill"], 0.35))
 
     def _draw_timer(self, state, sleeping, now):
         c = self.canvas
@@ -9550,18 +9623,15 @@ class Mascot:
                 return
             win.update_idletasks()
             wh, ww = win.winfo_height(), win.winfo_width()
-            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            sl, st_, sr, sb = self._screen_box()
             keep = self._set_pos
             if keep:
                 px, py = keep
                 # 모니터 구성이 바뀌어 화면 밖이면 그 자리는 버린다
-                if not (-4000 < px < sw + 4000 and -4000 < py < sh + 4000):
+                if not (-8000 < px < 16000 and -8000 < py < 16000):
                     keep = None
             if not keep:
-                px = min(max(self.root.winfo_rootx() - 70, 10),
-                         max(sw - ww - 10, 10))
-                py = min(max(self.root.winfo_rooty() - 30, 10),
-                         max(sh - wh - 60, 10))
+                return self._place_near(win, 70, 30)
             win.geometry(f"+{int(px)}+{int(py)}")
 
         def text_w(t, font):
@@ -9838,7 +9908,7 @@ class Mascot:
 
             # 화면에 들어가는 만큼만 보여 주고 나머지는 스크롤로 넘긴다.
             # 창 높이를 내용에 맞춰 늘리기만 하면 아래가 잘려 저장을 못 누른다.
-            room = self.root.winfo_screenheight() - self._ui(190)
+            room = self._screen_h() - self._ui(190)
             view_h = int(min(y, max(self._ui(240), room)))
             if self._set_h:            # 사용자가 창 끝을 끌어 정한 높이가 우선
                 view_h = int(max(self._ui(160), min(self._set_h, room)))
