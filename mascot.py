@@ -324,6 +324,10 @@ MAC_KEY = "#5d0051"
 KEY_ROT = (-7.0, 7.0)            # 타이핑 시 손 회전(어깨 축) 범위 (도)
 PEN_KB_ROT = (-6.0, 6.0)
 SHADOW_PAD = 16                  # 그림자 이미지 여백 (가장자리 파츠 잘림 방지)
+LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
+# 한글 획은 글자 상자 안에서 아래로 쏠려 있어, 점(아이콘)과 같은 y에 놓으면
+# 1.5px 내려앉아 보인다(화면 픽셀로 실측). 그만큼 올려 눈으로 가운데를 맞춘다.
+INK_DY = -1.5
 TIMER_H = 92                     # 타이머 카드 영역 높이 (게이지형 = 준사)
 OY_CLOCK_COMPACT = 70            # 시계형 카드 접힘 (상태+시간 한 줄)
 OY_CLOCK_OPEN = 182             # 시계형 카드 펼침 (시계 + 시간)
@@ -2644,6 +2648,9 @@ class Mascot:
         self.day_key = ""            # 지금 세고 있는 작업일
         self.day_base = 0.0          # 그 작업일이 시작될 때의 누적
         self._day_at = 0.0           # 마지막으로 날짜를 확인한 시각
+        self.lv_secs = 0.0           # 레벨용 누적 작업 시간 (줄어들지 않는다)
+        self._lv_seen = 0            # 마지막으로 알린 레벨 (0이면 아직 모름)
+        self._lv_save_at = 0.0       # 레벨을 마지막으로 저장한 시각
         self.goal_cheered = ""       # 목표 달성을 축하한 작업일
         # ── 마감 목록 (할 일 목록과 같은 말풍선 구조, 여러 개 등록) ──────
         self.dues = []               # [{"name": ..., "date": "YYYY-MM-DD"}]
@@ -2655,6 +2662,11 @@ class Mascot:
         self._beat_t = 0.0           # 살아있음 알림을 마지막으로 쓴 시각
         self._pid_written = False    # PID 파일을 남겼는가
         self._hello_at = 0.0         # 또 실행됐는지 마지막으로 살핀 시각
+        self._upd_q = []             # 새 소식 확인 스레드가 넣는다 (앞에서 꺼냄)
+        self._upd_at = 0.0           # 마지막으로 확인한 시각 (0이면 아직)
+        self._upd_start = time.time()   # 첫 확인은 켠 뒤 조금 있다가
+        self._upd_busy = False       # 확인하는 중인가
+        self._upd_restart = False    # 받아야 할 새 버전이 올라와 있는가
         self._fs_at = 0.0            # 전체화면 여부를 마지막으로 물어본 시각
         self._fs_hidden = False      # 전체화면 프로그램 때문에 비켜 있는가
         self.has_clock = self.timer_on and self.ws_path is not None
@@ -2887,8 +2899,12 @@ class Mascot:
         self._fg_checked = 0.0
         self._fg_work = False
         self.state_path = os.path.join(self.state_dir, ".timer_state.json")
-        if self.timer_on and self.ws_path is None:
-            self._timer_load()
+        if self.timer_on:
+            if self.ws_path is None:
+                self._timer_load()
+            else:
+                self._lv_load()      # 연동 중이면 레벨만 (기록은 에이전트 몫)
+        self._lv_seen = self._level()
 
         # ── 창 드래그 이동 / 카드 클릭 토글 / 우클릭 메뉴 ────────────────
         self._press = None
@@ -2897,6 +2913,18 @@ class Mascot:
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
+        # 작업 종료는 카드에서 뺐으므로 여기가 유일한 통로다. 맨 위에 두고
+        # 색과 굵기로 다른 항목과 구분한다 — 하루를 끝내는, 되돌릴 수 없는
+        # 동작이라 다른 것과 같은 모양이면 눈에 안 들어온다.
+        if self.timer_on:
+            # 파스텔 테마에서도 흰 글자가 읽히도록 카드색을 조금 어둡게 쓴다
+            _bg = self._shade(self.card["fill"], 0.22)
+            menu.add_command(label="  작업 종료  ", command=self._end_workday,
+                             font=self._uf(9, True),
+                             foreground="#ffffff", background=_bg,
+                             activeforeground="#ffffff",
+                             activebackground=self._shade(_bg, 0.25))
+            menu.add_separator()
         if self.todo_on:
             menu.add_command(label="할 일 추가", command=self.add_todo)
         if self.cfg.get("deadline_on"):
@@ -2905,8 +2933,6 @@ class Mascot:
             menu.add_command(label="유튜브 노래", command=self.add_music)
         if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
             menu.add_separator()
-        if self.ws_path is not None:
-            menu.add_command(label="작업 종료", command=self._end_workday)
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -3643,10 +3669,9 @@ class Mascot:
             return 0
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
-            return base + self._yt_bar()
+            return base + self._yt_bar() + self._lv_row()
         extra = int(self.cfg.get("card_top", 22)) - 22        # 장식 여유 (토끼 귀)
-        return (TIMER_H + (26 if self.cfg.get("fun") else 0) + extra
-                + self._yt_bar())
+        return TIMER_H + extra + self._yt_bar() + self._lv_row()
 
     def _bake_oy(self):
         """oy(카드 높이)에 의존하는 좌표들 — 시계 토글로 oy가 바뀌면 다시 부른다."""
@@ -3778,14 +3803,20 @@ class Mascot:
         else:
             self.shadow_img = img
 
+    def _lv_row(self):
+        """카드 맨 위 레벨·칭호 줄이 차지하는 높이 (안 쓰면 0)."""
+        return LV_ROW if (self.timer_on and self.cfg.get("level", True)) else 0
+
     def _card_geom(self):
         """현재 타이머 카드의 위치·크기. 시계 펼침이면 세로 직사각형."""
+        lv = self._lv_row()
         if self.has_clock and self.clock_open:
-            w, h = 148, 150           # 세로가 살짝 더 긴 직사각형
+            w, h = 148, 150 + lv      # 세로가 살짝 더 긴 직사각형
         elif self.has_clock:
-            w, h = 196, 40
+            w, h = 196, 40 + lv
         else:
-            w, h = 200, (88 if self.cfg.get("fun") else 62)
+            # 작업 종료 버튼은 우클릭 메뉴로 옮겼다 — 그 자리에 레벨·칭호가 온다
+            w, h = 200, 62 + lv
         x0 = getattr(self, "card_cx", self.W / 2) - w / 2
         # 창 밖으로 나가지 않게 — 책상이 한쪽으로 치우친 캐릭터도 안 잘리게
         x0 = max(3.0, min(x0, self.W - w - 3.0)) if self.W >= w + 6 else x0
@@ -4165,7 +4196,6 @@ class Mascot:
             on_card = (g["x0"] <= px <= g["x1"] and g["y0"] - 17 <= py <= g["y1"])
             mb = getattr(self, "_yt_btn", None)
             dot = getattr(self, "_dot_btn", None)
-            btn = getattr(self, "_end_btn", None)
             if dot and (px - dot[0]) ** 2 + (py - dot[1]) ** 2 <= dot[2] ** 2:
                 self.open_update_news()
                 self._press = None
@@ -4173,8 +4203,6 @@ class Mascot:
             # 음악 버튼이 카드 윗변에 걸쳐 있으므로 카드보다 먼저 본다
             if mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
                 self._safe("music", self._yt_toggle)
-            elif self.fun and btn and btn[0] <= px <= btn[2] and btn[1] <= py <= btn[3]:
-                self._end_workday()                    # 작업 종료 버튼
             elif self.has_clock and on_card:
                 self._toggle_clock()
             elif self.can_talk and not on_card and py > self.oy:
@@ -4569,6 +4597,13 @@ class Mascot:
             self.day_key = str(st.get("day_key", "") or "")
             self.day_base = float(st.get("day_base", 0) or 0)
             self.goal_cheered = str(st.get("goal_cheered", "") or "")
+            # 레벨은 따로 쌓는다. 처음 켜는 사람(키가 없음)은 지금까지의 누적
+            # 작업 시간을 그대로 물려받는다 — 몇 달 쓴 친구가 Lv1로 떨어지지
+            # 않게. work_secs는 이 시점엔 아직 예전 값 그대로다.
+            if "lv_secs" in st:
+                self.lv_secs = max(0.0, float(st.get("lv_secs") or 0))
+            else:
+                self.lv_secs = max(0.0, float(st.get("seconds") or 0))
             saved = st.get("stat")
             if isinstance(saved, dict):
                 self.stat.update({k: saved.get(k, v) for k, v in self.stat.items()})
@@ -4591,10 +4626,85 @@ class Mascot:
                         "zero_at": round(self.zero_at),
                         "day_key": self.day_key,
                         "day_base": round(self.day_base),
+                        "lv_secs": round(self.lv_secs),
                         "goal_cheered": self.goal_cheered,
                         "stat": self.stat, "rec": self.rec})
         except Exception:
             pass
+
+    # ── 레벨 ─────────────────────────────────────────────────────────────
+    # 1시간 그리면 1레벨. 숨은 계산이 없어 'Lv42 = 41시간 넘게 그렸다'로 읽힌다.
+    # 칭호는 캐릭터마다 다르다 (config의 "titles"). 없으면 아래 기본값.
+    LV_TITLES = ((1, "첫 붓"), (3, "삐뚤빼뚤"), (5, "낙서쟁이"),
+                 (8, "지우개 친구"), (12, "선 연습생"), (16, "동그라미 장인"),
+                 (20, "밑그림쟁이"), (25, "스케치 요정"), (30, "선 긋는 사람"),
+                 (36, "색칠 견습"), (42, "팔레트 지킴이"), (50, "그리는 사람"),
+                 (60, "붓 한 자루"), (75, "채색 요정"), (90, "그림 친구"),
+                 (100, "밤샘 새싹"), (125, "커피 두 잔"), (150, "손목 조심"),
+                 (175, "마감 친구"), (200, "손이 기억해"), (250, "그림 벌레"),
+                 (300, "붓끝 장인"), (350, "레이어 부자"), (400, "한 획의 사람"),
+                 (500, "태블릿 요정"), (600, "그림쟁이"), (700, "무한 캔버스"),
+                 (800, "선의 마술사"), (900, "잠은 나중에"), (1000, "붓의 주인"),
+                 (1250, "그림 도사"), (1500, "전설의 손"), (2000, "그림 요정왕"),
+                 (3000, "붓과 한 몸"), (5000, "그림 그 자체"))
+
+    def _titles(self):
+        """이 캐릭터의 칭호 표 — [[레벨, 이름], ...]. 잘못 적혀 있으면 기본값."""
+        got = self.cfg.get("titles")
+        try:
+            out = [(int(a), str(b)) for a, b in got if str(b).strip()]
+            return sorted(out) or list(self.LV_TITLES)
+        except Exception:
+            return list(self.LV_TITLES)
+
+    def _level(self):
+        """지금 레벨. 1시간마다 하나씩 오르고, 시작이 Lv1이다."""
+        return 1 + int(max(0.0, self.lv_secs) // 3600)
+
+    def _title(self, lv=None):
+        """그 레벨의 칭호."""
+        lv = self._level() if lv is None else lv
+        name = ""
+        for need, nm in self._titles():
+            if lv >= need:
+                name = nm
+            else:
+                break
+        return name
+
+    def _lv_load(self):
+        """연동 중인 캐릭터는 타이머 기록을 안 읽으므로 레벨만 되살린다."""
+        try:
+            with open(self.state_path, encoding="utf-8") as fp:
+                st = json.load(fp)
+            self.lv_secs = max(0.0, float(st.get("lv_secs",
+                                                 st.get("seconds", 0)) or 0))
+        except Exception:
+            pass
+
+    def _lv_add(self, now, dt, working):
+        """일한 만큼 레벨 경험치를 쌓는다. 줄어드는 일은 없다.
+
+        `work_secs`를 그대로 쓰면 안 된다 — '타이머 초기화'로 0이 되고,
+        연동 중인 캐릭터는 그 값을 에이전트에게서 통째로 받아온다.
+        """
+        if not working or dt <= 0:
+            return
+        self.lv_secs += min(dt, 2.0)
+        if now - self._lv_save_at > 60:      # 강제 종료로 진행이 날아가지 않게
+            self._lv_save_at = now
+            self._safe("timer_save", self._timer_save)
+        lv = self._level()
+        if lv <= self._lv_seen:
+            return
+        first, self._lv_seen = self._lv_seen <= 0, lv
+        self._lv_save_at = now
+        self._safe("timer_save", self._timer_save)
+        if first or not self.can_talk:
+            return                       # 처음 켠 순간에는 축하하지 않는다
+        title = self._title(lv)
+        self._say("Lv %d! %s" % (lv, title) if title else "Lv %d!" % lv, 4.5)
+        self._safe("burst", self._burst, 18, 40)
 
     HIST_DAYS = 60               # 하루 기록을 며칠치 보관할지
 
@@ -5988,6 +6098,7 @@ class Mascot:
             st = self.stat
             st[state] = st.get(state, 0.0) + dt
             self._log_work(now, state, st, dt)
+            self._safe("level", self._lv_add, now, dt, state == "work")
             return state
 
         return self._own_tick(now, idle)
@@ -6035,6 +6146,7 @@ class Mascot:
         s = self.stat
         s[state] = s.get(state, 0.0) + dt
         self._log_work(now, state, s, dt)
+        self._safe("level", self._lv_add, now, dt, state == "work")
         if now - self._t_save > 30:
             self._t_save = now
             self._timer_save()
@@ -7858,6 +7970,72 @@ class Mascot:
     # ── 안 본 업데이트 표시 (빨간 점) ────────────────────────────────
     # 켜짐/꺼짐을 저장하지 않는다. '어디까지 읽었나' 숫자 하나만 두고 점은
     # 볼 때마다 계산한다 — 저장된 상태가 없으니 켜진 채로 굳을 수가 없다.
+    UPDATE_POLL = 4 * 3600       # 켜 둔 채로 새 소식을 확인하는 간격
+    UPDATE_FIRST = 120           # 켠 뒤 첫 확인까지 (시작을 방해하지 않게)
+
+    def _update_poll(self, now):
+        """켜 둔 채로도 새 소식을 알아챈다.
+
+        지금까지는 켜는 순간에만 확인했다. 며칠씩 켜 두는 사람은 그동안
+        아무것도 못 받는다. 배포 레포의 version.json 하나만 보므로 가볍다.
+        받는 것은 런처가 다음에 켤 때 하므로, 여기서는 '알림'만 한다.
+        """
+        if not (self.cfg.get("update_dot") and UPDATE_REPOS.get(self.char)):
+            return
+        while self._upd_q:                   # 스레드가 넣은 것을 앞에서 꺼낸다
+            self._safe("update_news", self._update_news, self._upd_q.pop(0))
+        wait = self.UPDATE_FIRST if self._upd_at == 0 else self.UPDATE_POLL
+        if now - self._upd_start < wait or self._upd_busy:
+            return
+        self._upd_at = self._upd_start = now
+        self._upd_busy = True
+        threading.Thread(target=self._update_check, daemon=True).start()
+
+    def _update_check(self):
+        """배포 레포의 version.json만 받아 본다 (백그라운드). 실패는 넘긴다."""
+        import urllib.request
+        try:
+            repo = UPDATE_REPOS.get(self.char)
+            url = ("https://raw.githubusercontent.com/%s/main/version.json"
+                   % repo)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "mascot-poll"})
+            with urllib.request.urlopen(req, timeout=12) as r:
+                man = json.loads(r.read().decode("utf-8"))
+            if isinstance(man, dict):
+                self._upd_q.append(man)
+        except Exception:
+            pass
+        finally:
+            self._upd_busy = False
+
+    def _update_news(self, man):
+        """새 버전이 올라와 있으면 빨간 점을 켜고 한마디 한다."""
+        ver = man.get("version")
+        notes = [str(s) for s in (man.get("notes") or []) if str(s).strip()]
+        if not ver or man.get("silent") or not notes:
+            return
+        seen_path = os.path.join(self.state_dir, SEEN_FILE)
+        try:
+            with open(seen_path, encoding="utf-8") as fp:
+                if json.load(fp).get("version") == ver:
+                    return                   # 이미 아는 소식
+        except Exception:
+            pass
+        got = man.get("link") or {}
+        url = str(got.get("url") or "")
+        link = ({"url": url, "label": str(got.get("label") or "새 버전 받기")}
+                if url.startswith("https://") else None)
+        _update_log_add(self.state_dir, ver, notes, link)
+        try:
+            _save_json(seen_path, {"version": ver})
+        except Exception:
+            pass
+        # 지금 도는 코드는 아직 옛 것이다. 받는 것은 다음에 켤 때 런처가 한다.
+        self._upd_restart = True
+        if self.can_talk:
+            self._say("새 소식이 있어요! 껐다 켜면 반영돼요", 6.0)
+
     def _update_latest(self, pages=None):
         """기록에 있는 가장 최신 안내 번호. 없으면 0."""
         try:
@@ -8279,6 +8457,29 @@ class Mascot:
     def _cf_n(n, bold=False):
         return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
 
+    def _draw_lv_row(self, x0, x1, cy):
+        """카드 맨 윗줄 — 'Lv 42  선 긋는 사람'.
+
+        레벨은 진하게, 칭호는 옅게 해서 한 줄 안에서 위계를 준다. 둘을 한
+        덩어리로 보고 가운데에 놓는다 (가운데를 글자 사이에 맞추면 칭호
+        길이에 따라 좌우로 흔들린다).
+        """
+        c, cd = self.canvas, self.card
+        lv = "Lv %d" % self._level()
+        title = self._title()
+        avail = (x1 - x0) - 24
+        gap = 7
+        f1 = self._fit(lv, 9, avail * 0.45, True)
+        f2 = self._fit(title, 8, avail - self._mw(lv, f1) - gap) if title else f1
+        w1 = self._mw(lv, f1)
+        w2 = self._mw(title, f2) if title else 0
+        sx = (x0 + x1) / 2 - (w1 + (gap + w2 if title else 0)) / 2
+        c.create_text(sx, cy + INK_DY, anchor="w", text=lv, font=f1,
+                      fill=cd["text"])
+        if title:
+            c.create_text(sx + w1 + gap, cy + INK_DY, anchor="w", text=title,
+                          font=f2, fill=cd["sub"])
+
     def _draw_timer(self, state, sleeping, now):
         c = self.canvas
         cd = self.card
@@ -8294,6 +8495,12 @@ class Mascot:
         self._rrect(x0 + 2, y0 + 3, x1 + 2, y1 + 3, 16, fill="#e3e6ee", outline="")
         self._rrect(x0, y0, x1, y1, 16, fill=cd["bg"], outline=cd["border"], width=2)
 
+        # 맨 윗줄 — 레벨과 칭호. 아래 칸들은 그만큼 내려간다.
+        lvh = self._lv_row()
+        if lvh:
+            self._safe("level_row", self._draw_lv_row, x0, x1, y0 + lvh / 2 + 2)
+            y0 += lvh
+
         def status_dot(px, py):
             pulse = 1.5 + math.sin(now * 4) * 1.5 if active else 0
             r = 5 + pulse * 0.5
@@ -8306,12 +8513,12 @@ class Mascot:
             tw = self._mw(status, f_stat)
             gx = cxm - (16 + tw) / 2            # 점+간격+텍스트 그룹 중앙
             status_dot(gx + 5, y0 + 16)
-            c.create_text(gx + 16, y0 + 16, anchor="w", text=status,
+            c.create_text(gx + 16, y0 + 16 + INK_DY, anchor="w", text=status,
                           font=f_stat, fill=cd["sub"])
             R = 38
             clock_cy = y0 + 30 + R
             self._draw_clock(cxm, clock_cy, R, now)
-            c.create_text(cxm, clock_cy + R + 18, text=label,
+            c.create_text(cxm, clock_cy + R + 18 + INK_DY, text=label,
                           font=self._fit(label, 14, (x1 - x0) - 20, True),
                           fill=cd["text"])
         elif self.has_clock:
@@ -8322,9 +8529,9 @@ class Mascot:
             f_time = self._fit(label, 13, avail * 0.62, True)
             f_stat = self._fit(status, 8,
                                avail - self._mw(label, f_time) - 8)
-            c.create_text(x0 + pad + 16, row, anchor="w", text=status,
+            c.create_text(x0 + pad + 16, row + INK_DY, anchor="w", text=status,
                           font=f_stat, fill=cd["sub"])
-            c.create_text(x1 - pad, row, anchor="e", text=label,
+            c.create_text(x1 - pad, row + INK_DY, anchor="e", text=label,
                           font=f_time, fill=cd["text"])
         else:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
@@ -8336,9 +8543,9 @@ class Mascot:
             f_time = self._fit(label, 13, avail * 0.62, True)
             f_stat = self._fit(status, 8,
                                avail - self._mw(label, f_time) - 8)
-            c.create_text(x0 + pad + 16, row1, anchor="w", text=status,
+            c.create_text(x0 + pad + 16, row1 + INK_DY, anchor="w", text=status,
                           font=f_stat, fill=cd["sub"])
-            c.create_text(x1 - pad, row1, anchor="e", text=label,
+            c.create_text(x1 - pad, row1 + INK_DY, anchor="e", text=label,
                           font=f_time, fill=cd["text"])
             goal = max(float(self.us["goal_hours"]), 0.5) * 3600
             frac = min(self._shown_secs() / goal, 1.0)
@@ -8350,18 +8557,11 @@ class Mascot:
                 c.create_line(bx0, row2, bx0 + (bx1 - bx0) * frac, row2,
                               width=6, capstyle="round",
                               fill="#7ccf8f" if frac >= 1.0 else cd["fill"])
-            c.create_text(x1 - pad, row2, anchor="e", text=f"{int(frac * 100)}%",
+            c.create_text(x1 - pad, row2 + INK_DY, anchor="e",
+                          text=f"{int(frac * 100)}%",
                           font=self._fit(f"{int(frac * 100)}%", 7, 34, True),
                           fill="#5aa86e" if frac >= 1.0 else cd["sub"])
-            if self.fun:                      # 작업 종료 버튼
-                bw = 104
-                bx = (x0 + x1) / 2
-                by = y1 - 22
-                r = (bx - bw / 2, by - 11, bx + bw / 2, by + 11)
-                self._rrect(*r, 11, fill=cd["fill"], outline="")
-                c.create_text(bx, by, text="작업 종료",
-                              font=self._fit("작업 종료", 8, bw - 12, True), fill="#ffffff")
-                self._end_btn = r
+            # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
     def _log_error(self, where):
@@ -8455,8 +8655,9 @@ class Mascot:
         if now >= self.next_blink:
             self.blink_until = now + 0.12
             self.next_blink = now + random.uniform(2.5, 5.5)
-        # 또 실행했는가 / 전체화면 프로그램이 떴는가
+        # 또 실행했는가 / 새 소식이 올라왔는가 / 전체화면 프로그램이 떴는가
         self._safe("hello", self._hello_tick, now)
+        self._safe("update_poll", self._update_poll, now)
         # 전체화면 비켜 주기는 _safe에 맡기지 않는다. 세 번 터져 그 구역이
         # 꺼지면 '숨은 채로 굳어' 캐릭터가 영영 안 보인다 (지뢰 14).
         # 터지면 무조건 되돌려 놓는다 — 최악이 '게임 위에 잠깐 보이는 것'.
