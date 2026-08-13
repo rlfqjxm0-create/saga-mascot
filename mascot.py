@@ -2049,6 +2049,21 @@ def _parts_broken(char_dir):
                         return True
             except Exception:
                 return True
+    # config가 슬라임을 켜 뒀는데 소리 폴더가 없으면 그것도 '끊긴 상태'다.
+    # 업데이트가 반쪽만 적용되면 동그란 기본 모양에 소리도 안 나는 채로
+    # 굳는데(준사 제보), PNG만 보면 멀쩡해 보여 복구가 안 걸렸다.
+    try:
+        with open(os.path.join(char_dir, "config.json"), encoding="utf-8") as fp:
+            sl = json.load(fp).get("slime")
+        if isinstance(sl, dict) and sl.get("kinds"):
+            base = os.path.join(char_dir, "sounds", "slime")
+            for kind in sl["kinds"]:
+                d = os.path.join(base, kind)
+                if not os.path.isdir(d) or not any(
+                        f.lower().endswith(".wav") for f in os.listdir(d)):
+                    return True
+    except Exception:
+        pass
     return False
 
 
