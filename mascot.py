@@ -3326,6 +3326,8 @@ class Mascot:
         self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
         self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
         self._slime_hand = None      # 슬라임을 만지는 손이 지금 있는 자리
+        self._sl_touched = False     # 꺼낸 뒤 한 번이라도 만졌나
+        self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
         # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
         # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
         self._sl_shape, self._sl_damp = self.SL_SHAPE, self.SL_DAMP
@@ -3465,6 +3467,7 @@ class Mascot:
         self.shadow = None
         self._z_check = 0.0
         self._panel_z = 0.0          # 말풍선 창을 다시 올린 시각
+        self._z_pin_at = 0.0         # 캐릭터가 맨 앞인지 마지막으로 본 시각
         if self.shadow_img is not None and IS_WIN:
             # 그림자 이미지가 P만큼 여백을 두므로, 창을 (offset - P)에 놓아 정렬
             self.shadow = ShadowLayer(self.root, self.shadow_img,
@@ -6600,6 +6603,63 @@ class Mascot:
         self._last_pos = None
         self._panel_z = 0.0
 
+    Z_PIN = 1.0              # 이 간격으로 '내가 아직 맨 앞인가'를 본다
+
+    def _z_pin(self, now):
+        """'항상 위'인데도 뒤로 밀렸으면 다시 올린다.
+
+        항상 위는 창을 만들 때 한 번 정해질 뿐이다. 다른 '항상 위' 프로그램이
+        앞으로 나오면 캐릭터가 그 뒤로 눌리는데, 스스로 올라오는 길이 없어
+        그대로 굳는다(실측: 전체화면 프로그램 뒤에서 z순번 9에 30초 동안
+        그대로). 같은 프로세스의 말풍선 창들은 0.5초마다 다시 올려 주고 있어
+        맨 앞(z 0·1·2)에 있었다 — 캐릭터에만 그게 없었던 것이다.
+
+        올릴 필요가 있을 때만 올린다. 필요 없는데 주기적으로 밀어 넣으면
+        눈에 띄게 깜빡인다 (그림자에서 겪은 일).
+        """
+        if (not IS_WIN or self._fs_hidden or not self._main_hwnd
+                or not self.us.get("topmost", True)
+                or now - self._z_pin_at < self.Z_PIN):
+            return
+        self._z_pin_at = now
+        u = ctypes.windll.user32
+        x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        bx0, by0, bx1, by1 = x, y, x + self.W, y + self.H
+        # 내 창들은 앞에 있어도 괜찮다 (말풍선은 일부러 캐릭터보다 위에 둔다)
+        mine = {self._main_hwnd}
+        for holder in (self.shadow, self.todo_panel, self.due_panel, self._fx):
+            h = getattr(holder, "hwnd", None)
+            if h:
+                mine.add(h)
+            top = getattr(holder, "top", None)
+            if top is not None:
+                try:
+                    mine.add(int(top.wm_frame(), 16))
+                except Exception:
+                    pass
+        r = (ctypes.c_long * 4)()
+        cur = u.GetTopWindow(0)
+        buried = False
+        while cur and cur != self._main_hwnd:
+            if cur not in mine and u.IsWindowVisible(cur):
+                u.GetWindowRect(cur, ctypes.byref(r))
+                if not (r[2] <= bx0 or bx1 <= r[0]
+                        or r[3] <= by0 or by1 <= r[1]):
+                    buried = True
+                    break
+            cur = u.GetWindow(cur, 2)          # GW_HWNDNEXT
+        if not buried:
+            return
+        # HWND_TOP(0) — HWND_TOPMOST(-1)는 이미 항상 위인 창에는 무효라
+        # 순서를 못 되돌린다 (지뢰 23).
+        u.SetWindowPos(self._main_hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+        # 캐릭터가 맨 앞으로 갔으니 그림자와 말풍선을 다시 붙여 준다.
+        # 여기서 직접 옮기지 않는 것은, 미뤄 둔 이동이 버려지기 때문이다
+        # (지뢰 15) — 다음 프레임의 자리잡기에 맡긴다.
+        self._last_pos = None
+        self._panel_z = 0.0
+        self._z_check = 0.0
+
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
 
@@ -9514,6 +9574,7 @@ class Mascot:
                 self._fs_show()
             except Exception:
                 pass
+        self._safe("z_pin", self._z_pin, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
@@ -9857,6 +9918,8 @@ class Mascot:
                 holes.append((a, rr, rnd.uniform(0.10, 0.17)))
             self.slime["holes"] = holes
         self._slime_step = now
+        self._sl_touched = False
+        self._sl_fg = now
         self._slime_sound("unroll")
         self.smile_until = now + 1.6
 
@@ -9977,6 +10040,7 @@ class Mascot:
             return False
         now = time.time()
         sl["touch"] = now
+        self._sl_touched = True
         i = self._slime_idx(sl, x, y)
         # 집는 순간의 손끝과 입자 사이 어긋남을 기억해 둔다. 안 그러면 누르는
         # 순간 덩어리가 손끝으로 톡 튄다.
@@ -10044,6 +10108,18 @@ class Mascot:
         sl = self.slime
         if sl is None:
             return
+        # 만지다가 다른 창을 클릭하면 그 자리에서 치운다 — 슬라임을 두고
+        # 작업으로 돌아간 것이므로 90초를 기다릴 이유가 없다.
+        #   · 한 번도 안 만졌으면 두는 것은, 메뉴로 꺼낸 직후에는 앞 창이
+        #     아직 작업 프로그램일 수 있어 꺼내자마자 사라지기 때문이다.
+        #   · 맥은 자기 창인지 가릴 방법이 없어(_fg_is_self가 늘 False)
+        #     여기서 빼 둔다. 아래 90초는 그대로 도니 결국은 치워진다.
+        if (IS_WIN and self._sl_touched and self._slime_grab is None
+                and now - self._sl_fg > 0.15):
+            self._sl_fg = now
+            if not self._fg_is_self():
+                self._slime_close()
+                return
         if now - sl["touch"] > self.SL_IDLE:
             self._slime_close()
             return
