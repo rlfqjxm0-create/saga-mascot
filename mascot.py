@@ -1433,22 +1433,24 @@ class PokeSound:
         hdr.dwBufferLength = len(self.pcm)
         wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
         wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
-        self._voices.append((h, hdr))
+        # 여기도 같은 이유로 버퍼를 함께 붙든다 (set_volume이
+        # self.buf를 갈아 끼우는 동안 옛 소리가 재생 중일 수 있다)
+        self._voices.append((h, hdr, self.buf))
 
     def reap(self):
         wm = ctypes.windll.winmm
         keep = []
-        for h, hdr in self._voices:
+        for h, hdr, _b in self._voices:
             if hdr.dwFlags & 0x00000001:        # WHDR_DONE
                 wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
                 wm.waveOutClose(h)
             else:
-                keep.append((h, hdr))
+                keep.append((h, hdr, _b))
         self._voices = keep
 
     def close(self):
         wm = ctypes.windll.winmm
-        for h, hdr in self._voices:
+        for h, hdr, _b in self._voices:
             try:
                 wm.waveOutReset(h)
                 wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
@@ -1491,9 +1493,9 @@ class SlimeSound:
     # 종류별 상한과 최소 간격. 누르는 소리는 종류에 따라 400ms까지 가는데,
     # 빨리 누르면 그게 죄다 겹쳐 웅웅거린다. 한 가지 소리는 둘까지만,
     # 그것도 이 간격은 띄우고 낸다.
-    SAME_MAX = {"press": 1, "pop": 1, "stretch": 2, "crunch": 1, "unroll": 1}
-    MIN_GAP = {"press": 0.16, "pop": 0.16, "stretch": 0.06,
-               "crunch": 0.08, "unroll": 0.40}
+    SAME_MAX = {"press": 2, "pop": 2, "stretch": 3, "crunch": 2, "unroll": 1}
+    MIN_GAP = {"press": 0.13, "pop": 0.13, "stretch": 0.05,
+               "crunch": 0.07, "unroll": 0.40}
 
     def __init__(self, folder, volume=45):
         import wave
@@ -1565,22 +1567,25 @@ class SlimeSound:
         hdr.dwBufferLength = ln
         wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
         wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
-        self._voices.append((h, hdr, kind))
+        # 버퍼를 voice에 함께 담아 둔다. 헤더는 날 포인터만 들고 있어서,
+        # 재생 중에 _bufs가 비워지면(볼륨 변경·종류 교체) 드라이버가
+        # 이미 없는 메모리를 읽어 프로세스가 통째로 죽는다.
+        self._voices.append((h, hdr, kind, buf))
 
     def reap(self):
         wm = ctypes.windll.winmm
         keep = []
-        for h, hdr, kind in self._voices:
+        for h, hdr, kind, buf in self._voices:
             if hdr.dwFlags & 0x00000001:        # WHDR_DONE
                 wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
                 wm.waveOutClose(h)
             else:
-                keep.append((h, hdr, kind))
+                keep.append((h, hdr, kind, buf))
         self._voices = keep
 
     def close(self):
         wm = ctypes.windll.winmm
-        for h, hdr, _k in self._voices:
+        for h, hdr, _k, _b in self._voices:
             try:
                 wm.waveOutReset(h)
                 wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
