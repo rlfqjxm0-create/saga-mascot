@@ -1,5 +1,5 @@
 {
- "version": 1786601035,
+ "version": 1786601448,
  "files": {
   "mascot.py": "6c87ca4bcdc349e9f9890a2308662f450da944a17b6fc4af44783fd52633d4c5",
   "parts_saga/arm_key.png": "77641097db051ac9a94a8ada77efd2dabcfca095402a443e1b8a7e30bc231011",
@@ -222,8 +222,6 @@
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
- "notes": [
-  "슬라임 소리가 다양해졌어요\n누를 때·늘릴 때·놓을 때 소리가 종류마다 스무 장 넘게 있어서 만질 때마다 다르게 들립니다.",
-  "놓을 때 나던 '따닥' 소리를 바꿨어요\n손가락 튕기는 것처럼 들리던 소리를 부드러운 것으로 갈았습니다."
- ]
+ "notes": [],
+ "silent": true
 }
