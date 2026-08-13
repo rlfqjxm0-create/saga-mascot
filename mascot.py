@@ -376,6 +376,8 @@ DEFAULT_SETTINGS = {
     "sound_volume": 60,   # 타자 소리 볼륨 (0~100)
     "pen_volume": 10,     # 펜 긋는 소리 볼륨 (0~100)
     "poke_volume": 40,    # 캐릭터를 눌렀을 때 나는 소리 볼륨 (0~100)
+    "slime_volume": 45,   # 슬라임 만지는 소리 볼륨 (0~100)
+    "slime_kind": "",     # 슬라임 종류 (sounds/slime/ 아래 폴더 이름)
     "sound_pack": "banana split lubed",
     "skin": "기본",        # 패션 슬롯 이름
     "stickers_show": True,   # 바탕화면 스티커 보이기 (config의 stickers를 켠 캐릭터만)
@@ -1472,8 +1474,159 @@ class MacPokeSound(_MacSoundPool):
         self._all_stop()
 
 
+class SlimeSound:
+    """슬라임을 만질 때 나는 소리 — 종류별로 여러 장을 두고 골라 낸다.
+
+    PokeSound와 같은 방식(볼륨은 샘플에 미리 곱해 두고, 재생 속도를 흔들어
+    음높이를 달리한다)이지만 누르기·늘리기·구슬처럼 종류가 여럿이다.
+    파일 이름 앞머리로 묶으므로 press1.wav / crunch2.wav 처럼 두면 된다.
+
+    끄는 세기에 따라 소리 크기가 달라져야 해서 세 단계로 미리 만들어 둔다.
+    waveOutSetVolume은 드라이버가 무시할 수 있어 믿을 수 없기 때문이다.
+    """
+
+    KINDS = ("press", "stretch", "pop", "crunch", "unroll")
+    LEVELS = (0.35, 0.62, 1.0)
+    MAX_VOICES = 4               # 동시에 나는 소리 상한 (연타해도 안 뭉개지게)
+    # 종류별 상한과 최소 간격. 누르는 소리는 종류에 따라 400ms까지 가는데,
+    # 빨리 누르면 그게 죄다 겹쳐 웅웅거린다. 한 가지 소리는 둘까지만,
+    # 그것도 이 간격은 띄우고 낸다.
+    SAME_MAX = {"press": 1, "pop": 1, "stretch": 2, "crunch": 1, "unroll": 1}
+    MIN_GAP = {"press": 0.16, "pop": 0.16, "stretch": 0.06,
+               "crunch": 0.08, "unroll": 0.40}
+
+    def __init__(self, folder, volume=45):
+        import wave
+        self.clips = {}
+        for name in sorted(os.listdir(folder)):
+            if not name.lower().endswith(".wav"):
+                continue
+            kind = os.path.splitext(name)[0].rstrip("0123456789")
+            if kind not in self.KINDS:
+                continue
+            with wave.open(os.path.join(folder, name), "rb") as w:
+                if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                    continue
+                fr = w.getframerate()
+                pcm = w.readframes(w.getnframes())
+            # 재생 속도는 소리마다 따로 들고 있는다. 하나로 뭉뚱그리면 종류를
+            # 바꿨을 때(44.1kHz ↔ 48kHz) 음이 통째로 어긋난다.
+            self.clips.setdefault(kind, []).append((pcm, fr))
+        if not self.clips:
+            raise ValueError("슬라임 소리 wav 없음")
+        self._voices = []            # (핸들, 헤더, 종류)
+        self._bufs = {}
+        self._last = {}              # 종류별 마지막으로 낸 시각
+        self.set_volume(volume)
+
+    def set_volume(self, volume):
+        self.volume = max(0.0, min(float(volume), 100.0))
+        self._bufs = {}              # 볼륨이 바뀌면 미리 만든 것을 버린다
+
+    def _buf(self, kind, idx, level):
+        key = (kind, idx, level)
+        hit = self._bufs.get(key)
+        if hit is None:
+            pcm, fr = self.clips[kind][idx]
+            g = self.volume / 100.0 * self.LEVELS[level]
+            hit = (_scaled_buffer(pcm, g, 2), len(pcm), fr)
+            self._bufs[key] = hit
+        return hit
+
+    def has(self, kind):
+        return kind in self.clips
+
+    def play(self, kind, pitch=1.0, level=2):
+        self.reap()
+        if self.volume <= 0 or kind not in self.clips:
+            return
+        if len(self._voices) >= self.MAX_VOICES:
+            return
+        # 같은 소리가 겹쳐 웅웅거리지 않게 — 간격과 개수를 함께 막는다
+        now = time.time()
+        if now - self._last.get(kind, 0.0) < self.MIN_GAP.get(kind, 0.08):
+            return
+        if (sum(1 for v in self._voices if v[2] == kind)
+                >= self.SAME_MAX.get(kind, 2)):
+            return
+        self._last[kind] = now
+        idx = random.randrange(len(self.clips[kind]))
+        buf, ln, fr = self._buf(kind, idx,
+                                max(0, min(len(self.LEVELS) - 1, int(level))))
+        fr2 = max(8000, int(fr * pitch * random.uniform(0.94, 1.07)))
+        wfx = _WAVEFORMATEX(1, 1, fr2, fr2 * 2, 2, 16, 0)
+        wm = ctypes.windll.winmm
+        h = ctypes.c_void_p()
+        if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF, ctypes.byref(wfx), 0, 0, 0):
+            return
+        wm.waveOutSetVolume(h, 0xFFFFFFFF)     # 실볼륨은 샘플에 이미 반영됨
+        hdr = _WAVEHDR()
+        hdr.lpData = ctypes.cast(buf, ctypes.c_void_p)
+        hdr.dwBufferLength = ln
+        wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        self._voices.append((h, hdr, kind))
+
+    def reap(self):
+        wm = ctypes.windll.winmm
+        keep = []
+        for h, hdr, kind in self._voices:
+            if hdr.dwFlags & 0x00000001:        # WHDR_DONE
+                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+                wm.waveOutClose(h)
+            else:
+                keep.append((h, hdr, kind))
+        self._voices = keep
+
+    def close(self):
+        wm = ctypes.windll.winmm
+        for h, hdr, _k in self._voices:
+            try:
+                wm.waveOutReset(h)
+                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+                wm.waveOutClose(h)
+            except Exception:
+                pass
+        self._voices = []
+
+
+class MacSlimeSound(_MacSoundPool):
+    """맥용 슬라임 소리 (SlimeSound와 같은 인터페이스). 음높이 변주는 없다."""
+
+    # 아래에서 SlimeSound라는 이름 자체를 이 클래스로 바꿔 끼우므로, 메서드
+    # 안에서 SlimeSound.KINDS를 찾으면 자기 자신을 보게 된다. 클래스를 만드는
+    # 지금(아직 윈도우용을 가리킬 때) 붙잡아 둔다.
+    KINDS = SlimeSound.KINDS
+
+    def __init__(self, folder, volume=45):
+        names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
+        self.idx = {}
+        paths = []
+        for name in names:
+            kind = os.path.splitext(name)[0].rstrip("0123456789")
+            if kind not in self.KINDS:
+                continue
+            self.idx.setdefault(kind, []).append(len(paths))
+            paths.append(os.path.join(folder, name))
+        if not paths:
+            raise ValueError("슬라임 소리 wav 없음")
+        super().__init__(paths, volume)
+
+    def has(self, kind):
+        return kind in self.idx
+
+    def play(self, kind, pitch=1.0, level=2):
+        row = self.idx.get(kind)
+        if row:
+            self._fire(random.choice(row))
+
+    def close(self):
+        self._all_stop()
+
+
 if IS_MAC:                        # 맥에서는 같은 이름으로 맥 구현을 쓴다
     SoundPack, PenSound, PokeSound = MacSoundPack, MacPenSound, MacPokeSound
+    SlimeSound = MacSlimeSound
 
 
 if IS_WIN:
@@ -3143,6 +3296,28 @@ class Mascot:
         if self.ws_path is None:
             self._lv_work = float(self.work_secs)
 
+        # ── 슬라임(책상 위 말랑이) ───────────────────────────────────────
+        # 그리는 도중에 쓰는 값은 하나도 빠짐없이 여기서 만들어 둔다. 조건문
+        # 뒤쪽에서 처음 만들면 단락 평가 때문에 몇 분 뒤에 터진다 (지뢰 13).
+        self.slime = None            # 꺼내 놓은 슬라임 (없으면 None)
+        self._slime_grab = None      # 지금 잡고 있는 자리 (없으면 None)
+        self._slime_snd = None       # 만질 때 나는 소리
+        self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
+        self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
+        self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
+        self._slime_hand = None      # 슬라임을 만지는 손이 지금 있는 자리
+        # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
+        # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
+        self._sl_shape, self._sl_damp = self.SL_SHAPE, self.SL_DAMP
+        self._sl_area, self._sl_step = self.SL_AREA, self.SL_STEP
+        self._sl_edge, self._sl_stretch = self.SL_EDGE, self.SL_STRETCH
+        self._sl_reach, self._sl_stiff = self.SL_REACH, 0.0
+        self._sl_pin = 1.0
+        # 종류 목록 = sounds/slime/ 아래 wav가 든 폴더들
+        self.slime_kinds = self._list_slime_kinds()
+        if self.slime_kinds and self.us.get("slime_kind") not in self.slime_kinds:
+            self.us["slime_kind"] = self.slime_kinds[0]
+
         # ── 창 드래그 이동 / 카드 클릭 토글 / 우클릭 메뉴 ────────────────
         self._press = None
         self._dragged = False
@@ -3168,6 +3343,24 @@ class Mascot:
             menu.add_command(label="마감 추가", command=self.add_due)
         if self._yt_on():
             menu.add_command(label="유튜브 노래", command=self.add_music)
+        if self.cfg.get("slime"):
+            # 꺼내기/치우기와 종류 고르기를 '슬라임' 하나로 모은다.
+            # 켬/끔은 체크 표시로, 종류는 라디오로 지금 상태가 보이게.
+            sub = tk.Menu(menu, tearoff=0, font=self._uf(9))
+            self._slime_on_var = tk.BooleanVar(value=False)
+            sub.add_checkbutton(label="꺼내 놓기", variable=self._slime_on_var,
+                                command=self._slime_toggle)
+            if len(self.slime_kinds) > 1:
+                sub.add_separator()
+                self._slime_kind_var = tk.StringVar(
+                    value=self.us.get("slime_kind") or "")
+                for _k in self.slime_kinds:
+                    # 기본 인자로 지금 값을 붙잡는다 (안 그러면 마지막 것만 걸린다)
+                    sub.add_radiobutton(
+                        label=_k, value=_k, variable=self._slime_kind_var,
+                        command=lambda n=_k: self._slime_set_kind(n))
+            menu.add_cascade(label="슬라임", menu=sub)
+            self._slime_menu = sub
         if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
             menu.add_separator()
         menu.add_command(label="환경설정", command=self.open_settings)
@@ -3183,6 +3376,9 @@ class Mascot:
         # grab_release를 안 하면 메뉴를 닫은 뒤에도 마우스를 붙잡고 있어
         # 다음 클릭이 엉뚱하게 먹힌다
         def _pop(e):
+            # 메뉴는 켤 때 한 번만 만든다. 지금 상태(꺼내 놨는지·어떤 종류인지)는
+            # 띄우기 직전에 맞춰 준다 — 안 그러면 처음 값에 굳어 있다.
+            self._safe("slime_menu_sync", self._slime_menu_sync)
             try:
                 menu.tk_popup(e.x_root, e.y_root)
             finally:
@@ -3583,9 +3779,22 @@ class Mascot:
         # 타이머 카드 가로 중심 = 책상 내용의 중심 (캔버스 중심이 아니라)
         self.card_cx = self.W / 2
         self._desk_top = self.H * 0.6        # 반려동물이 올라오는 기준선
+        self._desk_bb = None                 # 책상 그림의 실제 범위(배율 반영)
+        self._desk_prof = None               # 열마다 책상의 위·아래 끝
+        self._slime_pts = None               # 매트 좌표 캐시 — 배율이 바뀌면 다시
         if "desk" in pil_cache:
             bb = pil_cache["desk"].split()[3].getbbox()
+            self._desk_bb = bb
             if bb:
+                # 매트가 책상 상판을 따라 덮으려면 실루엣을 알아야 한다.
+                # 열마다 위·아래 끝을 재 둔다 (켤 때 한 번만).
+                al = pil_cache["desk"].split()[3].point(
+                    lambda v: 255 if v > 40 else 0)
+                prof = []
+                for x in range(bb[0], bb[2]):
+                    box = al.crop((x, bb[1], x + 1, bb[3])).getbbox()
+                    prof.append((box[1], box[3]) if box else None)
+                self._desk_prof = prof
                 # 책상 PNG가 캔버스 전체가 아니라 잘려 있을 수 있으므로
                 # layout 위치를 더해 창 좌표로 옮긴다 (옛 캐릭터는 pos가 0,0)
                 dx, dy = self.layout["desk"]["pos"]
@@ -4239,6 +4448,12 @@ class Mascot:
             except Exception:
                 pass
             self.pokesnd = None
+        if self._slime_snd is not None:
+            try:
+                self._slime_snd.close()
+            except Exception:
+                pass
+            self._slime_snd = None
         self._pen_playing = False
         self._pen_release_t = None
         if not (self.us.get("sound", True) and self.sound_packs):
@@ -4274,6 +4489,17 @@ class Mascot:
                     poke_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.pokesnd = None
+        slime_dir = self._slime_dir()
+        if self.cfg.get("slime") and os.path.isdir(slime_dir):
+            # 종류마다 원본 소리 크기가 딴판이다 (직접 녹음한 것과 받은 음원).
+            # 종류별 vol로 눈금을 맞춰 둔다 — 사람이 볼륨을 다시 안 만지게.
+            vol = float(self.us.get("slime_volume", 45))
+            vol *= max(0.1, min(float(self._slime_look().get("vol", 1.0)), 2.0))
+            try:
+                self._slime_snd = SlimeSound(slime_dir,
+                                             volume=max(0.0, min(vol, 100.0)))
+            except Exception:
+                self._slime_snd = None
 
     # ── 입력 콜백 ─────────────────────────────────────────────────────────
     def _on_key(self, key):
@@ -4394,8 +4620,11 @@ class Mascot:
                 self.stat["clicks"] = int(self.stat.get("clicks", 0)) + 1
             self._drag_at = None
             self._new_stroke = True
-        # 펜 소리는 여기서 바로 판정한다 — 그리기 루프를 기다리면 늦다
-        if self._pen_grain and self.pensnd is not None:
+        # 펜 소리는 여기서 바로 판정한다 — 그리기 루프를 기다리면 늦다.
+        # 슬라임을 꺼내 놓았으면 펜을 내려놓은 것이므로 사각거리는 소리도 없다
+        # (안 그러면 슬라임을 끄는 동안 펜 소리가 같이 난다).
+        if (self._pen_grain and self.pensnd is not None
+                and self._slime_grab is None):
             try:
                 if pressed:
                     self.pensnd.pen_down(x, y, now)
@@ -4415,7 +4644,8 @@ class Mascot:
                 self._drag_px += d
                 if self._working():
                     self.stat["px"] = float(self.stat.get("px", 0.0)) + d
-        if self._pen_grain and self.pensnd is not None:
+        if (self._pen_grain and self.pensnd is not None
+                and self._slime_grab is None):
             try:
                 self.pensnd.pen_move(x, y, now)
             except Exception:
@@ -4424,8 +4654,15 @@ class Mascot:
     def _on_press(self, e):
         self._press = (e.x, e.y, e.x_root, e.y_root)
         self._dragged = False
+        self._slime_grab = None
+        if self.slime is not None:
+            self._safe("slime_press", self._slime_press, e.x, e.y)
 
     def _on_drag(self, e):
+        # 슬라임을 잡고 있으면 창을 옮기지 않는다 — 그 손짓은 늘이기다
+        if self._slime_grab is not None:
+            self._safe("slime_move", self._slime_move, e.x, e.y)
+            return
         if self._press is None:
             return
         px, py, prx, pry = self._press
@@ -4435,6 +4672,11 @@ class Mascot:
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
     def _on_release(self, e):
+        if self._slime_grab is not None:
+            self._safe("slime_up", self._slime_release)
+            self._slime_grab = None
+            self._press = None
+            return
         if self._dragged:
             self._safe("win_pos", self._save_win_pos)
         if self._press is not None and not self._dragged:
@@ -4452,6 +4694,12 @@ class Mascot:
                 self._safe("music", self._yt_toggle)
             elif self.has_clock and on_card:
                 self._toggle_clock()
+            elif self.cfg.get("slime") and not on_card and self._on_desk(px, py):
+                # 책상을 누르면 슬라임을 꺼냈다 치웠다 한다. 슬라임 위를
+                # 눌렀으면 이미 _on_press가 붙잡았으므로 여기까지 안 온다.
+                self._safe("slime_open",
+                           self._slime_close if self.slime is not None
+                           else self._slime_open)
             elif self.can_talk and not on_card and py > self.oy:
                 self._on_poke()                        # 캐릭터를 콕 찌름
         self._press = None
@@ -9304,6 +9552,798 @@ class Mascot:
                 pass
         self.draw(now)
 
+    # ── 슬라임 (책상 위 말랑이) ──────────────────────────────────────────
+    # 책상 그림에는 키보드와 타블렛이 한 장으로 그려져 있어 그것만 지울 수는
+    # 없다. 그래서 상판 위에 매트를 펼쳐 덮고, 그 위에 슬라임을 올린다.
+    # 슬라임은 그림 파일이 아니라 둘레를 도는 입자 SL_N개다. 매 프레임
+    # 좌표만 옮기면 되므로 빠르고, 그림 캐시가 없어 메모리도 안 샌다(지뢰 18).
+    #
+    # 예전에는 '중심에서의 거리'만 늘였다 줄였다 했는데, 그러면 아무리 잡아
+    # 끌어도 원 언저리를 못 벗어난다. 지금은 입자마다 제 좌표를 들고
+    #   ① 변 길이  ② 넓이  ③ 원래 모양으로 돌아가려는 힘
+    # 세 가지 제약을 번갈아 풀어 자리를 잡는다. 그래서 잡아당기면 그쪽으로
+    # 길게 늘어나고 가운데가 가늘어지는, 진짜 슬라임 같은 모양이 나온다.
+    SL_N = 36                # 둘레 입자 개수
+    SL_ITER = 3              # 한 걸음에 제약을 몇 번 풀까
+    SL_EDGE = 0.55           # 변 길이를 지키는 힘 (덩어리가 안 찢어지게)
+    SL_STRETCH = 2.6         # 변이 늘어날 수 있는 최대 배율
+    SL_AREA = 0.45           # 넓이를 지키는 힘 (길게 늘이면 가늘어진다)
+    SL_SHAPE = 0.13          # 원래 모양으로 돌아가려는 힘
+    SL_HOME = 0.06           # 제자리로 돌아가려는 힘
+    SL_DAMP = 0.74           # 출렁임이 잦아드는 정도 (낮을수록 덜 촐랑인다)
+    SL_GRIP = 2              # 손가락이 집는 폭 (입자 몇 개를 함께 쥐는가)
+    SL_REACH = 2.2           # 제자리에서 이만큼(반지름 배수)까지만 따라간다
+    SL_STEP = 0.22           # 한 걸음에 손끝을 따라갈 수 있는 거리 (반지름 배수)
+    SL_NEAR = 1.35           # 가까운 이웃끼리 지켜야 할 간격 (변 길이 배수)
+    SL_FLAT = 0.50           # 비스듬히 내려다보는 책상이라 세로로 눌러 그린다
+    SL_IDLE = 90.0           # 이만큼 안 만지면 저절로 치운다
+    SL_GRAIN_PX = 26.0       # 끌 때 이 거리마다 소리 한 알
+    # 매트는 책상 상판을 통째로 덮는다. 열마다 책상의 위·아래 끝을 재어
+    # 그 사이의 비율로 잡으므로, 책상 그림이 바뀌어도 실루엣을 따라간다.
+    # 실측(도로롱): 상판과 앞면을 가르는 선이 열마다 위아래 폭의 74~77%에
+    # 있었다. 그래서 앞끝을 0.77로 두면 상판만 정확히 덮는다.
+    SL_BACK = 0.035          # 뒤 모서리에서 안쪽으로 (책상 테두리를 남긴다)
+    SL_SMOOTH = 0.055        # 실루엣을 이만큼 폭으로 평균 내어 다듬는다
+    SL_LIGHT = 208           # 슬라임 색의 밝기 하한 (파스텔 유지)
+    SL_FRONT = 0.775         # 매트 앞끝 — 상판까지만 덮고 책상 앞면은 남긴다
+    SL_BED = 0.775           # 슬라임이 앉는 선 (여기까지가 상판)
+    SL_REVEAL = 8            # 펼치는 연출을 몇 단계로 나눌까
+
+    def _slime_mat(self):
+        """슬라임을 놓을 자리와, 상판을 흰색으로 칠한 그림.
+
+        (칠한 그림들, (가운데x, 뒤끝y, 상판 앞끝y, 폭)) 을 돌려준다.
+        매트를 따로 된 도형으로 얹으면 모서리가 어색해서, 아예 **책상 상판을
+        흰 페인트로 칠한다**. 책상의 검은 외곽선은 남기고 밝은 면만 하얘지므로
+        그림체가 그대로 살고 원근도 맞는다. 아래쪽 옆면은 안 칠한다.
+
+        펼치는 연출용으로 위에서 아래로 조금씩 드러나는 단계도 함께 만든다.
+        배율이 그대로면 다시 만들지 않는다.
+        """
+        prof = self._desk_prof
+        src = self._pil_cache.get("desk") if hasattr(self, "_pil_cache") else None
+        if not self.has.get("desk") or not self._desk_bb or not prof or src is None:
+            return None
+        dx, dy = self._pos("desk")
+        key = (round(dx, 1), round(dy, 1), round(self.s, 4))
+        hit = self._slime_pts
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        s = self.cfg.get("slime") if isinstance(self.cfg.get("slime"), dict) else {}
+        fb = float(s.get("bed", self.SL_BED))
+        bx0, by0, bx1, by1 = self._desk_bb
+        ox0, oy0 = dx + bx0, dy + by0
+        # 열마다 상판이 끝나는 선 (흔들림은 이웃 평균으로 다듬는다)
+        n = len(prof)
+        half = max(1, int(n * self.SL_SMOOTH))
+        sm = []
+        for i in range(n):
+            vals = [prof[q] for q in range(max(0, i - half), min(n, i + half + 1))
+                    if prof[q] is not None]
+            sm.append((sum(v[0] for v in vals) / len(vals),
+                       sum(v[1] for v in vals) / len(vals)) if vals else None)
+        im = src.copy()
+        px = im.load()
+        cols = [i for i in range(n) if sm[i] is not None]
+        if not cols:
+            return None
+        lo, hi = cols[0], cols[-1]
+        # 책상을 통째로 하얗게 칠한다 — 옆면까지 싹. 키보드도 타블렛도 같이
+        # 덮여 사라져서, 흰 매트를 씌워 둔 것처럼 보인다. 다만 바깥
+        # 테두리(가장자리 몇 px)는 남겨야 실루엣이 산다.
+        rim = max(2, int(round(self.s * 9)))
+        for i in cols:
+            t, b = sm[i]
+            side = i < lo + rim or i > hi - rim
+            y0i, y1i = int(by0 + t), min(by1, int(by0 + b))
+            for y in range(y0i, y1i):
+                a = px[bx0 + i, y][3]
+                if a < 8:
+                    continue
+                r, g, bl = px[bx0 + i, y][:3]
+                if side or y < y0i + rim or y > y1i - rim:
+                    # 테두리 구역이라도 '어두운 선'만 남긴다. 나무색이 섞인
+                    # 가장자리를 그대로 두면 갈색 자국이 남는다.
+                    if (r * 299 + g * 587 + bl * 114) / 1000.0 < 120:
+                        continue
+                px[bx0 + i, y] = (255, 255, 255, a)
+        mid = (lo + hi) // 2
+        t, b = sm[mid]
+        span = b - t
+        steps = []
+        full = by0 + int(round(b)) + 2
+        for q in range(1, self.SL_REVEAL + 1):
+            hgt = max(1, int(round((full - by0) * q / self.SL_REVEAL)))
+            steps.append(ImageTk.PhotoImage(im.crop((0, 0, im.width, by0 + hgt))))
+        bed = (ox0 + mid, oy0 + t + span * self.SL_BACK,
+               oy0 + t + span * fb, hi - lo)
+        got = (steps, bed)
+        self._slime_pts = (key, got)
+        return got
+
+    def _on_desk(self, x, y):
+        """책상 그림 위를 눌렀는가 (카드·캐릭터 몸이 아니라)."""
+        if not self.has.get("desk") or not self._desk_bb:
+            return False
+        dx, dy = self._pos("desk")
+        bx0, by0, bx1, by1 = self._desk_bb
+        return (dx + bx0 <= x <= dx + bx1) and (dy + by0 <= y <= dy + by1)
+
+    def _slime_dir(self, kind=None):
+        """그 종류의 소리가 있는 폴더."""
+        base = os.path.join(self.dir, "sounds", "slime")
+        k = self.us.get("slime_kind") if kind is None else kind
+        if k and os.path.isdir(os.path.join(base, k)):
+            return os.path.join(base, k)
+        return base                       # 종류를 안 나눈 옛 배치
+
+    def _list_slime_kinds(self):
+        """슬라임 종류 목록 — sounds/slime/ 아래 wav가 든 폴더가 곧 종류다.
+
+        폴더를 새로 넣으면 그대로 목록에 뜬다. 종류 없이 wav를 바로 둔
+        옛 배치도 그대로 돈다(목록은 빈 채로).
+        """
+        base = os.path.join(self.dir, "sounds", "slime")
+        out = []
+        if os.path.isdir(base):
+            for name in sorted(os.listdir(base)):
+                p = os.path.join(base, name)
+                if name.startswith(".") or not os.path.isdir(p):
+                    continue
+                if any(f.lower().endswith(".wav") for f in os.listdir(p)):
+                    out.append(name)
+        # config에 적어 둔 차례를 먼저 따르고, 없는 것은 뒤에 이름순으로
+        cfg = self._slime_cfg().get("kinds")
+        order = list(cfg) if isinstance(cfg, dict) else []
+        return ([k for k in order if k in out]
+                + [k for k in out if k not in order])
+
+    def _slime_cfg(self):
+        s = self.cfg.get("slime")
+        return s if isinstance(s, dict) else {}
+
+    def _slime_look(self):
+        """지금 고른 종류의 생김새·물성. 없는 값은 기본값을 쓴다."""
+        s = self._slime_cfg()
+        kinds = s.get("kinds") if isinstance(s.get("kinds"), dict) else {}
+        me = kinds.get(self.us.get("slime_kind")) or {}
+        look = dict(s)
+        look.pop("kinds", None)
+        look.update(me if isinstance(me, dict) else {})
+        return look
+
+    def _slime_color(self):
+        """(슬라임 색, 매트 색) — 캐릭터의 테마색에서 뽑는다.
+
+        슬라임은 테마색에 흰색을 섞은 파스텔, 매트는 같은 색을 어둡고
+        차분하게 낮춘 것이다. 매트를 슬라임의 옅은 색으로 두면 안 된다 —
+        같은 밝기끼리는 슬라임이 매트에 묻혀 안 보인다.
+        tint는 테마색을 얼마나 진하게 쓰는가다 (0이면 흰색, 1이면 테마색).
+        """
+        look = self._slime_look()
+        theme = look.get("theme") or self.card.get("fill") or "#f2a7c5"
+        tint = max(0.15, min(float(look.get("tint", 0.55)), 1.0))
+        # shade는 꾸덕한 종류를 한 단계 짙게 만드는 값이다. 종류가 색만
+        # 조금 다르면 사람 눈에는 같은 슬라임으로 보인다.
+        shade = max(0.0, min(float(look.get("shade", 0.0)), 0.4))
+        col = look.get("color") or self._shade(
+            self._mix("#ffffff", theme, tint), shade)
+        if not look.get("color"):
+            # 테마색이 어두운 캐릭터(준사 #4a4a52, 퀸시 #3c5488 …)는 흰색을
+            # 같은 비율로 섞어도 파스텔이 안 된다. 밝기 하한을 두어 어떤
+            # 캐릭터에서든 연한 색이 나오게 한다.
+            for _ in range(12):
+                r, g, b = (int(col[i:i + 2], 16) for i in (1, 3, 5))
+                if (r * 299 + g * 587 + b * 114) / 1000.0 >= self.SL_LIGHT:
+                    break
+                col = self._mix(col, "#ffffff", 0.18)
+        return (col, look.get("mat_color") or "#ffffff")
+
+    def _slime_open(self):
+        """슬라임을 꺼낸다 (작업 중에도 된다 — 잠깐 만지고 싶을 때가 있다)."""
+        if self.slime is not None:
+            return
+        got = self._slime_mat()
+        if not got:
+            return
+        look = self._slime_look()          # 고른 종류의 생김새·물성
+        cx, ytop, yfront, mw = got[1]
+        mh = yfront - ytop
+        # 상판 안에서 위쪽(캐릭터 쪽)에 놓는다. 가운데에 두면 앞 모서리에
+        # 딱 붙어 책상 밖으로 흘러내린 것처럼 보인다.
+        cy = ytop + mh * 0.30
+        # r은 가로 반지름이다. 매트가 비스듬해 세로로 얕으므로, 세로가 매트를
+        # 넘지 않는 선(mh의 80%)에서 가로를 최대한 키운다.
+        r = max(9.0, min(mw * 0.20, mh * 0.80 / (2 * self.SL_FLAT)))
+        # 종류마다 덩치가 다르다 (꾸덕한 쪽은 야무지게 작게)
+        r *= max(0.6, min(float(look.get("size", 1.0)), 1.3))
+        now = time.time()
+        n = self.SL_N
+        # 꾸덕한 종류는 천천히 굼뜨게 움직이고 모양을 더 오래 붙들고 있는다
+        # (thick 0이면 말랑, 1이면 꾸덕)
+        # thick(묵직함) — 손을 굼뜨게 따라오고 출렁임이 빨리 죽는다.
+        # stiff(단단함) — 제 모양을 강하게 붙들어 애초에 덜 변형된다.
+        # 둘은 다른 이야기다. 묵직하기만 하면 흐물흐물 늘어진 채로 굼뜨다.
+        thick = max(0.0, min(float(look.get("thick", 0.0)), 1.0))
+        stiff = max(0.0, min(float(look.get("stiff", 0.0)), 1.0))
+        # 단단한 고체는 출렁이지 않는다. 감쇠를 세게 걸어 속도를 바로 죽인다.
+        self._sl_stiff = stiff
+        self._sl_damp = self.SL_DAMP * (1.0 - 0.72 * thick)
+        # 굼뜨게 따라오는 것은 '무른데 묵직한' 것에만 준다. 단단한 고체가
+        # 손보다 느리면 뒤늦게 확 쏠려 오히려 출렁이는 것처럼 보인다
+        # (실측: 끄는 중 최대 속도가 무른 쪽의 두 배였다).
+        self._sl_step = self.SL_STEP * (1.0 - 0.55 * thick * (1.0 - stiff))
+        self._sl_shape = min(0.20 + 0.45 * stiff,
+                             self.SL_SHAPE * (1.0 + 3.2 * stiff))
+        self._sl_stretch = max(1.05, self.SL_STRETCH - 1.4 * stiff)
+        self._sl_edge = min(0.9, self.SL_EDGE + 0.3 * stiff)
+        self._sl_area = self.SL_AREA + 0.3 * stiff
+        # 단단한 종류는 애초에 멀리 끌려가지도 않는다. 글씨가 인쇄된
+        # 판이라 크게 늘어나면 글씨만 제자리에 남아 어색하다.
+        self._sl_reach = float(look.get("reach", self.SL_REACH))
+        # 무른 것은 집은 자리를 손끝에 딱 붙인다(가닥이 뽑힌다). 단단한
+        # 고체는 그러면 그 자리만 크게 일그러지므로 살짝만 당기고,
+        # 대신 덩어리째 끌려오게 한다.
+        self._sl_pin = 1.0 - 0.88 * stiff
+        # 기준 모양 — 돌아갈 자리이자 변 길이의 기준.
+        # "bar"면 버터 한 조각처럼 모서리가 둥근 네모, 아니면 납작한 타원.
+        if str(look.get("shape", "")) == "bar":
+            bw = r * float(look.get("bar_w", 1.18))
+            bh = r * self.SL_FLAT * float(look.get("bar_h", 0.86))
+            e = 2.0 / max(2.5, float(look.get("bar_edge", 5.0)))   # 클수록 각짐
+            rx, ry = [], []
+            for i in range(n):
+                a = math.tau * i / n
+                ca, sa = math.cos(a), math.sin(a)
+                rx.append(bw * (1 if ca >= 0 else -1) * abs(ca) ** e)
+                ry.append(bh * (1 if sa >= 0 else -1) * abs(sa) ** e)
+        else:
+            rx = [math.cos(math.tau * i / n) * r for i in range(n)]
+            ry = [math.sin(math.tau * i / n) * r * self.SL_FLAT for i in range(n)]
+        edge = [math.hypot(rx[(i + 1) % n] - rx[i], ry[(i + 1) % n] - ry[i])
+                for i in range(n)]
+        px = [cx + v for v in rx]
+        py = [cy + v for v in ry]
+        # 매트 밖으로 나가지 않게 가둬 둘 범위 (책상 위에서만 논다)
+        self.slime = {
+            "x": px, "y": py, "vx": [0.0] * n, "vy": [0.0] * n,
+            "rx": rx, "ry": ry, "edge": edge,
+            # 최소 간격의 기준은 변 길이의 평균이어야 한다. 버터바처럼
+            # 모서리가 있는 모양은 변 길이가 자리마다 크게 달라서, 한
+            # 변만 보면 평평한 쪽에서 기준이 너무 짧아진다.
+            "near": sum(edge) / n * self.SL_NEAR,
+            "area": self._poly_area(px, py),
+            "cx": cx, "cy": cy, "hx": cx, "hy": cy, "r": r,
+            # 위쪽(캐릭터 쪽)으로는 상판을 좀 넘어가도 된다 — 책상 뒤로
+            # 밀어 올리는 손짓이 자연스러우려면 여유가 있어야 한다.
+            "lim": (cx - mw * 0.52, cx + mw * 0.52,
+                    ytop - mh * 0.75, yfront - 2),
+            "born": now, "touch": now,
+        }
+        if look.get("label") == "cheese":
+            # 구멍은 꺼낼 때 한 번만 정한다. 매 프레임 새로 뽑으면 깜빡인다.
+            rnd = random.Random(int(now))
+            cnt = max(1, int(look.get("holes", 7)))
+            holes = []
+            for q in range(cnt):
+                # 각도는 칸을 나눠 하나씩 (아무렇게나 뽑으면 한쪽에 뭉친다).
+                a = math.tau * (q + rnd.uniform(0.15, 0.85)) / cnt
+                # 반지름은 제곱근을 취해야 넓이에 고르게 퍼진다. 그냥 뽑으면
+                # 가운데가 좁은데도 같은 수가 몰려 한복판에 뭉쳐 보인다.
+                rr = math.sqrt(rnd.uniform(0.09, 0.62))
+                holes.append((a, rr, rnd.uniform(0.10, 0.17)))
+            self.slime["holes"] = holes
+        self._slime_step = now
+        self._slime_sound("unroll")
+        self.smile_until = now + 1.6
+
+    @staticmethod
+    def _poly_area(px, py):
+        """다각형 넓이 (신발끈 공식). 부호는 도는 방향이라 절댓값을 쓴다."""
+        n = len(px)
+        s = 0.0
+        for i in range(n):
+            j = (i + 1) % n
+            s += px[i] * py[j] - px[j] * py[i]
+        return abs(s) * 0.5
+
+    def _slime_menu_sync(self):
+        """우클릭 메뉴의 체크·라디오를 지금 상태에 맞춘다."""
+        v = getattr(self, "_slime_on_var", None)
+        if v is not None:
+            v.set(self.slime is not None)
+        k = getattr(self, "_slime_kind_var", None)
+        if k is not None:
+            k.set(self.us.get("slime_kind") or "")
+
+    def _slime_toggle(self):
+        self._safe("slime_menu",
+                   self._slime_close if self.slime is not None
+                   else self._slime_open)
+        # 작업 중이라 안 나왔을 수도 있으니 체크 표시를 실제 상태로 되돌린다
+        self._safe("slime_menu_sync", self._slime_menu_sync)
+
+    def _slime_set_kind(self, name):
+        """슬라임 종류를 바꾼다 — 소리도 생김새도 그 종류의 것으로."""
+        if name == self.us.get("slime_kind") or name not in self.slime_kinds:
+            return
+        self.us["slime_kind"] = name
+        self._safe("slime_save", self._save_settings)
+        self._safe("slime_snd", self._init_sound)
+        if self.slime is not None:
+            # 꺼내 놓은 채로 바꾸면 그 자리에서 새 것으로 갈아 준다
+            self.slime = None
+            self._slime_grab = None
+            self._slime_hand = None
+            self._safe("slime_swap", self._slime_open)
+
+    def _slime_close(self):
+        if self.slime is None:
+            return
+        self.slime = None
+        self._slime_grab = None
+        self._slime_hand = None
+        self._slime_sound("pop", 0.9)
+
+    def _slime_sound(self, kind, pitch=1.0, level=2):
+        snd = self._slime_snd
+        if snd is None:
+            return
+        try:
+            snd.play(kind, pitch, level)
+        except Exception:
+            pass
+
+    def _slime_xy(self, sl, i, d=None):
+        """제어점 i의 화면 좌표."""
+        return (sl["x"][i], sl["y"][i])
+
+    def _slime_pt(self, sl, a, rr):
+        """덩어리 '안'의 한 점(기준 모양에서의 각도 a, 중심에서의 비율 rr).
+
+        둘레 입자의 지금 자리를 섞어 쓰므로 늘어난 쪽 속살도 같이 딸려 간다.
+        고정 좌표로 그리면 덩어리만 움직이고 속은 제자리에 붙어 따로 논다.
+        """
+        n = self.SL_N
+        f = (a % math.tau) / math.tau * n
+        i = int(f)
+        k = f - i
+        bx = sl["x"][i % n] * (1.0 - k) + sl["x"][(i + 1) % n] * k
+        by = sl["y"][i % n] * (1.0 - k) + sl["y"][(i + 1) % n] * k
+        return (sl["cx"] + (bx - sl["cx"]) * rr,
+                sl["cy"] + (by - sl["cy"]) * rr)
+
+    def _slime_idx(self, sl, x, y):
+        """(x, y)에 가장 가까운 둘레 입자 번호."""
+        best, bd = 0, None
+        for i in range(self.SL_N):
+            d = (sl["x"][i] - x) ** 2 + (sl["y"][i] - y) ** 2
+            if bd is None or d < bd:
+                best, bd = i, d
+        return best
+
+    def _slime_inside(self, x, y, pad=6.0):
+        """다각형 안인가 — 자유롭게 찌그러지므로 원으로는 못 잰다.
+
+        가장자리를 조금 봐 주려고, 안이 아니면 둘레에서 pad 안쪽인지도 본다.
+        """
+        sl = self.slime
+        if sl is None:
+            return False
+        n = self.SL_N
+        px, py = sl["x"], sl["y"]
+        inside = False
+        j = n - 1
+        for i in range(n):                       # 반직선 교차 세기
+            if (py[i] > y) != (py[j] > y):
+                xx = px[i] + (y - py[i]) * (px[j] - px[i]) / (py[j] - py[i])
+                if x < xx:
+                    inside = not inside
+            j = i
+        if inside:
+            return True
+        for i in range(n):                       # 둘레 가까이도 잡아 준다
+            if (px[i] - x) ** 2 + (py[i] - y) ** 2 <= pad * pad:
+                return True
+        return False
+
+    def _slime_press(self, x, y):
+        """누른 순간 — 슬라임 위면 붙잡고, 그 자리를 움푹 들어가게 한다."""
+        sl = self.slime
+        if sl is None or not self._slime_inside(x, y):
+            return False
+        now = time.time()
+        sl["touch"] = now
+        i = self._slime_idx(sl, x, y)
+        # 집는 순간의 손끝과 입자 사이 어긋남을 기억해 둔다. 안 그러면 누르는
+        # 순간 덩어리가 손끝으로 톡 튄다.
+        self._slime_grab = {"i": i, "x": x, "y": y, "moved": 0.0,
+                            "ox": sl["x"][i] - x, "oy": sl["y"][i] - y}
+        self._slime_px = 0.0
+        self._slime_grain = now
+        # 누르는 순간 그 자리를 안쪽으로 살짝 눌러 준다. 집을 때의 어긋남을
+        # 그대로 두면 끌기 전까지 아무 일도 안 일어나 '눌러도 반응이 없다'가
+        # 된다 (어긋남은 덩어리가 손끝으로 톡 튀는 것을 막으려고 둔 것이다).
+        n = self.SL_N
+        dent = sl["r"] * 0.20 * (1.0 - self._sl_stiff * 0.5)
+        ccx = sum(sl["x"]) / n
+        ccy = sum(sl["y"]) / n
+        for k in range(-2, 3):
+            j = (i + k) % n
+            w = 1.0 - abs(k) / 3.0
+            ddx, ddy = ccx - sl["x"][j], ccy - sl["y"][j]
+            d = math.hypot(ddx, ddy) or 1.0
+            sl["vx"][j] += ddx / d * dent * w
+            sl["vy"][j] += ddy / d * dent * w
+        self._slime_sound("press", random.uniform(0.94, 1.08))
+        self.smile_until = max(self.smile_until, now + 0.9)
+        return True
+
+    def _slime_move(self, x, y):
+        """끄는 중 — 잡은 자리가 손끝을 따라 늘어난다."""
+        sl = self.slime
+        g = self._slime_grab
+        if sl is None or g is None:
+            return
+        now = time.time()
+        sl["touch"] = now
+        d = math.hypot(x - g["x"], y - g["y"])
+        g["x"], g["y"], g["moved"] = x, y, g["moved"] + d
+        self._slime_px += d
+        if self._slime_px >= self.SL_GRAIN_PX and now - self._slime_grain > 0.05:
+            self._slime_px = 0.0
+            self._slime_grain = now
+            lv = 2 if d > 6 else (1 if d > 2 else 0)
+            self._slime_sound("stretch", random.uniform(0.9, 1.15), lv)
+
+    def _slime_release(self):
+        """손을 뗀 순간 — 늘어난 만큼 튕겨 돌아온다."""
+        sl = self.slime
+        g = self._slime_grab
+        self._slime_grab = None
+        if sl is None or g is None:
+            return
+        # 놓는 순간 잡고 있던 쪽에 살짝 되튀는 기운을 준다. 자리를 잡아 주는
+        # 것은 어차피 모양 제약이므로, 여기서는 출렁임만 얹는다.
+        n = self.SL_N
+        for k in range(-n // 3, n // 3 + 1):
+            j = (g["i"] + k) % n
+            # 단단할수록 되튀지 않는다 (고체는 놓아도 출렁이지 않는다)
+            kick = 0.06 * (1.0 - self._sl_stiff)
+            sl["vx"][j] += (sl["cx"] - sl["x"][j]) * kick
+            sl["vy"][j] += (sl["cy"] - sl["y"][j]) * kick
+        if g["moved"] > 10:
+            self._slime_sound("pop", random.uniform(0.92, 1.10))
+        sl["touch"] = time.time()
+
+    def _slime_tick(self, now):
+        """말랑말랑 물리."""
+        sl = self.slime
+        if sl is None:
+            return
+        if now - sl["touch"] > self.SL_IDLE:
+            self._slime_close()
+            return
+        # 프레임 간격이 30/15/10fps로 바뀌므로, 흐른 시간만큼 나눠 돌린다.
+        # 안 그러면 조용할 때 출렁임이 세 배로 느려진다.
+        steps = int(max(1, min(3, round((now - self._slime_step) / 0.033))))
+        self._slime_step = now
+        for _ in range(steps):
+            self._slime_solve(sl)
+        n = self.SL_N
+        sl["cx"] = sum(sl["x"]) / n
+        sl["cy"] = sum(sl["y"]) / n
+
+    def _slime_solve(self, sl):
+        """한 걸음 — 자리를 먼저 예측하고 제약을 몇 번 풀어 다시 앉힌다.
+
+        힘을 더하는 대신 자리를 직접 고치는 방식(위치 기반)이라, 세게 잡아
+        끌어도 발산하지 않는다. 제약은 세 가지다.
+          ① 변 길이 — 이웃끼리 너무 벌어지거나 붙지 않게 (찢어짐 방지)
+          ② 넓이   — 길게 늘이면 가운데가 가늘어지게 (부피가 있는 것처럼)
+          ③ 모양   — 원래 타원으로, 제자리로 돌아오려는 힘
+        잡고 있는 입자는 마지막에 손끝에 그대로 박아 둔다.
+        """
+        n = self.SL_N
+        x, y, vx, vy = sl["x"], sl["y"], sl["vx"], sl["vy"]
+        qx = [x[i] + vx[i] for i in range(n)]
+        qy = [y[i] + vy[i] for i in range(n)]
+        edge = sl["edge"]
+        g = self._slime_grab
+        pin = {}
+        if g is not None:
+            # 집은 자리는 손끝을 따라 '둘레를 타고' 한 칸씩 미끄러진다.
+            # 한 입자를 붙든 채로 덩어리를 가로지르면 그 입자가 반대편으로
+            # 넘어가 둘레가 8자로 꼬이고, 겹친 자리가 뚫린 것처럼 칠해진다.
+            # 사람이 슬라임 위에서 손가락을 미끄러뜨리는 것과 같은 모양이다.
+            # 집을 때의 어긋남은 걸음마다 지운다. 끌 때만 지우면 가만히
+            # 누르고 있을 때 핀이 원래 자리로 되당겨 아무 일도 안 난다.
+            g["ox"] *= 0.86
+            g["oy"] *= 0.86
+            gi = g["i"]
+            near = self._slime_idx(sl, g["x"], g["y"])
+            if near != gi:
+                fwd = (near - gi) % n
+                gi = (gi + (1 if fwd <= n - fwd else -1)) % n
+                g["i"] = gi
+            # 손가락은 점 하나가 아니라 좁은 면으로 집는다. 가운데와 양옆
+            # 몇 개를 함께 쥐어야 집힌 자리가 바늘처럼 안 뾰족해진다.
+            gx, gy = g["x"] + g["ox"], g["y"] + g["oy"]
+            # 손끝을 먼저 매트 안으로 들인다. 매트 밖을 짚게 두면 그 자리에
+            # 못 가는 입자들이 벽에 죄다 눌어붙어 모양이 납작하게 무너진다.
+            x0, x1, y0, y1 = sl["lim"]
+            gx = min(max(gx, x0), x1)
+            gy = min(max(gy, y0), y1)
+            # 너무 멀리는 못 따라간다 — 끝까지 늘어나면 손에서 미끄러진다
+            dx, dy = gx - sl["hx"], gy - sl["hy"]
+            far = math.hypot(dx, dy)
+            reach = sl["r"] * self._sl_reach
+            if far > reach:
+                gx = sl["hx"] + dx / far * reach
+                gy = sl["hy"] + dy / far * reach
+            # 한 걸음에 옮길 수 있는 거리를 제한한다. 손끝으로 곧장
+            # 순간이동시키면 덩어리를 관통해 둘레가 꼬인다 — 조금씩 끌려가야
+            # 이웃들이 따라올 틈이 생긴다.
+            step = sl["r"] * self._sl_step
+            dx, dy = gx - sl["x"][gi], gy - sl["y"][gi]
+            d = math.hypot(dx, dy)
+            if d > step:
+                gx = sl["x"][gi] + dx / d * step
+                gy = sl["y"][gi] + dy / d * step
+            if self._sl_stiff > 0.05:
+                # 단단할수록 통째로 끌려온다 — 한 자리만 늘어나지 않는다
+                mx = (gx - qx[gi]) * 0.5 * self._sl_stiff
+                my = (gy - qy[gi]) * 0.5 * self._sl_stiff
+                for i in range(n):
+                    qx[i] += mx
+                    qy[i] += my
+            for k in range(-self.SL_GRIP, self.SL_GRIP + 1):
+                j = (gi + k) % n
+                pin[j] = (gx + (sl["rx"][j] - sl["rx"][gi]) * 0.5,
+                          gy + (sl["ry"][j] - sl["ry"][gi]) * 0.5)
+        for _ in range(self.SL_ITER):
+            # ① 변 길이
+            k = self._sl_edge * 0.5
+            for i in range(n):
+                j = (i + 1) % n
+                dx, dy = qx[j] - qx[i], qy[j] - qy[i]
+                d = math.hypot(dx, dy) or 1e-6
+                want = min(d, edge[i] * self._sl_stretch)
+                want = max(want, edge[i] * 0.72)
+                s = (d - want) / d * k
+                ax, ay = dx * s, dy * s
+                qx[i] += ax
+                qy[i] += ay
+                qx[j] -= ax
+                qy[j] -= ay
+            # ② 파인 자리가 스스로 맞닿아 겹치지 않게 — 번호가 가까운
+            #    이웃끼리만 최소 간격을 둔다. 위로 잡아당기면 V자 홈이
+            #    생기는데 그 양쪽이 맞물리면 둘레가 꼬여 '영역이 뒤집힌'
+            #    모양이 된다. 가늘게 늘인 가닥의 양면은 번호가 반 바퀴만큼
+            #    떨어져 있으므로 이 제약에 걸리지 않는다.
+            near = sl["near"]
+            n2 = near * near
+            for i in range(n):
+                xi, yi = qx[i], qy[i]
+                for k in range(3, 12):
+                    j = (i + k) % n
+                    dx, dy = qx[j] - xi, qy[j] - yi
+                    d2 = dx * dx + dy * dy
+                    if 1e-9 < d2 < n2:
+                        d = math.sqrt(d2)
+                        push = (near - d) / d * 0.5
+                        ax, ay = dx * push, dy * push
+                        qx[i] = xi = xi - ax
+                        qy[i] = yi = yi - ay
+                        qx[j] += ax
+                        qy[j] += ay
+            # ③ 넓이 — 모자란 만큼 둘레를 바깥으로 밀어낸다
+            area = self._poly_area(qx, qy)
+            peri = 0.0
+            for i in range(n):
+                j = (i + 1) % n
+                peri += math.hypot(qx[j] - qx[i], qy[j] - qy[i])
+            if peri > 1e-6:
+                push = (sl["area"] - area) / peri * self._sl_area
+                for i in range(n):
+                    a, b = (i - 1) % n, (i + 1) % n
+                    tx, ty = qx[b] - qx[a], qy[b] - qy[a]
+                    d = math.hypot(tx, ty) or 1e-6
+                    qx[i] += ty / d * push        # 바깥쪽 법선
+                    qy[i] += -tx / d * push
+            # ④ 모양 — 원래 타원 자리로 조금씩 당긴다.
+            a0 = self._sl_shape
+            if pin:
+                # 잡고 있는 동안 무른 것은 손에서 먼 쪽이 매트에 붙어 버틴다 —
+                # 그래야 한쪽에서 가닥이 뽑힌다. 반대로 단단한 고체는 그러면
+                # 안 된다. 먼 쪽은 제자리로, 가까운 쪽은 손으로 당겨져 서로
+                # 줄다리기를 하면서 끄는 내내 출렁이기 때문이다. 단단할수록
+                # 기준점을 '지금 자리'로 옮겨 통째로 따라가게 한다.
+                gi = self._slime_grab["i"]
+                half = n * 0.5
+                # 기준점을 지금 자리 쪽으로 옮기되 끝까지 옮기지는 않는다.
+                # 완전히 옮기면 제자리로 돌아오려는 힘이 사라져 덩어리가
+                # 책상 위를 미끄러져 다닌다.
+                st = self._sl_stiff * 0.8
+                ax = sl["hx"] + (sum(qx) / n - sl["hx"]) * st
+                ay = sl["hy"] + (sum(qy) / n - sl["hy"]) * st
+                for i in range(n):
+                    far = min((i - gi) % n, (gi - i) % n) / half
+                    a = a0 * (0.10 + 0.90 * far + 0.90 * st * (1.0 - far))
+                    qx[i] += (ax + sl["rx"][i] - qx[i]) * a
+                    qy[i] += (ay + sl["ry"][i] - qy[i]) * a
+            else:
+                # 놓은 뒤에는 지금 중심을 기준으로 모양을 되찾으면서,
+                # 중심 자체도 제자리 쪽으로 천천히 끌려온다.
+                cx = sum(qx) / n
+                cy = sum(qy) / n
+                tx = cx + (sl["hx"] - cx) * self.SL_HOME
+                ty = cy + (sl["hy"] - cy) * self.SL_HOME
+                for i in range(n):
+                    qx[i] += (tx + sl["rx"][i] - qx[i]) * a0
+                    qy[i] += (ty + sl["ry"][i] - qy[i]) * a0
+            for i, (px_, py_) in pin.items():
+                qx[i] += (px_ - qx[i]) * self._sl_pin
+                qy[i] += (py_ - qy[i]) * self._sl_pin
+        # 매트 밖으로는 못 나간다 (책상 위에서만 논다)
+        x0, x1, y0, y1 = sl["lim"]
+        for i in range(n):
+            qx[i] = min(max(qx[i], x0), x1)
+            qy[i] = min(max(qy[i], y0), y1)
+        damp = self._sl_damp
+        for i in range(n):
+            vx[i] = (qx[i] - x[i]) * damp
+            vy[i] = (qy[i] - y[i]) * damp
+            x[i], y[i] = qx[i], qy[i]
+        # 다 잦아들었으면 아주 작은 떨림은 지운다 (가만히 있을 때 안 떨리게)
+        if g is None and max(map(abs, vx)) < 0.05 and max(map(abs, vy)) < 0.05:
+            for i in range(n):
+                vx[i] = vy[i] = 0.0
+
+    def _draw_slime(self, now):
+        """매트를 펼치고 그 위에 슬라임을 그린다."""
+        sl = self.slime
+        c = self.canvas
+        got = self._slime_mat()
+        if not got:
+            self.slime = None
+            return
+        steps = got[0]
+        col, mat = self._slime_color()
+        # 펼쳐지는 0.35초 — 상판이 위에서 아래로 하얗게 칠해진다
+        t = min(1.0, (now - sl["born"]) / 0.35)
+        ease = 1.0 - (1.0 - t) ** 2
+        dxp, dyp = self._pos("desk")
+        q = min(len(steps) - 1, int(ease * len(steps)))
+        c.create_image(dxp, dyp, image=steps[q], anchor="nw")
+        if ease < 0.55:
+            return                        # 아직 다 안 펴졌으면 슬라임은 뒤에
+        self._draw_blob(now, col, mat, min(1.0, (ease - 0.55) / 0.45))
+
+    def _draw_blob(self, now, col, mat, grow=1.0):
+        sl = self.slime
+        c = self.canvas
+        n = self.SL_N
+        cx, cy = sl["cx"], sl["cy"]
+        k = 0.35 + 0.65 * grow            # 꺼낼 때 중심에서 부풀어 오른다
+        ring = [(cx + (sl["x"][i] - cx) * k, cy + (sl["y"][i] - cy) * k)
+                for i in range(n)]
+        xs = [p[0] for p in ring]
+        ys = [p[1] for p in ring]
+        # 바닥 그림자 — 슬라임보다 먼저. 지금 실루엣을 따라가되 아래쪽에만
+        # 깔리게 눌러 그린다 (덩어리 크기로 고정하면 늘였을 때 따로 논다).
+        c.create_oval(min(xs) + 2, cy + (max(ys) - cy) * 0.45,
+                      max(xs) - 2, cy + (max(ys) - cy) * 1.02,
+                      fill=self._shade(mat, 0.13), outline="")
+        flat = [v for p in ring for v in p]
+        c.create_polygon(*flat, fill=col, outline=self._shade(col, 0.52),
+                         width=2, smooth=True, splinesteps=6)
+        look = self._slime_look()
+        if look.get("label") == "butter":
+            # 버터 한 조각 — 불투명한 재질이라 윤기 점은 안 그린다.
+            self._draw_butter(col, ring, xs, ys, cx, cy)
+            return
+        if look.get("label") == "cheese":
+            self._draw_cheese(col, ring, cx, cy, k)
+            return
+        # 윤기 — 왼쪽 위에 두 점. 덩어리 안의 점이라 늘이면 같이 딸려 간다.
+        wob = math.sin(now * 2.3) * 0.05
+        hi = self._mix("#ffffff", col, 0.16)      # 거의 흰색이라야 윤기로 보인다
+        rr0 = sl["r"] * k
+        for a, rr, wx, wy in ((3.95, 0.58, 0.20, 0.11), (4.42, 0.50, 0.07, 0.04)):
+            hx, hy = self._slime_pt(sl, a + wob, rr)
+            hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
+            c.create_oval(hx - rr0 * wx, hy - rr0 * wy,
+                          hx + rr0 * wx, hy + rr0 * wy,
+                          fill=hi, outline="")
+
+    def _draw_cheese(self, col, ring, cx, cy, k):
+        """치즈 한 덩이 — 윗면(밝은 띠)과 숭숭 뚫린 구멍.
+
+        구멍은 덩어리 안의 점이라 누르거나 늘이면 같이 딸려 간다. 매끈한
+        재질이라 반투명 윤기 대신 구멍의 그늘로 두께를 보인다.
+        """
+        c = self.canvas
+        sl = self.slime
+        n = len(ring)
+        top = [i for i in range(n) if sl["ry"][i] < 0]
+        if len(top) > 2:
+            band = [ring[i] for i in top]
+            band += [(px, cy + (py - cy) * 0.34) for px, py in reversed(band)]
+            c.create_polygon(*[v for p in band for v in p],
+                             fill=self._mix("#ffffff", col, 0.45), outline="",
+                             smooth=True, splinesteps=4)
+        deep = self._shade(col, 0.20)         # 구멍 안쪽 그늘
+        lip = self._mix("#ffffff", col, 0.35)  # 구멍 아래쪽에 닿는 빛
+        for a, rr, sz in sl.get("holes", ()):
+            hx, hy = self._slime_pt(sl, a, rr)
+            hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
+            r0 = sl["r"] * sz * k
+            if r0 < 1.2:
+                continue
+            c.create_oval(hx - r0, hy - r0 * 0.82, hx + r0, hy + r0 * 0.82,
+                          fill=deep, outline="")
+            c.create_oval(hx - r0 * 0.62, hy - r0 * 0.10,
+                          hx + r0 * 0.62, hy + r0 * 0.62,
+                          fill=lip, outline="")
+
+    BUTTER_INK = "#2b4fd0"           # 버터 포장 글씨의 파랑
+
+    def _draw_butter(self, col, ring, xs, ys, cx, cy):
+        """버터 한 조각 — 윗면(밝은 띠)과 파란 글씨.
+
+        불투명한 재질이라 반투명 윤기는 안 넣는다. 글씨는 판에 인쇄된 것이라
+        덩어리를 따라 움직이기만 하고 일그러지지는 않는다 — 그래서 이 종류는
+        단단하게(stiff) 두어 모양이 크게 안 변하도록 짝을 맞춰 놓았다.
+        """
+        c = self.canvas
+        n = len(ring)
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        w, h = x1 - x0, y1 - y0
+        if w < 12 or h < 6:
+            return
+        # 윗면 — 둘레의 위쪽 절반을 안쪽으로 접어 만든 띠
+        # 기준 모양에서 위쪽이던 번호를 쓴다. '지금 y가 중심보다 위'로
+        # 고르면 찌그러졌을 때 번호가 흩어져 렌즈 같은 헛것이 그려진다.
+        sl = self.slime
+        top = [i for i in range(n) if sl["ry"][i] < 0]
+        if len(top) > 2:
+            band = [ring[i] for i in top]
+            band += [(px, cy + (py - cy) * 0.30) for px, py in reversed(band)]
+            c.create_polygon(*[v for p in band for v in p],
+                             fill=self._mix("#ffffff", col, 0.55), outline="",
+                             smooth=True, splinesteps=4)
+        # 포장 글씨 — 인쇄된 것이라 크기는 '원래 조각 크기'로 고정한다.
+        # 지금 실루엣에 맞추면 누를 때마다 글자가 커졌다 작아졌다 한다.
+        bw = sl["r"] * 2.0 * float(self._slime_look().get("bar_w", 1.30))
+        ink = self.BUTTER_INK
+        big = self._pt_fit("BUTTER", bw * 0.40, True)
+        if big is None:
+            return                        # 너무 작아 글자가 뭉개진다
+        left = self._pt_fit("4oz.", bw * 0.24, True)
+        salt = self._pt_fit("SALTED", bw * 0.26)
+        tiny = self._pt_fit("NET WT.(113G)", bw * 0.36)
+        row = cy + h * 0.06
+        c.create_text(cx + bw * 0.22, row, text="BUTTER", fill=ink,
+                      font=big, anchor="center")
+        if left:
+            c.create_text(cx - bw * 0.26, row, text="4oz.", fill=ink,
+                          font=left, anchor="center")
+        if salt:
+            c.create_text(cx + bw * 0.20, row - h * 0.28, text="SALTED",
+                          fill=ink, font=salt, anchor="center")
+        if tiny:
+            c.create_text(cx - bw * 0.20, row + h * 0.26, text="NET WT.(113G)",
+                          fill=ink, font=tiny, anchor="center")
+
+    def _pt_fit(self, text, max_w, bold=False):
+        """그 폭에 들어가는 가장 큰 Arial 글꼴. 6px 밑으로 가면 None."""
+        for n in range(14, 4, -1):
+            f = ("Arial", n, "bold") if bold else ("Arial", n)
+            if self._mw(text, f) <= max_w:
+                return f
+        return None
+
     def _quad_xy(self, u, v):
         (tlx, tly), (trx, try_), (brx, bry), (blx, bly) = self.quad
         top = (tlx + (trx - tlx) * u, tly + (try_ - tly) * u)
@@ -9490,7 +10530,19 @@ class Mascot:
         # ── 책상 (+옵션: 화면 낙서) ──────────────────────────────────────
         dx_, dy_ = self._pos("desk")
         self._safe("desk", self._put, "desk", dx_, dy_)
-        if self.us.get("trail"):
+        if self.slime is not None:
+            # 여기는 _safe에 맡기지 않는다. 구역이 꺼지면 매트만 덮인 채로
+            # 굳어 책상이 영영 안 돌아온다 (지뢰 14). 터지면 그냥 치운다.
+            try:
+                self._slime_tick(now)
+                if self.slime is not None:
+                    self._draw_slime(now)
+            except Exception:
+                self.slime = None
+                self._slime_grab = None
+                self._log_error("slime")
+        # 슬라임을 꺼내 놓은 동안에는 타블렛이 매트에 덮여 있으니 낙서도 없다
+        if self.us.get("trail") and self.slime is None:
             if self.strokes and now - self.last_drag > 12:
                 self.strokes = []
             for st in self.strokes:
@@ -9679,6 +10731,25 @@ class Mascot:
             if self.pensnd is not None and self._pen_grain and "pen" not in f:
                 self.pensnd.tick(now, enabled=True)
             return
+        if self.slime is not None:
+            # 슬라임을 꺼내 놓았으면 두 손 다 그쪽으로. 펜은 내려놓은 셈이라
+            # arm_pen(펜 쥔 손)을 안 그린다 — arm_right가 양끝 둥근 통이라
+            # 그것만 빼면 그대로 평범한 손이 된다.
+            # 팔을 먼저 그려 보고 성공했을 때만 _track_pen을 부른다. 실패해
+            # 평소 경로로 물러나면 거기서 또 부르게 되어 획이 두 번 세어진다.
+            try:
+                drew = self._draw_pen_arm_slime(now, yo * 0.25)
+            except Exception:
+                drew, _ = False, self._log_error("slime_pen_arm")
+            if drew:
+                self._track_pen(now, f, cx, cy)     # 획·거리 세기는 그대로
+                if self.pensnd is not None and self._pen_grain:
+                    # 슬라임을 쥐고 있을 때만 멈춘다 — 꺼내 놓은 채로
+                    # 그림을 그리면 펜 소리는 그대로 나야 한다.
+                    self.pensnd.tick(now, enabled=(self._slime_grab is None
+                                                  and "pen" not in f))
+                self._draw_left(now, f)
+                return
         if pen_typing and "pen" not in f and "arm_right_typing" in self.hop:
             # 양손 타이핑: 왼손을 먼저(아래), 오른팔-타자를 나중(위) 그림
             self._draw_left(now, f)
@@ -9868,8 +10939,78 @@ class Mascot:
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
 
+    SL_HAND_EASE = 0.20      # 손이 목표 자리로 따라붙는 빠르기
+    SL_HAND_X = 0.52         # 두 손이 덩어리 가운데에서 좌우로 벌어지는 정도
+
+    def _slime_hand_at(self, now, side):
+        """슬라임을 만지는 손이 갈 자리. side는 +1이 오른손(키보드 쪽).
+
+        잡고 있으면 손끝에 가까운 쪽 손이 그 자리를 짚고, 다른 손은 제자리에
+        얹혀 있는다. 두 손이 같은 점으로 몰리면 팔이 겹쳐 보인다.
+        """
+        sl = self.slime
+        bob = math.sin(now * 1.5 + (0.0 if side > 0 else 1.7)) * sl["r"] * 0.05
+        # 손끝을 위쪽 가장자리에 두면 '얹은' 게 아니라 '떠 있는' 것으로 보인다 —
+        # 실제로 찍어 보고 덩어리 한가운데 가까이로 내렸다.
+        rest = (sl["cx"] + sl["r"] * self.SL_HAND_X * side,
+                sl["cy"] - sl["r"] * self.SL_FLAT * 0.15 + bob)
+        g = self._slime_grab
+        if g is None:
+            return rest
+        mine = abs(g["x"] - rest[0])
+        other = abs(g["x"] - (sl["cx"] - sl["r"] * self.SL_HAND_X * side))
+        if mine > other:
+            return rest                    # 반대 손이 더 가깝다 — 나는 그대로
+        return g["x"] + sl["r"] * 0.05 * side, g["y"] - sl["r"] * self.SL_FLAT * 0.10
+
+    def _slime_arm(self, now, side, which, shoulder, natural, yo):
+        """슬라임 쪽으로 늘인 팔 한 짝. 그렸으면 True.
+
+        못 그리면 부르는 쪽이 평소 팔로 물러난다 (지뢰 14 — 눈에 띄는 파츠는
+        실패해도 한 단계 소박한 그림으로).
+        """
+        if which not in self._arm_src or self.slime is None:
+            return False
+        want = self._slime_hand_at(now, side)
+        cur = self._slime_hand.get(side) if self._slime_hand else None
+        if cur is None:
+            cur = list(natural)               # 평소 자리에서 스르륵 옮겨 간다
+        cur = [cur[0] + (want[0] - cur[0]) * self.SL_HAND_EASE,
+               cur[1] + (want[1] - cur[1]) * self.SL_HAND_EASE]
+        if self._slime_hand is None:
+            self._slime_hand = {}
+        self._slime_hand[side] = cur
+        sx, sy = shoulder
+        arm = self._stretched_arm(cur[0] - sx, cur[1] - sy, which)
+        if arm is None:
+            return False
+        self.canvas.create_image(sx - arm[1][0], sy - arm[1][1] + yo,
+                                 image=arm[0], anchor="nw")
+        return True
+
+    def _draw_left_slime(self, now, yo):
+        """슬라임 위에 얹은 오른손(키보드 쪽 팔)."""
+        return self._slime_arm(now, 1, "l", self.armk_top, self.armk_bottom, yo)
+
+    def _draw_pen_arm_slime(self, now, yo):
+        """펜 쥔 쪽 팔도 슬라임으로 — 펜 든 손(arm_pen)은 그리지 않는다.
+
+        arm_right는 양끝이 둥근 통이라, 펜 파츠를 빼면 그대로 평범한 손이 된다.
+        """
+        return self._slime_arm(now, -1, "r", self.arm_top, self.arm_bottom, yo)
+
     def _draw_left(self, now, f):
         """왼손(키보드): 어깨 축 회전으로 키를 옮겨가며 타이핑."""
+        if self.slime is not None:
+            # 슬라임을 꺼내 놓았으면 키보드가 매트에 덮여 있다. 손은 거기로.
+            try:
+                # 평소 왼팔은 숨쉬기(yo)를 안 따르므로 여기서도 0으로 맞춘다
+                if self._draw_left_slime(now, 0.0):
+                    return
+            except Exception:
+                self._log_error("slime_hand")
+        elif self._slime_hand is not None:
+            self._slime_hand = None           # 치웠으면 다음엔 평소 자리부터
         if now - self.last_key > 2.5:
             self.key_ang_t = 0.0
         self.key_ang += (self.key_ang_t - self.key_ang) * 0.5
@@ -10335,10 +11476,20 @@ class Mascot:
                     lambda ry: open_picker(ry, "펜 따라갈 화면",
                                            "pen_monitor", mons))
             y = group(y, "타이머", timer_rows)
-            y = group(y, "소리", [
+            snd_rows = [
                 lambda ry: slider(ry, "타자 소리 볼륨", "sound_volume", 0, 100),
                 lambda ry: slider(ry, "펜 소리 볼륨", "pen_volume", 0, 100),
                 lambda ry: slider(ry, "클릭 소리 볼륨", "poke_volume", 0, 100),
+            ]
+            if self.cfg.get("slime"):
+                snd_rows.append(
+                    lambda ry: slider(ry, "슬라임 소리 볼륨", "slime_volume",
+                                      0, 100))
+                if len(self.slime_kinds) > 1:
+                    snd_rows.append(
+                        lambda ry: open_picker(ry, "슬라임 종류", "slime_kind",
+                                               self.slime_kinds))
+            y = group(y, "소리", snd_rows + [
                 lambda ry: toggle(ry, "타자 소리", "sound"),
                 lambda ry: open_picker(ry, "소리 팩", "sound_pack",
                                        self.sound_packs),
@@ -10499,18 +11650,27 @@ class Mascot:
             new["day_start"] = max(0, min(12, int(new.get("day_start", 6))))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
             new["font_pct"] = max(70, min(160, int(new["font_pct"])))
-            for k in ("sound_volume", "pen_volume", "poke_volume"):
-                new[k] = max(0, min(100, int(new[k])))
+            for k in ("sound_volume", "pen_volume", "poke_volume",
+                      "slime_volume"):
+                if k in new:
+                    new[k] = max(0, min(100, int(new[k])))
             need_restart = (new["scale_pct"] != self.us["scale_pct"]
                             or new["font_pct"] != self.us.get("font_pct", 100)
                             or new.get("skin") != self.us.get("skin")
                             or bool(new["show_timer"]) != self.timer_on
                             or bool(new["shadow"]) != bool(self.us.get("shadow", True)))
+            old_slime = self.us.get("slime_kind")
             self.us.update(new)
             self._save_settings()
             self.idle_thr = self.us["idle_sec"]
             self.root.attributes("-topmost", bool(self.us["topmost"]))
             self._init_sound()
+            if self.slime is not None and self.us.get("slime_kind") != old_slime:
+                # 꺼내 놓은 채로 종류를 바꿨으면 그 자리에서 새 것으로 갈아 준다
+                self.slime = None
+                self._slime_grab = None
+                self._slime_hand = None
+                self._safe("slime_swap", self._slime_open)
             self._apply_autostart()
             self._safe("stickers_apply", self._apply_stickers)
             win.destroy()

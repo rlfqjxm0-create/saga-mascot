@@ -270,5 +270,36 @@
   ]
  ],
  "level": true,
- "update_dot": true
+ "update_dot": true,
+ "slime": {
+  "kinds": {
+   "버터바": {
+    "shape": "bar",
+    "label": "butter",
+    "bar_w": 1.5,
+    "bar_h": 1.25,
+    "bar_edge": 6.0,
+    "tint": 0.52,
+    "shade": 0.0,
+    "size": 1.0,
+    "thick": 1.0,
+    "stiff": 0.6,
+    "reach": 2.0,
+    "vol": 1.0
+   },
+   "치즈": {
+    "shape": "bar",
+    "label": "cheese",
+    "holes": 7,
+    "bar_w": 0.95,
+    "bar_h": 1.45,
+    "bar_edge": 4.0,
+    "color": "#f5e09a",
+    "size": 0.95,
+    "thick": 0.55,
+    "stiff": 0.3,
+    "vol": 0.32
+   }
+  }
+ }
 }
