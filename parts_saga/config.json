@@ -273,6 +273,14 @@
  "update_dot": true,
  "slime": {
   "kinds": {
+   "말랑이": {
+    "tint": 0.45,
+    "size": 1.0,
+    "thick": 0.0,
+    "stiff": 0.0,
+    "reach": 2.8,
+    "vol": 1.0
+   },
    "버터바": {
     "shape": "bar",
     "label": "butter",
@@ -285,7 +293,8 @@
     "thick": 1.0,
     "stiff": 0.6,
     "reach": 2.0,
-    "vol": 1.0
+    "vol": 1.0,
+    "pitch": 0.82
    },
    "치즈": {
     "shape": "bar",

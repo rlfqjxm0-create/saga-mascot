@@ -3332,7 +3332,7 @@ class Mascot:
         self._sl_area, self._sl_step = self.SL_AREA, self.SL_STEP
         self._sl_edge, self._sl_stretch = self.SL_EDGE, self.SL_STRETCH
         self._sl_reach, self._sl_stiff = self.SL_REACH, 0.0
-        self._sl_pin = 1.0
+        self._sl_pin, self._sl_pitch = 1.0, 1.0
         # 종류 목록 = sounds/slime/ 아래 wav가 든 폴더들
         self.slime_kinds = self._list_slime_kinds()
         if self.slime_kinds and self.us.get("slime_kind") not in self.slime_kinds:
@@ -9805,6 +9805,9 @@ class Mascot:
         # 고체는 그러면 그 자리만 크게 일그러지므로 살짝만 당기고,
         # 대신 덩어리째 끌려오게 한다.
         self._sl_pin = 1.0 - 0.88 * stiff
+        # 종류마다 소리 높낮이를 달리 준다. 1보다 작으면 느리게 재생돼
+        # 음이 낮아지고 길어져서 더 묵직하게 들린다.
+        self._sl_pitch = max(0.5, min(float(look.get("pitch", 1.0)), 1.6))
         # 기준 모양 — 돌아갈 자리이자 변 길이의 기준.
         # "bar"면 버터 한 조각처럼 모서리가 둥근 네모, 아니면 납작한 타원.
         if str(look.get("shape", "")) == "bar":
@@ -9910,7 +9913,7 @@ class Mascot:
         if snd is None:
             return
         try:
-            snd.play(kind, pitch, level)
+            snd.play(kind, pitch * self._sl_pitch, level)
         except Exception:
             pass
 
