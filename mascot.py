@@ -48,6 +48,44 @@ else:
 IS_WIN = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 
+_CRASH_DIR = [None]          # 기록을 남길 폴더 (Mascot 이 켜지면서 채운다)
+
+
+def _install_crash_log():
+    """잡히지 않은 예외를 .error.log 에 남긴다.
+
+    런처(exe·맥 앱)는 Mascot(...) 을 try 로 감싸지 않는다. 그래서 켜는
+    도중에 터지면 창도 안 뜨고 아무 기록도 안 남아, 사람 쪽에서는
+    '그냥 안 켜진다'로만 보이고 원인을 알 길이 없다. 맥 런처는 코드를
+    읽어 들이는 단계조차 감싸지 않는다.
+    """
+    prev = sys.excepthook
+
+    def hook(kind, value, tb):
+        try:
+            import traceback
+            d = _CRASH_DIR[0] or os.path.expanduser("~")
+            with open(os.path.join(d, ".error.log"), "a",
+                      encoding="utf-8") as fp:
+                fp.write("\n===== %s 켜지 못함\n"
+                         % time.strftime("%Y-%m-%d %H:%M:%S"))
+                fp.write("python=%s frozen=%s platform=%s\n"
+                         % (sys.version.split()[0],
+                            getattr(sys, "frozen", False), sys.platform))
+                fp.write("".join(traceback.format_exception(kind, value, tb)))
+        except Exception:
+            pass
+        try:
+            prev(kind, value, tb)
+        except Exception:
+            pass
+
+    sys.excepthook = hook
+
+
+_install_crash_log()
+
+
 if IS_WIN:
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PER_MONITOR_DPI_AWARE
@@ -3183,6 +3221,8 @@ class Mascot:
         # 설정·타이머 기록 저장 위치 (자동 업데이트로 교체되지 않는 곳으로 분리 가능)
         self.state_dir = state_dir or self.dir
         os.makedirs(self.state_dir, exist_ok=True)
+        _CRASH_DIR[0] = self.state_dir      # 여기서부터는 기록을 남길 수 있다
+        self._boot_step("시작")
         # 같은 캐릭터가 이미 떠 있으면 여기서 물러난다. 둘이 같이 뜨면 두
         # 프로세스가 같은 기록 파일에 번갈아 써서 작업 시간·할 일이 서로를
         # 덮어쓴다 (나중에 닫힌 쪽이 이긴다). 그냥 꺼지면 사람은 안 켜진 줄
@@ -3197,8 +3237,10 @@ class Mascot:
             repair_parts(self.dir, self.state_dir)
         except Exception:
             self._log_boot("repair_parts")
+        self._boot_step("파츠 복구 지남")
         with open(os.path.join(self.dir, "config.json"), encoding="utf-8") as fp:
             self.cfg = json.load(fp)
+        self._boot_step("config 읽음")
 
         # 사용자 환경설정 (config 기본값 위에 덮어씀)
         tcfg = self.cfg.get("timer") or {}
@@ -3364,6 +3406,7 @@ class Mascot:
         self.font_k = max(FONT_MIN / 100.0 * FONT_SPAN, min(
             FONT_SPAN,
             float(self.us.get("font_pct", 100)) / 100.0 * FONT_SPAN))
+        self._boot_step("설정·창 준비됨")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.us["topmost"]))
         # 투명 배경: 윈도우는 색상키, 맥은 Tk의 진짜 투명 속성
@@ -3383,6 +3426,7 @@ class Mascot:
         self.canvas = tk.Canvas(self.root, width=self.W, height=self.H,
                                 highlightthickness=0, **kw)
         self.canvas.pack()
+        self._boot_step("캔버스 만듦")
         if IS_MAC:                            # 제목 표시줄 제거 후 위치 재적용
             self._mac_borderless()
             self.root.geometry(f"{self.W}x{self.H}+{wx}+{wy}")
@@ -9802,6 +9846,20 @@ class Mascot:
             # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
+    def _boot_step(self, step):
+        """켜는 도중 어디까지 갔는지 남긴다 — 터지면 마지막 줄이 곧 자리다.
+
+        기록은 켤 때마다 새로 쓴다(a 가 아니라 w). 몇 줄 안 되는 것이
+        계속 쌓이면 정작 볼 때 찾기 어렵다.
+        """
+        try:
+            mode = "w" if step == "시작" else "a"
+            with open(os.path.join(self.state_dir, ".boot.log"), mode,
+                      encoding="utf-8") as fp:
+                fp.write("%s %s\n" % (time.strftime("%H:%M:%S"), step))
+        except Exception:
+            pass
+
     def _log_boot(self, where):
         """켜는 도중 터진 것을 남긴다.
 
