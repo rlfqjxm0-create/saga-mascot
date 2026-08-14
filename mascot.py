@@ -3626,6 +3626,8 @@ class Mascot:
         self._hd_head = False        # 첫머리를 남겼는가
         self._hd_at = 0.0
         self._diag_at = 0.0          # 마지막으로 기록한 시각
+        self._room_born = time.time()   # 언제 켰나 (방 진단에 적는다)
+        self._diag_hist = []            # 방 진단 최근 기록 (흐름을 본다)
         self.shadow_img_type = None  # 타자 자세용 그림자 (깃펜 없음)
         self._shadow_base = None
         self._shadow_typing = False
@@ -12748,8 +12750,9 @@ class Mascot:
         성공하는데도 아무도 안 보이는 경우가 여러 갈래라서, 어느 갈래인지
         숫자로 남겨 둔다.
         """
-        if now - getattr(self, "_diag_at", 0) < 20.0:
+        if now - getattr(self, "_diag_at", 0) < 10.0:
             return
+        first = not getattr(self, "_diag_at", 0)
         self._diag_at = now
         net = self.room_net
         code = str(self.us.get("room_code") or "")
@@ -12778,10 +12781,21 @@ class Mascot:
                 "지금 보이는 사람=%s"
                 % ([q.get("slot") for q in self.room_people] or "없음"),
             ]
+        # 한 장만 남기면 '켠 직후' 모습만 보고 끝난다. 최근 것들을 같이
+        # 남겨서, 숫자가 늘어나는지 멈춰 있는지가 한눈에 보이게 한다.
+        hist = getattr(self, "_diag_hist", None)
+        if hist is None:
+            hist = self._diag_hist = []
+        hist.insert(0, "\n".join(lines))
+        del hist[8:]
+        head = ["(새것부터. 켠 지 %.0f초, %d번째 기록)"
+                % (now - self._room_born, len(hist)), ""]
         try:
             _save_json_text(os.path.join(self.state_dir, ".room_diag.txt"),
-                            "\n".join(lines) + "\n")
+                            "\n".join(head + ["\n-----\n".join(hist)]) + "\n")
         except Exception:
+            pass
+        if first:
             pass
 
     def _room_event(self, ev):
