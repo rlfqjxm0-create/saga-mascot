@@ -3544,7 +3544,9 @@ class Mascot:
         self._room_meta = {}         # 캐릭터별 책상 높이
         self._room_bg = None
         self._room_body = []
-        self._room_key_last = None         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
+        self._room_key_last = None
+        self._room_fx = []           # 지금 보이는 연출
+        self._char_fx = []           # 캐릭터 창에서 터지는 연출 (남이 눌러 줬을 때)         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
         self._room_body = []         # 숨쉬며 움직이는 몸 그림
         self._room_key_last = None
         self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
@@ -4242,8 +4244,13 @@ class Mascot:
         hit = self._tilt_cache.get(key)
         if hit is not None:
             return hit
-        if len(self._tilt_cache) > 60:
-            self._tilt_cache.clear()
+        # 머리 판 한 장이 1.1MB나 된다(488x599 RGBA). 60장이면 67MB —
+        # 실측으로 확인했다. 한 번에 쓰는 각도는 몇 개뿐이라 30이면 넉넉하다.
+        # 통째로 비우면 다음 프레임부터 다시 만드느라 메모리가 계단처럼
+        # 뛰므로, 오래된 절반만 버린다 (지뢰 18).
+        if len(self._tilt_cache) > self.TILT_CACHE_MAX:
+            for _old in list(self._tilt_cache)[:self.TILT_CACHE_MAX // 2]:
+                del self._tilt_cache[_old]
         layer = self._rot_head(key[0], mode)
         dx = max(-12, min(12, self._tilt_fit(layer)))
         hit = (ImageTk.PhotoImage(self._hard(layer)), dx)
@@ -10738,6 +10745,7 @@ class Mascot:
         return True
 
     ARM_CACHE_MAX = 500          # 늘인 팔 그림 캐시 상한 (한 장이 꽤 크다)
+    TILT_CACHE_MAX = 30          # 기울인 머리 판 (한 장 1.1MB)
 
     def _stretched_arm(self, dx, dy, which="r"):
         """어깨에서 손끝까지를 잇도록 늘이고 돌린 팔 그림.
@@ -10964,6 +10972,9 @@ class Mascot:
         if self.can_talk:
             self._safe("particles", self._draw_particles)
             self._safe("bubble", self._draw_bubble, yo)
+        # 남이 눌러 준 연출은 캐릭터 위에 얹는다. draw() 안에서 그려야 한다 —
+        # 밖에서 그리면 다음 draw() 의 delete("all") 에 바로 지워진다.
+        self._safe("char_fx", self._draw_char_fx, now)
         self._safe("pet_shadow", self._update_pet_shadow)
 
     AUTO_MON = "자동 (커서가 있는 화면)"
@@ -12330,6 +12341,8 @@ class Mascot:
                        "blanket": "담요를 덮었어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
+            self._char_fx_add(k)
+            self._safe("self_poke_snd", self._poke_sound)
             return
         if False:
             pass
@@ -12340,13 +12353,13 @@ class Mascot:
                     break
         kind = ev.get("k")
         now = time.time()
+        self._char_fx_add(kind)               # 타이머 화면에서 터진다
+        self._safe("room_poke_snd", self._poke_sound)   # 뿅
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
             self._say("%s가 콕 찔렀어요" % who if who else "누가 콕 찔렀어요", 3.0)
-            self._safe("room_poke_snd", self._poke_sound)
         elif kind == "blanket":
-            self._say("%s가 담요를 덮어 줬어요" % who if who else "담요를 덮어 줬어요",
-                      3.5)
+            self._say("%s 덕분에 따뜻해요" % who if who else "따뜻해요", 3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
         elif kind == "wave":
             self.smile_until = max(self.smile_until, now + 2.0)
@@ -12355,12 +12368,12 @@ class Mascot:
         elif kind == "cheer":
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say("%s가 응원했어요" % who if who else "누가 응원했어요", 3.5)
-            self._safe("room_cheer", self._burst, 10, 26)
         elif kind == "snack":
             self._say("%s가 간식을 놓고 갔어요" % who if who else "간식이 놓여 있어요",
                       3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
         self._room_flash[ev.get("f", "")] = now
+        self._room_fx_add(self.char, kind)     # 받은 것은 내 칸에서 터진다
 
     def _poke_sound(self):
         snd = getattr(self, "pokesnd", None)
@@ -12589,6 +12602,7 @@ class Mascot:
         win.geometry("+%d+%d" % (x, max(0, self.root.winfo_rooty())))
 
     def _room_close(self):
+        self._room_fx = []
         if self._room_job is not None:
             try:
                 self.root.after_cancel(self._room_job)   # 지뢰 20
@@ -12625,9 +12639,20 @@ class Mascot:
                 self, "tray_img", None) else None
         except Exception:
             pass
-        x = self.root.winfo_rootx() + self.W + int(12 * k)
-        y = max(0, self.root.winfo_rooty() - int(60 * k))
+        # 화면 한가운데에 띄운다 (캐릭터 옆이면 화면 밖으로 나가기도 한다)
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        x = max(0, (sw - W) // 2)
+        y = max(0, (sh - H) // 2)
         win.geometry("%dx%d+%d+%d" % (W, H, x, y))
+        # geometry 의 y 는 제목 표시줄 위가 아니라 안쪽 기준이라, 그대로 두면
+        # 제목 표시줄 높이만큼 아래로 치우친다. 실제로 놓인 자리를 재서 보정한다.
+        win.update_idletasks()
+        try:
+            win.geometry("+%d+%d" % (x + (x - win.winfo_rootx()),
+                                     y + (y - win.winfo_rooty())))
+        except Exception:
+            pass
         cv = tk.Canvas(win, width=W, height=H, highlightthickness=0,
                        bd=0, bg=self._room_palette()["wall"])
         cv.pack(fill="both", expand=True)
@@ -12659,6 +12684,8 @@ class Mascot:
                for q in self.room_people]
         fresh = [k for k, v in self._room_flash.items()
                  if v > time.time() - 1.6]
+        # 연출이 도는 동안은 개수만 열쇠에 넣는다 — 프레임마다 다시 그리되
+        # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         return (tuple(who), self._room_pick, tuple(sorted(fresh)),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
@@ -12672,6 +12699,7 @@ class Mascot:
             self._room_key_last = key
             self._room_draw()
             return
+
         now = time.time()
         for i, (item, desk_item, slot, base, sleeping, pose) in enumerate(
                 self._room_body):
@@ -12824,11 +12852,14 @@ class Mascot:
             note = (self._room_note[0]
                     if self._room_note and self._room_note[1] >= fl - 0.3
                     else "!")
-            self._rr(cv, (kx0 + kx1) / 2 - 26 * k, floor - 92 * k,
-                     (kx0 + kx1) / 2 + 26 * k, floor - 68 * k, 12 * k,
+            # 알림 말풍선은 칸 맨 위로 — 연출·얼굴과 안 겹치게
+            ny = ky0 + 16 * k
+            self._rr(cv, (kx0 + kx1) / 2 - 26 * k, ny - 12 * k,
+                     (kx0 + kx1) / 2 + 26 * k, ny + 12 * k, 12 * k,
                      fill="#ffffff", outline=col, width=2)
-            cv.create_text((kx0 + kx1) / 2, floor - 80 * k, text=note,
-                           font=self._uf(9, True), fill=self._shade(col, 0.15), tags="dyn")
+            cv.create_text((kx0 + kx1) / 2, ny, text=note,
+                           font=self._uf(9, True),
+                           fill=self._shade(col, 0.15), tags="dyn")
         lab = "Lv.%d  %s" % (int(p.get("lv") or 1), str(p.get("n") or "")[:12])
         f = self._uf(10, True)
         tw = self._room_tw(cv, lab, f)
@@ -12911,6 +12942,7 @@ class Mascot:
         if not to:
             return
         if to == self.char:
+            self._room_fx_add(to, kind)
             self._room_flash[to] = time.time()
             self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
                 kind, kind), time.time())
@@ -12923,8 +12955,10 @@ class Mascot:
         if to == "*":
             for q in self.room_people:
                 self._room_flash[q.get("slot") or ""] = time.time()
+                self._room_fx_add(q.get("slot"), kind)
         else:
             self._room_flash[to] = time.time()
+            self._room_fx_add(to, kind)
         self._room_sent = (kind, time.time())
         self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
             kind, kind), time.time())
@@ -12945,6 +12979,149 @@ class Mascot:
         # 0.7초마다 손 위치가 바뀐다 (사람마다 박자를 어긋나게)
         n = int(time.time() / 0.7 + (hash(p.get("slot") or "") % 3))
         return "seat_pen" if n % 2 else "seat_pen2"
+
+    ROOM_FX = 1.5            # 연출이 보이는 시간(초)
+
+    CHAR_FX = 2.2            # 캐릭터 창 연출이 보이는 시간(초)
+
+    def _char_fx_add(self, kind):
+        """내 캐릭터 창에서 터지는 연출 — 남이 눌러 줬을 때."""
+        self._char_fx = [f for f in self._char_fx if f[0] != kind][-3:]
+        self._char_fx.append((kind, time.time()))
+
+    def _draw_char_fx(self, now):
+        """콕·응원·담요·간식이 캐릭터 위에서 보이게. draw() 끝에서 부른다."""
+        self._char_fx = [f for f in self._char_fx
+                         if now - f[1] < self.CHAR_FX]
+        if not self._char_fx:
+            return
+        c = self.canvas
+        k = max(0.7, self.cw_px / 300.0)          # 캐릭터 크기에 맞춘 배율
+        cx = self.ox + self.cw_px / 2
+        top = self.oy + self.ch_px * 0.16         # 머리 언저리
+        mid = self.oy + self.ch_px * 0.45
+        for kind, t0 in self._char_fx:
+            p = (now - t0) / self.CHAR_FX          # 0 → 1
+            if kind == "poke":
+                for i in range(3):                 # 물결이 퍼진다
+                    q = p * 1.9 - i * 0.16
+                    if 0 < q < 1:
+                        r = (14 + 62 * q) * k
+                        c.create_oval(cx - r, mid - r * 0.6,
+                                      cx + r, mid + r * 0.6, outline="#ffd0e0",
+                                      width=max(1, int(3 * k * (1 - q))))
+            elif kind in ("cheer", "blanket"):
+                # 담요도 하트로 (따뜻하다는 표시)
+                n = 7 if kind == "cheer" else 5
+                for i in range(n):
+                    q = p * 1.25 - i * 0.1
+                    if 0 < q < 1:
+                        dx = math.sin(q * 5.5 + i * 2.3) * 22 * k
+                        yy = mid + 24 * k - q * (mid - top + 34 * k)
+                        sz = int((11 + 6 * (1 - q)) * k)
+                        c.create_text(cx + dx + (i - n // 2) * 17 * k, yy,
+                                      text="\u2665", font=("Malgun Gothic", sz),
+                                      fill="#ff9ec4" if i % 2 else "#ffc0d4")
+            elif kind == "snack":
+                q = min(1.0, p * 1.7)              # 미니 케이크가 내려온다
+                yy = top - 26 * k + q * q * (mid - top + 40 * k)
+                self._mini_cake(c, cx, yy, 15 * k)
+
+    def _mini_cake(self, c, cx, cy, r):
+        """작은 조각 케이크 — 크림 위에 딸기 하나, 아래에 시트."""
+        c.create_rectangle(cx - r, cy - r * 0.15, cx + r, cy + r * 0.75,
+                           fill="#f6d9a8", outline="#c99a55", width=2)
+        c.create_line(cx - r, cy + r * 0.3, cx + r, cy + r * 0.3,
+                      fill="#e0bd86", width=2)
+        c.create_arc(cx - r, cy - r * 0.85, cx + r, cy + r * 0.45,
+                     start=0, extent=180, fill="#fff4f7",
+                     outline="#f0c6d4", width=2)
+        c.create_oval(cx - r * 0.28, cy - r * 1.15, cx + r * 0.28,
+                      cy - r * 0.55, fill="#ff7a9a", outline="#d94f74",
+                      width=2)
+        c.create_line(cx, cy - r * 1.15, cx, cy - r * 1.4,
+                      fill="#6aa84f", width=2)
+
+    def _room_fx_add(self, slot, kind):
+        """그 사람 칸에 연출을 띄운다 (보낸 쪽·받은 쪽 모두)."""
+        if not slot:
+            return
+        self._room_fx = [f for f in self._room_fx if f[0] != slot][-8:]
+        self._room_fx.append((slot, kind, time.time()))
+
+    def _room_fx_draw(self, cv, k):
+        """연출은 매 프레임 지웠다 다시 그린다 (한 번에 몇 개 안 된다)."""
+        now = time.time()
+        self._room_fx = [f for f in self._room_fx
+                         if now - f[2] < self.ROOM_FX]
+        cv.delete("fx")
+        for slot, kind, t0 in self._room_fx:
+            box = next((h for h in self._room_hit if h[4] == slot), None)
+            if not box:
+                continue
+            x0, y0, x1, y1 = box[:4]
+            cx = (x0 + x1) / 2
+            cy = y0 + (y1 - y0) * 0.30
+            col = self._room_tone(slot)
+            p = (now - t0) / self.ROOM_FX          # 0 → 1
+            soft = self._room_palette()["card"]
+            if kind == "poke":
+                for i in range(3):                 # 퍼지는 물결 셋
+                    q = p * 1.7 - i * 0.18
+                    if 0 < q < 1:
+                        r = (12 + 44 * q) * k
+                        cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                       outline=self._mix(col, soft, q),
+                                       width=max(1, int(2.4 * k)), tags="fx")
+            elif kind == "cheer":
+                for i in range(5):                 # 하트가 떠오른다
+                    q = p * 1.4 - i * 0.12
+                    if 0 < q < 1:
+                        dx = math.sin(q * 5 + i * 2.1) * 18 * k
+                        yy = cy + 26 * k - q * 74 * k
+                        cv.create_text(cx + dx + (i - 2) * 13 * k, yy,
+                                       text="\u2665",
+                                       font=self._uf(int(9 + 4 * (1 - q))),
+                                       fill=self._mix(col, soft, q), tags="fx")
+            elif kind == "blanket":
+                q = min(1.0, p * 2.2)              # 담요가 덮인다
+                h = 52 * k * q
+                if h > 2:
+                    self._rr(cv, cx - 46 * k, cy - 16 * k, cx + 46 * k,
+                             cy - 16 * k + h, 10 * k,
+                             fill=self._mix(col, soft, 0.45),
+                             outline=self._shade(col, 0.15),
+                             width=max(1, int(1.6 * k)), tags="fx")
+                    for i in range(3):             # 줄무늬
+                        yy = cy - 16 * k + h * (i + 1) / 4.0
+                        cv.create_line(cx - 40 * k, yy, cx + 40 * k, yy,
+                                       fill=soft, width=max(1, int(2 * k)),
+                                       tags="fx")
+            elif kind == "snack":
+                q = min(1.0, p * 1.8)              # 간식이 툭 떨어진다
+                yy = cy - 40 * k + q * q * 66 * k
+                if q < 1:
+                    r = 13 * k
+                    self._rr(cv, cx - r, yy - r * 0.8, cx + r, yy + r * 0.8,
+                             5 * k, fill="#f0c98a", outline="#c99a55",
+                             width=max(1, int(1.6 * k)), tags="fx")
+                else:
+                    r = 13 * k
+                    self._rr(cv, cx - r, yy - r * 0.8, cx + r, yy + r * 0.8,
+                             5 * k, fill=self._mix("#f0c98a", soft, p),
+                             outline=self._mix("#c99a55", soft, p),
+                             width=max(1, int(1.6 * k)), tags="fx")
+            elif kind == "wave":
+                a = math.sin(p * 22) * 26          # 손이 좌우로
+                hx, hy = cx + 42 * k, cy - 4 * k
+                cv.create_line(hx, hy + 18 * k, hx, hy,
+                               fill=self._shade(col, 0.1),
+                               width=max(2, int(3 * k)), tags="fx")
+                cv.create_oval(hx - 9 * k + a * 0.3 * k, hy - 9 * k,
+                               hx + 9 * k + a * 0.3 * k, hy + 9 * k,
+                               fill=self._mix(col, soft, 0.35),
+                               outline=self._shade(col, 0.15),
+                               width=max(1, int(1.6 * k)), tags="fx")
 
     def _room_tw(self, cv, text, font):
         """글자 폭 — 캔버스에 잠깐 그려 재고 지운다 (캐시는 안 쌓는다)."""
@@ -13060,12 +13237,15 @@ class Mascot:
                     if self.room_net is not None:
                         self.room_net.send("*", "wave")
                     self._room_flash[slot] = time.time()
-                    self._room_note = ("손 흔들기", time.time())
+                    self._room_fx_add(slot, "wave")
+                    self._room_note = ("인사", time.time())
                     self.smile_until = max(self.smile_until, time.time() + 2.0)
                     self._safe("room_wave_snd", self._poke_sound)
                 elif self.room_net is not None:
-                    self.room_net.send(slot, "blanket" if sleeping else "poke")
+                    kind = "blanket" if sleeping else "poke"
+                    self.room_net.send(slot, kind)
                     self._room_flash[slot] = time.time()
+                    self._room_fx_add(slot, kind)
                 self._safe("room_draw", self._room_draw)
                 return
         self._room_pick = None
