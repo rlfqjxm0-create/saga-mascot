@@ -3190,8 +3190,13 @@ class Mascot:
         if not preview and already_running(self.char):
             say_hello(self.state_dir)
             raise SystemExit(0)
-        # 업데이트가 끊겨 파츠가 섞였으면 복구 (알림 신호도 여기서 남는다)
-        repair_parts(self.dir, self.state_dir)
+        # 업데이트가 끊겨 파츠가 섞였으면 복구 (알림 신호도 여기서 남는다).
+        # 인터넷·파일 문제로 터져도 프로그램은 떠야 한다 — 런처는
+        # Mascot(...) 을 감싸지 않아서, 여기서 터지면 아무것도 안 뜬다.
+        try:
+            repair_parts(self.dir, self.state_dir)
+        except Exception:
+            self._log_boot("repair_parts")
         with open(os.path.join(self.dir, "config.json"), encoding="utf-8") as fp:
             self.cfg = json.load(fp)
 
@@ -3214,8 +3219,19 @@ class Mascot:
                                     and not saved.get("font_v2"))
         except Exception:
             pass
-        self._font_migrate()
-        self._sanitize_settings()
+        # 설정 때문에 못 켜지는 일은 없어야 한다. 한 번 터지면 다음에 켜도
+        # 같은 파일을 또 읽어 영영 안 켜진다 (런처에 되돌릴 길이 없다).
+        try:
+            self._font_migrate()
+            self._sanitize_settings()
+        except Exception:
+            self._log_boot("settings")
+            keep = self.us.get("room_nick"), self.us.get("room_code")
+            self.us = dict(DEFAULT_SETTINGS)
+            if isinstance(keep[0], str):
+                self.us["room_nick"] = keep[0]
+            if isinstance(keep[1], str):
+                self.us["room_code"] = keep[1]
         # 그림자는 켜 둔 모습이 기본이다. 예전에 꺼 둔 채로 저장된 사람도
         # 한 번은 켜 준다 — 딱 한 번만이라, 그 뒤에 다시 끄면 꺼진 채로 둔다.
         if not self.us.get("shadow_on"):
@@ -9786,6 +9802,25 @@ class Mascot:
             # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
+    def _log_boot(self, where):
+        """켜는 도중 터진 것을 남긴다.
+
+        아직 화면이 없어서 이 파일이 유일한 단서다. _log_error 는
+        self.s·self.W 같은 값을 쓰는데 이 시점에는 아직 없다.
+        """
+        try:
+            import traceback
+            with open(os.path.join(self.state_dir, ".error.log"), "a",
+                      encoding="utf-8") as fp:
+                fp.write("\n===== %s 시작 중 (%s)\n"
+                         % (time.strftime("%Y-%m-%d %H:%M:%S"), where))
+                fp.write("char=%s frozen=%s\n"
+                         % (getattr(self, "char", "?"),
+                            getattr(sys, "frozen", False)))
+                fp.write(traceback.format_exc())
+        except Exception:
+            pass
+
     def _log_error(self, where):
         """한 프레임이 터져도 프로그램은 계속 돌게 — 원인은 파일로 남긴다."""
         self._err_count = getattr(self, "_err_count", 0) + 1
@@ -12256,8 +12291,17 @@ class Mascot:
         if not getattr(self, "_font_v2_needed", False):
             self.us["font_v2"] = True
             return
-        old = int(self.us.get("font_pct", 100))
-        auto = max(70, min(160, round(_screen_scale(None) * 100)))
+        # 저장된 값이 null·빈 글자·엉뚱한 형일 수 있다. _sanitize_settings
+        # 는 이 뒤에 도므로 여기서 스스로 다듬어야 한다 (실제로 null 하나에
+        # 프로그램이 아예 안 켜졌다).
+        try:
+            old = int(float(self.us.get("font_pct") or 100))
+        except (TypeError, ValueError):
+            old = 100
+        try:
+            auto = max(70, min(160, round(_screen_scale(None) * 100)))
+        except Exception:
+            auto = 100
         if old == auto:                    # 고른 적이 없다 → 새 기본값
             self.us["font_pct"] = FONT_MAX
         else:                              # 고른 크기를 그대로 지킨다
