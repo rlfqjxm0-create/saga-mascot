@@ -2966,32 +2966,42 @@ def _room_keys(code):
 
 
 def _room_seal(key, obj):
-    """내용을 잠근다. 서버는 알아볼 수 없는 덩어리만 받는다."""
+    """내용을 잠근다. 서버는 알아볼 수 없는 덩어리만 받는다.
+
+    잠그는 방식은 **표준 라이브러리 하나뿐이다.** 예전에는 cryptography 가
+    깔려 있으면 AES-GCM 을 쓰고 없으면 이 방식으로 물러났는데, 선물본 exe
+    에는 그 꾸러미가 안 들어 있어 형식이 두 갈래로 갈렸다. 그러면 서로의
+    덩어리를 못 열어, 같은 방에 앉아 있어도 '아직 안 켰어요'로 보인다.
+    쓰는 사람마다 환경이 다르므로 통신 형식은 늘 있는 것으로만 만든다.
+
+    잠그고 나서 서명한다(encrypt-then-MAC): 키스트림과 XOR 한 뒤,
+    nonce+본문에 HMAC-SHA256 을 찍어 앞 16바이트를 붙인다.
+    """
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
     nonce = os.urandom(12)
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        body = AESGCM(key).encrypt(nonce, raw, None)
-    except Exception:
-        body = _room_xor(key, nonce, raw) + hmac.new(
-            key, nonce + _room_xor(key, nonce, raw), hashlib.sha256).digest()[:16]
-    return _b64.b64encode(nonce + body).decode()
+    ct = _room_xor(key, nonce, raw)
+    tag = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
+    return _b64.b64encode(nonce + ct + tag).decode()
 
 
 def _room_open_blob(key, blob):
-    """잠긴 내용을 연다. 못 열면 None (남의 방 것이거나 코드가 다르다)."""
+    """잠긴 내용을 연다. 못 열면 None (남의 방 것이거나 코드가 다르다).
+
+    옛 판이 AES-GCM 으로 잠가 둔 것도 열 수 있게 두 방식을 다 해 본다.
+    아직 안 고쳐진 프로그램이 방에 남아 있을 수 있기 때문이다.
+    """
     try:
         data = _b64.b64decode(blob)
         nonce, body = data[:12], data[12:]
+        ct, tag = body[:-16], body[-16:]
+        want = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
+        if hmac.compare_digest(tag, want):
+            return json.loads(_room_xor(key, nonce, ct).decode("utf-8"))
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
             raw = AESGCM(key).decrypt(nonce, body, None)
-        except ImportError:
-            ct, tag = body[:-16], body[-16:]
-            want = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
-            if not hmac.compare_digest(tag, want):
-                return None
-            raw = _room_xor(key, nonce, ct)
+        except Exception:
+            return None
         return json.loads(raw.decode("utf-8"))
     except Exception:
         return None
