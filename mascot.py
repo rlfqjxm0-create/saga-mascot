@@ -22,7 +22,6 @@ config.json 주요 키: scale, screen_quad, blink, trail_color, pen_tip,
 import base64 as _b64
 import ctypes
 import hashlib
-import hmac
 import json
 import math
 import os
@@ -2999,6 +2998,34 @@ ROOM_HOME = "ena-mascot-home-2026"   # 코드를 안 넣었을 때 들어가는 
 ROOM_MAX = 12                        # 한 방에 보여 줄 최대 인원
 
 
+def _hmac_sha256(key, msg):
+    """HMAC-SHA256 — hashlib 만으로 만든다.
+
+    파이썬에 들어 있는 hmac 모듈을 쓰면 안 된다. 선물본(exe·맥 앱)은
+    PyInstaller 로 굳혀 만드는데, 굳힐 당시에 아무도 안 부르던 모듈은
+    아예 안 들어간다. 홈 기능에서 처음 hmac 을 부르자 사가의 맥 앱이
+    'No module named hmac' 으로 **켜지지도 않았다** (맥 런처는 코드를
+    읽어 들이는 단계를 감싸지 않아 창조차 안 뜬다).
+
+    표준 규격 그대로라 결과 바이트는 hmac 모듈과 똑같다.
+    """
+    if len(key) > 64:
+        key = hashlib.sha256(key).digest()
+    key = key + b"\x00" * (64 - len(key))
+    inner = hashlib.sha256(bytes(b ^ 0x36 for b in key) + msg).digest()
+    return hashlib.sha256(bytes(b ^ 0x5C for b in key) + inner).digest()
+
+
+def _ct_eq(a, b):
+    """길이·내용을 시간차 없이 견준다 (hmac.compare_digest 대신)."""
+    if len(a) != len(b):
+        return False
+    diff = 0
+    for x, y in zip(a, b):
+        diff |= x ^ y
+    return diff == 0
+
+
 def _room_keys(code):
     """방 코드에서 '방 번호'와 '자물쇠'를 따로 뽑는다.
 
@@ -3007,8 +3034,8 @@ def _room_keys(code):
     """
     raw = str(code or ROOM_HOME).strip().encode("utf-8")
     rid = _b64.urlsafe_b64encode(
-        hmac.new(raw, b"room-id", hashlib.sha256).digest()).decode()[:22]
-    key = hmac.new(raw, b"room-key", hashlib.sha256).digest()
+        _hmac_sha256(raw, b"room-id")).decode()[:22]
+    key = _hmac_sha256(raw, b"room-key")
     return rid, key
 
 
@@ -3027,7 +3054,7 @@ def _room_seal(key, obj):
     raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
     nonce = os.urandom(12)
     ct = _room_xor(key, nonce, raw)
-    tag = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
+    tag = _hmac_sha256(key, nonce + ct)[:16]
     return _b64.b64encode(nonce + ct + tag).decode()
 
 
@@ -3041,8 +3068,8 @@ def _room_open_blob(key, blob):
         data = _b64.b64decode(blob)
         nonce, body = data[:12], data[12:]
         ct, tag = body[:-16], body[-16:]
-        want = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
-        if hmac.compare_digest(tag, want):
+        want = _hmac_sha256(key, nonce + ct)[:16]
+        if _ct_eq(tag, want):
             return json.loads(_room_xor(key, nonce, ct).decode("utf-8"))
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -3059,8 +3086,7 @@ def _room_xor(key, nonce, data):
     out = bytearray()
     i = 0
     while len(out) < len(data):
-        out += hmac.new(key, nonce + i.to_bytes(4, "big"),
-                        hashlib.sha256).digest()
+        out += _hmac_sha256(key, nonce + i.to_bytes(4, "big"))
         i += 1
     return bytes(a ^ b for a, b in zip(data, out))
 
