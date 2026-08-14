@@ -1460,24 +1460,32 @@ class PokeSound:
         names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
         if not names:
             raise ValueError("클릭 소리 wav 없음")
-        with wave.open(os.path.join(folder, names[0]), "rb") as w:
-            if w.getsampwidth() != 2 or w.getnchannels() != 1:
-                raise ValueError("클릭 소리는 16bit 모노 wav만 지원")
-            self.fr = w.getframerate()
-            self.pcm = w.readframes(w.getnframes())
+        # 폴더에 여럿이면 다 읽어 두고 번갈아 낸다 (홈 반응 소리가 둘이다).
+        self.clips = []
+        for nm in names:
+            with wave.open(os.path.join(folder, nm), "rb") as w:
+                if w.getsampwidth() != 2 or w.getnchannels() != 1:
+                    continue          # 16bit 모노가 아니면 건너뛴다
+                self.clips.append((w.getframerate(),
+                                   w.readframes(w.getnframes())))
+        if not self.clips:
+            raise ValueError("클릭 소리는 16bit 모노 wav만 지원")
+        self.fr, self.pcm = self.clips[0]
         self._voices = []
         self.set_volume(volume)
 
     def set_volume(self, volume):
         self.volume = max(0.0, min(float(volume), 100.0))
-        self.buf = (_scaled_buffer(self.pcm, self.volume / 100.0, 2)
-                    if self.volume > 0 else None)
+        self.bufs = ([(fr, _scaled_buffer(pcm, self.volume / 100.0, 2), len(pcm))
+                      for fr, pcm in self.clips] if self.volume > 0 else [])
+        self.buf = self.bufs[0][1] if self.bufs else None
 
     def play(self):
         self.reap()
-        if self.buf is None:
+        if not getattr(self, "bufs", None):
             return
-        fr2 = max(8000, int(self.fr * random.uniform(0.92, 1.10)))
+        fr, buf, nbytes = random.choice(self.bufs)
+        fr2 = max(8000, int(fr * random.uniform(0.92, 1.10)))
         wfx = _WAVEFORMATEX(1, 1, fr2, fr2 * 2, 2, 16, 0)
         wm = ctypes.windll.winmm
         h = ctypes.c_void_p()
@@ -1485,13 +1493,13 @@ class PokeSound:
             return
         wm.waveOutSetVolume(h, 0xFFFFFFFF)     # 실볼륨은 샘플에 이미 반영됨
         hdr = _WAVEHDR()
-        hdr.lpData = ctypes.cast(self.buf, ctypes.c_void_p)
-        hdr.dwBufferLength = len(self.pcm)
+        hdr.lpData = ctypes.cast(buf, ctypes.c_void_p)
+        hdr.dwBufferLength = nbytes
         wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
         wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
         # 여기도 같은 이유로 버퍼를 함께 붙든다 (set_volume이
-        # self.buf를 갈아 끼우는 동안 옛 소리가 재생 중일 수 있다)
-        self._voices.append((h, hdr, self.buf))
+        # 버퍼를 갈아 끼우는 동안 옛 소리가 재생 중일 수 있다)
+        self._voices.append((h, hdr, buf))
 
     def reap(self):
         wm = ctypes.windll.winmm
@@ -3885,6 +3893,7 @@ class Mascot:
         self.sndpack = None
         self.pensnd = None
         self.pokesnd = None
+        self.roomsnd = None          # 홈에서 남이 눌러 줬을 때 (평소와 다른 소리)
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -4926,6 +4935,12 @@ class Mascot:
             except Exception:
                 pass
             self.pokesnd = None
+        if self.roomsnd is not None:
+            try:
+                self.roomsnd.close()
+            except Exception:
+                pass
+            self.roomsnd = None
         if self._slime_snd is not None:
             try:
                 self._slime_snd.close()
@@ -4967,6 +4982,15 @@ class Mascot:
                     poke_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.pokesnd = None
+        # 홈에서 온 반응은 평소 말풍선 소리('뿅')와 달라야 구분이 된다.
+        # 종소리 두 음짜리 '띠링' — 없으면 그냥 평소 소리로 물러난다.
+        room_dir = os.path.join(self.dir, "sounds", "room")
+        if os.path.isdir(room_dir):
+            try:
+                self.roomsnd = PokeSound(
+                    room_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.roomsnd = None
         slime_dir = self._slime_dir()
         if self.cfg.get("slime") and os.path.isdir(slime_dir):
             # 종류마다 원본 소리 크기가 딴판이다 (직접 녹음한 것과 받은 음원).
@@ -12593,6 +12617,9 @@ class Mascot:
                  "parts_dororong_gift": "도로롱", "parts_dororong": "도로롱",
                  "parts_saga": "사가", "parts_gippo": "기뽀",
                  "parts_myeoljong": "멸종", "parts_peugo": "프고"}
+    # 얼굴이 넓적한 캐릭터는 같은 높이로 맞추면 옆으로 커 보인다.
+    # 그 캐릭터만 조금 줄인다 (1.0 이 기본).
+    ROOM_SIZE = {"parts_peugo": 0.84}
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
@@ -12845,7 +12872,7 @@ class Mascot:
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
             self._char_fx_add(k)
-            self._safe("self_poke_snd", self._poke_sound)
+            self._safe("self_poke_snd", self._room_sound)
             return
         if False:
             pass
@@ -12859,7 +12886,7 @@ class Mascot:
         kind = ev.get("k")
         now = time.time()
         self._char_fx_add(kind)               # 타이머 화면에서 터진다
-        self._safe("room_poke_snd", self._poke_sound)   # 뿅
+        self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
             self._say("%s가 콕 찔렀어요" % who if who else "누가 콕 찔렀어요", 3.0)
@@ -12882,6 +12909,12 @@ class Mascot:
 
     def _poke_sound(self):
         snd = getattr(self, "pokesnd", None)
+        if snd is not None:
+            snd.play()
+
+    def _room_sound(self):
+        """홈에서 남이 눌러 줬을 때. 파일이 없는 옛 파츠면 평소 소리로."""
+        snd = getattr(self, "roomsnd", None) or getattr(self, "pokesnd", None)
         if snd is not None:
             snd.play()
 
@@ -12973,7 +13006,7 @@ class Mascot:
             return None
         try:
             im = Image.open(p).convert("RGBA")
-            h = int(self.ROOM_FIG * self.ui_k)
+            h = int(self.ROOM_FIG * self.ui_k * self.ROOM_SIZE.get(slot, 1.0))
             im = im.resize((max(1, int(im.width * h / im.height)), h),
                            Image.LANCZOS)
             line = self._room_deskline(slot)
@@ -13359,6 +13392,15 @@ class Mascot:
             cx0 = left + (i % cols) * cw
             cy0 = top + (i // cols) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
+        # 마지막 줄에 남는 칸도 카드 모양만 그려 둔다. 비워 두면 그 줄만
+        # 휑하게 뚫려 보인다.
+        used = len(people)
+        for i in range(used, -(-used // cols) * cols):
+            cx0 = left + (i % cols) * cw
+            cy0 = top + (i // cols) * chh
+            self._rr(cv, cx0 + 8 * k, cy0 + 6 * k, cx0 + cw - 8 * k,
+                     cy0 + chh - 16 * k, 18 * k, fill=P["card"],
+                     outline=P["line"], width=1)
         self._room_bar(cv, W, H, P, k, people)
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
