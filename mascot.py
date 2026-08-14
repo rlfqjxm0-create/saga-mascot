@@ -12682,24 +12682,17 @@ class Mascot:
             self._say("환경설정에서 '같이 작업하는 방'을 켜 주세요", 4.0)
             return
         k = self.ui_k
-        cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
-        win_h = self.root.winfo_screenheight()
+        cw = int(self.ROOM_CW * k)
         n = max(1, len(self._room_seats()))
-        rows = max(2, (n + self.ROOM_COLS - 1) // self.ROOM_COLS)
-        W = int(16 * k) * 2 + cw * self.ROOM_COLS
-        # 화면을 넘기면 줄을 줄인다 (뒤쪽 = 아직 안 켠 사람부터 빠진다)
-        while rows > 2 and (int(self.ROOM_TOP * k) + ch * rows
-                            + int(126 * k)) > win_h * 0.92:
-            rows -= 1
-        self._room_rows = rows
-        self._room_cols = self.ROOM_COLS
+        cols, rows, W, H = self._room_fit(
+            int(16 * k) * 2 + cw * self.ROOM_COLS, n)
+        self._room_cols, self._room_rows = cols, rows
         self._room_size = (0, 0)
-        H = int(self.ROOM_TOP * k) + ch * rows + int(126 * k)
         win = tk.Toplevel(self.root)
         win.title("같이 작업 중")
         win.resizable(True, True)
-        win.minsize(int(cw + 32 * k),
-                    int(self.ROOM_TOP * k + ch + 126 * k))
+        win.minsize(int(self.ROOM_CW * k) + int(20 * k),
+                    int((self.ROOM_TOP + 126) * k) + int(self.ROOM_CH * k))
         win.configure(bg=self._room_palette()["wall"])
         try:
             win.iconphoto(False, self.tray_img) if getattr(
@@ -12863,7 +12856,7 @@ class Mascot:
         gx0, gx1 = W - 200 * k, W - 20 * k
         gy = mid + 9 * k
         self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
-                 fill=P["line"], width=0)
+                 fill="#ffffff", outline=P["line"], width=1)
         goal = max(1, on) * 6 * 60
         if tot > 0:
             self._rr(cv, gx0, gy - 5 * k,
@@ -12966,11 +12959,14 @@ class Mascot:
                        font=self._uf(8), fill=P["sub"], tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
-        self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill=P["line"], width=0)
+        # 바탕은 흰색, 채우는 색은 그 사람 테마색 그대로
+        self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill="#ffffff",
+                 outline=self._tint(col, 0.55), width=1)
         pr = max(0.0, min(1.0, float(p.get("p") or 0)))
         if pr > 0.01:
             self._rr(cv, bx0, by, bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k,
-                     fill=col, width=0)
+                     fill=self._room_raw(slot) if not off
+                     else self._tint(self._room_raw(slot), 0.5), width=0)
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
@@ -13301,6 +13297,23 @@ class Mascot:
         cv.delete(t)
         return (box[2] - box[0]) if box else len(text) * 8
 
+    def _room_raw(self, slot):
+        """그 캐릭터의 테마색 그대로 — 밝기에 손대지 않은 값.
+
+        _room_tone 은 글자 대비를 위해 어두운 색을 밝혀 버리고,
+        _room_pastel 은 옅게 만든다. 게이지처럼 '그 색 그대로'가 필요한
+        곳에서는 이걸 쓴다.
+        """
+        col = self.ROOM_TINT.get(slot, "#8b8b93")
+        if slot == self.char:
+            return self.card.get("fill", col)
+        p = os.path.join(HERE, slot, "config.json")
+        try:
+            with open(p, encoding="utf-8") as fp:
+                return (json.load(fp).get("card") or {}).get("fill", col)
+        except Exception:
+            return col
+
     def _room_pastel(self, slot, light=0.88, smin=0.55, smax=0.85):
         """그 사람 테마색의 파스텔. 밝기는 정해 놓고 색기만 살린다.
 
@@ -13314,16 +13327,7 @@ class Mascot:
         if hit:
             return hit
         import colorsys
-        col = self.ROOM_TINT.get(slot, "#8b8b93")
-        if slot == self.char:
-            col = self.card.get("fill", col)
-        else:
-            p = os.path.join(HERE, slot, "config.json")
-            try:
-                with open(p, encoding="utf-8") as fp:
-                    col = (json.load(fp).get("card") or {}).get("fill", col)
-            except Exception:
-                pass
+        col = self._room_raw(slot)
         try:
             r, g, b = (int(col[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
         except Exception:
@@ -13343,16 +13347,7 @@ class Mascot:
         c = self._room_tone_cache.get(slot)
         if c:
             return c
-        col = self.ROOM_TINT.get(slot, "#8b8b93")
-        if slot == self.char:
-            col = self.card.get("fill", col)
-        else:
-            p = os.path.join(HERE, slot, "config.json")
-            try:
-                with open(p, encoding="utf-8") as fp:
-                    col = (json.load(fp).get("card") or {}).get("fill", col)
-            except Exception:
-                pass
+        col = self._room_raw(slot)
         for _ in range(12):
             r, g, b = (int(col[i:i + 2], 16) for i in (1, 3, 5))
             if (r * 299 + g * 587 + b * 114) / 1000 >= 150:
@@ -13427,6 +13422,28 @@ class Mascot:
     def _hex(c):
         return tuple(int(str(c)[i:i + 2], 16) for i in (1, 3, 5))
 
+    def _room_fit(self, W, n):
+        """가로 폭 W 에 n 명을 앉히는 칸/줄 수와, 그러려면 필요한 최소 창 크기.
+
+        창을 줄였을 때 사람이 사라지지 않게, 다 들어가는 크기를 최소 크기로
+        걸어 둔다 (Tk 가 그보다 작게 못 줄인다). 화면보다 커지면 안 되므로
+        줄 수에 상한을 두고, 그때는 칸을 늘려 가로로 눕힌다.
+        """
+        k = self.ui_k
+        cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
+        top, bot = int(self.ROOM_TOP * k), int(126 * k)
+        pad = int(20 * k)
+        sh = self.root.winfo_screenheight()
+        sw = self.root.winfo_screenwidth()
+        maxr = max(1, int((sh * 0.92 - top - bot) // ch))
+        maxc = max(1, int((sw * 0.95 - pad) // cw))
+        cols = max(1, min(maxc, int((W - pad) // cw)))
+        rows = max(1, -(-n // cols))              # 올림 나눗셈
+        if rows > maxr:                           # 세로가 모자라면 옆으로
+            rows = maxr
+            cols = max(cols, min(maxc, -(-n // rows)))
+        return cols, rows, cols * cw + pad, top + rows * ch + bot
+
     def _room_relayout(self):
         """창 크기가 바뀌면 칸 배치를 다시 잡는다.
 
@@ -13440,11 +13457,19 @@ class Mascot:
         if W < 20 or H < 20 or (W, H) == self._room_size:
             return
         self._room_size = (W, H)
-        k = self.ui_k
-        cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
-        self._room_cols = max(1, int((W - int(20 * k)) // cw))
-        self._room_rows = max(1, int((H - int(self.ROOM_TOP * k)
-                                      - int(126 * k)) // ch))
+        cols, rows, mw, mh = self._room_fit(W, max(1, len(self._room_seats())))
+        self._room_cols, self._room_rows = cols, rows
+        # 다 안 들어가면 모자란 쪽을 늘려 준다. 최소 크기를 지금 폭으로
+        # 걸면 안 된다 — 한 번 넓어진 창을 다시 좁힐 수 없게 갇힌다.
+        # 좁히면 칸이 줄고 줄이 늘어 세로로 자라고, 그것도 모자라면 폭이 는다.
+        try:
+            win = self.room_win
+            cw2, ch2 = win.winfo_width(), win.winfo_height()
+            nw, nh = max(cw2, mw), max(ch2, mh)
+            if nw > cw2 + 1 or nh > ch2 + 1:
+                win.geometry("%dx%d" % (nw, nh))
+        except Exception:
+            pass
         self._room_key_last = None            # 통째로 다시 그린다
         self._room_body = []
         self._safe("room_draw", self._room_draw)
@@ -13494,6 +13519,11 @@ class Mascot:
                     self.room_net.send(slot, kind)
                     self._room_flash[slot] = time.time()
                     self._room_fx_add(slot, kind)
+                    # 무엇을 했는지 글자로 — 안 정해 주면 기본값 '!' 가 뜬다
+                    self._room_note = (
+                        dict((b, a) for a, b, _c in self.ROOM_BTN).get(
+                            kind, kind), time.time())
+                    self._room_toast_say(slot, kind)
                 self._safe("room_draw", self._room_draw)
                 return
         self._room_pick = None
