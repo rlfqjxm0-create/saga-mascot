@@ -3218,10 +3218,14 @@ class RoomNet:
     IDLE_LIST = 120.0
     IDLE_TAKE = 8.0   # 신호는 번호로 가져오니 늦어도 안 놓친다 (2분 남음)
 
-    def __init__(self, slot, code=None):
+    def __init__(self, slot, code=None, state=None):
+        # 보낼 값은 **만들 때 같이 받는다.** 스레드가 __init__ 끝에서 바로
+        # 출발해 첫 바퀴를 돌기 때문에, 만든 뒤에 push 하면 이미 늦다.
+        # 첫 바퀴를 빈손으로 흘려보내면 그 바퀴가 멈췄을 때(맥 주소 조회)
+        # 두 번째 기회가 영영 안 온다 — 사가가 이 상태였다.
         self.slot = str(slot)[:40]
         self.room, self.key = _room_keys(code)
-        self._state = {}
+        self._state = dict(state or {})
         self._out = []            # 보낼 신호
         self._roster = []         # 받은 사람들
         self._events = []         # 받은 신호
@@ -3297,6 +3301,10 @@ class RoomNet:
                                           self.IDLE_TAKE)
             else:
                 i_beat, i_list, i_take = self.BEAT, self.LIST, self.TAKE
+            if self.stat.get("beat") != "보냄":
+                # 아직 한 번도 자리를 못 알렸다. 남에게는 안 켠 것으로
+                # 보이는 상태라, 느린 간격(30초)을 기다리지 않는다.
+                i_beat = min(i_beat, 5.0)
             if self._wake:            # 홈을 막 열었다 — 기다리지 않는다
                 self._wake = False
                 t_beat = t_list = t_take = 0.0
@@ -12809,8 +12817,15 @@ class Mascot:
     def _room_start(self):
         if self.room_net is not None or not self._room_on():
             return
+        # 보낼 값을 같이 넘긴다 — 첫 바퀴부터 자리를 알리게 (지뢰: 사가 사례)
         try:
-            self.room_net = RoomNet(self.char, self.us.get("room_code"))
+            first = self._room_state_now()
+        except Exception:
+            first = None
+            self._log_error("room_first_state")
+        try:
+            self.room_net = RoomNet(self.char, self.us.get("room_code"), first)
+            self._room_push = time.time()
         except Exception:
             self.room_net = None
             self._log_error("room_start")
@@ -12842,7 +12857,9 @@ class Mascot:
         net = self.room_net
         last = max(getattr(net, "ok_at", 0.0) or 0.0,
                    getattr(net, "born", 0.0) or 0.0)
-        gap = 90.0 if self._room_retry < 20 else 300.0
+        # 자리는 90초가 지나면 남의 명단에서 사라진다. 한 바퀴에 한 번밖에
+        # 못 통하는 상태에서도 자리가 유지되도록 그보다 짧게 잡는다.
+        gap = 60.0 if self._room_retry < 20 else 300.0
         if now - last > gap and now - self._room_retry_at > gap:
             self._room_retry += 1
             self._room_retry_at = now
