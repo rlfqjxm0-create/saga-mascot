@@ -400,6 +400,8 @@ DEFAULT_SETTINGS = {
     "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
     "room_code": "",         # 방 코드 (비우면 '홈')
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
+    "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
+    "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
 }
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
 
@@ -3030,6 +3032,13 @@ class RoomNet:
     BEAT = 5.0        # 내 자리를 알리는 간격 (서버는 3초에 한 번만 받는다)
     LIST = 6.0        # 방 사람들을 받아 오는 간격
     TAKE = 2.5        # 신호를 받아 오는 간격
+    # 홈 창이 닫혀 있을 때 쓰는 간격. 명단은 창이 떠 있을 때만 보는데도
+    # 6초마다 받아 오고 있었고, 그것이 전송량의 대부분이었다(실측 96%).
+    # 자리는 90초 안에만 알리면 남에게 보이고, 신호(콕·응원)는 늦으면
+    # 티가 나므로 조금만 늦춘다.
+    IDLE_BEAT = 30.0
+    IDLE_LIST = 120.0
+    IDLE_TAKE = 8.0   # 신호는 번호로 가져오니 늦어도 안 놓친다 (2분 남음)
 
     def __init__(self, slot, code=None):
         self.slot = str(slot)[:40]
@@ -3043,6 +3052,9 @@ class RoomNet:
         self._after = 0
         self.err = None           # 마지막 오류 (설정 화면에서 보여 준다)
         self.ok_at = 0.0          # 마지막으로 성공한 시각
+        self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
+        self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
+        self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
 
@@ -3067,11 +3079,16 @@ class RoomNet:
                 evs.append(self._events.pop(0))
         return people, evs
 
+    def wake(self):
+        """홈을 열었을 때 — 기다리지 말고 곧바로 한 바퀴 돈다."""
+        self._wake = True
+
     def close(self):
         self._stop = True
 
     # ── 스레드 ────────────────────────────────────────────────────────
     def _rpc(self, fn, args, timeout=12):
+        self.calls += 1
         req = urllib.request.Request(
             "%s/rest/v1/rpc/%s" % (ROOM_URL, fn),
             data=json.dumps(args).encode("utf-8"),
@@ -3087,8 +3104,16 @@ class RoomNet:
         t_beat = t_list = t_take = 0.0
         while not self._stop:
             now = time.time()
+            if self.idle:
+                i_beat, i_list, i_take = (self.IDLE_BEAT, self.IDLE_LIST,
+                                          self.IDLE_TAKE)
+            else:
+                i_beat, i_list, i_take = self.BEAT, self.LIST, self.TAKE
+            if self._wake:            # 홈을 막 열었다 — 기다리지 않는다
+                self._wake = False
+                t_beat = t_list = t_take = 0.0
             try:
-                if now - t_beat >= self.BEAT:
+                if now - t_beat >= i_beat:
                     t_beat = now
                     with self._lock:
                         st = dict(self._state)
@@ -3104,7 +3129,7 @@ class RoomNet:
                                "p_blob": _room_seal(
                                    self.key, {"f": self.slot, "k": kind,
                                               "x": extra})})
-                if now - t_list >= self.LIST:
+                if now - t_list >= i_list:
                     t_list = now
                     rows = self._rpc("room_list", {"p_room": self.room}) or []
                     got = []
@@ -3117,7 +3142,7 @@ class RoomNet:
                         got.append(d)
                     with self._lock:
                         self._roster = got[:ROOM_MAX]
-                if now - t_take >= self.TAKE:
+                if now - t_take >= i_take:
                     t_take = now
                     rows = self._rpc("room_take",
                                      {"p_room": self.room, "p_slot": self.slot,
@@ -3556,6 +3581,7 @@ class Mascot:
         self._room_cols = 3          # 방 창에 들어가는 칸 수 (창 크기에 따라)
         self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
         self._room_toast = None      # '보냈어요' 알림 (글, 시각)
+        self._msg_win = None         # 오늘 한 줄 적는 창
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -3627,6 +3653,9 @@ class Mascot:
             menu.add_separator()
         if ROOM_URL and ROOM_KEY:
             menu.add_command(label="홈", command=self._room_toggle)
+            if self._room_on():
+                menu.add_command(label="오늘 한 줄",
+                                 command=self._room_msg_win)
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -11468,6 +11497,10 @@ class Mascot:
         nick_entry = tk.Entry(cv, textvariable=nick_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
                               highlightthickness=0, borderwidth=0)
+        msg_var = tk.StringVar(value=self._room_msg())
+        msg_entry = tk.Entry(cv, textvariable=msg_var, font=(FONT, FS(8)),
+                             relief="flat", bg="#ffffff", fg=cd["text"],
+                             highlightthickness=0, borderwidth=0)
         code_var = tk.StringVar(value=str(st.get("room_code", "")))
         code_entry = tk.Entry(cv, textvariable=code_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
@@ -11945,7 +11978,9 @@ class Mascot:
                            text="어떤 프로그램을 쓰는지, 창 제목은 보내지 않습니다.",
                            font=(FONT, FS(8)), fill=cd["sub"])
             y += 26
-            for cap, ent, hint in (("방에서 보일 이름", nick_entry,
+            for cap, ent, hint in (("오늘 한 줄", msg_entry,
+                                    "날이 바뀌면 지워집니다"),
+                                   ("방에서 보일 이름", nick_entry,
                                     "비우면 캐릭터 이름"),
                                    ("방 코드", code_entry,
                                     "비우면 '홈'")):
@@ -12073,6 +12108,9 @@ class Mascot:
                 new["settings_pos"] = list(self._set_pos)
             new["work_apps"] = apps_var.get().strip()
             new["room_nick"] = nick_var.get().strip()[:14]
+            _msg = msg_var.get().strip()[:20]
+            new["room_msg"] = _msg
+            new["room_msg_day"] = self._my_workday() if _msg else ""
             new["room_code"] = code_var.get().strip()[:40]
             new["goal_hours"] = float(new["goal_hours"])
             new["idle_sec"] = max(float(new["idle_sec"]), 5.0)
@@ -12300,6 +12338,92 @@ class Mascot:
     def _room_on(self):
         return bool(self.us.get("room_on")) and bool(ROOM_URL) and bool(ROOM_KEY)
 
+    def _room_msg(self):
+        """오늘 한 줄. 작업일이 바뀌면 저절로 비워진다 ('오늘' 목표니까)."""
+        if str(self.us.get("room_msg_day") or "") != self._my_workday():
+            return ""
+        return str(self.us.get("room_msg") or "").strip()[:20]
+
+    def _room_msg_set(self, text):
+        """오늘 한 줄을 정한다 (빈 글자면 지운다)."""
+        text = str(text or "").strip()[:20]
+        self.us["room_msg"] = text
+        self.us["room_msg_day"] = self._my_workday() if text else ""
+        try:      # 여는 순간 지워지는 open("w") 말고 _save_json 으로 (지뢰 35)
+            _save_json(self.settings_path, self.us, indent=1)
+        except Exception:
+            self._log_error("room_msg_save")
+        try:      # 통신층이 어떤 상태든 한 줄은 저장돼야 한다
+            self.room_net.push(self._room_state_now())
+            self.room_net.wake()          # 곧바로 남에게 보이게
+        except Exception:
+            pass
+        self._room_key_last = None
+        if self.room_win is not None:
+            self._safe("room_draw", self._room_draw)
+
+    def _room_msg_win(self):
+        """오늘 한 줄을 적는 작은 창 — 우클릭 메뉴에서 바로 연다."""
+        w = getattr(self, "_msg_win", None)
+        if w is not None:
+            try:
+                w.lift()
+                return
+            except Exception:
+                self._msg_win = None
+        cd, u = self.card, self._ui
+        win = tk.Toplevel(self.root)
+        self._msg_win = win
+        win.title("오늘 한 줄")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=cd["panel"])
+        tk.Label(win, text="홈에서 다른 사람들에게 보일 한 줄이에요.",
+                 bg=cd["panel"], fg=cd["text"], font=self._uf(10, True)
+                 ).pack(padx=u(20), pady=(u(16), u(2)))
+        tk.Label(win, text="날이 바뀌면 저절로 지워집니다.",
+                 bg=cd["panel"], fg=cd["sub"], font=self._uf(8)
+                 ).pack(padx=u(20), pady=(0, u(12)))
+        var = tk.StringVar(value=self._room_msg())
+        ent = tk.Entry(win, textvariable=var, font=self._uf(11),
+                       relief="flat", bg="#ffffff", fg=cd["text"],
+                       justify="center", width=20, highlightthickness=1,
+                       highlightbackground=cd["fill"],
+                       highlightcolor=cd["fill"])
+        ent.pack(ipady=u(7), padx=u(20))
+        row = tk.Frame(win, bg=cd["panel"])
+        row.pack(pady=(u(14), u(16)))
+
+        def done(save):
+            if save:
+                self._safe("room_msg_set", self._room_msg_set, var.get())
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._msg_win = None
+
+        for cap, val, bg, fg in (("지우기", None, cd["panel"], cd["sub"]),
+                                 ("저장", True, cd["fill"], "#ffffff")):
+            def hit(v=val):
+                if v is None:
+                    var.set("")
+                done(True)
+            tk.Button(row, text=cap, command=hit, font=self._uf(9, True),
+                      bg=bg, fg=fg, relief="flat", bd=0, padx=u(18),
+                      pady=u(6), activebackground=bg, cursor="hand2"
+                      ).pack(side="left", padx=u(5))
+        win.bind("<Return>", lambda e: done(True))
+        ent.bind("<Return>", lambda e: done(True))
+        win.bind("<Escape>", lambda e: done(False))
+        win.protocol("WM_DELETE_WINDOW", lambda: done(False))
+        win.update_idletasks()
+        x = self.root.winfo_rootx() + (self.W - win.winfo_width()) // 2
+        y = self.root.winfo_rooty() + u(60)
+        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        ent.focus_set()
+        ent.select_range(0, "end")
+
     def _room_nick(self):
         return (str(self.us.get("room_nick") or "").strip()
                 or str(self.cfg.get("name") or self.char))
@@ -12320,7 +12444,8 @@ class Mascot:
             # 최근에 무엇을 만졌는지 — 방에서 그 자세로 보여 준다
             act = "key" if (now - self.last_pointer > 2.0
                             and now - self.last_key < 1.8) else "pen"
-        return {"n": self._room_nick()[:14], "lv": self._level(),
+        return {"n": self._room_nick()[:14], "m": self._room_msg(),
+                "lv": self._level(),
                 "ti": self._title()[:14], "t": int(today // 60), "s": st,
                 "p": round(min(1.0, today / goal), 3),
                 "a": act, "sl": bool(self.slime)}
@@ -12354,7 +12479,9 @@ class Mascot:
             self._room_start()
         if self.room_net is None:
             return
-        if now - self._room_push > 2.0:
+        # 홈 창이 닫혀 있으면 천천히 — 명단은 창이 떠 있을 때만 쓴다
+        self.room_net.idle = (self.room_win is None)
+        if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now())
         people, events = self.room_net.drain()
@@ -12388,6 +12515,8 @@ class Mascot:
                 if p.get("slot") == ev.get("f"):
                     who = str(p.get("n") or "")
                     break
+            # 홈이 닫혀 있으면 명단이 2분까지 묵는다. 이름이 없으면 표로 채운다.
+            who = who or self.ROOM_NAME.get(ev.get("f") or "", "")
         kind = ev.get("k")
         now = time.time()
         self._char_fx_add(kind)               # 타이머 화면에서 터진다
@@ -12725,6 +12854,11 @@ class Mascot:
         self._room_cur = ""
         win.protocol("WM_DELETE_WINDOW", self._room_close)
         win.bind("<Escape>", lambda e: self._room_close())
+        try:      # 통신층이 없거나 옛 것이어도 창은 떠야 한다
+            self.room_net.idle = False
+            self.room_net.wake()          # 열자마자 최신 명단을 받는다
+        except Exception:
+            pass
         self.room_win, self.room_cv = win, cv
         self._room_hit = []
         self._room_loop()
@@ -12953,10 +13087,15 @@ class Mascot:
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
                        fill=P["sub"] if (sleeping or off) else P["ink"],
                        tags="dyn")
-        cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
-                       text="아직 안 켰어요" if off
-                       else str(p.get("ti") or "")[:14],
-                       font=self._uf(8), fill=P["sub"], tags="dyn")
+        # 오늘 한 줄이 있으면 칭호 대신 그것을 보여 준다 (직접 쓴 말이 먼저).
+        msg = "" if off else str(p.get("m") or "").strip()
+        line = "아직 안 켰어요" if off else (msg or str(p.get("ti") or ""))
+        f2 = self._uf(8)
+        while line and self._room_tw(cv, line, f2) > (kx1 - kx0) - 20 * k:
+            line = line[:-1]
+        cv.create_text((kx0 + kx1) / 2, py0 + 34 * k, text=line, font=f2,
+                       fill=self._shade(col, 0.3) if msg else P["sub"],
+                       tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
         # 바탕은 흰색, 채우는 색은 그 사람 테마색 그대로
