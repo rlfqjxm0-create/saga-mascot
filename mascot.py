@@ -3059,6 +3059,52 @@ def _hls_to_rgb(h, ll, sat):
             _hls_v(m1, m2, h - 1.0 / 3.0))
 
 
+_JOSA_PAIR = {"이/가": ("이", "가"), "은/는": ("은", "는"),
+              "을/를": ("을", "를"), "과/와": ("과", "와"),
+              "아/야": ("아", "야"), "으로/로": ("으로", "로")}
+
+# 숫자를 읽었을 때 받침이 남는가 (영·일·삼·육·칠·팔)
+_JOSA_NUM = {"0": True, "1": True, "2": False, "3": True, "4": False,
+             "5": False, "6": True, "7": True, "8": True, "9": False}
+
+# 영문을 옮겨 적었을 때 끝소리가 받침이 되는 글자 (cat→캣, book→북)
+_JOSA_ABC = set("bcdfgjklmnpqstvxz")
+
+
+def _josa_bat(word):
+    """마지막 글자에 받침이 있는가 — (받침 있음, ㄹ 받침) 을 돌려준다.
+
+    이모지·괄호처럼 소리를 알 수 없는 글자는 건너뛰고 앞으로 간다.
+    끝까지 못 가리면 받침 없는 쪽으로 둔다 ('가·를' 이 덜 어색하다).
+    """
+    for ch in reversed((word or "").strip()):
+        o = ord(ch)
+        if 0xAC00 <= o <= 0xD7A3:              # 한글 음절
+            jong = (o - 0xAC00) % 28
+            return (jong != 0, jong == 8)
+        if ch in _JOSA_NUM:
+            return (_JOSA_NUM[ch], ch in "178")   # 일·칠·팔은 ㄹ 받침
+        low = ch.lower()
+        if "a" <= low <= "z":
+            return (low in _JOSA_ABC, low == "l")
+    return (False, False)
+
+
+def _josa(word, kind="이/가"):
+    """이름에 조사를 붙여 돌려준다. 빈 이름이면 그대로 둔다.
+
+    '도로롱가 콕 찔렀어요' 처럼 받침을 안 보고 붙이면 어색하다.
+    """
+    word = "" if word is None else str(word)
+    if not word.strip():
+        return word
+    withb, nob = _JOSA_PAIR.get(kind, ("이", "가"))
+    bat, rieul = _josa_bat(word)
+    if rieul and kind == "으로/로":            # '서울로' — ㄹ 뒤에는 '로'
+        bat = False
+    return word + (withb if bat else nob)
+
+
 def _hmac_sha256(key, msg):
     """HMAC-SHA256 — hashlib 만으로 만든다.
 
@@ -12894,20 +12940,22 @@ class Mascot:
         self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
-            self._say("%s가 콕 찔렀어요" % who if who else "누가 콕 찔렀어요", 3.0)
+            self._say(("%s 콕 찔렀어요" % _josa(who)) if who
+                      else "누가 콕 찔렀어요", 3.0)
         elif kind == "blanket":
             self._say("%s 덕분에 따뜻해요" % who if who else "따뜻해요", 3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
         elif kind == "wave":
             self.smile_until = max(self.smile_until, now + 2.0)
-            self._say("%s가 손을 흔들어요" % who if who else "누가 손을 흔들어요",
-                      3.0)
+            self._say(("%s 손을 흔들어요" % _josa(who)) if who
+                      else "누가 손을 흔들어요", 3.0)
         elif kind == "cheer":
             self.smile_until = max(self.smile_until, now + 3.0)
-            self._say("%s가 응원했어요" % who if who else "누가 응원했어요", 3.5)
+            self._say(("%s 응원했어요" % _josa(who)) if who
+                      else "누가 응원했어요", 3.5)
         elif kind == "snack":
-            self._say("%s가 간식을 놓고 갔어요" % who if who else "간식이 놓여 있어요",
-                      3.5)
+            self._say(("%s 간식을 놓고 갔어요" % _josa(who)) if who
+                      else "간식이 놓여 있어요", 3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
         self._room_flash[ev.get("f", "")] = now
         self._room_fx_add(self.char, kind)     # 받은 것은 내 칸에서 터진다
@@ -13697,13 +13745,7 @@ class Mascot:
         for kind, t0 in self._char_fx:
             p = (now - t0) / self.CHAR_FX          # 0 → 1
             if kind == "poke":
-                for i in range(3):                 # 물결이 퍼진다
-                    q = p * 1.9 - i * 0.16
-                    if 0 < q < 1:
-                        r = (22 + 96 * q) * k
-                        c.create_oval(cx - r, mid - r * 0.6,
-                                      cx + r, mid + r * 0.6, outline="#ffd0e0",
-                                      width=max(2, int(5 * k * (1 - q))))
+                self._fx_poke(c, p, cx, mid, k)
             elif kind in ("cheer", "blanket"):
                 # 담요도 하트로 (따뜻하다는 표시)
                 n = 7 if kind == "cheer" else 5
@@ -13718,6 +13760,50 @@ class Mascot:
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "snack":
                 self._fx_cake(c, p, cx, top, mid, k)
+
+    POKE_RING = ("#ff9ec4", "#ffb6d2", "#ffd6e4")
+
+    def _fx_poke(self, c, p, cx, cy, k):
+        """콕 — 동그란 물결 세 겹, 톡 튀는 점, 가운데 반짝임.
+
+        예전에는 세로를 0.6배로 눌러 타원이었는데 눌린 자국처럼 보였다.
+        실측으로 정원이 어느 캐릭터에서도 창을 안 넘는 것을 확인하고
+        (반지름 118*k, 창 428x529 / 244x354 / 348x544) 동그라미로 바꿨다.
+        """
+        for i in range(3):                         # 물결이 퍼진다
+            q = p * 1.9 - i * 0.16
+            if 0 < q < 1:
+                e = 1.0 - (1.0 - q) ** 2           # 톡 튀어나가 천천히 멎는다
+                r = (20 + 96 * e) * k
+                c.create_oval(cx - r, cy - r, cx + r, cy + r,
+                              outline=self.POKE_RING[i],
+                              width=max(2, int(6 * k * (1 - q))))
+        q = p * 1.55                               # 물결을 따라 튀는 점 여섯
+        if q < 1:
+            e = 1.0 - (1.0 - q) ** 2
+            d = (32 + 82 * e) * k
+            for i in range(6):
+                a = math.pi * (i / 3.0 - 0.5) + 0.26
+                dx, dy = cx + math.cos(a) * d, cy + math.sin(a) * d
+                sz = max(1.6, (5.4 - 3.4 * q) * k)
+                col = self.POKE_RING[0] if i % 2 else self.POKE_RING[1]
+                if i % 2:
+                    self._fx_spark(c, dx, dy, sz * 1.7, col)
+                else:
+                    c.create_oval(dx - sz, dy - sz, dx + sz, dy + sz,
+                                  fill=col, width=0)
+        if p < 0.42:                               # 눌린 자리에서 반짝
+            q = p / 0.42
+            self._fx_spark(c, cx, cy, (9 + 16 * q) * k * (1 - q * 0.55),
+                           "#fff0f6" if q < 0.5 else self.POKE_RING[1])
+
+    @staticmethod
+    def _fx_spark(c, x, y, r, col):
+        """네 갈래 반짝임. 글꼴을 안 써서 맥에서도 똑같이 보인다."""
+        w = r * 0.30
+        c.create_polygon(x, y - r, x + w, y - w, x + r, y, x + w, y + w,
+                         x, y + r, x - w, y + w, x - r, y, x - w, y - w,
+                         fill=col, outline="", smooth=False)
 
     def _fx_cake(self, c, p, cx, top, mid, k):
         """케이크가 접시째 책상 위로 떨어진다.
