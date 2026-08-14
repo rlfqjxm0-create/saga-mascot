@@ -399,6 +399,7 @@ DEFAULT_SETTINGS = {
     "room_seen": False,      # 처음 열 때 무엇이 오가는지 한 번 알려 줬는가
     "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
     "room_code": "",         # 방 코드 (비우면 '홈')
+    "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
 }
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
 
@@ -3538,6 +3539,8 @@ class Mascot:
         self._photo_after = None     # 단체사진 안내 예약
         self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
         self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
+        self._room_cur = ""          # 지금 방 창 커서 (같은 값을 다시 넣으면 깜빡)
+        self._room_rows = 2          # 방 창에 들어가는 줄 수
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -11914,6 +11917,8 @@ class Mascot:
             # ── 같이 작업하는 방 ──────────────────────────────────────
             y = group(y, "같이 작업하는 방", [
                 lambda ry: toggle(ry, "친구들과 같이 보기", "room_on"),
+                lambda ry: toggle(ry, "홈에서 내 캐릭터를 비활성화",
+                                  "room_hide_me"),
             ])
             y -= 12
             cv.create_text(LX, y, anchor="w",
@@ -12260,6 +12265,14 @@ class Mascot:
         "parts_dororong_gift": ("dororong-mascot", "parts_dororong_gift"),
         "parts_dororong": ("dororong-mascot", "parts_dororong_gift"),
     }
+    # 선물용 타이머를 받은 사람들 — 접속해 있지 않아도 자리는 늘 보인다.
+    ROOM_ALL = ("parts_junsa", "parts_dog", "parts_quincy",
+                "parts_dororong_gift", "parts_saga", "parts_gippo",
+                "parts_myeoljong")
+    ROOM_NAME = {"parts_junsa": "준사", "parts_dog": "개", "parts_quincy": "퀸시",
+                 "parts_dororong_gift": "도로롱", "parts_dororong": "도로롱",
+                 "parts_saga": "사가", "parts_gippo": "기뽀",
+                 "parts_myeoljong": "멸종"}
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
@@ -12627,8 +12640,15 @@ class Mascot:
             return
         k = self.ui_k
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
-        rows = 2
+        win_h = self.root.winfo_screenheight()
+        n = max(1, len(self._room_seats()))
+        rows = max(2, (n + self.ROOM_COLS - 1) // self.ROOM_COLS)
         W = int(16 * k) * 2 + cw * self.ROOM_COLS
+        # 화면을 넘기면 줄을 줄인다 (뒤쪽 = 아직 안 켠 사람부터 빠진다)
+        while rows > 2 and (int(self.ROOM_TOP * k) + ch * rows
+                            + int(126 * k)) > win_h * 0.92:
+            rows -= 1
+        self._room_rows = rows
         H = int(self.ROOM_TOP * k) + ch * rows + int(126 * k)
         win = tk.Toplevel(self.root)
         win.title("같이 작업 중")
@@ -12658,6 +12678,9 @@ class Mascot:
         cv.pack(fill="both", expand=True)
         cv.bind("<Button-1>", lambda e: self._safe("room_click",
                                                    self._room_click, e))
+        cv.bind("<Motion>", lambda e: self._safe("room_hover",
+                                                 self._room_hover, e))
+        self._room_cur = ""
         win.protocol("WM_DELETE_WINDOW", self._room_close)
         win.bind("<Escape>", lambda e: self._room_close())
         self.room_win, self.room_cv = win, cv
@@ -12770,22 +12793,17 @@ class Mascot:
         mid = top / 2
         cv.create_oval(18 * k, mid - 10 * k, 38 * k, mid + 10 * k,
                        fill=P["lamp"], width=0, tags="dyn")
-        me = self._room_state_now()
-        people = [q for q in self.room_people
-                  if (q.get("slot") or "") != self.char]
-        people.insert(0, dict(me, slot=self.char, age=0))   # 내 것은 늘 최신
-        cv.create_text(50 * k, mid - 9 * k, anchor="w", text="우리 방",
+        people = self._room_seats()
+        cv.create_text(50 * k, mid - 9 * k, anchor="w", text="HOME",
                        font=self._uf(13, True), fill=P["ink"], tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
-        if live > 60:
-            sub = "연결 안 됨 — 인터넷을 확인해 주세요"
-        elif len(people) < 2:
-            sub = "아직 혼자예요"
-        else:
-            sub = "%d명 같이 있어요" % len(people)
+        on = sum(1 for q in people if not q.get("off"))
+        sub = "총 %d명  ·  %s" % (
+            len(people),
+            "연결 안 됨" if live > 60 else "%d명 접속 중" % on)
         cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
-        tot = sum(int(q.get("t") or 0) for q in people)
+        tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
         cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
                        text="오늘 다 같이  %d시간 %d분" % (tot // 60, tot % 60),
                        font=self._uf(10, True), fill=P["ink"], tags="dyn")
@@ -12793,7 +12811,7 @@ class Mascot:
         gy = mid + 9 * k
         self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
                  fill=P["line"], width=0)
-        goal = max(1, len(people)) * 6 * 60
+        goal = max(1, on) * 6 * 60
         if tot > 0:
             self._rr(cv, gx0, gy - 5 * k,
                      gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
@@ -12802,7 +12820,7 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
-        for i, p in enumerate(people[:self.ROOM_COLS * 2]):
+        for i, p in enumerate(people[:self.ROOM_COLS * self._room_rows]):
             cx0 = int(16 * k) + (i % self.ROOM_COLS) * cw
             cy0 = top + (i // self.ROOM_COLS) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
@@ -12822,6 +12840,7 @@ class Mascot:
                  fill=self._tint(col, 0.72), width=0)
         cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
                             fill=self._tint(col, 0.72), width=0, tags="dyn")
+        off = bool(p.get("off"))
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, desk, cut = got
@@ -12840,7 +12859,10 @@ class Mascot:
                 # 책상은 붙박이고 이음매도 안 보인다.
                 ditem = cv.create_image(cx, base, image=desk, anchor="s",
                                         tags="dyn")
-            self._room_body.append((item, ditem, slot, base, sleeping, pose))
+            if not off:
+                # 안 켠 사람은 숨쉬지 않는다 — 켜 있는 사람과 구분이 된다
+                self._room_body.append((item, ditem, slot, base, sleeping,
+                                        pose))
         else:
             cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
                            (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,
@@ -12860,7 +12882,9 @@ class Mascot:
             cv.create_text((kx0 + kx1) / 2, ny, text=note,
                            font=self._uf(9, True),
                            fill=self._shade(col, 0.15), tags="dyn")
-        lab = "Lv.%d  %s" % (int(p.get("lv") or 1), str(p.get("n") or "")[:12])
+        lab = (str(p.get("n") or "")[:12] if off
+               else "Lv.%d  %s" % (int(p.get("lv") or 1),
+                                   str(p.get("n") or "")[:12]))
         f = self._uf(10, True)
         tw = self._room_tw(cv, lab, f)
         px0 = (kx0 + kx1) / 2 - tw / 2 - 12 * k
@@ -12868,10 +12892,12 @@ class Mascot:
         self._rr(cv, px0, py0, px0 + tw + 24 * k, py0 + 24 * k, 12 * k,
                  fill="#ffffff", outline=col, width=2)
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
-                       fill=P["sub"] if sleeping else P["ink"], tags="dyn")
+                       fill=P["sub"] if (sleeping or off) else P["ink"],
+                       tags="dyn")
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
-                       text=str(p.get("ti") or "")[:14], font=self._uf(8),
-                       fill=P["sub"], tags="dyn")
+                       text="아직 안 켰어요" if off
+                       else str(p.get("ti") or "")[:14],
+                       font=self._uf(8), fill=P["sub"], tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
         self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill=P["line"], width=0)
@@ -12963,6 +12989,31 @@ class Mascot:
         self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
             kind, kind), time.time())
 
+    def _room_seats(self):
+        """방에 그릴 자리 — 나 · 접속한 사람 · 아직 안 켠 사람 순.
+
+        선물용 타이머를 받은 사람은 꺼져 있어도 자리를 보여 준다. 그래야
+        혼자 켰을 때도 방이 비어 보이지 않는다. 뒤쪽(안 켠 사람)부터
+        잘리므로 창이 작아도 접속한 사람이 먼저 보인다.
+        """
+        seats = []
+        if not self.us.get("room_hide_me"):
+            seats.append(dict(self._room_state_now(), slot=self.char, age=0))
+        for q in self.room_people:
+            if (q.get("slot") or "") != self.char:
+                seats.append(q)
+        here = set(q.get("slot") or "" for q in seats)
+        mine = self.ROOM_ART.get(self.char)
+        for slot in self.ROOM_ALL:
+            if slot in here:
+                continue
+            if mine is not None and self.ROOM_ART.get(slot) == mine:
+                continue          # 내 캐릭터의 선물본 자리는 겹치니 뺀다
+            seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
+                          "lv": 1, "ti": "", "t": 0, "s": "off", "p": 0,
+                          "a": "", "off": True})
+        return seats
+
     def _room_pose(self, p):
         """그 사람이 지금 뭘 하고 있는지에 맞는 그림을 고른다.
 
@@ -12996,39 +13047,62 @@ class Mascot:
         if not self._char_fx:
             return
         c = self.canvas
-        k = max(0.7, self.cw_px / 300.0)          # 캐릭터 크기에 맞춘 배율
+        k = max(1.0, self.cw_px / 260.0)          # 캐릭터 크기에 맞춘 배율
         cx = self.ox + self.cw_px / 2
-        top = self.oy + self.ch_px * 0.16         # 머리 언저리
-        mid = self.oy + self.ch_px * 0.45
+        top = self.oy + self.ch_px * 0.13         # 머리 언저리
+        mid = self.oy + self.ch_px * 0.44
         for kind, t0 in self._char_fx:
             p = (now - t0) / self.CHAR_FX          # 0 → 1
             if kind == "poke":
                 for i in range(3):                 # 물결이 퍼진다
                     q = p * 1.9 - i * 0.16
                     if 0 < q < 1:
-                        r = (14 + 62 * q) * k
+                        r = (22 + 96 * q) * k
                         c.create_oval(cx - r, mid - r * 0.6,
                                       cx + r, mid + r * 0.6, outline="#ffd0e0",
-                                      width=max(1, int(3 * k * (1 - q))))
+                                      width=max(2, int(5 * k * (1 - q))))
             elif kind in ("cheer", "blanket"):
                 # 담요도 하트로 (따뜻하다는 표시)
                 n = 7 if kind == "cheer" else 5
                 for i in range(n):
                     q = p * 1.25 - i * 0.1
                     if 0 < q < 1:
-                        dx = math.sin(q * 5.5 + i * 2.3) * 22 * k
-                        yy = mid + 24 * k - q * (mid - top + 34 * k)
-                        sz = int((11 + 6 * (1 - q)) * k)
-                        c.create_text(cx + dx + (i - n // 2) * 17 * k, yy,
+                        dx = math.sin(q * 5.5 + i * 2.3) * 32 * k
+                        yy = mid + 32 * k - q * (mid - top + 52 * k)
+                        sz = int((18 + 10 * (1 - q)) * k)
+                        c.create_text(cx + dx + (i - n // 2) * 25 * k, yy,
                                       text="\u2665", font=("Malgun Gothic", sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "snack":
-                q = min(1.0, p * 1.7)              # 미니 케이크가 내려온다
-                yy = top - 26 * k + q * q * (mid - top + 40 * k)
-                self._mini_cake(c, cx, yy, 15 * k)
+                self._fx_cake(c, p, cx, top, mid, k)
+
+    def _fx_cake(self, c, p, cx, top, mid, k):
+        """케이크가 접시째 책상 위로 떨어진다.
+
+        책상 그림이 있으면 상판 위에 놓는다. 캐릭터마다 책상 높이가 달라서
+        비율로 잡으면 허공이나 책상 앞면에 떨어진다 — 실제로 잰
+        `_desk_top`(상판 윗선)에서 내려온 자리를 쓴다.
+        """
+        r = 22 * k
+        bb = self._desk_bb
+        # _desk_bb 는 이미 배율이 반영된 값이다 (self.s 를 또 곱하면 안 된다).
+        # 자리는 _pos("desk") 로 잡는다 — _desk_top 은 oy(캐릭터가 아래로
+        # 내려간 만큼)가 빠져 있어 그대로 쓰면 케이크가 얼굴 옆에 뜬다.
+        land = mid + 52 * k
+        if bb:
+            dx, dy = self._pos("desk")
+            # 접시 바닥이 상판 중간쯤에 닿게 — 앞면에 놓이면 붕 떠 보인다
+            land = dy + bb[1] + (bb[3] - bb[1]) * 0.60 - r * 1.16
+            cx = dx + (bb[0] + bb[2]) / 2 + (bb[2] - bb[0]) * 0.28
+        land = max(land, top + 20 * k)
+        start = top - 48 * k
+        q = min(1.0, p * 1.7)
+        self._mini_cake(c, cx, start + q * q * (land - start), r)
 
     def _mini_cake(self, c, cx, cy, r):
-        """작은 조각 케이크 — 크림 위에 딸기 하나, 아래에 시트."""
+        """접시에 놓인 조각 케이크 — 크림 위에 딸기 하나."""
+        c.create_oval(cx - r * 1.5, cy + r * 0.5, cx + r * 1.5, cy + r * 1.16,
+                      fill="#ffffff", outline="#c6bfce", width=2)
         c.create_rectangle(cx - r, cy - r * 0.15, cx + r, cy + r * 0.75,
                            fill="#f6d9a8", outline="#c99a55", width=2)
         c.create_line(cx - r, cy + r * 0.3, cx + r, cy + r * 0.3,
@@ -13218,6 +13292,24 @@ class Mascot:
     @staticmethod
     def _hex(c):
         return tuple(int(str(c)[i:i + 2], 16) for i in (1, 3, 5))
+
+    def _room_hover(self, e):
+        """누를 수 있는 것 위에서는 손 모양 커서로 — 눌리는지 알 수 있게.
+
+        같은 커서를 다시 넣으면 깜빡이므로 바뀔 때만 건드린다.
+        """
+        cv = self.room_cv
+        if cv is None:
+            return
+        hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                  for x0, y0, x1, y1, _k in self._room_btn_hit)
+        if not hot:
+            hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                      for x0, y0, x1, y1, _s, _z in self._room_hit)
+        want = "hand2" if hot else ""
+        if want != self._room_cur:
+            self._room_cur = want
+            cv.configure(cursor=want)
 
     def _room_click(self, e):
         for x0, y0, x1, y1, kind in self._room_btn_hit:
