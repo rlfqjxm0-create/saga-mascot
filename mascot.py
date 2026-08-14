@@ -2998,6 +2998,51 @@ ROOM_HOME = "ena-mascot-home-2026"   # 코드를 안 넣었을 때 들어가는 
 ROOM_MAX = 12                        # 한 방에 보여 줄 최대 인원
 
 
+def _rgb_to_hls(r, g, b):
+    """RGB(0~1) → 색상·밝기·선명도.
+
+    colorsys 를 부르지 않는다. 선물본(exe·맥 앱)은 굳혀 만들기 때문에
+    굳힐 당시 아무도 안 부르던 표준 모듈은 안 들어간다 — hmac 이 없어
+    사가의 맥 앱이 아예 안 켜진 일이 있었다. 계산식은 colorsys 와 같아
+    결과도 같다.
+    """
+    hi, lo = max(r, g, b), min(r, g, b)
+    ll = (hi + lo) / 2.0
+    if hi == lo:
+        return 0.0, ll, 0.0
+    d = hi - lo
+    sat = d / (hi + lo) if ll <= 0.5 else d / (2.0 - hi - lo)
+    rc, gc, bc = (hi - r) / d, (hi - g) / d, (hi - b) / d
+    if r == hi:
+        h = bc - gc
+    elif g == hi:
+        h = 2.0 + rc - bc
+    else:
+        h = 4.0 + gc - rc
+    return (h / 6.0) % 1.0, ll, sat
+
+
+def _hls_v(m1, m2, hue):
+    hue = hue % 1.0
+    if hue < 1.0 / 6.0:
+        return m1 + (m2 - m1) * hue * 6.0
+    if hue < 0.5:
+        return m2
+    if hue < 2.0 / 3.0:
+        return m1 + (m2 - m1) * (2.0 / 3.0 - hue) * 6.0
+    return m1
+
+
+def _hls_to_rgb(h, ll, sat):
+    """색상·밝기·선명도 → RGB(0~1). colorsys 와 같은 계산식."""
+    if sat == 0.0:
+        return ll, ll, ll
+    m2 = ll * (1.0 + sat) if ll <= 0.5 else ll + sat - (ll * sat)
+    m1 = 2.0 * ll - m2
+    return (_hls_v(m1, m2, h + 1.0 / 3.0), _hls_v(m1, m2, h),
+            _hls_v(m1, m2, h - 1.0 / 3.0))
+
+
 def _hmac_sha256(key, msg):
     """HMAC-SHA256 — hashlib 만으로 만든다.
 
@@ -13657,16 +13702,15 @@ class Mascot:
         hit = self._room_pastel_cache.get(key)
         if hit:
             return hit
-        import colorsys
         col = self._room_raw(slot)
         try:
             r, g, b = (int(col[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
         except Exception:
             r, g, b = 0.55, 0.55, 0.58
-        h, _l, sat = colorsys.rgb_to_hls(r, g, b)
+        h, _l, sat = _rgb_to_hls(r, g, b)
         if sat >= 0.12:                      # 회색은 그대로 회색으로 둔다
             sat = min(smax, max(sat, smin))
-        r, g, b = colorsys.hls_to_rgb(h, light, sat)
+        r, g, b = _hls_to_rgb(h, light, sat)
         out = "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
         if len(self._room_pastel_cache) > 60:
             self._room_pastel_cache = {}
