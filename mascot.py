@@ -3809,6 +3809,13 @@ class Mascot:
         self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
         self._room_toast = None      # '보냈어요' 알림 (글, 시각)
         self._msg_win = None         # 오늘 한 줄 적는 창
+        self._inbox = None           # 오늘 받은 반응 (첫 사용 때 읽는다)
+        self._inbox_open = False     # 목록이 펼쳐져 있나
+        self._inbox_scroll = 0       # 목록에서 몇 번째부터 보이나
+        self._away_got = []          # 자리 비운 사이에 온 것 (돌아오면 알린다)
+        self._room_inbox_hit = None  # 배지를 누를 수 있는 자리
+        self._room_inbox_panel = None    # 펼쳐진 목록의 자리
+        self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -11208,6 +11215,7 @@ class Mascot:
             state, _ = "idle", self._log_error("timer_tick")
         # 아래는 모두 구역 격리 — 하나가 터져도 캐릭터 본체는 그려진다
         self._safe("greet", self._greet_tick, now, state)
+        self._safe("inbox_back", self._inbox_welcome, now)
         self._safe("fun_tick", self._fun_tick, now, state, sleeping)
         if self.timer_on:
             self._safe("timer", self._draw_timer, state, sleeping, now)
@@ -12911,6 +12919,117 @@ class Mascot:
         if first:
             pass
 
+    INBOX_MAX = 100          # 하루에 이만큼까지 쌓아 둔다
+    INBOX_SHOW = 7           # 목록에 한 번에 보이는 줄 수
+    # 종류 → (목록에 쓰는 말, 짧은 말, 색)
+    INBOX_WORD = {"poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
+                  "cheer": ("응원했어요", "응원", "#ffbe55"),
+                  "blanket": ("담요를 덮어 줬어요", "담요", "#7fb3ff"),
+                  "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
+                  "wave": ("손을 흔들었어요", "인사", "#c9a0ff")}
+
+    def _inbox_path(self):
+        return os.path.join(self.state_dir, ".room_inbox.json")
+
+    def _inbox_get(self):
+        """오늘 받은 반응 꾸러미. 처음 부를 때 파일에서 읽는다."""
+        if self._inbox is None:
+            d = {"day": "", "seen": 0, "next": 0, "list": []}
+            try:
+                with open(self._inbox_path(), encoding="utf-8") as fp:
+                    got = json.load(fp)
+                if isinstance(got, dict):
+                    d.update(got)
+            except Exception:
+                pass
+            if not isinstance(d.get("list"), list):
+                d["list"] = []
+            self._inbox = d
+        self._inbox_roll()
+        return self._inbox
+
+    def _inbox_roll(self):
+        """작업일이 바뀌면 비운다 — '하루'는 새벽 6시 경계다 (지뢰 1).
+
+        번호(next·seen)는 안 되돌린다. 되돌리면 어제 읽은 번호가 오늘
+        것보다 커서 새로 온 것을 이미 본 것으로 여긴다.
+        """
+        d = self._inbox
+        if d is None:
+            return
+        day = self._my_workday()
+        if d.get("day") != day:
+            d["day"] = day
+            d["list"] = []
+            self._inbox_save()
+
+    def _inbox_save(self):
+        try:      # 여는 순간 지워지는 open("w") 말고 _save_json 으로 (지뢰 35)
+            _save_json(self._inbox_path(), self._inbox, indent=1)
+        except Exception:
+            self._log_error("inbox_save")
+
+    def _inbox_add(self, slot, name, kind):
+        """받은 반응 하나를 쌓는다."""
+        d = self._inbox_get()
+        d["next"] = int(d.get("next") or 0) + 1
+        d["list"].append({"i": d["next"], "f": slot or "", "n": name or "",
+                          "k": kind or "", "t": time.time()})
+        if len(d["list"]) > self.INBOX_MAX:
+            d["list"] = d["list"][-self.INBOX_MAX:]
+        self._inbox_save()
+
+    def _inbox_items(self):
+        """새것이 위로 오게 뒤집어 돌려준다."""
+        return list(reversed(self._inbox_get().get("list") or []))
+
+    def _inbox_unread(self):
+        """안 본 개수 — 깃발이 아니라 번호로 계산한다 (지뢰 30)."""
+        d = self._inbox_get()
+        seen = int(d.get("seen") or 0)
+        return sum(1 for it in (d.get("list") or [])
+                   if int(it.get("i") or 0) > seen)
+
+    def _inbox_read(self):
+        """읽음은 목록을 여는 순간 찍는다. 저장이 실패해도 값은 올린다."""
+        d = self._inbox_get()
+        top = max([int(it.get("i") or 0) for it in (d.get("list") or [])]
+                  or [0])
+        d["seen"] = max(int(d.get("seen") or 0), top)
+        self._inbox_save()
+
+    def _inbox_line(self, it):
+        """목록 한 줄 — '도로롱이 콕 찔렀어요'."""
+        who = str(it.get("n") or "") or self.ROOM_NAME.get(
+            str(it.get("f") or ""), "")
+        word, _short, col = self.INBOX_WORD.get(
+            str(it.get("k") or ""), ("반응을 보냈어요", "반응", "#c0b8c8"))
+        return ("%s %s" % (_josa(who), word) if who
+                else "누군가 %s" % word), col
+
+    def _inbox_welcome(self, now):
+        """자리를 비운 사이에 온 반응을 돌아왔을 때 한 번 알려 준다.
+
+        홈을 안 켜 두는 사람에게도 전달되도록 캐릭터가 말한다.
+        """
+        if not self._away_got:
+            return
+        last = max(getattr(self, "last_key", 0.0),
+                   getattr(self, "last_pointer", 0.0))
+        if now - last > 2.0:              # 아직 안 돌아왔다
+            return
+        got, self._away_got = self._away_got, []
+        if len(got) >= 3:
+            self._say("자리 비운 사이에 %d개 받았어요" % len(got), 5.0)
+            return
+        part = []
+        for i, (who, kind) in enumerate(got):
+            word, short, _c = self.INBOX_WORD.get(
+                kind, ("반응을 보냈어요", "반응", ""))
+            tail = word if i == len(got) - 1 else short
+            part.append("%s %s" % (_josa(who) if who else "누군가", tail))
+        self._say("자리 비운 사이에 " + ", ".join(part), 5.0)
+
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
         who = ""
@@ -12936,6 +13055,13 @@ class Mascot:
             who = who or self.ROOM_NAME.get(ev.get("f") or "", "")
         kind = ev.get("k")
         now = time.time()
+        self._safe("inbox_add", self._inbox_add, ev.get("f"), who, kind)
+        # 자리를 비운 사이에 온 것은 따로 적어 둔다 (돌아오면 알려 준다)
+        last = max(getattr(self, "last_key", 0.0),
+                   getattr(self, "last_pointer", 0.0))
+        if now - last > max(60.0, float(getattr(self, "idle_thr", 120.0))):
+            self._away_got.append((who, kind))
+            del self._away_got[:-20]
         self._char_fx_add(kind)               # 타이머 화면에서 터진다
         self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
         if kind == "poke":
@@ -13212,6 +13338,7 @@ class Mascot:
         win.geometry("+%d+%d" % (x, max(0, self.root.winfo_rooty())))
 
     def _room_close(self):
+        self._inbox_open = False
         self._room_fx = []
         if self._room_job is not None:
             try:
@@ -13276,6 +13403,8 @@ class Mascot:
                                                  self._room_hover, e))
         cv.bind("<Configure>", lambda e: self._safe("room_size",
                                                     self._room_relayout))
+        cv.bind("<MouseWheel>", lambda e: self._safe("room_wheel",
+                                                     self._room_wheel, e))
         self._room_cur = ""
         win.protocol("WM_DELETE_WINDOW", self._room_close)
         win.bind("<Escape>", lambda e: self._room_close())
@@ -13312,6 +13441,8 @@ class Mascot:
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         ts = self._room_toast
         return (tuple(who), self._room_pick, tuple(sorted(fresh)),
+                self._inbox_open, self._inbox_scroll,
+                len(self._inbox_get().get("list") or []), self._inbox_unread(),
                 bool(ts and time.time() - ts[1] < self.ROOM_TOAST),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
@@ -13409,8 +13540,14 @@ class Mascot:
         sub = "총 %d명  ·  %d명 접속 중" % (len(people), on)
         if live > 60:
             sub = "총 %d명  ·  연결 안 됨%s" % (len(people), self._room_why())
+        elif on <= 1 and self.room_net is not None and (
+                time.time() - getattr(self.room_net, "born", 0) > 60):
+            # 서버와는 통하는데 나 혼자다. '1명 접속 중'으로만 두면 멀쩡해
+            # 보여서, 방이 다르다는 것을 아무도 못 알아챈다.
+            sub = "총 %d명  ·  지금은 나만 있어요 (방 번호를 맞춰 보세요)" % len(people)
         cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
+        self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
         tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
         cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
                        text="오늘 다 같이  %d시간 %d분" % (tot // 60, tot % 60),
@@ -13455,6 +13592,76 @@ class Mascot:
                      cy0 + chh - 16 * k, 18 * k, fill=P["card"],
                      outline=P["line"], width=1)
         self._room_bar(cv, W, H, P, k, people)
+        # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
+        self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
+
+    def _room_inbox_draw(self, cv, W, H, P, k):
+        """오늘 받은 반응 — 홈 창 안에서 펼쳐진다.
+
+        새 창을 만들지 않는다. 캐릭터 창과 이 창이 모두 '항상 위'라
+        따로 띄우면 순서가 뒤집혀 안 보이는 일이 생긴다 (지뢰 15).
+        """
+        self._room_inbox_panel = None
+        if not self._inbox_open:
+            return
+        items = self._inbox_items()
+        top = max(0, min(self._inbox_scroll, max(0, len(items) - self.INBOX_SHOW)))
+        self._inbox_scroll = top
+        rows = items[top:top + self.INBOX_SHOW]
+        pw = min(W - 16 * k, 300 * k)
+        rh = 30 * k
+        ph = 76 * k + rh * max(1, len(rows))
+        card = self._room_inbox_card or (10 * k, 10 * k, 10 * k + pw, 10 * k)
+        px = min(max(8 * k, card[0] + 6 * k), W - pw - 8 * k)
+        py = min(max(self.ROOM_TOP * k + 4 * k, card[3] - 44 * k), H - ph - 8 * k)
+        # 카드도 희고 목록도 희어서, 테두리를 내 테마색으로 해야 떠 보인다
+        mine = self._room_tone(self.char)
+        self._rr(cv, px + 3 * k, py + 4 * k, px + pw + 3 * k, py + ph + 4 * k,
+                 18 * k, fill=self._tint(mine, 0.62), width=0)   # 그림자
+        self._rr(cv, px, py, px + pw, py + ph, 18 * k, fill="#fffdfe",
+                 outline=self._tint(mine, 0.32), width=2)
+        cv.create_text(px + 18 * k, py + 22 * k, anchor="w",
+                       text="오늘 받은 반응", font=self._uf(11, True),
+                       fill=self._shade(mine, 0.2), tags="dyn")
+        cv.create_text(px + pw - 18 * k, py + 22 * k, anchor="e",
+                       text="%d개" % len(items), font=self._uf(9),
+                       fill=P["sub"], tags="dyn")
+        cv.create_line(px + 16 * k, py + 38 * k, px + pw - 16 * k, py + 38 * k,
+                       fill=self._tint(mine, 0.55), width=1, tags="dyn")
+        yy = py + 38 * k + rh / 2
+        if not rows:
+            cv.create_text(px + pw / 2, yy + 6 * k, text="아직 받은 반응이 없어요",
+                           font=self._uf(9), fill=P["sub"], tags="dyn")
+        f = self._uf(10)
+        for it in rows:
+            text, col = self._inbox_line(it)
+            cv.create_oval(px + 18 * k, yy - 7 * k, px + 32 * k, yy + 7 * k,
+                           fill=col, width=0, tags="dyn")
+            when = time.strftime("%H:%M", time.localtime(float(it.get("t") or 0)))
+            lim = pw - 100 * k
+            line = text
+            while line and self._room_tw(cv, line, f) > lim:
+                line = line[:-1]
+            cv.create_text(px + 40 * k, yy, anchor="w", text=line, font=f,
+                           fill=P["ink"], tags="dyn")
+            cv.create_text(px + pw - 18 * k, yy, anchor="e", text=when,
+                           font=self._uf(8), fill=P["sub"], tags="dyn")
+            yy += rh
+        foot = "내일 아침 6시에 지워져요"
+        if len(items) > self.INBOX_SHOW:
+            foot = "휠을 굴리면 더 보여요  (%d/%d)" % (
+                min(top + self.INBOX_SHOW, len(items)), len(items))
+        cv.create_text(px + 18 * k, py + ph - 18 * k, anchor="w", text=foot,
+                       font=self._uf(8), fill=P["sub"], tags="dyn")
+        self._room_inbox_panel = (px, py, px + pw, py + ph)
+
+    def _room_wheel(self, e):
+        """목록이 펼쳐져 있을 때만 굴린다."""
+        if not self._inbox_open:
+            return
+        self._inbox_scroll = max(0, self._inbox_scroll
+                                 + (-1 if e.delta > 0 else 1))
+        self._safe("room_draw", self._room_draw)
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
         slot = p.get("slot") or ""
@@ -13519,13 +13726,22 @@ class Mascot:
             # 말풍선은 꼬리까지 그 안에 들어가야 머리를 안 가린다.
             f3 = self._uf(10)
             line = msg
-            while line and self._room_tw(cv, line, f3) > (kx1 - kx0) - 34 * k:
+            room = (kx1 - kx0) - 34 * k
+            bub = cx2
+            # 내 칸에는 오른쪽 위에 배지가 있다. 말풍선을 왼쪽으로 밀어
+            # 자리를 나눠 쓴다 — 가운데에 둔 채로 좁히면 훨씬 많이 잘린다
+            # (폭 321px 칸에서 99px 대 177px). 남이 보는 내 칸에는 배지가
+            # 없으니 잘리는 것은 내 화면의 내 칸뿐이다.
+            if slot == self.char and (self._inbox_get().get("list") or []):
+                room = (kx1 - kx0) - 104 * k
+                bub = (kx0 + 8 * k + kx1 - 68 * k) / 2
+            while line and self._room_tw(cv, line, f3) > room:
                 line = line[:-1]
             tw3 = self._room_tw(cv, line, f3)
             ny = ky0 + 19 * k
             edge = self._tint(col, 0.35)
-            self._rr(cv, cx2 - tw3 / 2 - 14 * k, ny - 15 * k,
-                     cx2 + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
+            self._rr(cv, bub - tw3 / 2 - 14 * k, ny - 15 * k,
+                     bub + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
                      fill="#ffffff", outline=edge, width=2)
             # 꼬리 — 그린 뒤에 말풍선 아랫선을 흰 줄로 덮어야 이어져 보인다
             cv.create_polygon(cx2 - 7 * k, ny + 14 * k, cx2 + 7 * k,
@@ -13535,7 +13751,7 @@ class Mascot:
             cv.create_line(cx2 - 6 * k, ny + 15 * k, cx2 + 6 * k, ny + 15 * k,
                            fill="#ffffff", width=max(2, int(3 * k)),
                            tags="dyn")
-            cv.create_text(cx2, ny, text=line, font=f3,
+            cv.create_text(bub, ny, text=line, font=f3,
                            fill=self._shade(col, 0.25), tags="dyn")
         lab = (str(p.get("n") or "")[:12] if off
                else "Lv.%d  %s" % (int(p.get("lv") or 1),
@@ -13568,7 +13784,31 @@ class Mascot:
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
+        if slot == self.char:
+            self._room_inbox_card = (kx0, ky0, kx1, ky1)
+            self._safe("inbox_badge", self._room_inbox_badge,
+                       cv, kx0, ky0, kx1, k)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
+
+    def _room_inbox_badge(self, cv, kx0, ky0, kx1, k):
+        """내 칸 오른쪽 위 — 오늘 받은 수, 안 본 것이 있으면 빨간 점."""
+        self._room_inbox_hit = None
+        n = len(self._inbox_get().get("list") or [])
+        if not n:
+            return
+        w, h = 46 * k, 24 * k
+        x1 = kx1 - 10 * k
+        x0, y0 = x1 - w, ky0 + 8 * k
+        self._rr(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
+                 outline="#ff8fb8", width=2)
+        cv.create_text((x0 + x1) / 2, y0 + h / 2, text="\u2665 %d" % min(n, 99),
+                       font=self._uf(9, True), fill="#ff6f9f", tags="dyn")
+        if self._inbox_unread():
+            cv.create_oval(x1 - 6 * k, y0 - 5 * k, x1 + 5 * k, y0 + 6 * k,
+                           fill="#ff4d6d", outline="#ffffff", width=2,
+                           tags="dyn")
+        self._room_inbox_hit = (x0 - 5 * k, y0 - 6 * k,
+                                x1 + 7 * k, y0 + h + 5 * k)
 
     ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
                 ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
@@ -13977,6 +14217,32 @@ class Mascot:
         self._room_pastel_cache[key] = out
         return out
 
+    def _room_tag_draw(self, cv, W, mid, P, k):
+        """방 번호표 — 같은 방에 있는지 화면만 견주면 알 수 있게.
+
+        코드 자체는 안 보여 준다 (방 번호는 코드에서 나오지만 역산이 안 된다).
+        """
+        tag = self._room_tag()
+        if not tag:
+            return
+        f = self._uf(8)
+        tw = self._room_tw(cv, tag, f)
+        x1 = W - 220 * k
+        self._rr(cv, x1 - tw - 18 * k, mid - 10 * k, x1, mid + 10 * k, 10 * k,
+                 fill=P["card"], outline=P["line"], width=1)
+        cv.create_text(x1 - tw / 2 - 9 * k, mid, text=tag, font=f,
+                       fill=P["sub"], tags="dyn")
+
+    def _room_tag(self):
+        """이 방의 번호표 (앞 네 자). 통신층이 없으면 코드로 직접 만든다."""
+        try:
+            rid = getattr(self.room_net, "room", None)
+            if not rid:
+                rid = _room_keys(self.us.get("room_code"))[0]
+            return "방 #" + str(rid)[:4]
+        except Exception:
+            return ""
+
     def _room_why(self):
         """방에 못 붙는 이유를 짧게 (없으면 빈 글자)."""
         try:
@@ -14133,8 +14399,18 @@ class Mascot:
         cv = self.room_cv
         if cv is None:
             return
-        hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
-                  for x0, y0, x1, y1, _k in self._room_btn_hit)
+        hit = self._room_inbox_hit
+        hot = bool(hit and hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3])
+        if not hot and self._inbox_open:
+            pb = self._room_inbox_panel   # 목록 위에서는 손 모양을 안 쓴다
+            if pb and pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
+                if self._room_cur:
+                    self._room_cur = ""
+                    cv.configure(cursor="")
+                return
+        if not hot:
+            hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                      for x0, y0, x1, y1, _k in self._room_btn_hit)
         if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _s, _z in self._room_hit)
@@ -14144,6 +14420,21 @@ class Mascot:
             cv.configure(cursor=want)
 
     def _room_click(self, e):
+        hit = self._room_inbox_hit
+        if hit and hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3]:
+            self._inbox_open = not self._inbox_open
+            self._inbox_scroll = 0
+            if self._inbox_open:      # 여는 순간 읽음으로 (지뢰 30)
+                self._safe("inbox_read", self._inbox_read)
+            self._safe("room_draw", self._room_draw)
+            return
+        if self._inbox_open:
+            pb = self._room_inbox_panel
+            if pb and pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
+                return                # 목록 안을 누른 것은 아무 일도 안 한다
+            self._inbox_open = False  # 밖을 누르면 닫기만 한다
+            self._safe("room_draw", self._room_draw)
+            return
         for x0, y0, x1, y1, kind in self._room_btn_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 if kind == "@all":
