@@ -370,7 +370,7 @@ DEFAULT_SETTINGS = {
     "stretch_every": "20분마다",   # 스트레칭 알림 간격 ("끄기"면 안 뜸)
     "pen_monitor": "자동", # 펜을 따라갈 화면 (자동 = 커서가 있는 화면)
     "scale_pct": 100,     # 캐릭터 크기(%)
-    "font_pct": 100,      # 타이머·말풍선 글자 크기(%)
+    "font_pct": 100,      # 타이머·말풍선 글자 크기(%) — 100%가 가장 큼
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
     "sleep_min": 10,      # 이 시간(분) 동안 무입력이면 수면 모드
@@ -402,7 +402,14 @@ DEFAULT_SETTINGS = {
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
+    "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
 }
+# 글자 크기 100%가 실제로 몇 배인가. 예전에는 눈금이 70~160%여서 100%인
+# 사람은 '이게 최대'라고 생각하고 더 키울 수 있는 줄 몰랐다. 그래서 예전
+# 160%(=1.6배)를 100%로 다시 매기고, 눈금을 45~100%로 바꿨다. 보이는
+# 숫자만 달라졌을 뿐 실제 크기의 폭은 그대로다.
+FONT_SPAN = 1.6
+FONT_MIN, FONT_MAX = 45, 100
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
 
 
@@ -3203,8 +3210,11 @@ class Mascot:
             # 직접 고친 사람은 건드리지 않는다.
             if str(self.us.get("work_apps", "")).strip() == OLD_WORK_APPS:
                 self.us["work_apps"] = DEFAULT_SETTINGS["work_apps"]
+            self._font_v2_needed = ("font_pct" in saved
+                                    and not saved.get("font_v2"))
         except Exception:
             pass
+        self._font_migrate()
         self._sanitize_settings()
         # 그림자는 켜 둔 모습이 기본이다. 예전에 꺼 둔 채로 저장된 사람도
         # 한 번은 켜 준다 — 딱 한 번만이라, 그 뒤에 다시 끄면 꺼진 채로 둔다.
@@ -3331,11 +3341,13 @@ class Mascot:
             self.root.tk.call("tk", "scaling", 96.0 / 72.0)
         except Exception:
             pass
-        # 처음 켜는 사람은 화면 배율에 맞춘 크기로 시작한다 (설정한 적이 있으면 존중)
+        # 처음 켜는 사람은 가장 큰 크기(100%)로 시작한다. 화면 배율에 맞춰
+        # 작게 시작하면 '더 키울 수 있다'는 것을 아예 모르고 쓰게 된다.
         if not self._font_pct_saved:
-            self.us["font_pct"] = max(70, min(160, round(self.ui_k * 100)))
-        self.font_k = max(0.7, min(1.6,
-                                   float(self.us.get("font_pct", 100)) / 100.0))
+            self.us["font_pct"] = FONT_MAX
+        self.font_k = max(FONT_MIN / 100.0 * FONT_SPAN, min(
+            FONT_SPAN,
+            float(self.us.get("font_pct", 100)) / 100.0 * FONT_SPAN))
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.us["topmost"]))
         # 투명 배경: 윈도우는 색상키, 맥은 Tk의 진짜 투명 속성
@@ -3582,7 +3594,6 @@ class Mascot:
         self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
         self._room_toast = None      # '보냈어요' 알림 (글, 시각)
         self._msg_win = None         # 오늘 한 줄 적는 창
-        self._room_msg_hit = None    # 홈에서 '오늘 한 줄'을 누르는 자리
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -3653,7 +3664,16 @@ class Mascot:
         if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
             menu.add_separator()
         if ROOM_URL and ROOM_KEY:
-            menu.add_command(label="홈", command=self._room_toggle)
+            # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
+            # 되돌릴 수 없는 '작업 종료'가 여전히 가장 세 보여야 한다.
+            _hb = self._tint(self.card["fill"], 0.62)
+            menu.add_command(label="  홈  ", command=self._room_toggle,
+                             font=self._uf(9, True),
+                             foreground=self._shade(self.card["fill"], 0.35),
+                             background=_hb,
+                             activeforeground="#ffffff",
+                             activebackground=self._shade(
+                                 self.card["fill"], 0.22))
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -11927,7 +11947,8 @@ class Mascot:
                                                   self.skin_names))
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
-                lambda ry: stepper(ry, "글자 크기", "font_pct", 70, 160, 10, "%"),
+                lambda ry: stepper(ry, "글자 크기", "font_pct",
+                                   FONT_MIN, FONT_MAX, 5, "%"),
                 lambda ry: toggle(ry, "캐릭터 그림자", "shadow"),
                 lambda ry: toggle(ry, "타블렛 낙서 표시", "trail"),
                 lambda ry: toggle(ry, "항상 위에 표시", "topmost"),
@@ -12115,7 +12136,8 @@ class Mascot:
             new["sleep_min"] = max(1, int(new["sleep_min"]))
             new["day_start"] = max(0, min(12, int(new.get("day_start", 6))))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
-            new["font_pct"] = max(70, min(160, int(new["font_pct"])))
+            new["font_pct"] = max(FONT_MIN, min(FONT_MAX,
+                                                int(new["font_pct"])))
             for k in ("sound_volume", "pen_volume", "poke_volume",
                       "slime_volume"):
                 if k in new:
@@ -12220,7 +12242,29 @@ class Mascot:
         self.us["idle_sec"] = max(5.0, float(self.us["idle_sec"]))
         self.us["goal_hours"] = max(0.5, float(self.us["goal_hours"]))
         self.us["scale_pct"] = max(50, min(200, int(self.us["scale_pct"])))
-        self.us["font_pct"] = max(70, min(160, int(self.us.get("font_pct", 100))))
+        self.us["font_pct"] = max(FONT_MIN, min(
+            FONT_MAX, int(self.us.get("font_pct", FONT_MAX))))
+
+    def _font_migrate(self):
+        """옛 눈금(70~160%)에 저장된 값을 새 눈금(45~100%)으로 옮긴다.
+
+        직접 고른 사람은 보이던 크기를 그대로 지킨다(숫자만 바뀐다).
+        손댄 적 없는 사람 — 예전에 화면 배율로 자동으로 정해진 값 그대로인
+        사람 — 은 새 기본값인 100%로 올린다. 이 판단은 딱 한 번만 한다
+        (지뢰 34: 옛 기본값과 똑같을 때만 갈아 준다).
+        """
+        if not getattr(self, "_font_v2_needed", False):
+            self.us["font_v2"] = True
+            return
+        old = int(self.us.get("font_pct", 100))
+        auto = max(70, min(160, round(_screen_scale(None) * 100)))
+        if old == auto:                    # 고른 적이 없다 → 새 기본값
+            self.us["font_pct"] = FONT_MAX
+        else:                              # 고른 크기를 그대로 지킨다
+            self.us["font_pct"] = max(FONT_MIN, min(
+                FONT_MAX, int(round(old / FONT_SPAN / 5.0) * 5)))
+        self.us["font_v2"] = True
+        self._font_v2_needed = False
 
     def _save_settings(self):
         try:
@@ -12786,7 +12830,6 @@ class Mascot:
 
     def _room_close(self):
         self._room_fx = []
-        self._room_msg_hit = None
         if self._room_job is not None:
             try:
                 self.root.after_cancel(self._room_job)   # 지뢰 20
@@ -12999,7 +13042,6 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
-        self._room_msg_hit = None
         cols = max(1, self._room_cols)
         cap = cols * max(1, self._room_rows)
         if len(people) > cap:
@@ -13063,18 +13105,43 @@ class Mascot:
             cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
                            font=self._uf(12), fill=P["sub"], tags="dyn")
         fl = self._room_flash.get(slot, 0)
+        msg = "" if off else str(p.get("m") or "").strip()
+        cx2 = (kx0 + kx1) / 2
         if fl > time.time() - 1.6:
             note = (self._room_note[0]
                     if self._room_note and self._room_note[1] >= fl - 0.3
                     else "!")
             # 알림 말풍선은 칸 맨 위로 — 연출·얼굴과 안 겹치게
             ny = ky0 + 16 * k
-            self._rr(cv, (kx0 + kx1) / 2 - 26 * k, ny - 12 * k,
-                     (kx0 + kx1) / 2 + 26 * k, ny + 12 * k, 12 * k,
-                     fill="#ffffff", outline=col, width=2)
-            cv.create_text((kx0 + kx1) / 2, ny, text=note,
-                           font=self._uf(9, True),
+            self._rr(cv, cx2 - 26 * k, ny - 12 * k, cx2 + 26 * k, ny + 12 * k,
+                     12 * k, fill="#ffffff", outline=col, width=2)
+            cv.create_text(cx2, ny, text=note, font=self._uf(9, True),
                            fill=self._shade(col, 0.15), tags="dyn")
+        elif msg:
+            # 오늘 한 줄 — 캐릭터 머리 위 빈자리에 말풍선으로.
+            # 알림이 뜬 동안은 그쪽이 먼저다 (같은 자리라 겹친다).
+            # 캐릭터 머리 위 여백은 칸 위에서 44*k 까지다 (그 아래는 그림).
+            # 말풍선은 꼬리까지 그 안에 들어가야 머리를 안 가린다.
+            f3 = self._uf(10)
+            line = msg
+            while line and self._room_tw(cv, line, f3) > (kx1 - kx0) - 34 * k:
+                line = line[:-1]
+            tw3 = self._room_tw(cv, line, f3)
+            ny = ky0 + 19 * k
+            edge = self._tint(col, 0.35)
+            self._rr(cv, cx2 - tw3 / 2 - 14 * k, ny - 15 * k,
+                     cx2 + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
+                     fill="#ffffff", outline=edge, width=2)
+            # 꼬리 — 그린 뒤에 말풍선 아랫선을 흰 줄로 덮어야 이어져 보인다
+            cv.create_polygon(cx2 - 7 * k, ny + 14 * k, cx2 + 7 * k,
+                              ny + 14 * k, cx2 - 2 * k, ny + 24 * k,
+                              fill="#ffffff", outline=edge, width=2,
+                              tags="dyn")
+            cv.create_line(cx2 - 6 * k, ny + 15 * k, cx2 + 6 * k, ny + 15 * k,
+                           fill="#ffffff", width=max(2, int(3 * k)),
+                           tags="dyn")
+            cv.create_text(cx2, ny, text=line, font=f3,
+                           fill=self._shade(col, 0.25), tags="dyn")
         lab = (str(p.get("n") or "")[:12] if off
                else "Lv.%d  %s" % (int(p.get("lv") or 1),
                                    str(p.get("n") or "")[:12]))
@@ -13087,32 +13154,12 @@ class Mascot:
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
                        fill=P["sub"] if (sleeping or off) else P["ink"],
                        tags="dyn")
-        # 오늘 한 줄이 있으면 칭호 대신 그것을 보여 준다 (직접 쓴 말이 먼저).
-        msg = "" if off else str(p.get("m") or "").strip()
-        mine = (slot == self.char)
-        line = "아직 안 켰어요" if off else (msg or str(p.get("ti") or ""))
-        if mine and not msg:
-            line = "오늘 한 줄 적기"      # 내 칸은 비어 있어도 누를 데를 보여 준다
-        f2 = self._uf(8)
-        while line and self._room_tw(cv, line, f2) > (kx1 - kx0) - 20 * k:
-            line = line[:-1]
-        my = py0 + 34 * k
-        if mine:
-            # 여기를 누르면 오늘 한 줄을 적는다. 칸의 나머지는 그대로
-            # 눌러서 인사하는 자리다 — 둘을 겹치지 않게 따로 잡는다.
-            tw2 = self._room_tw(cv, line, f2)
-            self._room_msg_hit = ((kx0 + kx1) / 2 - tw2 / 2 - 10 * k,
-                                  my - 11 * k,
-                                  (kx0 + kx1) / 2 + tw2 / 2 + 10 * k,
-                                  my + 11 * k)
-            self._rr(cv, self._room_msg_hit[0], self._room_msg_hit[1],
-                     self._room_msg_hit[2], self._room_msg_hit[3], 11 * k,
-                     fill="#ffffff", outline=self._tint(col, 0.5), width=1)
-        cv.create_text((kx0 + kx1) / 2, my, text=line, font=f2,
-                       fill=self._shade(col, 0.3) if msg
-                       else (self._tint(self._shade(col, 0.1), 0.25) if mine
-                             else P["sub"]),
-                       tags="dyn")
+        # 이 자리는 칭호와 접속 여부를 알려 준다. 오늘 한 줄은 캐릭터
+        # 위쪽 빈자리에 말풍선으로 따로 띄운다.
+        cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
+                       text="아직 안 켰어요" if off
+                       else str(p.get("ti") or "")[:14],
+                       font=self._uf(8), fill=P["sub"], tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
         # 바탕은 흰색, 채우는 색은 그 사람 테마색 그대로
@@ -13638,10 +13685,8 @@ class Mascot:
         cv = self.room_cv
         if cv is None:
             return
-        box = self._room_msg_hit
-        hot = bool(box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3])
-        hot = hot or any(x0 <= e.x <= x1 and y0 <= e.y <= y1
-                         for x0, y0, x1, y1, _k in self._room_btn_hit)
+        hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                  for x0, y0, x1, y1, _k in self._room_btn_hit)
         if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _s, _z in self._room_hit)
@@ -13651,10 +13696,6 @@ class Mascot:
             cv.configure(cursor=want)
 
     def _room_click(self, e):
-        box = self._room_msg_hit          # 내 칸의 '오늘 한 줄'이 먼저다
-        if box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
-            self._safe("room_msg_win", self._room_msg_win)
-            return
         for x0, y0, x1, y1, kind in self._room_btn_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 if kind == "@all":
@@ -13667,15 +13708,10 @@ class Mascot:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 self._room_pick = None if self._room_pick == slot else slot
                 if slot == self.char:
-                    # 나를 눌러도 골라진다 (혼자서도 눌러 볼 수 있게).
-                    # 겸사겸사 방 전체에 손을 흔든다.
-                    if self.room_net is not None:
-                        self.room_net.send("*", "wave")
-                    self._room_flash[slot] = time.time()
-                    self._room_fx_add(slot, "wave")
-                    self._room_note = ("인사", time.time())
-                    self.smile_until = max(self.smile_until, time.time() + 2.0)
-                    self._safe("room_wave_snd", self._poke_sound)
+                    # 내 칸을 누르면 오늘 한 줄을 적는다. 고르는 것도 같이
+                    # 되므로 아래 단추로 나에게 보내 볼 수도 있다.
+                    self._room_pick = slot
+                    self._safe("room_msg_win", self._room_msg_win)
                 elif self.room_net is not None:
                     kind = "blanket" if sleeping else "poke"
                     self.room_net.send(slot, kind)
