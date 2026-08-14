@@ -12574,23 +12574,25 @@ class Mascot:
         "parts_saga": ("saga-mascot", "parts_saga"),
         "parts_gippo": ("gippo-mascot", "parts_gippo"),
         "parts_myeoljong": ("myeoljong-mascot", "parts_myeoljong"),
+        "parts_peugo": ("peugo-mascot", "parts_peugo"),
         "parts_dororong_gift": ("dororong-mascot", "parts_dororong_gift"),
         "parts_dororong": ("dororong-mascot", "parts_dororong_gift"),
     }
     # 선물용 타이머를 받은 사람들 — 접속해 있지 않아도 자리는 늘 보인다.
     ROOM_ALL = ("parts_junsa", "parts_dog", "parts_quincy",
                 "parts_dororong_gift", "parts_saga", "parts_gippo",
-                "parts_myeoljong")
+                "parts_myeoljong", "parts_peugo")
     # 남의 테마색은 그 사람 config.json 에 있는데, 친구 컴퓨터에는 자기
     # 파츠 폴더밖에 없다. 그래서 여기에 적어 둔다 (없으면 전부 회색이 된다).
     ROOM_TINT = {"parts_junsa": "#4a4a52", "parts_dog": "#555555",
                  "parts_quincy": "#3c5488", "parts_dororong": "#f2a7c5",
                  "parts_dororong_gift": "#f2a7c5", "parts_saga": "#f486b6",
-                 "parts_gippo": "#7fb436", "parts_myeoljong": "#ba2028"}
+                 "parts_gippo": "#7fb436", "parts_myeoljong": "#ba2028",
+                 "parts_peugo": "#1562f0"}
     ROOM_NAME = {"parts_junsa": "준사", "parts_dog": "개", "parts_quincy": "퀸시",
                  "parts_dororong_gift": "도로롱", "parts_dororong": "도로롱",
                  "parts_saga": "사가", "parts_gippo": "기뽀",
-                 "parts_myeoljong": "멸종"}
+                 "parts_myeoljong": "멸종", "parts_peugo": "프고"}
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
