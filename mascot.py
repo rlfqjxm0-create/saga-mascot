@@ -3544,6 +3544,8 @@ class Mascot:
         self._room_flash = {}        # 신호를 주고받아 반짝일 사람
         self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
         self._room_tone_cache = {}
+        self._room_pastel_cache = {}
+        self._room_pal_cache = {}
         self._room_art_bad = set()   # 그림을 못 받은 자리 (다시 안 조른다)
         self._room_art_th = None
         self._photo_after = None     # 단체사진 안내 예약
@@ -3551,6 +3553,9 @@ class Mascot:
         self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
         self._room_cur = ""          # 지금 방 창 커서 (같은 값을 다시 넣으면 깜빡)
         self._room_rows = 2          # 방 창에 들어가는 줄 수
+        self._room_cols = 3          # 방 창에 들어가는 칸 수 (창 크기에 따라)
+        self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
+        self._room_toast = None      # '보냈어요' 알림 (글, 시각)
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -12279,6 +12284,12 @@ class Mascot:
     ROOM_ALL = ("parts_junsa", "parts_dog", "parts_quincy",
                 "parts_dororong_gift", "parts_saga", "parts_gippo",
                 "parts_myeoljong")
+    # 남의 테마색은 그 사람 config.json 에 있는데, 친구 컴퓨터에는 자기
+    # 파츠 폴더밖에 없다. 그래서 여기에 적어 둔다 (없으면 전부 회색이 된다).
+    ROOM_TINT = {"parts_junsa": "#4a4a52", "parts_dog": "#555555",
+                 "parts_quincy": "#3c5488", "parts_dororong": "#f2a7c5",
+                 "parts_dororong_gift": "#f2a7c5", "parts_saga": "#f486b6",
+                 "parts_gippo": "#7fb436", "parts_myeoljong": "#ba2028"}
     ROOM_NAME = {"parts_junsa": "준사", "parts_dog": "개", "parts_quincy": "퀸시",
                  "parts_dororong_gift": "도로롱", "parts_dororong": "도로롱",
                  "parts_saga": "사가", "parts_gippo": "기뽀",
@@ -12349,7 +12360,10 @@ class Mascot:
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
-            self._room_want_art(people)
+            # 방 창이 떠 있으면 안 켠 사람 그림도 받아 둔다. 안 그러면
+            # 그 자리가 회색 동그라미로만 남는다 (친구 쪽 제보).
+            self._room_want_art(
+                people if self.room_win is None else self._room_seats())
         for ev in events:
             self._safe("room_ev", self._room_event, ev)
 
@@ -12515,19 +12529,38 @@ class Mascot:
 
     # ── 방 창 ───────────────────────────────────────────────────────────
     def _room_palette(self):
-        """시간에 따라 방 분위기가 바뀐다 (작업일 기준이 아니라 시계 기준)."""
+        """방 배경은 내 캐릭터 테마색의 파스텔.
+
+        보는 사람마다 자기 색의 방이 된다 — 도로롱은 분홍, 기뽀는 연두.
+        시간에 따라 밝기만 조금 달라진다 (작업일 기준이 아니라 시계 기준).
+        칸 색은 여기서 정하지 않는다 — 칸은 흰색에 가깝게 두고, 그 사람
+        테마색은 바닥과 테두리에만 쓴다.
+        """
         h = time.localtime().tm_hour
-        if 6 <= h < 17:                      # 낮 — 아주 연한 핑크
-            return {"wall": "#fdf2f6", "dot": "#f8e6ee", "card": "#fffcfd",
-                    "line": "#f6e2ea", "ink": "#6f5460", "sub": "#a8919c",
-                    "bar": "#fffafc", "lamp": "#ffd9e6"}
-        if 17 <= h < 20:                     # 저녁 — 조금 더 따뜻하게
-            return {"wall": "#fbeceF".replace("F", "f"), "dot": "#f6dfe6",
-                    "card": "#fffafb", "line": "#f4dde5", "ink": "#6d4e58",
-                    "sub": "#a68b95", "bar": "#fff8fa", "lamp": "#ffcbd9"}
-        return {"wall": "#f2e9f2", "dot": "#e8dced", "card": "#fdfaff",
-                "line": "#e6d9e8", "ink": "#584a5c", "sub": "#96879a",
-                "bar": "#fbf6fc", "lamp": "#e2cfe8"}
+        if 6 <= h < 17:                      # 낮 — 가장 밝게
+            d, ink, sub = 0.0, "#6f5460", "#a8919c"
+        elif 17 <= h < 20:                   # 저녁 — 조금 진하게
+            d, ink, sub = 0.022, "#6d4e58", "#a68b95"
+        else:                                # 밤 — 한 단계 더
+            d, ink, sub = 0.045, "#584a5c", "#96879a"
+        key = (self.char, int(d * 1000))
+        hit = self._room_pal_cache.get(key)
+        if hit:
+            return hit
+        p = self._room_pastel
+        # 배경은 칸보다 색기를 낮춘다 — 안 그러면 진한 테마색(멸종 #ba2028)
+        # 에서 벽이 눈에 띄게 붉어져 캐릭터가 묻힌다.
+        out = {"wall": p(self.char, 0.970 - d * 0.6, 0.35, 0.50),
+               "dot": p(self.char, 0.930 - d * 0.6, 0.35, 0.55),
+               "card": p(self.char, 0.993 - d * 0.4, 0.25, 0.40),
+               "line": p(self.char, 0.920 - d, 0.35, 0.55),
+               "bar": p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
+               "lamp": p(self.char, 0.870 - d, 0.45, 0.70),
+               "ink": ink, "sub": sub}
+        if len(self._room_pal_cache) > 12:
+            self._room_pal_cache = {}
+        self._room_pal_cache[key] = out
+        return out
 
     def _room_reset(self):
         """방 코드나 켬/끔이 바뀌었을 때 — 끊고 다시 붙는다."""
@@ -12659,10 +12692,14 @@ class Mascot:
                             + int(126 * k)) > win_h * 0.92:
             rows -= 1
         self._room_rows = rows
+        self._room_cols = self.ROOM_COLS
+        self._room_size = (0, 0)
         H = int(self.ROOM_TOP * k) + ch * rows + int(126 * k)
         win = tk.Toplevel(self.root)
         win.title("같이 작업 중")
-        win.resizable(False, False)
+        win.resizable(True, True)
+        win.minsize(int(cw + 32 * k),
+                    int(self.ROOM_TOP * k + ch + 126 * k))
         win.configure(bg=self._room_palette()["wall"])
         try:
             win.iconphoto(False, self.tray_img) if getattr(
@@ -12690,6 +12727,8 @@ class Mascot:
                                                    self._room_click, e))
         cv.bind("<Motion>", lambda e: self._safe("room_hover",
                                                  self._room_hover, e))
+        cv.bind("<Configure>", lambda e: self._safe("room_size",
+                                                    self._room_relayout))
         self._room_cur = ""
         win.protocol("WM_DELETE_WINDOW", self._room_close)
         win.bind("<Escape>", lambda e: self._room_close())
@@ -12719,7 +12758,9 @@ class Mascot:
                  if v > time.time() - 1.6]
         # 연출이 도는 동안은 개수만 열쇠에 넣는다 — 프레임마다 다시 그리되
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
+        ts = self._room_toast
         return (tuple(who), self._room_pick, tuple(sorted(fresh)),
+                bool(ts and time.time() - ts[1] < self.ROOM_TOAST),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
 
@@ -12777,8 +12818,10 @@ class Mascot:
             return
         P = self._room_palette()
         k = self.ui_k
-        W = int(cv["width"])
-        H = int(cv["height"])
+        # 창을 늘릴 수 있으므로 실제로 그려진 크기를 본다 (cv["width"] 는
+        # 처음 만들 때 준 값에서 안 변한다).
+        W = cv.winfo_width() or int(cv["width"])
+        H = cv.winfo_height() or int(cv["height"])
         top = int(self.ROOM_TOP * k)
         # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
         # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
@@ -12830,15 +12873,29 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
-        for i, p in enumerate(people[:self.ROOM_COLS * self._room_rows]):
-            cx0 = int(16 * k) + (i % self.ROOM_COLS) * cw
-            cy0 = top + (i // self.ROOM_COLS) * chh
+        cols = max(1, self._room_cols)
+        cap = cols * max(1, self._room_rows)
+        if len(people) > cap:
+            # 자리가 모자라면 안 켠 사람부터 뺀다 (차례는 그대로 둔다)
+            keep = [q for q in people if not q.get("off")][:cap]
+            for q in people:
+                if len(keep) >= cap:
+                    break
+                if q.get("off"):
+                    keep.append(q)
+            ids = set(id(q) for q in keep)
+            people = [q for q in people if id(q) in ids][:cap]
+        left = max(int(8 * k), (W - cols * cw) // 2)
+        for i, p in enumerate(people):
+            cx0 = left + (i % cols) * cw
+            cy0 = top + (i // cols) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
         self._room_bar(cv, W, H, P, k, people)
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
         slot = p.get("slot") or ""
         sleeping = p.get("s") == "sleep"
+        off = bool(p.get("off"))
         col = self._room_tone(slot)
         kx0, ky0 = cx0 + 8 * k, cy0 + 6 * k
         kx1, ky1 = cx0 + cw - 8 * k, cy0 + ch - 16 * k
@@ -12850,7 +12907,6 @@ class Mascot:
                  fill=self._tint(col, 0.72), width=0)
         cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
                             fill=self._tint(col, 0.72), width=0, tags="dyn")
-        off = bool(p.get("off"))
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, desk, cut = got
@@ -12923,6 +12979,21 @@ class Mascot:
     ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
                 ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
 
+    ROOM_TOAST = 2.0         # '보냈어요' 알림이 떠 있는 시간(초)
+
+    def _room_toast_say(self, to, kind):
+        """무엇을 누구에게 보냈는지 잠깐 알린다."""
+        label = dict((b, a) for a, b, _c in self.ROOM_BTN).get(kind, kind)
+        if to == "*":
+            who = "모두"
+        else:
+            who = next((str(q.get("n") or "") for q in self.room_people
+                        if q.get("slot") == to), "")
+            who = who or self.ROOM_NAME.get(to, "") or (
+                self._room_nick() if to == self.char else "")
+        self._room_toast = ("%s에게 %s 보냈어요" % (who, label)
+                            if who else "%s 보냈어요" % label, time.time())
+
     def _room_bar(self, cv, W, H, P, k, people):
         """아래 단추 줄 — 고른 상대에게만 간다.
 
@@ -12941,6 +13012,15 @@ class Mascot:
             cap = "보낼 사람을 골라 주세요"
         cv.create_text(W // 2, by - 30 * k, anchor="center", text=cap,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
+        ts = self._room_toast
+        if ts and time.time() - ts[1] < self.ROOM_TOAST:
+            tw = self._room_tw(cv, ts[0], self._uf(9, True))
+            ty = by - 56 * k
+            self._rr(cv, W / 2 - tw / 2 - 14 * k, ty - 13 * k,
+                     W / 2 + tw / 2 + 14 * k, ty + 13 * k, 13 * k,
+                     fill="#ffffff", outline=P["lamp"], width=2)
+            cv.create_text(W / 2, ty, text=ts[0], font=self._uf(9, True),
+                           fill=P["ink"], tags="dyn")
         row = len(self.ROOM_BTN) * bw + (len(self.ROOM_BTN) - 1) * gap
         pw = 66 * k
         px = W / 2 - row / 2 - pw - 18 * k
@@ -12979,6 +13059,7 @@ class Mascot:
             return
         if to == self.char:
             self._room_fx_add(to, kind)
+            self._room_toast_say(to, kind)
             self._room_flash[to] = time.time()
             self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
                 kind, kind), time.time())
@@ -12988,6 +13069,7 @@ class Mascot:
         if self.room_net is None:
             return
         self.room_net.send(to, kind)
+        self._room_toast_say(to, kind)
         if to == "*":
             for q in self.room_people:
                 self._room_flash[q.get("slot") or ""] = time.time()
@@ -13009,9 +13091,14 @@ class Mascot:
         seats = []
         if not self.us.get("room_hide_me"):
             seats.append(dict(self._room_state_now(), slot=self.char, age=0))
-        for q in self.room_people:
-            if (q.get("slot") or "") != self.char:
-                seats.append(q)
+        # 서버는 '최근에 신호한 순'으로 준다. 그대로 쓰면 5초마다 자리가
+        # 뒤바뀌어 보인다 — 정해진 차례로 다시 세운다.
+        order = dict((sl, i) for i, sl in enumerate(self.ROOM_ALL))
+        rest = [q for q in self.room_people
+                if (q.get("slot") or "") != self.char]
+        rest.sort(key=lambda q: (order.get(q.get("slot") or "", 99),
+                                 q.get("slot") or ""))
+        seats.extend(rest)
         here = set(q.get("slot") or "" for q in seats)
         mine = self.ROOM_ART.get(self.char)
         for slot in self.ROOM_ALL:
@@ -13214,12 +13301,49 @@ class Mascot:
         cv.delete(t)
         return (box[2] - box[0]) if box else len(text) * 8
 
+    def _room_pastel(self, slot, light=0.88, smin=0.55, smax=0.85):
+        """그 사람 테마색의 파스텔. 밝기는 정해 놓고 색기만 살린다.
+
+        _room_tone 을 옅게 만들어 쓰면 안 된다 — 그쪽은 어두운 색에 밝기
+        하한을 걸어 회색으로 눌러 버려서(준사 #4a4a52 → #a3a3a7), 옅게
+        하면 칸이 전부 흰색처럼 보인다. 원래 테마색에서 따로 뽑는다.
+        회색 테마(준사·개)는 색기를 억지로 올리지 않는다 — 엉뚱한 색이 된다.
+        """
+        key = (slot, round(light, 3), smin, smax)
+        hit = self._room_pastel_cache.get(key)
+        if hit:
+            return hit
+        import colorsys
+        col = self.ROOM_TINT.get(slot, "#8b8b93")
+        if slot == self.char:
+            col = self.card.get("fill", col)
+        else:
+            p = os.path.join(HERE, slot, "config.json")
+            try:
+                with open(p, encoding="utf-8") as fp:
+                    col = (json.load(fp).get("card") or {}).get("fill", col)
+            except Exception:
+                pass
+        try:
+            r, g, b = (int(col[i:i + 2], 16) / 255.0 for i in (1, 3, 5))
+        except Exception:
+            r, g, b = 0.55, 0.55, 0.58
+        h, _l, sat = colorsys.rgb_to_hls(r, g, b)
+        if sat >= 0.12:                      # 회색은 그대로 회색으로 둔다
+            sat = min(smax, max(sat, smin))
+        r, g, b = colorsys.hls_to_rgb(h, light, sat)
+        out = "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+        if len(self._room_pastel_cache) > 60:
+            self._room_pastel_cache = {}
+        self._room_pastel_cache[key] = out
+        return out
+
     def _room_tone(self, slot):
         """그 캐릭터의 테마색. 어두우면 밝기 하한을 준다 — 안 그러면 묻힌다."""
         c = self._room_tone_cache.get(slot)
         if c:
             return c
-        col = "#8b8b93"
+        col = self.ROOM_TINT.get(slot, "#8b8b93")
         if slot == self.char:
             col = self.card.get("fill", col)
         else:
@@ -13302,6 +13426,28 @@ class Mascot:
     @staticmethod
     def _hex(c):
         return tuple(int(str(c)[i:i + 2], 16) for i in (1, 3, 5))
+
+    def _room_relayout(self):
+        """창 크기가 바뀌면 칸 배치를 다시 잡는다.
+
+        <Configure> 는 창을 끄는 동안 수십 번 온다. 크기가 실제로 달라졌을
+        때만 다시 그린다 — 안 그러면 끄는 내내 통째로 다시 칠한다.
+        """
+        cv = self.room_cv
+        if cv is None or self.room_win is None:
+            return
+        W, H = cv.winfo_width(), cv.winfo_height()
+        if W < 20 or H < 20 or (W, H) == self._room_size:
+            return
+        self._room_size = (W, H)
+        k = self.ui_k
+        cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
+        self._room_cols = max(1, int((W - int(20 * k)) // cw))
+        self._room_rows = max(1, int((H - int(self.ROOM_TOP * k)
+                                      - int(126 * k)) // ch))
+        self._room_key_last = None            # 통째로 다시 그린다
+        self._room_body = []
+        self._safe("room_draw", self._room_draw)
 
     def _room_hover(self, e):
         """누를 수 있는 것 위에서는 손 모양 커서로 — 눌리는지 알 수 있게.
