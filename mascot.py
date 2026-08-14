@@ -10088,7 +10088,11 @@ class Mascot:
             except Exception:
                 pass
         self._safe("z_pin", self._z_pin, now)
+        # 진단은 방 처리 밖에서 돈다. 안에 두면 방이 멈출 때 진단도 같이
+        # 멈춰서, 정작 알아야 할 '멈췄다'는 사실이 안 남는다 (실제로 겪음).
+        self._frames = getattr(self, "_frames", 0) + 1
         self._room_dead = self._safe_off("room")
+        self._safe("room_diag", self._room_diag, now)
         self._safe("room", self._room_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
@@ -12732,7 +12736,6 @@ class Mascot:
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now())
-        self._safe("room_diag", self._room_diag, now)
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
@@ -12759,6 +12762,12 @@ class Mascot:
         lines = [
             time.strftime("%Y-%m-%d %H:%M:%S"),
             "캐릭터=%s  방기능켜짐=%s" % (self.char, self._room_on()),
+            "그린 프레임=%d  방처리=%s"
+            % (getattr(self, "_frames", 0),
+               "꺼짐(여러 번 터짐)" if getattr(self, "_room_dead", False)
+               else "정상"),
+            "터진 횟수=%s" % (dict((k, v) for k, v in self._fail.items() if v)
+                              or "없음"),
             "방 코드=%s (%d글자)"
             % ("비어 있음(모두의 홈)" if not code else "적혀 있음", len(code)),
             "방 번호=%s" % (getattr(net, "room", "-") if net else "-"),
@@ -12778,6 +12787,9 @@ class Mascot:
                 % (getattr(net, "calls", "-"),
                    ("%.0f초 전" % (now - ok_at)) if ok_at else "없음"),
                 "마지막 오류=%s" % (getattr(net, "err", None) or "없음"),
+                "통신 스레드 살아있음=%s"
+                % (getattr(getattr(net, "_th", None), "is_alive", bool)()
+                   if getattr(net, "_th", None) else "-"),
                 "지금 보이는 사람=%s"
                 % ([q.get("slot") for q in self.room_people] or "없음"),
             ]
