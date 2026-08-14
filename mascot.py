@@ -3238,7 +3238,7 @@ class RoomNet:
         # 요청이 성공하는데 자리가 0개면 방 번호가 다른 것이고, 자리는
         # 받았는데 못 읽으면 코드가 다른 것이다. 그 둘을 갈라 준다.
         self.stat = {"beat": "아직", "list": "아직", "take": "아직",
-                     "rows": 0, "read": 0}
+                     "rows": 0, "read": 0, "mine": None}
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
 
@@ -3333,6 +3333,10 @@ class RoomNet:
                         got.append(d)
                     self.stat["rows"] = len(rows)
                     self.stat["read"] = len(got)
+                    # 서버는 조건이 안 맞으면 아무 일도 안 하고 성공으로
+                    # 돌아온다. 내 자리가 명단에 있는지 봐야 진짜 알 수 있다.
+                    self.stat["mine"] = any(r.get("slot") == self.slot
+                                            for r in rows)
                     self.stat["list"] = ("%d자리 받아서 %d개 읽음"
                                          % (len(rows), len(got)))
                     with self._lock:
@@ -10180,6 +10184,11 @@ class Mascot:
         # 멈춰서, 정작 알아야 할 '멈췄다'는 사실이 안 남는다 (실제로 겪음).
         self._frames = getattr(self, "_frames", 0) + 1
         self._room_dead = self._safe_off("room")
+        if self._room_dead and now - self._fail_at.get("room", 0) > 60:
+            # 이 구역이 꺼져 있는 동안은 자리도 못 알리고 남도 못 받는다.
+            # 5분(FAIL_FORGET)은 너무 기니 1분마다 다시 해 본다.
+            self._fail["room"] = 0
+            self._room_dead = False
         self._safe("room_diag", self._room_diag, now)
         self._safe("room", self._room_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
@@ -13537,14 +13546,7 @@ class Mascot:
         # 왜 안 되는지 여기서 바로 보이게. 지금까지는 RoomNet 이 오류를
         # 들고만 있고 아무 데도 안 보여 줘서, 친구 화면에서는 '다들 안 켰네'
         # 로만 보였다 (사가가 방에 못 붙는데도 그 이유를 알 수 없었다).
-        sub = "총 %d명  ·  %d명 접속 중" % (len(people), on)
-        if live > 60:
-            sub = "총 %d명  ·  연결 안 됨%s" % (len(people), self._room_why())
-        elif on <= 1 and self.room_net is not None and (
-                time.time() - getattr(self.room_net, "born", 0) > 60):
-            # 서버와는 통하는데 나 혼자다. '1명 접속 중'으로만 두면 멀쩡해
-            # 보여서, 방이 다르다는 것을 아무도 못 알아챈다.
-            sub = "총 %d명  ·  지금은 나만 있어요 (방 번호를 맞춰 보세요)" % len(people)
+        sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
         cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
         self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
@@ -14242,6 +14244,37 @@ class Mascot:
             return "방 #" + str(rid)[:4]
         except Exception:
             return ""
+
+    def _room_state_text(self, on, live):
+        """지금 방이 어떤 상태인지 한 마디로.
+
+        '아무도 안 보인다'는 갈래가 여럿인데 화면에는 하나로만 보인다.
+        RoomNet 이 요청마다 적어 둔 것(stat)을 그대로 읽어 갈라 준다.
+        여기서 터져도 홈은 떠야 하므로 전부 getattr 로 막는다.
+        """
+        try:
+            if getattr(self, "_room_dead", False):
+                return "홈 처리가 멈췄어요 (곧 다시 해 볼게요)"
+            if live > 60:
+                return "연결 안 됨%s" % self._room_why()
+            net = self.room_net
+            st = dict(getattr(net, "stat", None) or {})
+            born = time.time() - float(getattr(net, "born", 0) or 0)
+            if born > 60:
+                # 자리를 한 번도 못 알렸다 — 남에게는 안 켠 것으로 보인다
+                if st.get("beat") not in (None, "보냄"):
+                    return "내 자리를 아직 못 알렸어요 (%s)" % st.get("beat")
+                # 자리는 받았는데 하나도 못 읽었다 — 방 코드가 다른 것이다
+                if int(st.get("rows") or 0) > 0 and not int(st.get("read") or 0):
+                    return "다른 사람 자리를 못 읽어요 (방 코드가 달라요)"
+                # 보냈다는데 명단에 내가 없다 — 서버가 안 받아 준 것이다
+                if st.get("beat") == "보냄" and st.get("mine") is False:
+                    return "서버가 내 자리를 안 받아요"
+                if on <= 1:
+                    return "지금은 나만 있어요 (방 번호를 맞춰 보세요)"
+            return "%d명 접속 중" % on
+        except Exception:
+            return "%d명 접속 중" % on
 
     def _room_why(self):
         """방에 못 붙는 이유를 짧게 (없으면 빈 글자)."""
