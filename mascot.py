@@ -3176,6 +3176,7 @@ class RoomNet:
         self._after = 0
         self.err = None           # 마지막 오류 (설정 화면에서 보여 준다)
         self.ok_at = 0.0          # 마지막으로 성공한 시각
+        self.born = time.time()   # 언제 시작했나 (멈춤 판정에 쓴다)
         self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
         self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
         self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
@@ -3216,7 +3217,11 @@ class RoomNet:
         self._stop = True
 
     # ── 스레드 ────────────────────────────────────────────────────────
-    def _rpc(self, fn, args, timeout=12):
+    def _rpc(self, fn, args, timeout=10):
+        # 갈아 끼운 뒤 옛 스레드가 멈춤에서 풀리면, 남은 요청을 마저 보내
+        # 옛 상태를 덮어쓴다. 닫힌 뒤에는 한 번도 더 부르지 않는다.
+        if self._stop:
+            raise RuntimeError("닫힘")
         self.calls += 1
         req = urllib.request.Request(
             "%s/rest/v1/rpc/%s" % (ROOM_URL, fn),
@@ -3627,6 +3632,8 @@ class Mascot:
         self._hd_at = 0.0
         self._diag_at = 0.0          # 마지막으로 기록한 시각
         self._room_born = time.time()   # 언제 켰나 (방 진단에 적는다)
+        self._room_retry = 0            # 통신층을 다시 시작한 횟수
+        self._room_retry_at = 0.0       # 마지막으로 다시 시작한 시각
         self._diag_hist = []            # 방 진단 최근 기록 (흐름을 본다)
         self.shadow_img_type = None  # 타자 자세용 그림자 (깃펜 없음)
         self._shadow_base = None
@@ -12732,6 +12739,19 @@ class Mascot:
         if self.room_net is None:
             return
         # 홈 창이 닫혀 있으면 천천히 — 명단은 창이 떠 있을 때만 쓴다
+        # 멈춰 있으면 스스로 다시 시작한다. 한 번도 성공하지 못한 채
+        # 오래 지났으면 통신층이 그 자리에 걸린 것이다 — 맥에서 주소 조회가
+        # 걸리면 시간 제한이 안 먹어 영영 그대로다 (사가 사례).
+        net = self.room_net
+        last = max(getattr(net, "ok_at", 0.0) or 0.0,
+                   getattr(net, "born", 0.0) or 0.0)
+        gap = 90.0 if self._room_retry < 20 else 300.0
+        if now - last > gap and now - self._room_retry_at > gap:
+            self._room_retry += 1
+            self._room_retry_at = now
+            self._room_stop()
+            self._room_start()
+            return
         self.room_net.idle = (self.room_win is None)
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
@@ -12768,6 +12788,7 @@ class Mascot:
                else "정상"),
             "터진 횟수=%s" % (dict((k, v) for k, v in self._fail.items() if v)
                               or "없음"),
+            "통신층 다시 시작=%d번" % getattr(self, "_room_retry", 0),
             "방 코드=%s (%d글자)"
             % ("비어 있음(모두의 홈)" if not code else "적혀 있음", len(code)),
             "방 번호=%s" % (getattr(net, "room", "-") if net else "-"),
