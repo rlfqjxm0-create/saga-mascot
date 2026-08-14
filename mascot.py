@@ -12322,8 +12322,17 @@ class Mascot:
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
         who = ""
-        if ev.get("f") == self.char:
-            who = "나"
+        mine = (ev.get("f") == self.char)     # 내가 나에게 (혼자 눌러 본 것)
+        if mine:
+            k = ev.get("k")
+            self.smile_until = max(self.smile_until, time.time() + 2.5)
+            self._say({"poke": "콕!", "cheer": "혼자 응원해 봤어요",
+                       "blanket": "담요를 덮었어요",
+                       "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
+            self._room_flash[self.char] = time.time()
+            return
+        if False:
+            pass
         else:
             for p in self.room_people:
                 if p.get("slot") == ev.get("f"):
