@@ -9931,6 +9931,15 @@ class Mascot:
         except Exception:
             pass
 
+    def _safe_off(self, name):
+        """그 구역이 여러 번 터져서 꺼졌는가 (_safe 가 3번이면 끈다)."""
+        try:
+            n = self._fail.get(name, 0)
+            when = self._fail_at.get(name, 0.0)
+            return n >= 3 and (time.time() - when) < self.FAIL_FORGET
+        except Exception:
+            return False
+
     def _log_boot(self, where):
         """켜는 도중 터진 것을 남긴다.
 
@@ -10056,6 +10065,7 @@ class Mascot:
             except Exception:
                 pass
         self._safe("z_pin", self._z_pin, now)
+        self._room_dead = self._safe_off("room")
         self._safe("room", self._room_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
@@ -13193,9 +13203,12 @@ class Mascot:
                        font=self._uf(13, True), fill=P["ink"], tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
         on = sum(1 for q in people if not q.get("off"))
-        sub = "총 %d명  ·  %s" % (
-            len(people),
-            "연결 안 됨" if live > 60 else "%d명 접속 중" % on)
+        # 왜 안 되는지 여기서 바로 보이게. 지금까지는 RoomNet 이 오류를
+        # 들고만 있고 아무 데도 안 보여 줘서, 친구 화면에서는 '다들 안 켰네'
+        # 로만 보였다 (사가가 방에 못 붙는데도 그 이유를 알 수 없었다).
+        sub = "총 %d명  ·  %d명 접속 중" % (len(people), on)
+        if live > 60:
+            sub = "총 %d명  ·  연결 안 됨%s" % (len(people), self._room_why())
         cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
         tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
@@ -13716,6 +13729,22 @@ class Mascot:
             self._room_pastel_cache = {}
         self._room_pastel_cache[key] = out
         return out
+
+    def _room_why(self):
+        """방에 못 붙는 이유를 짧게 (없으면 빈 글자)."""
+        try:
+            if not self._room_on():
+                return " — 환경설정에서 꺼져 있어요"
+            if self.room_net is None:
+                return " — 통신을 시작하지 못했어요"
+            if getattr(self, "_room_dead", False):
+                return " — 프로그램 안에서 막혔어요"
+            err = getattr(self.room_net, "err", None)
+            if err:
+                return " — " + str(err)[:44]
+            return " — 인터넷을 확인해 주세요"
+        except Exception:
+            return ""
 
     def _room_tone(self, slot):
         """그 캐릭터의 테마색. 어두우면 밝기 하한을 준다 — 안 그러면 묻힌다."""
