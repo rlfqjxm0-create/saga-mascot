@@ -1944,6 +1944,14 @@ NEWS_REPOS = dict(UPDATE_REPOS,
 UPDATE_FLAG = ".updated"          # 업데이트 알림 신호 파일
 
 
+def _save_json_text(path, text):
+    """글자 파일도 임시 파일에 쓰고 갈아 끼운다 (지뢰 35와 같은 이유)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write(text)
+    os.replace(tmp, path)
+
+
 def _save_json(path, data, **kw):
     """중간에 꺼져도 파일이 반쪽으로 남지 않게 — 임시 파일에 쓰고 갈아 끼운다.
 
@@ -3171,6 +3179,11 @@ class RoomNet:
         self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
         self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
         self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
+        # 왜 방에 못 붙는지 사람이 알 수 있게 — 요청마다 결과를 적어 둔다.
+        # 요청이 성공하는데 자리가 0개면 방 번호가 다른 것이고, 자리는
+        # 받았는데 못 읽으면 코드가 다른 것이다. 그 둘을 갈라 준다.
+        self.stat = {"beat": "아직", "list": "아직", "take": "아직",
+                     "rows": 0, "read": 0}
         self._th = threading.Thread(target=self._loop, daemon=True)
         self._th.start()
 
@@ -3237,6 +3250,9 @@ class RoomNet:
                         self._rpc("room_beat",
                                   {"p_room": self.room, "p_slot": self.slot,
                                    "p_blob": _room_seal(self.key, st)})
+                        self.stat["beat"] = "보냄"
+                    else:
+                        self.stat["beat"] = "보낼 값이 아직 없음"
                 with self._lock:
                     out, self._out[:] = list(self._out), []
                 for to, kind, extra in out:
@@ -3256,6 +3272,10 @@ class RoomNet:
                         d["slot"] = r.get("slot", "")
                         d["age"] = int(r.get("age_sec") or 0)
                         got.append(d)
+                    self.stat["rows"] = len(rows)
+                    self.stat["read"] = len(got)
+                    self.stat["list"] = ("%d자리 받아서 %d개 읽음"
+                                         % (len(rows), len(got)))
                     with self._lock:
                         self._roster = got[:ROOM_MAX]
                 if now - t_take >= i_take:
@@ -3263,6 +3283,7 @@ class RoomNet:
                     rows = self._rpc("room_take",
                                      {"p_room": self.room, "p_slot": self.slot,
                                       "p_after": self._after}) or []
+                    self.stat["take"] = "%d개" % len(rows)
                     for r in rows:
                         self._after = max(self._after, int(r.get("id") or 0))
                         d = _room_open_blob(self.key, r.get("blob", ""))
@@ -12709,6 +12730,7 @@ class Mascot:
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now())
+        self._safe("room_diag", self._room_diag, now)
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
@@ -12718,6 +12740,49 @@ class Mascot:
                 people if self.room_win is None else self._room_seats())
         for ev in events:
             self._safe("room_ev", self._room_event, ev)
+
+    def _room_diag(self, now):
+        """방 상태를 파일 하나에 적는다 (.room_diag.txt).
+
+        '왜 아무도 안 보이나'는 화면만 보고 가릴 수 없다. 서버 요청이
+        성공하는데도 아무도 안 보이는 경우가 여러 갈래라서, 어느 갈래인지
+        숫자로 남겨 둔다.
+        """
+        if now - getattr(self, "_diag_at", 0) < 20.0:
+            return
+        self._diag_at = now
+        net = self.room_net
+        code = str(self.us.get("room_code") or "")
+        lines = [
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            "캐릭터=%s  방기능켜짐=%s" % (self.char, self._room_on()),
+            "방 코드=%s (%d글자)"
+            % ("비어 있음(모두의 홈)" if not code else "적혀 있음", len(code)),
+            "방 번호=%s" % (getattr(net, "room", "-") if net else "-"),
+            "내 자리 이름=%s" % (getattr(net, "slot", "-") if net else "-"),
+        ]
+        if net is None:
+            lines.append("통신층이 없음 — 시작하지 못했다")
+        else:
+            # 진단이 진단하다 터지면 아무 소용이 없다. 값이 없어도 그냥 적는다.
+            st = getattr(net, "stat", None) or {}
+            ok_at = getattr(net, "ok_at", 0) or 0
+            lines += [
+                "심장=%s" % st.get("beat", "-"),
+                "명단=%s" % st.get("list", "-"),
+                "신호=%s" % st.get("take", "-"),
+                "부른 횟수=%s  마지막 성공=%s"
+                % (getattr(net, "calls", "-"),
+                   ("%.0f초 전" % (now - ok_at)) if ok_at else "없음"),
+                "마지막 오류=%s" % (getattr(net, "err", None) or "없음"),
+                "지금 보이는 사람=%s"
+                % ([q.get("slot") for q in self.room_people] or "없음"),
+            ]
+        try:
+            _save_json_text(os.path.join(self.state_dir, ".room_diag.txt"),
+                            "\n".join(lines) + "\n")
+        except Exception:
+            pass
 
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
