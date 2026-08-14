@@ -12329,6 +12329,10 @@ class Mascot:
             self._say("%s가 담요를 덮어 줬어요" % who if who else "담요를 덮어 줬어요",
                       3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
+        elif kind == "wave":
+            self.smile_until = max(self.smile_until, now + 2.0)
+            self._say("%s가 손을 흔들어요" % who if who else "누가 손을 흔들어요",
+                      3.0)
         elif kind == "cheer":
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say("%s가 응원했어요" % who if who else "누가 응원했어요", 3.5)
@@ -12560,7 +12564,7 @@ class Mascot:
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         rows = 2
         W = int(16 * k) * 2 + cw * self.ROOM_COLS
-        H = int(self.ROOM_TOP * k) + ch * rows + int(34 * k)
+        H = int(self.ROOM_TOP * k) + ch * rows + int(126 * k)
         win = tk.Toplevel(self.root)
         win.title("같이 작업 중")
         win.resizable(False, False)
@@ -12711,39 +12715,61 @@ class Mascot:
                 ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
 
     def _room_bar(self, cv, W, H, P, k, people):
-        """아래 단추 줄 — 고른 사람에게 보낸다. 아무도 안 골랐으면 방 전체."""
+        """아래 단추 줄 — 고른 상대에게만 간다.
+
+        누구에게 보낼지는 두 가지로 고른다. 캐릭터를 누르면 그 사람,
+        '모두에게' 알약을 누르면 방 전체. 바닥에 붙지 않게 여백을 둔다.
+        """
         pick = self._room_pick
-        who = next((p for p in people if p.get("slot") == pick), None)
-        if pick == self.char:
-            who, pick = None, None
-        name = str(who.get("n") or "") if who else ""
-        cv.create_text(W // 2, H - 62 * k, anchor="center",
-                       text=("%s에게" % name) if name else "방에 있는 모두에게",
+        who = next((q for q in people if q.get("slot") == pick), None)
+        bw, gap, bot = 46 * k, 14 * k, 34 * k
+        by = H - bot - bw
+        if who is not None:
+            cap = "%s에게" % str(who.get("n") or "")
+        elif pick == "*":
+            cap = "방에 있는 모두에게"
+        else:
+            cap = "보낼 사람을 골라 주세요"
+        cv.create_text(W // 2, by - 30 * k, anchor="center", text=cap,
                        font=self._uf(9), fill=P["sub"])
-        bw, gap = 46 * k, 14 * k
-        tot = len(self.ROOM_BTN) * bw + (len(self.ROOM_BTN) - 1) * gap
-        x = (W - tot) / 2
-        self._room_btn_hit = []
+        row = len(self.ROOM_BTN) * bw + (len(self.ROOM_BTN) - 1) * gap
+        pw = 66 * k
+        px = W / 2 - row / 2 - pw - 18 * k
+        all_on = (pick == "*")
+        self._rr(cv, px, by + bw / 2 - 14 * k, px + pw, by + bw / 2 + 14 * k,
+                 14 * k, fill=P["lamp"] if all_on else P["card"],
+                 outline=P["sub"] if all_on else P["line"],
+                 width=2 if all_on else 1)
+        cv.create_text(px + pw / 2, by + bw / 2, text="모두에게",
+                       font=self._uf(8, True), fill=P["ink"])
+        self._room_btn_hit = [(px, by + bw / 2 - 14 * k, px + pw,
+                               by + bw / 2 + 14 * k, "@all")]
+        live = who is not None or pick == "*"
+        x = W / 2 - row / 2
         for label, kind, col in self.ROOM_BTN:
-            cv.create_oval(x + 2, H - 46 * k + 2, x + bw + 2, H - 46 * k + bw + 2,
+            fill = col if live else self._tint(col, 0.62)
+            cv.create_oval(x + 2, by + 2, x + bw + 2, by + bw + 2,
                            fill=P["line"], width=0)
-            cv.create_oval(x, H - 46 * k, x + bw, H - 46 * k + bw,
-                           fill=col, outline="#ffffff", width=2)
-            cv.create_text(x + bw / 2, H - 46 * k + bw / 2, text=label,
-                           font=self._uf(9, True), fill=P["ink"])
-            self._room_btn_hit.append((x, H - 46 * k, x + bw,
-                                       H - 46 * k + bw, kind))
+            cv.create_oval(x, by, x + bw, by + bw, fill=fill,
+                           outline="#ffffff", width=2)
+            cv.create_text(x + bw / 2, by + bw / 2, text=label,
+                           font=self._uf(9, True),
+                           fill=P["ink"] if live else P["sub"])
+            if live:
+                self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
 
     def _room_send(self, kind):
-        """단추를 눌렀을 때 — 고른 사람에게, 아무도 안 골랐으면 방 전체에."""
-        if self.room_net is None:
-            return
+        """단추를 눌렀을 때 — 고른 상대에게만 간다."""
         to = self._room_pick
-        if not to or to == self.char:
-            to = "*"
+        if not to or self.room_net is None:
+            return
         self.room_net.send(to, kind)
-        self._room_flash[to if to != "*" else ""] = time.time()
+        if to == "*":
+            for q in self.room_people:
+                self._room_flash[q.get("slot") or ""] = time.time()
+        else:
+            self._room_flash[to] = time.time()
         self._room_sent = (kind, time.time())
 
     def _room_pose(self, p):
@@ -12862,13 +12888,23 @@ class Mascot:
     def _room_click(self, e):
         for x0, y0, x1, y1, kind in self._room_btn_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                self._safe("room_btn", self._room_send, kind)
+                if kind == "@all":
+                    self._room_pick = None if self._room_pick == "*" else "*"
+                else:
+                    self._safe("room_btn", self._room_send, kind)
+                self._safe("room_draw", self._room_draw)
                 return
         for x0, y0, x1, y1, slot, sleeping in self._room_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                # 누르면 고른다. 한 번 더 누르면 푼다(방 전체로 보낸다).
                 self._room_pick = None if self._room_pick == slot else slot
-                if slot != self.char and self.room_net is not None:
+                if slot == self.char:
+                    # 내 캐릭터를 누르면 방 전체에 손을 흔든다
+                    if self.room_net is not None:
+                        self.room_net.send("*", "wave")
+                    self._room_flash[slot] = time.time()
+                    self.smile_until = max(self.smile_until, time.time() + 2.0)
+                    self._safe("room_wave_snd", self._poke_sound)
+                elif self.room_net is not None:
                     self.room_net.send(slot, "blanket" if sleeping else "poke")
                     self._room_flash[slot] = time.time()
                 self._safe("room_draw", self._room_draw)
