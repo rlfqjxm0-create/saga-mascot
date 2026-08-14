@@ -26,6 +26,11 @@ REPO = "rlfqjxm0-create/saga-mascot"   # 공개 배포 전용 레포
 BRANCH = "main"
 TIMEOUT = 20
 RETRY = 3
+# 첫 확인(version.json)은 짧게 끊는다. 인터넷이 막힌 곳에서는 20초 x 3번을
+# 꼬박 기다리느라 1분 넘게 아무것도 안 뜬다 — 사람은 안 켜진 줄 안다.
+# 받을 게 있다고 확인된 뒤(=인터넷이 되는 상태)에는 넉넉한 값을 쓴다.
+PROBE_TIMEOUT = 6
+PROBE_RETRY = 2
 
 BUNDLE = sys._MEIPASS if getattr(sys, "frozen", False) \
     else os.path.dirname(os.path.abspath(__file__))
@@ -61,18 +66,19 @@ def _log(msg):
         pass
 
 
-def _fetch(path):
+def _fetch(path, timeout=None, tries=None):
     """레포 파일의 원본 바이트 — raw.githubusercontent CDN."""
     quoted = urllib.parse.quote(path, safe="/")
     url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{quoted}"
     req = urllib.request.Request(url, headers={"User-Agent": "SagaMascot-updater"})
-    for i in range(RETRY):
+    tries = tries or RETRY
+    for i in range(tries):
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT,
+            with urllib.request.urlopen(req, timeout=timeout or TIMEOUT,
                                         context=_ssl_ctx()) as r:
                 return r.read()
         except Exception:
-            if i == RETRY - 1:
+            if i == tries - 1:
                 raise
             time.sleep(1.0)
 
@@ -95,7 +101,9 @@ def _local_bytes(rel, want):
 
 def check_update():
     """전부 임시 폴더에 받아 놓고, 완전히 성공했을 때만 live로 바꾼다."""
-    manifest = json.loads(_fetch("version.json").decode("utf-8"))
+    manifest = json.loads(_fetch(
+        "version.json",
+        timeout=PROBE_TIMEOUT, tries=PROBE_RETRY).decode("utf-8"))
     cur = 0
     try:
         with open(os.path.join(LIVE, "version.json"), encoding="utf-8") as fp:
@@ -171,14 +179,25 @@ def main():
     use_live = os.path.exists(live_mascot) \
         and os.path.exists(os.path.join(live_parts, "config.json"))
 
+    mascot = char_dir = None
     if use_live:
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("mascot", live_mascot)
-        mascot = importlib.util.module_from_spec(spec)
-        sys.modules["mascot"] = mascot
-        spec.loader.exec_module(mascot)
-        char_dir = live_parts
-    else:
+        # 받아 둔 코드가 실행되지 않으면(디스크 손상 등) 그대로 죽는다.
+        # 다음에 켜도 같은 파일을 또 읽으므로 영영 안 켜진다. 그래서
+        # 실패하면 받아 둔 것을 치우고 번들 내장본으로 물러난다.
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("mascot", live_mascot)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["mascot"] = mod
+            spec.loader.exec_module(mod)
+            mascot, char_dir = mod, live_parts
+        except Exception:
+            sys.modules.pop("mascot", None)
+            try:
+                shutil.rmtree(LIVE, ignore_errors=True)   # 다음에 새로 받게
+            except Exception:
+                pass
+    if mascot is None:
         import mascot
         char_dir = os.path.join(BUNDLE, "parts_saga")
 
