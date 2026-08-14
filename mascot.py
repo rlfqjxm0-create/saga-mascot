@@ -21,6 +21,8 @@ config.json 주요 키: scale, screen_quad, blink, trail_color, pen_tip,
 """
 import base64 as _b64
 import ctypes
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -28,9 +30,12 @@ import random
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import tkinter as tk
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 
 if sys.platform == "darwin":
     # 맥에서는 pynput을 쓰지 않는다. pynput의 맥 리스너는 별도 스레드에서
@@ -390,6 +395,10 @@ DEFAULT_SETTINGS = {
     "yt_signed": False,      # 유튜브에 로그인해 둔 적이 있는가 (프리미엄 적용)
     "yt_asked": False,       # 로그인 창을 한 번이라도 권했는가
     "shadow_on": False,      # 그림자를 한 번 켜 준 적이 있는가
+    "room_on": True,         # 같이 작업하는 방 (기본 켜짐, 환경설정에서 끈다)
+    "room_seen": False,      # 처음 열 때 무엇이 오가는지 한 번 알려 줬는가
+    "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
+    "room_code": "",         # 방 코드 (비우면 '홈')
 }
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
 
@@ -2933,6 +2942,192 @@ def say_hello(state_dir):
         pass
 
 
+# ── 같이 작업하는 방 (홈) ─────────────────────────────────────────────
+# 이 열쇠는 공개를 전제로 만들어진 것이다(publishable). 표를 직접 만지는 길은
+# 서버에서 막아 두었고, 부를 수 있는 것은 함수 네 개뿐이다.
+ROOM_URL = "https://cfoweblkseqhastxidrm.supabase.co"
+ROOM_KEY = "sb_publishable_yjqS78ZmLj2VrWS2P49L8w__XRf_GLI"
+ROOM_HOME = "ena-mascot-home-2026"   # 코드를 안 넣었을 때 들어가는 '홈'
+ROOM_MAX = 12                        # 한 방에 보여 줄 최대 인원
+
+
+def _room_keys(code):
+    """방 코드에서 '방 번호'와 '자물쇠'를 따로 뽑는다.
+
+    둘 다 코드에서 나오지만 서로 역산이 안 된다. 서버에는 방 번호만 가므로
+    코드 자체는 서버에 없다.
+    """
+    raw = str(code or ROOM_HOME).strip().encode("utf-8")
+    rid = _b64.urlsafe_b64encode(
+        hmac.new(raw, b"room-id", hashlib.sha256).digest()).decode()[:22]
+    key = hmac.new(raw, b"room-key", hashlib.sha256).digest()
+    return rid, key
+
+
+def _room_seal(key, obj):
+    """내용을 잠근다. 서버는 알아볼 수 없는 덩어리만 받는다."""
+    raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+    nonce = os.urandom(12)
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        body = AESGCM(key).encrypt(nonce, raw, None)
+    except Exception:
+        body = _room_xor(key, nonce, raw) + hmac.new(
+            key, nonce + _room_xor(key, nonce, raw), hashlib.sha256).digest()[:16]
+    return _b64.b64encode(nonce + body).decode()
+
+
+def _room_open_blob(key, blob):
+    """잠긴 내용을 연다. 못 열면 None (남의 방 것이거나 코드가 다르다)."""
+    try:
+        data = _b64.b64decode(blob)
+        nonce, body = data[:12], data[12:]
+        try:
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            raw = AESGCM(key).decrypt(nonce, body, None)
+        except ImportError:
+            ct, tag = body[:-16], body[-16:]
+            want = hmac.new(key, nonce + ct, hashlib.sha256).digest()[:16]
+            if not hmac.compare_digest(tag, want):
+                return None
+            raw = _room_xor(key, nonce, ct)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _room_xor(key, nonce, data):
+    """cryptography 가 없을 때 쓰는 대체 — HMAC 키스트림과 XOR."""
+    out = bytearray()
+    i = 0
+    while len(out) < len(data):
+        out += hmac.new(key, nonce + i.to_bytes(4, "big"),
+                        hashlib.sha256).digest()
+        i += 1
+    return bytes(a ^ b for a, b in zip(data, out))
+
+
+class RoomNet:
+    """방 서버와 주고받는 층 — 별도 스레드에서 돈다.
+
+    그리는 쪽은 절대 기다리지 않는다. 인터넷이 느려도 캐릭터는 그대로 돈다.
+    받은 것은 큐에 쌓아 두고 그리기 루프가 꺼내 간다. 큐를 새 목록으로
+    갈아 끼우면 스레드가 옛 목록에 계속 넣어 그때부터 한 줄도 안 들어온다
+    (지뢰 26) — 반드시 앞에서 꺼내 비운다.
+    """
+
+    BEAT = 5.0        # 내 자리를 알리는 간격 (서버는 3초에 한 번만 받는다)
+    LIST = 6.0        # 방 사람들을 받아 오는 간격
+    TAKE = 2.5        # 신호를 받아 오는 간격
+
+    def __init__(self, slot, code=None):
+        self.slot = str(slot)[:40]
+        self.room, self.key = _room_keys(code)
+        self._state = {}
+        self._out = []            # 보낼 신호
+        self._roster = []         # 받은 사람들
+        self._events = []         # 받은 신호
+        self._lock = threading.Lock()
+        self._stop = False
+        self._after = 0
+        self.err = None           # 마지막 오류 (설정 화면에서 보여 준다)
+        self.ok_at = 0.0          # 마지막으로 성공한 시각
+        self._th = threading.Thread(target=self._loop, daemon=True)
+        self._th.start()
+
+    # ── 바깥에서 부르는 것 ────────────────────────────────────────────
+    def push(self, state):
+        """내 상태를 갈아 끼운다 (보내는 것은 스레드가 알아서)."""
+        with self._lock:
+            self._state = dict(state)
+
+    def send(self, to_slot, kind, extra=None):
+        """콕 찌르기 같은 한 번짜리 신호."""
+        with self._lock:
+            if len(self._out) < 8:
+                self._out.append((str(to_slot)[:40], str(kind)[:16], extra))
+
+    def drain(self):
+        """쌓인 것을 꺼내 간다 — (사람들, 신호들)."""
+        with self._lock:
+            people = list(self._roster)
+            evs = []
+            while self._events:
+                evs.append(self._events.pop(0))
+        return people, evs
+
+    def close(self):
+        self._stop = True
+
+    # ── 스레드 ────────────────────────────────────────────────────────
+    def _rpc(self, fn, args, timeout=12):
+        req = urllib.request.Request(
+            "%s/rest/v1/rpc/%s" % (ROOM_URL, fn),
+            data=json.dumps(args).encode("utf-8"),
+            headers={"apikey": ROOM_KEY,
+                     "Authorization": "Bearer " + ROOM_KEY,
+                     "Content-Type": "application/json",
+                     "User-Agent": "mascot-room"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8")
+        return json.loads(body) if body.strip() else None
+
+    def _loop(self):
+        t_beat = t_list = t_take = 0.0
+        while not self._stop:
+            now = time.time()
+            try:
+                if now - t_beat >= self.BEAT:
+                    t_beat = now
+                    with self._lock:
+                        st = dict(self._state)
+                    if st:
+                        self._rpc("room_beat",
+                                  {"p_room": self.room, "p_slot": self.slot,
+                                   "p_blob": _room_seal(self.key, st)})
+                with self._lock:
+                    out, self._out[:] = list(self._out), []
+                for to, kind, extra in out:
+                    self._rpc("room_send",
+                              {"p_room": self.room, "p_to": to,
+                               "p_blob": _room_seal(
+                                   self.key, {"f": self.slot, "k": kind,
+                                              "x": extra})})
+                if now - t_list >= self.LIST:
+                    t_list = now
+                    rows = self._rpc("room_list", {"p_room": self.room}) or []
+                    got = []
+                    for r in rows:
+                        d = _room_open_blob(self.key, r.get("blob", ""))
+                        if not isinstance(d, dict):
+                            continue      # 코드가 다른 사람 — 못 읽는 게 맞다
+                        d["slot"] = r.get("slot", "")
+                        d["age"] = int(r.get("age_sec") or 0)
+                        got.append(d)
+                    with self._lock:
+                        self._roster = got[:ROOM_MAX]
+                if now - t_take >= self.TAKE:
+                    t_take = now
+                    rows = self._rpc("room_take",
+                                     {"p_room": self.room, "p_slot": self.slot,
+                                      "p_after": self._after}) or []
+                    for r in rows:
+                        self._after = max(self._after, int(r.get("id") or 0))
+                        d = _room_open_blob(self.key, r.get("blob", ""))
+                        if isinstance(d, dict) and d.get("f") != self.slot:
+                            with self._lock:
+                                if len(self._events) < 30:
+                                    self._events.append(d)
+                self.err = None
+                self.ok_at = now
+            except Exception as e:
+                self.err = "%s: %s" % (type(e).__name__, str(e)[:80])
+            for _ in range(10):           # 0.1초씩 나눠 자야 빨리 닫힌다
+                if self._stop:
+                    return
+                time.sleep(0.1)
+
+
 class Mascot:
     # 타이머 카드가 잘리지 않는 최소 창 폭 (카드 200 + 그림자·여백)
     CARD_MIN_W = 210
@@ -3327,6 +3522,21 @@ class Mascot:
         self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
         self._slime_hand = None      # 슬라임을 만지는 손이 지금 있는 자리
         self._sl_touched = False     # 꺼낸 뒤 한 번이라도 만졌나
+        # ── 같이 작업하는 방 ─────────────────────────────────────────
+        self.room_net = None         # 서버와 주고받는 층 (없으면 꺼진 것)
+        self.room_win = None         # 방 창
+        self.room_cv = None
+        self.room_people = []        # 방에 있는 사람들
+        self._room_job = None        # 방 창 다시 그리기 예약
+        self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
+        self._room_hit = []          # 방 창에서 누를 수 있는 자리
+        self._room_flash = {}        # 신호를 주고받아 반짝일 사람
+        self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
+        self._room_tone_cache = {}
+        self._room_art_bad = set()   # 그림을 못 받은 자리 (다시 안 조른다)
+        self._room_art_th = None
+        self._photo_after = None     # 단체사진 안내 예약
+        self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
         self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
         # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
         # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
@@ -3385,6 +3595,8 @@ class Mascot:
             self._slime_menu = sub
         if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
             menu.add_separator()
+        if ROOM_URL and ROOM_KEY:
+            menu.add_command(label="홈", command=self._room_toggle)
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -5161,6 +5373,12 @@ class Mascot:
                 except Exception:
                     pass
                 self._tick_after = None
+            if getattr(self, "_photo_after", None) is not None:
+                try:
+                    self.root.after_cancel(self._photo_after)
+                except Exception:
+                    pass
+                self._photo_after = None
             if getattr(self, "_stk_after", None) is not None:
                 try:
                     self.root.after_cancel(self._stk_after)
@@ -6951,13 +7169,18 @@ class Mascot:
                 c.create_oval(ex - 6, y0 - 11, ex + 6, y0 + 1,
                               fill="#4a4a4a", outline="")
         elif deco == "cat":
+            # 색은 그 캐릭터의 테마색에서 뽑는다. 분홍으로 박아 두면 붉은
+            # 카드(멸종)에서 혼자 튄다. 도로롱은 원래 값과 거의 같게 나온다.
+            base = self.card["fill"]
+            outer, line = self._tint(base, 0.30), self._shade(base, 0.15)
+            inner = self._tint(base, 0.14)
             for sign, ex in ((-1, x0 + 26), (1, x1 - 26)):
                 c.create_polygon(ex - 13 * sign, y0 + 5, ex + 3 * sign, y0 - 17,
                                  ex + 13 * sign, y0 + 3,
-                                 fill="#f5bdd2", outline="#d687ab", width=2)
+                                 fill=outer, outline=line, width=2)
                 c.create_polygon(ex - 6 * sign, y0 + 2, ex + 3 * sign, y0 - 10,
                                  ex + 8 * sign, y0 + 1,
-                                 fill="#eba0c0", outline="")
+                                 fill=inner, outline="")
         elif deco == "dog":
             # 접힌 검은 강아지 귀 — 카드 위 모서리에서 바깥으로 늘어짐
             for sign, ex in ((-1, x0 + 18), (1, x1 - 18)):
@@ -7414,6 +7637,18 @@ class Mascot:
                                "ts": time.time()}, fp)
             except Exception:
                 self._log_error("end_cmd")
+        # 방에 사람이 있으면 오늘의 단체사진을 남긴다 (혼자면 안 찍는다).
+        # _safe 는 돌려주는 값이 없어서 여기서는 직접 감싼다.
+        try:
+            if self._room_photo():
+                # 바로 말하면 아래 축하 말풍선에 덮인다. 축하가 지나간 뒤에.
+                if self._photo_after is not None:
+                    self.root.after_cancel(self._photo_after)
+                self._photo_after = self.root.after(
+                    6000, lambda: self._safe(
+                        "photo_say", self._say, "오늘의 단체사진을 남겼어요", 4.0))
+        except Exception:
+            self._log_error("room_photo")
         self._celebrate()
 
     # ── 제스처 ───────────────────────────────────────────────────────────
@@ -9575,6 +9810,7 @@ class Mascot:
             except Exception:
                 pass
         self._safe("z_pin", self._z_pin, now)
+        self._safe("room", self._room_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
@@ -11189,6 +11425,14 @@ class Mascot:
         apps_entry = tk.Entry(cv, textvariable=apps_var, font=(FONT, FS(8)),
                               relief="flat", bg="#ffffff", fg=cd["text"],
                               highlightthickness=0, borderwidth=0)
+        nick_var = tk.StringVar(value=str(st.get("room_nick", "")))
+        nick_entry = tk.Entry(cv, textvariable=nick_var, font=(FONT, FS(8)),
+                              relief="flat", bg="#ffffff", fg=cd["text"],
+                              highlightthickness=0, borderwidth=0)
+        code_var = tk.StringVar(value=str(st.get("room_code", "")))
+        code_entry = tk.Entry(cv, textvariable=code_var, font=(FONT, FS(8)),
+                              relief="flat", bg="#ffffff", fg=cd["text"],
+                              highlightthickness=0, borderwidth=0)
         fb_on = bool(self._fb_url())
         fb_text = None
         if fb_on:
@@ -11646,6 +11890,36 @@ class Mascot:
                              width=W - PAD * 2 - IN * 2, height=24)
             y += 50 + 22
 
+            # ── 같이 작업하는 방 ──────────────────────────────────────
+            y = group(y, "같이 작업하는 방", [
+                lambda ry: toggle(ry, "친구들과 같이 보기", "room_on"),
+            ])
+            y -= 12
+            cv.create_text(LX, y, anchor="w",
+                           text="켜면 별명·레벨·오늘 작업 시간·자는지가 방에 보입니다.",
+                           font=(FONT, FS(8)), fill=cd["sub"])
+            y += 15
+            y += 3
+            cv.create_text(LX, y, anchor="w",
+                           text="어떤 프로그램을 쓰는지, 창 제목은 보내지 않습니다.",
+                           font=(FONT, FS(8)), fill=cd["sub"])
+            y += 26
+            for cap, ent, hint in (("방에서 보일 이름", nick_entry,
+                                    "비우면 캐릭터 이름"),
+                                   ("방 코드", code_entry,
+                                    "비우면 '홈'")):
+                cv.create_text(LX, y, anchor="w", text=cap,
+                               font=(FONT, FS(8)), fill=cd["text"])
+                cv.create_text(W - PAD - 4, y, anchor="e", text=hint,
+                               font=(FONT, FS(8)), fill=cd["sub"])
+                y += 16
+                rrect(PAD, y, W - PAD, y + 44, 14, fill="#ffffff",
+                      outline=LINE, width=1)
+                cv.create_window(LX, y + 10, anchor="nw", window=ent,
+                                 width=W - PAD * 2 - IN * 2, height=24)
+                y += 44 + 16
+            y += 8
+
 
             if fb_on:
                 cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
@@ -11757,6 +12031,8 @@ class Mascot:
             if self._set_pos:
                 new["settings_pos"] = list(self._set_pos)
             new["work_apps"] = apps_var.get().strip()
+            new["room_nick"] = nick_var.get().strip()[:14]
+            new["room_code"] = code_var.get().strip()[:40]
             new["goal_hours"] = float(new["goal_hours"])
             new["idle_sec"] = max(float(new["idle_sec"]), 5.0)
             new["sleep_min"] = max(1, int(new["sleep_min"]))
@@ -11773,7 +12049,13 @@ class Mascot:
                             or bool(new["show_timer"]) != self.timer_on
                             or bool(new["shadow"]) != bool(self.us.get("shadow", True)))
             old_slime = self.us.get("slime_kind")
+            # 방 코드가 바뀌면 붙어 있던 연결을 끊는다 — 안 그러면 옛 방에
+            # 계속 앉아 있는다 (RoomNet 은 만들 때의 코드를 그대로 쓴다).
+            room_moved = (str(new.get("room_code", "")) != str(self.us.get("room_code", ""))
+                          or bool(new.get("room_on")) != bool(self.us.get("room_on")))
             self.us.update(new)
+            if room_moved:
+                self._safe("room_move", self._room_reset)
             self._save_settings()
             self.idle_thr = self.us["idle_sec"]
             self.root.attributes("-topmost", bool(self.us["topmost"]))
@@ -11943,6 +12225,575 @@ class Mascot:
             self._log_error("restart")
             return                       # 못 띄웠으면 이쪽이라도 살려 둔다
         self.close()
+
+    # ── 같이 작업하는 방 ─────────────────────────────────────────────────
+    # 자리 이름(=파츠 폴더)으로 그 사람의 '앉은 모습'을 어디서 받아올지 안다.
+    # 내 도로롱은 배포 레포가 선물본 쪽이라 폴더 이름이 다르다.
+    ROOM_ART = {
+        "parts_junsa": ("junsa-mascot", "parts_junsa"),
+        "parts_dog": ("dog-mascot", "parts_dog"),
+        "parts_quincy": ("quincy-mascot", "parts_quincy"),
+        "parts_saga": ("saga-mascot", "parts_saga"),
+        "parts_gippo": ("gippo-mascot", "parts_gippo"),
+        "parts_myeoljong": ("myeoljong-mascot", "parts_myeoljong"),
+        "parts_dororong_gift": ("dororong-mascot", "parts_dororong_gift"),
+        "parts_dororong": ("dororong-mascot", "parts_dororong_gift"),
+    }
+    ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 236, 62
+    ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
+
+    def _room_on(self):
+        return bool(self.us.get("room_on")) and bool(ROOM_URL) and bool(ROOM_KEY)
+
+    def _room_nick(self):
+        return (str(self.us.get("room_nick") or "").strip()
+                or str(self.cfg.get("name") or self.char))
+
+    def _room_state_now(self):
+        """방에 보낼 값. 어떤 프로그램을 쓰는지·창 제목은 절대 안 보낸다."""
+        goal = max(0.1, float(self.us.get("goal_hours") or 6.0)) * 3600.0
+        today = self._today_secs()
+        if self._sleeping:
+            st = "sleep"
+        elif self._last_state == "work":
+            st = "work"
+        else:
+            st = "away"
+        return {"n": self._room_nick()[:14], "lv": self._level(),
+                "ti": self._title()[:14], "t": int(today // 60), "s": st,
+                "p": round(min(1.0, today / goal), 3),
+                "sl": bool(self.slime)}
+
+    def _room_start(self):
+        if self.room_net is not None or not self._room_on():
+            return
+        try:
+            self.room_net = RoomNet(self.char, self.us.get("room_code"))
+        except Exception:
+            self.room_net = None
+            self._log_error("room_start")
+
+    def _room_stop(self):
+        if self.room_net is not None:
+            try:
+                self.room_net.close()
+            except Exception:
+                pass
+            self.room_net = None
+        self.room_people = []
+
+    def _room_tick(self, now):
+        """방과 주고받기 — 그리는 쪽은 절대 기다리지 않는다."""
+        if not self._room_on():
+            if self.room_net is not None:
+                self._room_stop()
+                self._room_close()
+            return
+        if self.room_net is None:
+            self._room_start()
+        if self.room_net is None:
+            return
+        if now - self._room_push > 2.0:
+            self._room_push = now
+            self.room_net.push(self._room_state_now())
+        people, events = self.room_net.drain()
+        if people:
+            self.room_people = people
+            self._room_want_art(people)
+        for ev in events:
+            self._safe("room_ev", self._room_event, ev)
+
+    def _room_event(self, ev):
+        """남이 보낸 신호 — 내 캐릭터가 반응한다."""
+        who = ""
+        for p in self.room_people:
+            if p.get("slot") == ev.get("f"):
+                who = str(p.get("n") or "")
+                break
+        kind = ev.get("k")
+        now = time.time()
+        if kind == "poke":
+            self.smile_until = max(self.smile_until, now + 2.5)
+            self._say("%s가 콕 찔렀어요" % who if who else "누가 콕 찔렀어요", 3.0)
+            self._safe("room_poke_snd", self._poke_sound)
+        elif kind == "blanket":
+            self._say("%s가 담요를 덮어 줬어요" % who if who else "담요를 덮어 줬어요",
+                      3.5)
+            self.smile_until = max(self.smile_until, now + 3.0)
+        elif kind == "snack":
+            self._say("%s가 간식을 놓고 갔어요" % who if who else "간식이 놓여 있어요",
+                      3.5)
+            self.smile_until = max(self.smile_until, now + 3.0)
+        self._room_flash[ev.get("f", "")] = now
+
+    def _poke_sound(self):
+        snd = getattr(self, "pokesnd", None)
+        if snd is not None:
+            snd.play()
+
+    # ── 앉은 모습 그림 받아 두기 ────────────────────────────────────────
+    def _room_art_dir(self):
+        d = os.path.join(self.state_dir, ".room_art")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _room_want_art(self, people):
+        """없는 그림만 뒤에서 조용히 받아 둔다 (그리기와 따로)."""
+        need = []
+        for p in people:
+            slot = p.get("slot") or ""
+            if slot not in self.ROOM_ART or slot in self._room_art_bad:
+                continue
+            for tag in ("seat", "seat_idle"):
+                if os.path.isfile(os.path.join(HERE, slot, tag + ".png")):
+                    continue                      # 원본이 여기 있다
+                if not os.path.isfile(os.path.join(self._room_art_dir(),
+                                                   "%s_%s.png" % (slot, tag))):
+                    need.append((slot, tag))
+        if not need or self._room_art_th is not None:
+            return
+
+        def work():
+            for slot, tag in need:
+                repo, folder = self.ROOM_ART[slot]
+                url = ("https://raw.githubusercontent.com/rlfqjxm0-create/"
+                       "%s/main/%s/%s.png" % (repo, folder, tag))
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "mascot-room"})
+                    with urllib.request.urlopen(req, timeout=20) as r:
+                        raw = r.read()
+                    if len(raw) < 200:
+                        raise ValueError("너무 작음")
+                    tmp = os.path.join(self._room_art_dir(),
+                                       "%s_%s.png.tmp" % (slot, tag))
+                    with open(tmp, "wb") as fp:
+                        fp.write(raw)
+                    os.replace(tmp, tmp[:-4])
+                except Exception:
+                    self._room_art_bad.add(slot)
+            self._room_art_th = None
+
+        self._room_art_th = threading.Thread(target=work, daemon=True)
+        self._room_art_th.start()
+
+    def _room_img(self, slot, tag):
+        """방에 그릴 그림 (캐시). 아직 없으면 None."""
+        k = (slot, tag)
+        got = self._room_img_cache.get(k)
+        if got is not None:
+            return got
+        p = os.path.join(self._room_art_dir(), "%s_%s.png" % (slot, tag))
+        if not os.path.isfile(p):
+            # 그 캐릭터 폴더가 내 컴퓨터에 있으면 받아 올 것도 없다
+            # (원본을 쓰는 쪽. 친구들은 배포 레포에서 받는다)
+            local = os.path.join(HERE, slot, tag + ".png")
+            if os.path.isfile(local):
+                p = local
+            else:
+                return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            h = int(self.ROOM_FIG * self.ui_k)
+            im = im.resize((max(1, int(im.width * h / im.height)), h),
+                           Image.LANCZOS)
+            img = ImageTk.PhotoImage(im)
+        except Exception:
+            self._room_art_bad.add(slot)
+            return None
+        if len(self._room_img_cache) > 40:      # 상한 (지뢰 18)
+            for old in list(self._room_img_cache)[:20]:
+                self._room_img_cache.pop(old, None)
+        self._room_img_cache[k] = img
+        return img
+
+    # ── 방 창 ───────────────────────────────────────────────────────────
+    def _room_palette(self):
+        """시간에 따라 방 분위기가 바뀐다 (작업일 기준이 아니라 시계 기준)."""
+        h = time.localtime().tm_hour
+        if 6 <= h < 17:
+            return {"wall": "#f7eee4", "dot": "#f1e6d9", "card": "#fffdfa",
+                    "line": "#f0e5d8", "ink": "#68564c", "sub": "#a29186",
+                    "bar": "#fffbf5", "lamp": "#ffe2a8"}
+        if 17 <= h < 20:
+            return {"wall": "#f6e6da", "dot": "#efdccc", "card": "#fffaf3",
+                    "line": "#eeddcc", "ink": "#6b4f42", "sub": "#a89083",
+                    "bar": "#fff7ee", "lamp": "#ffcf8a"}
+        return {"wall": "#e7e3ef", "dot": "#ded9ea", "card": "#faf8ff",
+                "line": "#ddd6ea", "ink": "#4e485e", "sub": "#8d879c",
+                "bar": "#f4f1fa", "lamp": "#cfd6ff"}
+
+    def _room_reset(self):
+        """방 코드나 켬/끔이 바뀌었을 때 — 끊고 다시 붙는다."""
+        self._room_close()
+        self._room_stop()
+        self.room_people = []
+        self._room_flash.clear()
+
+    def _room_toggle(self):
+        """우클릭 > 홈. 처음이면 무엇이 나가는지 알려 주고 물어본다."""
+        if self.room_win is not None:
+            self._room_close()
+        elif self.us.get("room_seen") and self.us.get("room_on"):
+            self._safe("room_open", self._room_open)
+        else:
+            self._safe("room_ask", self._room_ask)
+
+    def _room_ask(self):
+        """켜기 전에 한 번만 — 무엇이 나가고 무엇은 안 나가는지."""
+        if getattr(self, "_room_ask_win", None) is not None                 and self._room_ask_win.winfo_exists():
+            self._room_ask_win.lift()
+            return
+        cd, u = self.card, self._ui
+        W, H = u(372), u(268)
+        win = tk.Toplevel(self.root)
+        self._room_ask_win = win
+        win.title("홈")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=cd["panel"])
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0)
+        cv.pack()
+        self._rr(cv, u(14), u(12), W - u(14), u(46), u(12), fill=cd["soft"],
+                 outline=cd["border"], width=2)
+        cv.create_text(W / 2, u(29), text="친구들과 같이 앉아서 작업해요",
+                       font=self._uf(10, True), fill=cd["text"])
+        lines = [
+            ("보내는 것", True),
+            ("· 방에서 보일 이름 (기본은 캐릭터 이름)", False),
+            ("· 레벨과 칭호", False),
+            ("· 오늘 작업한 시간, 지금 작업 중인지 자는지", False),
+            ("보내지 않는 것", True),
+            ("· 어떤 프로그램을 쓰는지, 창 제목", False),
+            ("· 그린 그림, 할 일, 마감, 그 밖의 모든 것", False),
+        ]
+        y = u(64)
+        for text, head in lines:
+            cv.create_text(u(26), y, anchor="w", text=text,
+                           font=self._uf(9, True) if head else self._uf(9),
+                           fill=cd["fill"] if head else cd["text"])
+            y += u(23) if head else u(20)
+            if head:
+                y -= u(3)
+        cv.create_text(W / 2, H - u(62), text="환경설정에서 언제든 끌 수 있어요",
+                       font=self._uf(8), fill=cd["sub"])
+
+        def go():
+            self.us["room_seen"] = True
+            self.us["room_on"] = True
+            self._safe("room_save", self._save_settings)
+            win.destroy()
+            self._room_ask_win = None
+            self._safe("room_open", self._room_open)
+
+        def no():
+            # 이 자리에서 바로 끌 수 있게 — 설정을 뒤지게 하지 않는다
+            self.us["room_seen"] = True
+            self.us["room_on"] = False
+            self._safe("room_save", self._save_settings)
+            self._safe("room_off", self._room_reset)
+            win.destroy()
+            self._room_ask_win = None
+
+        for label, fn, x0, strong in (("들어가기", go, W / 2 + u(6), True),
+                                      ("끄기", no, W / 2 - u(114), False)):
+            self._rr(cv, x0, H - u(44), x0 + u(108), H - u(14), u(15),
+                     fill=cd["fill"] if strong else cd["soft"],
+                     outline="" if strong else cd["border"],
+                     width=0 if strong else 1)
+            cv.create_text(x0 + u(54), H - u(29), text=label,
+                           font=self._uf(9, True),
+                           fill="#ffffff" if strong else cd["text"])
+            cv.tag_bind(cv.create_rectangle(x0, H - u(44), x0 + u(108),
+                                            H - u(14), fill="", outline=""),
+                        "<Button-1>", lambda e, f=fn: f())
+        def later():
+            # 그냥 닫은 것은 고른 게 아니다 — 다음에 다시 알려 준다
+            win.destroy()
+            self._room_ask_win = None
+
+        win.protocol("WM_DELETE_WINDOW", later)
+        win.bind("<Escape>", lambda e: later())
+        x = self.root.winfo_rootx() + self.W + u(12)
+        win.geometry("+%d+%d" % (x, max(0, self.root.winfo_rooty())))
+
+    def _room_close(self):
+        if self._room_job is not None:
+            try:
+                self.root.after_cancel(self._room_job)   # 지뢰 20
+            except Exception:
+                pass
+            self._room_job = None
+        w = self.room_win
+        self.room_win = None
+        self.room_cv = None
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+    def _room_open(self):
+        if self.room_win is not None:
+            return
+        if not self._room_on():
+            self._say("환경설정에서 '같이 작업하는 방'을 켜 주세요", 4.0)
+            return
+        k = self.ui_k
+        cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
+        rows = 2
+        W = int(16 * k) * 2 + cw * self.ROOM_COLS
+        H = int(self.ROOM_TOP * k) + ch * rows + int(34 * k)
+        win = tk.Toplevel(self.root)
+        win.title("같이 작업 중")
+        win.resizable(False, False)
+        win.configure(bg=self._room_palette()["wall"])
+        try:
+            win.iconphoto(False, self.tray_img) if getattr(
+                self, "tray_img", None) else None
+        except Exception:
+            pass
+        x = self.root.winfo_rootx() + self.W + int(12 * k)
+        y = max(0, self.root.winfo_rooty() - int(60 * k))
+        win.geometry("%dx%d+%d+%d" % (W, H, x, y))
+        cv = tk.Canvas(win, width=W, height=H, highlightthickness=0,
+                       bd=0, bg=self._room_palette()["wall"])
+        cv.pack(fill="both", expand=True)
+        cv.bind("<Button-1>", lambda e: self._safe("room_click",
+                                                   self._room_click, e))
+        win.protocol("WM_DELETE_WINDOW", self._room_close)
+        win.bind("<Escape>", lambda e: self._room_close())
+        self.room_win, self.room_cv = win, cv
+        self._room_hit = []
+        self._room_loop()
+
+    def _room_loop(self):
+        """방 창은 느리게 그린다 — 0.5초면 충분하고 부담이 거의 없다."""
+        self._room_job = None
+        if self.room_win is None:
+            return
+        self._room_job = self.root.after(500, self._room_loop)   # 먼저 예약
+        self._safe("room_draw", self._room_draw)
+
+    def _rr(self, cv, x0, y0, x1, y1, r, **kw):
+        pts = []
+        for cx, cy, a0, a1 in ((x1 - r, y0 + r, -90, 0), (x1 - r, y1 - r, 0, 90),
+                               (x0 + r, y1 - r, 90, 180),
+                               (x0 + r, y0 + r, 180, 270)):
+            for i in range(7):
+                a = math.radians(a0 + (a1 - a0) * i / 6)
+                pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
+        return cv.create_polygon(pts, smooth=True, **kw)
+
+    def _room_draw(self):
+        cv = self.room_cv
+        if cv is None or self.room_win is None:
+            return
+        P = self._room_palette()
+        k = self.ui_k
+        W = int(cv["width"])
+        H = int(cv["height"])
+        cv.delete("all")
+        cv.configure(bg=P["wall"])
+        self.room_win.configure(bg=P["wall"])
+        top = int(self.ROOM_TOP * k)
+        for yy in range(top, H, int(26 * k)):
+            for xx in range(int(13 * k) if (yy // int(26 * k)) % 2 else 0,
+                            W, int(26 * k)):
+                cv.create_oval(xx, yy, xx + 3, yy + 3, fill=P["dot"], width=0)
+        # 위쪽 띠
+        cv.create_rectangle(0, 0, W, top, fill=P["bar"], width=0)
+        cv.create_line(0, top, W, top, fill=P["line"], width=2)
+        cv.create_oval(16 * k, 16 * k, 36 * k, 36 * k, fill=P["lamp"], width=0)
+        me = self._room_state_now()
+        people = list(self.room_people)
+        if not any(p.get("slot") == self.char for p in people):
+            people.insert(0, dict(me, slot=self.char, age=0))
+        cv.create_text(46 * k, 16 * k, anchor="nw", text="우리 방",
+                       font=self._uf(13, True), fill=P["ink"])
+        live = time.time() - (self.room_net.ok_at if self.room_net else 0)
+        sub = ("%d명 같이 있어요" % len(people) if live < 60
+               else "연결 안 됨 — 인터넷을 확인해 주세요")
+        cv.create_text(46 * k, 36 * k, anchor="nw", text=sub,
+                       font=self._uf(9), fill=P["sub"])
+        tot = sum(int(p.get("t") or 0) for p in people)
+        cv.create_text(W - 18 * k, 14 * k, anchor="ne",
+                       text="오늘 다 같이  %d시간 %d분" % (tot // 60, tot % 60),
+                       font=self._uf(10, True), fill=P["ink"])
+        gx0, gx1 = W - 190 * k, W - 18 * k
+        self._rr(cv, gx0, 34 * k, gx1, 46 * k, 6 * k, fill=P["line"], width=0)
+        goal = max(1, len(people)) * 6 * 60
+        self._rr(cv, gx0, 34 * k,
+                 gx0 + (gx1 - gx0) * min(1.0, tot / goal), 46 * k, 6 * k,
+                 fill="#ffc87a", width=0)
+        # 사람들
+        cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
+        self._room_hit = []
+        for i, p in enumerate(people[:self.ROOM_COLS * 2]):
+            cx0 = int(16 * k) + (i % self.ROOM_COLS) * cw
+            cy0 = top + (i // self.ROOM_COLS) * chh
+            self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
+        cv.create_text(W // 2, H - 16 * k, anchor="center",
+                       text="캐릭터를 누르면 콕 찔러요 · 자는 사람에겐 담요를 덮어 줘요",
+                       font=self._uf(9), fill=P["sub"])
+
+    def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
+        slot = p.get("slot") or ""
+        sleeping = p.get("s") == "sleep"
+        col = self._room_tone(slot)
+        kx0, ky0 = cx0 + 8 * k, cy0 + 6 * k
+        kx1, ky1 = cx0 + cw - 8 * k, cy0 + ch - 16 * k
+        self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
+                 outline=P["line"], width=2)
+        floor = ky1 - 62 * k
+        self._rr(cv, kx0 + 2, floor, kx1 - 2, ky1 - 2, 16 * k,
+                 fill=self._tint(col, 0.72), width=0)
+        cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
+                            fill=self._tint(col, 0.72), width=0)
+        img = self._room_img(slot, "seat_idle" if sleeping else "seat")
+        if img is not None:
+            cv.create_image((kx0 + kx1) / 2, floor + 4 * k, image=img,
+                            anchor="s")
+        else:
+            cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
+                           (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,
+                           fill=self._tint(col, 0.5), width=0)
+            cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
+                           font=self._uf(12), fill=P["sub"])
+        if self._room_flash.get(slot, 0) > time.time() - 1.2:
+            cv.create_text((kx0 + kx1) / 2, floor - 78 * k, text="!",
+                           font=self._uf(16, True), fill=self._shade(col, 0.15))
+        lab = "Lv.%d  %s" % (int(p.get("lv") or 1), str(p.get("n") or "")[:12])
+        f = self._uf(10, True)
+        tw = self._room_tw(cv, lab, f)
+        px0 = (kx0 + kx1) / 2 - tw / 2 - 12 * k
+        py0 = floor + 2 * k
+        self._rr(cv, px0, py0, px0 + tw + 24 * k, py0 + 24 * k, 12 * k,
+                 fill="#ffffff", outline=col, width=2)
+        cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
+                       fill=P["sub"] if sleeping else P["ink"])
+        cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
+                       text=str(p.get("ti") or "")[:14], font=self._uf(8),
+                       fill=P["sub"])
+        bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
+        by = py0 + 48 * k
+        self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill=P["line"], width=0)
+        pr = max(0.0, min(1.0, float(p.get("p") or 0)))
+        if pr > 0.01:
+            self._rr(cv, bx0, by, bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k,
+                     fill=col, width=0)
+        cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
+                       text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"])
+        # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
+        self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
+
+    def _room_tw(self, cv, text, font):
+        """글자 폭 — 캔버스에 잠깐 그려 재고 지운다 (캐시는 안 쌓는다)."""
+        t = cv.create_text(-999, -999, text=text, font=font, anchor="nw")
+        box = cv.bbox(t)
+        cv.delete(t)
+        return (box[2] - box[0]) if box else len(text) * 8
+
+    def _room_tone(self, slot):
+        """그 캐릭터의 테마색. 어두우면 밝기 하한을 준다 — 안 그러면 묻힌다."""
+        c = self._room_tone_cache.get(slot)
+        if c:
+            return c
+        col = "#8b8b93"
+        if slot == self.char:
+            col = self.card.get("fill", col)
+        else:
+            p = os.path.join(HERE, slot, "config.json")
+            try:
+                with open(p, encoding="utf-8") as fp:
+                    col = (json.load(fp).get("card") or {}).get("fill", col)
+            except Exception:
+                pass
+        for _ in range(12):
+            r, g, b = (int(col[i:i + 2], 16) for i in (1, 3, 5))
+            if (r * 299 + g * 587 + b * 114) / 1000 >= 150:
+                break
+            col = self._tint(col, 0.16)
+        self._room_tone_cache[slot] = col
+        return col
+
+    def _room_photo(self):
+        """지금 방에 있는 사람들로 한 장 남긴다 — 작업 종료 때 부른다.
+
+        방 창이 안 떠 있어도 만든다(명단만 있으면 된다). 사람이 나뿐이면
+        찍지 않는다 — 혼자 찍은 단체사진은 의미가 없다.
+        """
+        people = [p for p in self.room_people
+                  if (p.get("slot") or "") != self.char]
+        if not people:
+            return None
+        me = dict(self._room_state_now(), slot=self.char)
+        row = [me] + people[:5]
+        P = self._room_palette()
+        pad, gap, fh = 22, 14, 150
+        figs = []
+        for p in row:
+            slot = p.get("slot") or ""
+            tag = "seat_idle" if p.get("s") == "sleep" else "seat"
+            src = os.path.join(self._room_art_dir(), "%s_%s.png" % (slot, tag))
+            if not os.path.isfile(src):
+                src = os.path.join(HERE, slot, tag + ".png")
+            if not os.path.isfile(src):
+                continue
+            try:
+                im = Image.open(src).convert("RGBA")
+            except Exception:
+                continue
+            im = im.resize((max(1, int(im.width * fh / im.height)), fh),
+                           Image.LANCZOS)
+            figs.append((p, im))
+        if len(figs) < 2:
+            return None
+        W = pad * 2 + sum(f.width for _p, f in figs) + gap * (len(figs) - 1)
+        H = pad + fh + 46
+        sheet = Image.new("RGB", (W, H), self._hex(P["wall"]))
+        d = ImageDraw.Draw(sheet)
+        x = pad
+        for p, f in figs:
+            sheet.paste(f, (x, pad), f)
+            nm = str(p.get("n") or "")[:10]
+            try:
+                fnt = ImageFont.truetype("malgun.ttf", 13)
+            except Exception:
+                fnt = None
+            tw = d.textlength(nm, font=fnt) if fnt else len(nm) * 8
+            d.text((x + f.width / 2 - tw / 2, pad + fh + 8), nm, font=fnt,
+                   fill=self._hex(P["ink"]))
+            x += f.width + gap
+        tot = sum(int(p.get("t") or 0) for p in row)
+        try:
+            fnt2 = ImageFont.truetype("malgun.ttf", 12)
+        except Exception:
+            fnt2 = None
+        d.text((pad, H - 20), "%s  ·  %d명이 다 같이 %d시간 %d분"
+               % (time.strftime("%Y-%m-%d"), len(row), tot // 60, tot % 60),
+               font=fnt2, fill=self._hex(P["sub"]))
+        out = os.path.join(self.state_dir, "단체사진")
+        os.makedirs(out, exist_ok=True)
+        path = os.path.join(out, time.strftime("%Y%m%d-%H%M%S") + ".png")
+        sheet.save(path)
+        return path
+
+    @staticmethod
+    def _hex(c):
+        return tuple(int(str(c)[i:i + 2], 16) for i in (1, 3, 5))
+
+    def _room_click(self, e):
+        for x0, y0, x1, y1, slot, sleeping in self._room_hit:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                if slot == self.char:
+                    self._say("저예요", 2.0)
+                    return
+                if self.room_net is not None:
+                    self.room_net.send(slot, "blanket" if sleeping else "poke")
+                self._room_flash[slot] = time.time()
+                return
 
     # ── 프리뷰 ───────────────────────────────────────────────────────────
     def _preview_shots(self):
