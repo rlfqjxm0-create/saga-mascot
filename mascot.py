@@ -3540,6 +3540,13 @@ class Mascot:
         self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
+        self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
+        self._room_meta = {}         # 캐릭터별 책상 높이
+        self._room_bg = None
+        self._room_body = []
+        self._room_key_last = None         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
+        self._room_body = []         # 숨쉬며 움직이는 몸 그림
+        self._room_key_last = None
         self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
         # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
         # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
@@ -12315,10 +12322,13 @@ class Mascot:
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
         who = ""
-        for p in self.room_people:
-            if p.get("slot") == ev.get("f"):
-                who = str(p.get("n") or "")
-                break
+        if ev.get("f") == self.char:
+            who = "나"
+        else:
+            for p in self.room_people:
+                if p.get("slot") == ev.get("f"):
+                    who = str(p.get("n") or "")
+                    break
         kind = ev.get("k")
         now = time.time()
         if kind == "poke":
@@ -12361,12 +12371,12 @@ class Mascot:
             slot = p.get("slot") or ""
             if slot not in self.ROOM_ART or slot in self._room_art_bad:
                 continue
-            for tag in ("seat", "seat_idle", "seat_type", "seat_pen",
-                        "seat_pen2"):
-                if os.path.isfile(os.path.join(HERE, slot, tag + ".png")):
+            for tag in ("seat.png", "seat_idle.png", "seat_type.png",
+                        "seat_pen.png", "seat_pen2.png", "seat_meta.json"):
+                if os.path.isfile(os.path.join(HERE, slot, tag)):
                     continue                      # 원본이 여기 있다
                 if not os.path.isfile(os.path.join(self._room_art_dir(),
-                                                   "%s_%s.png" % (slot, tag))):
+                                                   "%s_%s" % (slot, tag))):
                     need.append((slot, tag))
         if not need or self._room_art_th is not None:
             return
@@ -12375,7 +12385,7 @@ class Mascot:
             for slot, tag in need:
                 repo, folder = self.ROOM_ART[slot]
                 url = ("https://raw.githubusercontent.com/rlfqjxm0-create/"
-                       "%s/main/%s/%s.png" % (repo, folder, tag))
+                       "%s/main/%s/%s" % (repo, folder, tag))
                 try:
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "mascot-room"})
@@ -12384,7 +12394,7 @@ class Mascot:
                     if len(raw) < 200:
                         raise ValueError("너무 작음")
                     tmp = os.path.join(self._room_art_dir(),
-                                       "%s_%s.png.tmp" % (slot, tag))
+                                       "%s_%s.tmp" % (slot, tag))
                     with open(tmp, "wb") as fp:
                         fp.write(raw)
                     os.replace(tmp, tmp[:-4])
@@ -12395,37 +12405,68 @@ class Mascot:
         self._room_art_th = threading.Thread(target=work, daemon=True)
         self._room_art_th.start()
 
+    def _room_art_file(self, slot, name):
+        """받아 둔 것 먼저, 없으면 내 컴퓨터의 원본."""
+        p = os.path.join(self._room_art_dir(), "%s_%s" % (slot, name))
+        if os.path.isfile(p):
+            return p
+        local = os.path.join(HERE, slot, name)
+        return local if os.path.isfile(local) else None
+
+    def _room_deskline(self, slot):
+        """그림에서 책상이 시작되는 높이 (0~1). 모르면 None."""
+        if slot in self._room_meta:
+            return self._room_meta[slot]
+        v = None
+        p = self._room_art_file(slot, "seat_meta.json")
+        if p:
+            try:
+                with open(p, encoding="utf-8") as fp:
+                    v = float(json.load(fp).get("desk"))
+            except Exception:
+                v = None
+        self._room_meta[slot] = v
+        return v
+
     def _room_img(self, slot, tag):
-        """방에 그릴 그림 (캐시). 아직 없으면 None."""
+        """방에 그릴 그림 — (몸, 책상) 두 조각. 아직 없으면 None.
+
+        숨쉬듯 위아래로 움직이는 것은 몸뿐이어야 한다. 통째로 흔들면
+        책상까지 떠올라 어색하다. 책상이 시작되는 높이는 그림을 만들 때
+        같이 적어 둔다(seat_meta.json). 없으면 통짜로 돌려준다.
+        """
         k = (slot, tag)
         got = self._room_img_cache.get(k)
         if got is not None:
             return got
-        p = os.path.join(self._room_art_dir(), "%s_%s.png" % (slot, tag))
-        if not os.path.isfile(p) and tag not in ("seat", "seat_idle"):
-            return self._room_img(slot, "seat")     # 옛 배포본 — 기본 자세로
-        if not os.path.isfile(p):
-            # 그 캐릭터 폴더가 내 컴퓨터에 있으면 받아 올 것도 없다
-            # (원본을 쓰는 쪽. 친구들은 배포 레포에서 받는다)
-            local = os.path.join(HERE, slot, tag + ".png")
-            if os.path.isfile(local):
-                p = local
-            else:
-                return None
+        p = self._room_art_file(slot, tag + ".png")
+        if p is None:
+            if tag not in ("seat", "seat_idle"):
+                return self._room_img(slot, "seat")   # 옛 배포본 — 기본 자세로
+            return None
         try:
             im = Image.open(p).convert("RGBA")
             h = int(self.ROOM_FIG * self.ui_k)
             im = im.resize((max(1, int(im.width * h / im.height)), h),
                            Image.LANCZOS)
-            img = ImageTk.PhotoImage(im)
+            line = self._room_deskline(slot)
+            if line and 0.2 < line < 0.95:
+                # 몸은 통짜로 두고, 책상 조각을 그 위에 고정으로 덮는다.
+                # 몸을 잘라 올리면 잘린 자리가 그대로 드러난다 (실제로 겪음).
+                cut = int(h * line)
+                pair = (ImageTk.PhotoImage(im),
+                        ImageTk.PhotoImage(im.crop((0, cut, im.width, h))),
+                        h - cut)
+            else:
+                pair = (ImageTk.PhotoImage(im), None, 0)
         except Exception:
             self._room_art_bad.add(slot)
             return None
         if len(self._room_img_cache) > 40:      # 상한 (지뢰 18)
             for old in list(self._room_img_cache)[:20]:
                 self._room_img_cache.pop(old, None)
-        self._room_img_cache[k] = img
-        return img
+        self._room_img_cache[k] = pair
+        return pair
 
     # ── 방 창 ───────────────────────────────────────────────────────────
     def _room_palette(self):
@@ -12548,6 +12589,7 @@ class Mascot:
         w = self.room_win
         self.room_win = None
         self.room_cv = None
+        self._room_bg = None
         if w is not None:
             try:
                 w.destroy()
@@ -12589,14 +12631,67 @@ class Mascot:
         self._room_loop()
 
     def _room_loop(self):
-        """방 창은 느리게 그린다 — 0.5초면 충분하고 부담이 거의 없다."""
+        """숨쉬는 것만 바뀐 프레임에서는 몸 그림만 옮긴다.
+
+        캔버스를 통째로 지웠다 그리면 창 전체가 다시 칠해져서, 6명 기준으로
+        CPU가 9%p쯤 더 든다(실측). 사람·자세·고른 상대가 그대로면 옮기기만
+        하면 되고, 그때는 그 자리만 다시 칠해진다.
+        """
         self._room_job = None
         if self.room_win is None:
             return
-        self._room_job = self.root.after(120, self._room_loop)   # 먼저 예약
-        self._safe("room_draw", self._room_draw)
+        self._room_job = self.root.after(100, self._room_loop)   # 먼저 예약
+        self._safe("room_frame", self._room_frame)
+
+    def _room_key(self):
+        """다시 그려야 하는지 가르는 값 — 바뀌면 통째로 그린다."""
+        who = [(q.get("slot"), q.get("n"), q.get("lv"), q.get("ti"),
+                q.get("t"), q.get("p"), q.get("s"))
+               for q in self.room_people]
+        fresh = [k for k, v in self._room_flash.items()
+                 if v > time.time() - 1.6]
+        return (tuple(who), self._room_pick, tuple(sorted(fresh)),
+                int(time.time() - (self.room_net.ok_at if self.room_net else 0)
+                    > 60))
+
+    def _room_frame(self):
+        cv = self.room_cv
+        if cv is None or self.room_win is None:
+            return
+        key = self._room_key()
+        if key != self._room_key_last or not self._room_body:
+            self._room_key_last = key
+            self._room_draw()
+            return
+        now = time.time()
+        for i, (item, desk_item, slot, base, sleeping, pose) in enumerate(
+                self._room_body):
+            bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self.ui_k)
+            if sleeping:
+                bob *= 0.6
+            try:
+                x, y = cv.coords(item)
+                # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
+                # 옮기면 그 자리를 다시 칠하느라 CPU만 쓴다.
+                if abs((base + bob) - y) >= 1.0:
+                    cv.coords(item, x, base + bob)
+                q = next((r for r in self.room_people
+                          if r.get("slot") == slot), None)
+                want = self._room_pose(q) if q else pose
+                if want != pose:
+                    got = self._room_img(slot, want)
+                    if got:
+                        cv.itemconfigure(item, image=got[0])
+                        if desk_item and got[1] is not None:
+                            cv.itemconfigure(desk_item, image=got[1])
+                        self._room_body[i] = (item, desk_item, slot, base,
+                                              sleeping, want)
+            except Exception:
+                self._room_body = []
+                return
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
+        kw.setdefault("tags", "dyn")
         pts = []
         for cx, cy, a0, a1 in ((x1 - r, y0 + r, -90, 0), (x1 - r, y1 - r, 0, 90),
                                (x0 + r, y1 - r, 90, 180),
@@ -12614,42 +12709,62 @@ class Mascot:
         k = self.ui_k
         W = int(cv["width"])
         H = int(cv["height"])
-        cv.delete("all")
-        cv.configure(bg=P["wall"])
-        self.room_win.configure(bg=P["wall"])
         top = int(self.ROOM_TOP * k)
-        for yy in range(top, H, int(26 * k)):
-            for xx in range(int(13 * k) if (yy // int(26 * k)) % 2 else 0,
-                            W, int(26 * k)):
-                cv.create_oval(xx, yy, xx + 3, yy + 3, fill=P["dot"], width=0)
-        # 위쪽 띠
-        cv.create_rectangle(0, 0, W, top, fill=P["bar"], width=0)
-        cv.create_line(0, top, W, top, fill=P["line"], width=2)
-        cv.create_oval(16 * k, 16 * k, 36 * k, 36 * k, fill=P["lamp"], width=0)
+        # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
+        # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
+        key = (W, H, P["wall"])
+        if self._room_bg != key:
+            self._room_bg = key
+            cv.delete("all")
+            cv.configure(bg=P["wall"])
+            self.room_win.configure(bg=P["wall"])
+            step = max(8, int(26 * k))
+            for yy in range(top, H, step):
+                for xx in range((step // 2) if (yy // step) % 2 else 0,
+                                W, step):
+                    cv.create_oval(xx, yy, xx + 3, yy + 3, fill=P["dot"],
+                                   width=0, tags="bg")
+            cv.create_rectangle(0, 0, W, top, fill=P["bar"], width=0,
+                                tags="bg")
+            cv.create_line(0, top, W, top, fill=P["line"], width=2, tags="bg")
+        else:
+            cv.delete("dyn")
+        # 위쪽 줄 — 왼쪽 덩어리와 오른쪽 덩어리를 각각 가운데 정렬한다
+        mid = top / 2
+        cv.create_oval(18 * k, mid - 10 * k, 38 * k, mid + 10 * k,
+                       fill=P["lamp"], width=0, tags="dyn")
         me = self._room_state_now()
-        people = list(self.room_people)
-        if not any(p.get("slot") == self.char for p in people):
-            people.insert(0, dict(me, slot=self.char, age=0))
-        cv.create_text(46 * k, 16 * k, anchor="nw", text="우리 방",
-                       font=self._uf(13, True), fill=P["ink"])
+        people = [q for q in self.room_people
+                  if (q.get("slot") or "") != self.char]
+        people.insert(0, dict(me, slot=self.char, age=0))   # 내 것은 늘 최신
+        cv.create_text(50 * k, mid - 9 * k, anchor="w", text="우리 방",
+                       font=self._uf(13, True), fill=P["ink"], tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
-        sub = ("%d명 같이 있어요" % len(people) if live < 60
-               else "연결 안 됨 — 인터넷을 확인해 주세요")
-        cv.create_text(46 * k, 36 * k, anchor="nw", text=sub,
-                       font=self._uf(9), fill=P["sub"])
-        tot = sum(int(p.get("t") or 0) for p in people)
-        cv.create_text(W - 18 * k, 14 * k, anchor="ne",
+        if live > 60:
+            sub = "연결 안 됨 — 인터넷을 확인해 주세요"
+        elif len(people) < 2:
+            sub = "아직 혼자예요"
+        else:
+            sub = "%d명 같이 있어요" % len(people)
+        cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
+                       font=self._uf(9), fill=P["sub"], tags="dyn")
+        tot = sum(int(q.get("t") or 0) for q in people)
+        cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
                        text="오늘 다 같이  %d시간 %d분" % (tot // 60, tot % 60),
-                       font=self._uf(10, True), fill=P["ink"])
-        gx0, gx1 = W - 190 * k, W - 18 * k
-        self._rr(cv, gx0, 34 * k, gx1, 46 * k, 6 * k, fill=P["line"], width=0)
+                       font=self._uf(10, True), fill=P["ink"], tags="dyn")
+        gx0, gx1 = W - 200 * k, W - 20 * k
+        gy = mid + 9 * k
+        self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
+                 fill=P["line"], width=0)
         goal = max(1, len(people)) * 6 * 60
-        self._rr(cv, gx0, 34 * k,
-                 gx0 + (gx1 - gx0) * min(1.0, tot / goal), 46 * k, 6 * k,
-                 fill="#ffc87a", width=0)
+        if tot > 0:
+            self._rr(cv, gx0, gy - 5 * k,
+                     gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
+                     gy + 5 * k, 5 * k, fill="#ffc87a", width=0)
         # 사람들
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
+        self._room_body = []
         for i, p in enumerate(people[:self.ROOM_COLS * 2]):
             cx0 = int(16 * k) + (i % self.ROOM_COLS) * cw
             cy0 = top + (i // self.ROOM_COLS) * chh
@@ -12669,24 +12784,42 @@ class Mascot:
         self._rr(cv, kx0 + 2, floor, kx1 - 2, ky1 - 2, 16 * k,
                  fill=self._tint(col, 0.72), width=0)
         cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
-                            fill=self._tint(col, 0.72), width=0)
-        img = self._room_img(slot, self._room_pose(p))
-        if img is not None:
-            # 아주 살짝 위아래로 — 정지 그림이라도 멈춰 있어 보이지 않는다
+                            fill=self._tint(col, 0.72), width=0, tags="dyn")
+        got = self._room_img(slot, self._room_pose(p))
+        if got is not None:
+            body, desk, cut = got
+            # 숨쉬듯 아주 살짝. 움직이는 것은 몸뿐이고 책상은 고정이다.
             bob = math.sin(time.time() * 1.7 + hash(slot) % 7) * (1.6 * k)
             if sleeping:
-                bob *= 0.5
-            cv.create_image((kx0 + kx1) / 2, floor + 4 * k + bob, image=img,
-                            anchor="s")
+                bob *= 0.6
+            cx = (kx0 + kx1) / 2
+            base = floor + 4 * k
+            pose = self._room_pose(p)
+            item = cv.create_image(cx, base + bob, image=body, anchor="s",
+                                   tags="dyn")
+            ditem = None
+            if desk is not None:
+                # 책상을 나중에 그려 위에 덮는다 — 뒤에서 몸이 움직여도
+                # 책상은 붙박이고 이음매도 안 보인다.
+                ditem = cv.create_image(cx, base, image=desk, anchor="s",
+                                        tags="dyn")
+            self._room_body.append((item, ditem, slot, base, sleeping, pose))
         else:
             cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
                            (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,
-                           fill=self._tint(col, 0.5), width=0)
+                           fill=self._tint(col, 0.5), width=0, tags="dyn")
             cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
-                           font=self._uf(12), fill=P["sub"])
-        if self._room_flash.get(slot, 0) > time.time() - 1.2:
-            cv.create_text((kx0 + kx1) / 2, floor - 78 * k, text="!",
-                           font=self._uf(16, True), fill=self._shade(col, 0.15))
+                           font=self._uf(12), fill=P["sub"], tags="dyn")
+        fl = self._room_flash.get(slot, 0)
+        if fl > time.time() - 1.6:
+            note = (self._room_note[0]
+                    if self._room_note and self._room_note[1] >= fl - 0.3
+                    else "!")
+            self._rr(cv, (kx0 + kx1) / 2 - 26 * k, floor - 92 * k,
+                     (kx0 + kx1) / 2 + 26 * k, floor - 68 * k, 12 * k,
+                     fill="#ffffff", outline=col, width=2)
+            cv.create_text((kx0 + kx1) / 2, floor - 80 * k, text=note,
+                           font=self._uf(9, True), fill=self._shade(col, 0.15), tags="dyn")
         lab = "Lv.%d  %s" % (int(p.get("lv") or 1), str(p.get("n") or "")[:12])
         f = self._uf(10, True)
         tw = self._room_tw(cv, lab, f)
@@ -12695,10 +12828,10 @@ class Mascot:
         self._rr(cv, px0, py0, px0 + tw + 24 * k, py0 + 24 * k, 12 * k,
                  fill="#ffffff", outline=col, width=2)
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
-                       fill=P["sub"] if sleeping else P["ink"])
+                       fill=P["sub"] if sleeping else P["ink"], tags="dyn")
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
                        text=str(p.get("ti") or "")[:14], font=self._uf(8),
-                       fill=P["sub"])
+                       fill=P["sub"], tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
         self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill=P["line"], width=0)
@@ -12707,7 +12840,7 @@ class Mascot:
             self._rr(cv, bx0, by, bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k,
                      fill=col, width=0)
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
-                       text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"])
+                       text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
 
@@ -12731,7 +12864,7 @@ class Mascot:
         else:
             cap = "보낼 사람을 골라 주세요"
         cv.create_text(W // 2, by - 30 * k, anchor="center", text=cap,
-                       font=self._uf(9), fill=P["sub"])
+                       font=self._uf(9), fill=P["sub"], tags="dyn")
         row = len(self.ROOM_BTN) * bw + (len(self.ROOM_BTN) - 1) * gap
         pw = 66 * k
         px = W / 2 - row / 2 - pw - 18 * k
@@ -12741,7 +12874,7 @@ class Mascot:
                  outline=P["sub"] if all_on else P["line"],
                  width=2 if all_on else 1)
         cv.create_text(px + pw / 2, by + bw / 2, text="모두에게",
-                       font=self._uf(8, True), fill=P["ink"])
+                       font=self._uf(8, True), fill=P["ink"], tags="dyn")
         self._room_btn_hit = [(px, by + bw / 2 - 14 * k, px + pw,
                                by + bw / 2 + 14 * k, "@all")]
         live = who is not None or pick == "*"
@@ -12749,20 +12882,33 @@ class Mascot:
         for label, kind, col in self.ROOM_BTN:
             fill = col if live else self._tint(col, 0.62)
             cv.create_oval(x + 2, by + 2, x + bw + 2, by + bw + 2,
-                           fill=P["line"], width=0)
+                           fill=P["line"], width=0, tags="dyn")
             cv.create_oval(x, by, x + bw, by + bw, fill=fill,
-                           outline="#ffffff", width=2)
+                           outline="#ffffff", width=2, tags="dyn")
             cv.create_text(x + bw / 2, by + bw / 2, text=label,
                            font=self._uf(9, True),
-                           fill=P["ink"] if live else P["sub"])
+                           fill=P["ink"] if live else P["sub"], tags="dyn")
             if live:
                 self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
 
     def _room_send(self, kind):
-        """단추를 눌렀을 때 — 고른 상대에게만 간다."""
+        """단추를 눌렀을 때 — 고른 상대에게만 간다.
+
+        나에게 보낸 것은 서버를 거쳐 돌아오지 않는다(자기 것은 걸러진다).
+        그래서 나를 고른 경우에는 그 자리에서 바로 반응한다.
+        """
         to = self._room_pick
-        if not to or self.room_net is None:
+        if not to:
+            return
+        if to == self.char:
+            self._room_flash[to] = time.time()
+            self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
+                kind, kind), time.time())
+            self._safe("room_self", self._room_event,
+                       {"f": self.char, "k": kind})
+            return
+        if self.room_net is None:
             return
         self.room_net.send(to, kind)
         if to == "*":
@@ -12771,6 +12917,8 @@ class Mascot:
         else:
             self._room_flash[to] = time.time()
         self._room_sent = (kind, time.time())
+        self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
+            kind, kind), time.time())
 
     def _room_pose(self, p):
         """그 사람이 지금 뭘 하고 있는지에 맞는 그림을 고른다.
@@ -12898,10 +13046,12 @@ class Mascot:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 self._room_pick = None if self._room_pick == slot else slot
                 if slot == self.char:
-                    # 내 캐릭터를 누르면 방 전체에 손을 흔든다
+                    # 나를 눌러도 골라진다 (혼자서도 눌러 볼 수 있게).
+                    # 겸사겸사 방 전체에 손을 흔든다.
                     if self.room_net is not None:
                         self.room_net.send("*", "wave")
                     self._room_flash[slot] = time.time()
+                    self._room_note = ("손 흔들기", time.time())
                     self.smile_until = max(self.smile_until, time.time() + 2.0)
                     self._safe("room_wave_snd", self._poke_sound)
                 elif self.room_net is not None:
