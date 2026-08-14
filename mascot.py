@@ -3537,6 +3537,9 @@ class Mascot:
         self._room_art_th = None
         self._photo_after = None     # 단체사진 안내 예약
         self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
+        self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
+        self._room_btn_hit = []      # 아래 단추 자리
+        self._room_sent = None
         self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
         # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
         # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
@@ -12239,7 +12242,7 @@ class Mascot:
         "parts_dororong_gift": ("dororong-mascot", "parts_dororong_gift"),
         "parts_dororong": ("dororong-mascot", "parts_dororong_gift"),
     }
-    ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 236, 62
+    ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
     def _room_on(self):
@@ -12259,10 +12262,16 @@ class Mascot:
             st = "work"
         else:
             st = "away"
+        now = time.time()
+        act = ""
+        if st == "work":
+            # 최근에 무엇을 만졌는지 — 방에서 그 자세로 보여 준다
+            act = "key" if (now - self.last_pointer > 2.0
+                            and now - self.last_key < 1.8) else "pen"
         return {"n": self._room_nick()[:14], "lv": self._level(),
                 "ti": self._title()[:14], "t": int(today // 60), "s": st,
                 "p": round(min(1.0, today / goal), 3),
-                "sl": bool(self.slime)}
+                "a": act, "sl": bool(self.slime)}
 
     def _room_start(self):
         if self.room_net is not None or not self._room_on():
@@ -12320,6 +12329,10 @@ class Mascot:
             self._say("%s가 담요를 덮어 줬어요" % who if who else "담요를 덮어 줬어요",
                       3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
+        elif kind == "cheer":
+            self.smile_until = max(self.smile_until, now + 3.0)
+            self._say("%s가 응원했어요" % who if who else "누가 응원했어요", 3.5)
+            self._safe("room_cheer", self._burst, 10, 26)
         elif kind == "snack":
             self._say("%s가 간식을 놓고 갔어요" % who if who else "간식이 놓여 있어요",
                       3.5)
@@ -12344,7 +12357,8 @@ class Mascot:
             slot = p.get("slot") or ""
             if slot not in self.ROOM_ART or slot in self._room_art_bad:
                 continue
-            for tag in ("seat", "seat_idle"):
+            for tag in ("seat", "seat_idle", "seat_type", "seat_pen",
+                        "seat_pen2"):
                 if os.path.isfile(os.path.join(HERE, slot, tag + ".png")):
                     continue                      # 원본이 여기 있다
                 if not os.path.isfile(os.path.join(self._room_art_dir(),
@@ -12384,6 +12398,8 @@ class Mascot:
         if got is not None:
             return got
         p = os.path.join(self._room_art_dir(), "%s_%s.png" % (slot, tag))
+        if not os.path.isfile(p) and tag not in ("seat", "seat_idle"):
+            return self._room_img(slot, "seat")     # 옛 배포본 — 기본 자세로
         if not os.path.isfile(p):
             # 그 캐릭터 폴더가 내 컴퓨터에 있으면 받아 올 것도 없다
             # (원본을 쓰는 쪽. 친구들은 배포 레포에서 받는다)
@@ -12411,17 +12427,17 @@ class Mascot:
     def _room_palette(self):
         """시간에 따라 방 분위기가 바뀐다 (작업일 기준이 아니라 시계 기준)."""
         h = time.localtime().tm_hour
-        if 6 <= h < 17:
-            return {"wall": "#f7eee4", "dot": "#f1e6d9", "card": "#fffdfa",
-                    "line": "#f0e5d8", "ink": "#68564c", "sub": "#a29186",
-                    "bar": "#fffbf5", "lamp": "#ffe2a8"}
-        if 17 <= h < 20:
-            return {"wall": "#f6e6da", "dot": "#efdccc", "card": "#fffaf3",
-                    "line": "#eeddcc", "ink": "#6b4f42", "sub": "#a89083",
-                    "bar": "#fff7ee", "lamp": "#ffcf8a"}
-        return {"wall": "#e7e3ef", "dot": "#ded9ea", "card": "#faf8ff",
-                "line": "#ddd6ea", "ink": "#4e485e", "sub": "#8d879c",
-                "bar": "#f4f1fa", "lamp": "#cfd6ff"}
+        if 6 <= h < 17:                      # 낮 — 아주 연한 핑크
+            return {"wall": "#fdf2f6", "dot": "#f8e6ee", "card": "#fffcfd",
+                    "line": "#f6e2ea", "ink": "#6f5460", "sub": "#a8919c",
+                    "bar": "#fffafc", "lamp": "#ffd9e6"}
+        if 17 <= h < 20:                     # 저녁 — 조금 더 따뜻하게
+            return {"wall": "#fbeceF".replace("F", "f"), "dot": "#f6dfe6",
+                    "card": "#fffafb", "line": "#f4dde5", "ink": "#6d4e58",
+                    "sub": "#a68b95", "bar": "#fff8fa", "lamp": "#ffcbd9"}
+        return {"wall": "#f2e9f2", "dot": "#e8dced", "card": "#fdfaff",
+                "line": "#e6d9e8", "ink": "#584a5c", "sub": "#96879a",
+                "bar": "#fbf6fc", "lamp": "#e2cfe8"}
 
     def _room_reset(self):
         """방 코드나 켬/끔이 바뀌었을 때 — 끊고 다시 붙는다."""
@@ -12573,7 +12589,7 @@ class Mascot:
         self._room_job = None
         if self.room_win is None:
             return
-        self._room_job = self.root.after(500, self._room_loop)   # 먼저 예약
+        self._room_job = self.root.after(120, self._room_loop)   # 먼저 예약
         self._safe("room_draw", self._room_draw)
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
@@ -12634,9 +12650,7 @@ class Mascot:
             cx0 = int(16 * k) + (i % self.ROOM_COLS) * cw
             cy0 = top + (i // self.ROOM_COLS) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
-        cv.create_text(W // 2, H - 16 * k, anchor="center",
-                       text="캐릭터를 누르면 콕 찔러요 · 자는 사람에겐 담요를 덮어 줘요",
-                       font=self._uf(9), fill=P["sub"])
+        self._room_bar(cv, W, H, P, k, people)
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
         slot = p.get("slot") or ""
@@ -12644,16 +12658,21 @@ class Mascot:
         col = self._room_tone(slot)
         kx0, ky0 = cx0 + 8 * k, cy0 + 6 * k
         kx1, ky1 = cx0 + cw - 8 * k, cy0 + ch - 16 * k
+        picked = (self._room_pick == slot)
         self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
-                 outline=P["line"], width=2)
-        floor = ky1 - 62 * k
+                 outline=col if picked else P["line"], width=3 if picked else 2)
+        floor = ky1 - 74 * k
         self._rr(cv, kx0 + 2, floor, kx1 - 2, ky1 - 2, 16 * k,
                  fill=self._tint(col, 0.72), width=0)
         cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
                             fill=self._tint(col, 0.72), width=0)
-        img = self._room_img(slot, "seat_idle" if sleeping else "seat")
+        img = self._room_img(slot, self._room_pose(p))
         if img is not None:
-            cv.create_image((kx0 + kx1) / 2, floor + 4 * k, image=img,
+            # 아주 살짝 위아래로 — 정지 그림이라도 멈춰 있어 보이지 않는다
+            bob = math.sin(time.time() * 1.7 + hash(slot) % 7) * (1.6 * k)
+            if sleeping:
+                bob *= 0.5
+            cv.create_image((kx0 + kx1) / 2, floor + 4 * k + bob, image=img,
                             anchor="s")
         else:
             cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
@@ -12687,6 +12706,62 @@ class Mascot:
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"])
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
+
+    ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
+                ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
+
+    def _room_bar(self, cv, W, H, P, k, people):
+        """아래 단추 줄 — 고른 사람에게 보낸다. 아무도 안 골랐으면 방 전체."""
+        pick = self._room_pick
+        who = next((p for p in people if p.get("slot") == pick), None)
+        if pick == self.char:
+            who, pick = None, None
+        name = str(who.get("n") or "") if who else ""
+        cv.create_text(W // 2, H - 62 * k, anchor="center",
+                       text=("%s에게" % name) if name else "방에 있는 모두에게",
+                       font=self._uf(9), fill=P["sub"])
+        bw, gap = 46 * k, 14 * k
+        tot = len(self.ROOM_BTN) * bw + (len(self.ROOM_BTN) - 1) * gap
+        x = (W - tot) / 2
+        self._room_btn_hit = []
+        for label, kind, col in self.ROOM_BTN:
+            cv.create_oval(x + 2, H - 46 * k + 2, x + bw + 2, H - 46 * k + bw + 2,
+                           fill=P["line"], width=0)
+            cv.create_oval(x, H - 46 * k, x + bw, H - 46 * k + bw,
+                           fill=col, outline="#ffffff", width=2)
+            cv.create_text(x + bw / 2, H - 46 * k + bw / 2, text=label,
+                           font=self._uf(9, True), fill=P["ink"])
+            self._room_btn_hit.append((x, H - 46 * k, x + bw,
+                                       H - 46 * k + bw, kind))
+            x += bw + gap
+
+    def _room_send(self, kind):
+        """단추를 눌렀을 때 — 고른 사람에게, 아무도 안 골랐으면 방 전체에."""
+        if self.room_net is None:
+            return
+        to = self._room_pick
+        if not to or to == self.char:
+            to = "*"
+        self.room_net.send(to, kind)
+        self._room_flash[to if to != "*" else ""] = time.time()
+        self._room_sent = (kind, time.time())
+
+    def _room_pose(self, p):
+        """그 사람이 지금 뭘 하고 있는지에 맞는 그림을 고른다.
+
+        작업 중이면 두 자세를 번갈아 보여 준다 — 한 장만 쓰면 통째로 멈춰
+        보인다. 자세 그림이 없는 옛 배포본이면 _room_img 가 None 을 주므로
+        기본 자세로 물러난다.
+        """
+        if p.get("s") == "sleep":
+            return "seat_idle"
+        if p.get("s") != "work":
+            return "seat"
+        if p.get("a") == "key":
+            return "seat_type"
+        # 0.7초마다 손 위치가 바뀐다 (사람마다 박자를 어긋나게)
+        n = int(time.time() / 0.7 + (hash(p.get("slot") or "") % 3))
+        return "seat_pen" if n % 2 else "seat_pen2"
 
     def _room_tw(self, cv, text, font):
         """글자 폭 — 캔버스에 잠깐 그려 재고 지운다 (캐시는 안 쌓는다)."""
@@ -12785,15 +12860,21 @@ class Mascot:
         return tuple(int(str(c)[i:i + 2], 16) for i in (1, 3, 5))
 
     def _room_click(self, e):
+        for x0, y0, x1, y1, kind in self._room_btn_hit:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._safe("room_btn", self._room_send, kind)
+                return
         for x0, y0, x1, y1, slot, sleeping in self._room_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                if slot == self.char:
-                    self._say("저예요", 2.0)
-                    return
-                if self.room_net is not None:
+                # 누르면 고른다. 한 번 더 누르면 푼다(방 전체로 보낸다).
+                self._room_pick = None if self._room_pick == slot else slot
+                if slot != self.char and self.room_net is not None:
                     self.room_net.send(slot, "blanket" if sleeping else "poke")
-                self._room_flash[slot] = time.time()
+                    self._room_flash[slot] = time.time()
+                self._safe("room_draw", self._room_draw)
                 return
+        self._room_pick = None
+        self._safe("room_draw", self._room_draw)
 
     # ── 프리뷰 ───────────────────────────────────────────────────────────
     def _preview_shots(self):

@@ -1,7 +1,7 @@
 {
- "version": 1786694771,
+ "version": 1786695851,
  "files": {
-  "mascot.py": "64e1755edf354792d57185440bcd0137a8d62e1dd000b7a35c5240fe6f96f398",
+  "mascot.py": "7e6925a09b7253036500effef4bab583907b1f4e78bf929b813b09da53600f73",
   "parts_saga/arm_key.png": "77641097db051ac9a94a8ada77efd2dabcfca095402a443e1b8a7e30bc231011",
   "parts_saga/arm_pen.png": "4f1f9b24580480c1b6c9f7ae84036e9fa5085662b1f42daaf5e5eed1c64fed9f",
   "parts_saga/arm_right.png": "382923c4c3bbf1ad279786d7deca43430bc21b63e3e8ad884b7214dc3f27e890",
@@ -17,8 +17,11 @@
   "parts_saga/lashes.png": "8dca231d6662941086fcceb77b8bf59c33ef40b608630460221520cc9214f523",
   "parts_saga/layout.json": "9b744bdf0d9dde163f0ac66f8de1982fda4870c81c6bd3006a900c7fbf787bc1",
   "parts_saga/pupils.png": "a1ef09ef89e598394a03278af78c1337f74044e545f6744dd04d3632e22c4956",
-  "parts_saga/seat.png": "b6712b6487868018afe055ccede1e392d82e52ce9676ce9e85550ae93b68fa0a",
-  "parts_saga/seat_idle.png": "e4d1f1fe077670dbd934dc04d8fe1da0a7a87ba5c50c6d8e47028d11763752ef",
+  "parts_saga/seat.png": "6b9f31df495882051d7f5be01d581540ea67d4004ac78407dcbd070bb3cc9652",
+  "parts_saga/seat_idle.png": "082e7df15187c10394e8046f56137d46486b085cf7e188b798df28f2512c8e56",
+  "parts_saga/seat_pen.png": "9c6073c421bb9c283e85b66f8defc0e5455f3bdef709ff4ed00c63a1d5c8d81d",
+  "parts_saga/seat_pen2.png": "b10d5c2bb14e14701e24a67bc374b2f11c4a73b9df4284510118b1af6b4963da",
+  "parts_saga/seat_type.png": "e87b0b4ee60d5bd358c035d9fb3108a4fb6792d6a5a637b3ad11d5bbaff8701e",
   "parts_saga/smile.png": "140f963e21bfd663d7e774dd11bef3fe56bb9858b6d6f37fd79d161a915c6ae1",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
