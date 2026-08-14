@@ -4690,7 +4690,11 @@ class Mascot:
             if name in self._pil_cache:
                 x, y = self._pos(name)
                 comp.alpha_composite(self._pil_cache[name], (round(x) + P, round(y) + P))
-        arms = ["arm_key", "arm_right_typing" if typing else "arm_right"]
+        # typing_arm 을 끈 캐릭터는 타자 중에도 평소 팔을 쓴다 (프고).
+        arms = ["arm_key",
+                "arm_right_typing"
+                if (typing and self.cfg.get("typing_arm", True))
+                else "arm_right"]
         for name in arms:
             try:
                 im = self._load_pil(name)
@@ -11417,7 +11421,8 @@ class Mascot:
                                                   and "pen" not in f))
                 self._draw_left(now, f)
                 return
-        if pen_typing and "pen" not in f and "arm_right_typing" in self.hop:
+        if (pen_typing and "pen" not in f and "arm_right_typing" in self.hop
+                and self.cfg.get("typing_arm", True)):
             # 양손 타이핑: 왼손을 먼저(아래), 오른팔-타자를 나중(위) 그림
             self._draw_left(now, f)
             self.pen_ang += (self.pen_ang_t - self.pen_ang) * 0.5
