@@ -3582,6 +3582,7 @@ class Mascot:
         self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
         self._room_toast = None      # '보냈어요' 알림 (글, 시각)
         self._msg_win = None         # 오늘 한 줄 적는 창
+        self._room_msg_hit = None    # 홈에서 '오늘 한 줄'을 누르는 자리
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -3653,9 +3654,6 @@ class Mascot:
             menu.add_separator()
         if ROOM_URL and ROOM_KEY:
             menu.add_command(label="홈", command=self._room_toggle)
-            if self._room_on():
-                menu.add_command(label="오늘 한 줄",
-                                 command=self._room_msg_win)
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -12788,6 +12786,7 @@ class Mascot:
 
     def _room_close(self):
         self._room_fx = []
+        self._room_msg_hit = None
         if self._room_job is not None:
             try:
                 self.root.after_cancel(self._room_job)   # 지뢰 20
@@ -13000,6 +12999,7 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
+        self._room_msg_hit = None
         cols = max(1, self._room_cols)
         cap = cols * max(1, self._room_rows)
         if len(people) > cap:
@@ -13089,12 +13089,29 @@ class Mascot:
                        tags="dyn")
         # 오늘 한 줄이 있으면 칭호 대신 그것을 보여 준다 (직접 쓴 말이 먼저).
         msg = "" if off else str(p.get("m") or "").strip()
+        mine = (slot == self.char)
         line = "아직 안 켰어요" if off else (msg or str(p.get("ti") or ""))
+        if mine and not msg:
+            line = "오늘 한 줄 적기"      # 내 칸은 비어 있어도 누를 데를 보여 준다
         f2 = self._uf(8)
         while line and self._room_tw(cv, line, f2) > (kx1 - kx0) - 20 * k:
             line = line[:-1]
-        cv.create_text((kx0 + kx1) / 2, py0 + 34 * k, text=line, font=f2,
-                       fill=self._shade(col, 0.3) if msg else P["sub"],
+        my = py0 + 34 * k
+        if mine:
+            # 여기를 누르면 오늘 한 줄을 적는다. 칸의 나머지는 그대로
+            # 눌러서 인사하는 자리다 — 둘을 겹치지 않게 따로 잡는다.
+            tw2 = self._room_tw(cv, line, f2)
+            self._room_msg_hit = ((kx0 + kx1) / 2 - tw2 / 2 - 10 * k,
+                                  my - 11 * k,
+                                  (kx0 + kx1) / 2 + tw2 / 2 + 10 * k,
+                                  my + 11 * k)
+            self._rr(cv, self._room_msg_hit[0], self._room_msg_hit[1],
+                     self._room_msg_hit[2], self._room_msg_hit[3], 11 * k,
+                     fill="#ffffff", outline=self._tint(col, 0.5), width=1)
+        cv.create_text((kx0 + kx1) / 2, my, text=line, font=f2,
+                       fill=self._shade(col, 0.3) if msg
+                       else (self._tint(self._shade(col, 0.1), 0.25) if mine
+                             else P["sub"]),
                        tags="dyn")
         bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
         by = py0 + 48 * k
@@ -13621,8 +13638,10 @@ class Mascot:
         cv = self.room_cv
         if cv is None:
             return
-        hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
-                  for x0, y0, x1, y1, _k in self._room_btn_hit)
+        box = self._room_msg_hit
+        hot = bool(box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3])
+        hot = hot or any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                         for x0, y0, x1, y1, _k in self._room_btn_hit)
         if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _s, _z in self._room_hit)
@@ -13632,6 +13651,10 @@ class Mascot:
             cv.configure(cursor=want)
 
     def _room_click(self, e):
+        box = self._room_msg_hit          # 내 칸의 '오늘 한 줄'이 먼저다
+        if box and box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+            self._safe("room_msg_win", self._room_msg_win)
+            return
         for x0, y0, x1, y1, kind in self._room_btn_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 if kind == "@all":
