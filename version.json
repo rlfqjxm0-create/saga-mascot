@@ -1,7 +1,7 @@
 {
- "version": 1786834996,
+ "version": 1786836939,
  "files": {
-  "mascot.py": "05ab15e2503d393d6981134286139f6c9cb2d733cc9f833118bc672000997468",
+  "mascot.py": "d41e2f26686a3096a1cb9c600e02dede82ade40dbf8622e6a5ad4faf5b142dd2",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -12,6 +12,7 @@
   "parts_saga/desk.png": "6c54dfa18470e2a17e6080f2b4830a36e3dd49ff751a5c79403c1daa8cb5e5f1",
   "parts_saga/eyes_closed.png": "10b1932ea6dc355094a470d1b4bda98e181b98134986dc0827d9c63d6f2a9143",
   "parts_saga/hair.png": "7f07e033610d74dc907ac492f9fb3929c9959b468fb992bcec53db0d6bf3e150",
+  "parts_saga/hand.png": "14fcba700a6266576b2d5a5e8d6aa308f53ff0d00008e93ee51526d08eec067f",
   "parts_saga/hat.png": "4bd1da80b760cff3694c7b21350e8dce6a177026846dcd737d796ad7560f277f",
   "parts_saga/head.png": "8a829eec7d8dbba1efc44ac6f188d8383df55ec4f3fdc71e14e26149c100b14a",
   "parts_saga/lashes.png": "3974e3b5440baa79c41b478e782a5b2d5ad72741663a613643d8cca41cf48b9f",

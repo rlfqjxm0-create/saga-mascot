@@ -13085,7 +13085,7 @@ class Mascot:
     # 종류 → (목록에 쓰는 말, 짧은 말, 색)
     INBOX_WORD = {"poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
                   "cheer": ("응원했어요", "응원", "#ffbe55"),
-                  "blanket": ("담요를 덮어 줬어요", "담요", "#7fb3ff"),
+                  "blanket": ("쓰담쓰담 해 줬어요", "쓰담", "#ff9ec4"),
                   "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
                   "wave": ("손을 흔들었어요", "인사", "#c9a0ff")}
 
@@ -13224,7 +13224,7 @@ class Mascot:
             k = ev.get("k")
             self.smile_until = max(self.smile_until, time.time() + 2.5)
             self._say({"poke": "콕!", "cheer": "혼자 응원해 봤어요",
-                       "blanket": "담요를 덮었어요",
+                       "blanket": "혼자 쓰담쓰담 했어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
             self._char_fx_add(k, ev.get("x") or "")
@@ -13255,8 +13255,10 @@ class Mascot:
             self._say(("%s 콕 찔렀어요" % _josa(who)) if who
                       else "누가 콕 찔렀어요", 3.0)
         elif kind == "blanket":
-            self._say("%s 덕분에 따뜻해요" % who if who else "따뜻해요", 3.5)
-            self.smile_until = max(self.smile_until, now + 3.0)
+            self._say(("%s 쓰담쓰담 해 줬어요" % _josa(who)) if who
+                      else "쓰담쓰담 받았어요", 3.5)
+            # 쓰다듬는 동안 계속 웃는다 (연출이 끝날 때까지)
+            self.smile_until = max(self.smile_until, now + self.CHAR_FX)
         elif kind == "wave":
             self.smile_until = max(self.smile_until, now + 2.0)
             self._say(("%s 손을 흔들어요" % _josa(who)) if who
@@ -14028,8 +14030,10 @@ class Mascot:
         cv.create_text(x0 + w / 2, py0 + 12 * k, text=txt, font=f,
                        fill=self._shade(col, 0.2), tags="dyn")
 
+    # 신호 이름(blanket)은 그대로 둔다 — 친구마다 업데이트 시점이 달라서
+    # 이름을 바꾸면 옛 판이 보낸 것을 못 알아본다. 보이는 글자만 바꾼다.
     ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
-                ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
+                ("쓰담", "blanket", "#ffe0ee"), ("간식", "snack", "#def0d6"))
 
     ROOM_TOAST = 2.0         # '보냈어요' 알림이 떠 있는 시간(초)
 
@@ -14264,9 +14268,10 @@ class Mascot:
             p = (now - t0) / self.CHAR_FX          # 0 → 1
             if kind == "poke":
                 self._fx_poke(c, p, cx, mid, k)
-            elif kind in ("cheer", "blanket"):
-                # 담요도 하트로 (따뜻하다는 표시)
-                n = 7 if kind == "cheer" else 5
+            elif kind == "blanket":
+                self._fx_pat(c, p, cx, top, k)
+            elif kind == "cheer":
+                n = 7
                 for i in range(n):
                     q = p * 1.25 - i * 0.1
                     if 0 < q < 1:
@@ -14323,6 +14328,54 @@ class Mascot:
         c.create_polygon(x, y - r, x + w, y - w, x + r, y, x + w, y + w,
                          x, y + r, x - w, y + w, x - r, y, x - w, y - w,
                          fill=col, outline="", smooth=False)
+
+    def _fx_pat(self, c, p, cx, top, k):
+        """쓰담 — 머리 위로 손이 내려와 토닥이고 하트가 떠오른다.
+
+        머리 상자(`_head_box`)가 있으면 그 윗선을 쓴다. 캐릭터마다 머리
+        크기가 달라서 비율로 잡으면 손이 이마에 박히거나 허공에 뜬다.
+        """
+        hb = getattr(self, "_head_box", None)
+        hx = (hb[0] + hb[2]) / 2 if hb else cx
+        # _head_box 에는 oy(캐릭터가 아래로 내려간 만큼)가 빠져 있다.
+        # 그대로 쓰면 손이 머리가 아니라 타이머 카드 위에 그려진다
+        # (지뢰 43과 같은 함정 — 다른 곳도 self.oy 를 더해서 쓴다).
+        hy = (hb[1] + self.oy) if hb else top
+        # 세 번 토닥인다. 내려올 때 빠르고 올라갈 때 느리게 (손맛).
+        beat = min(1.0, p * 1.25)
+        s2 = math.sin(beat * math.pi * 3.0)
+        down = (1.0 - abs(s2)) if s2 > 0 else 1.0
+        # 머리 위에 남는 자리가 얼마 없다 (실측 28px). 멀리 띄우면 손이
+        # 창 밖으로 나가 잘린다 — 머리 윗선 언저리에서 오르내리게 한다.
+        r = 14 * k
+        y = hy - r * 0.5 + r * 1.15 * down
+        y = max(y, r * 1.0 + 2)          # 그래도 넘으면 끌어내린다
+        self._draw_hand(c, hx, y, r)
+        # 하트는 손 옆에서 떠오른다
+        for i in range(4):
+            q = p * 1.4 - i * 0.16
+            if 0 < q < 1:
+                dx = math.sin(q * 4.0 + i * 2.0) * 22 * k
+                yy = hy - q * 62 * k
+                sz = int((13 + 7 * (1 - q)) * k)
+                c.create_text(hx + dx + (i - 1.5) * 20 * k, yy, text="\u2665",
+                              font=("Malgun Gothic", sz),
+                              fill="#ff9ec4" if i % 2 else "#ffc0d4")
+
+    @staticmethod
+    def _draw_hand(c, x, y, r):
+        """토닥이는 손 — 손바닥과 손가락 넷. 글꼴을 안 써서 맥에서도 같다."""
+        skin, line = "#ffe7d2", "#d9a882"
+        c.create_oval(x - r, y - r * 0.72, x + r, y + r * 0.86,
+                      fill=skin, outline=line, width=2)
+        for i in range(4):
+            fx = x - r * 0.62 + i * (r * 0.42)
+            c.create_oval(fx - r * 0.21, y + r * 0.38,
+                          fx + r * 0.21, y + r * 1.06,
+                          fill=skin, outline=line, width=2)
+        # 손목 (위로 살짝)
+        c.create_rectangle(x - r * 0.34, y - r * 0.95, x + r * 0.34,
+                           y - r * 0.5, fill=skin, outline=line, width=2)
 
     def _fx_cake(self, c, p, cx, top, mid, k, name=""):
         """케이크가 접시째 책상 위로 떨어진다.
@@ -14416,7 +14469,7 @@ class Mascot:
                                        font=self._uf(int(9 + 4 * (1 - q))),
                                        fill=self._mix(col, soft, q), tags="fx")
             elif kind == "blanket":
-                q = min(1.0, p * 2.2)              # 담요가 덮인다
+                q = min(1.0, p * 2.2)              # 쓰담 (손이 토닥인다)
                 h = 52 * k * q
                 if h > 2:
                     self._rr(cv, cx - 46 * k, cy - 16 * k, cx + 46 * k,
