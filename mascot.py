@@ -3843,6 +3843,8 @@ class Mascot:
         self._room_inbox_panel = None    # 펼쳐진 목록의 자리
         self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
         self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
+        self._snack_list = None          # 간식 그림 이름들 (첫 사용 때 읽는다)
+        self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -13119,7 +13121,7 @@ class Mascot:
                        "blanket": "담요를 덮었어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
-            self._char_fx_add(k)
+            self._char_fx_add(k, ev.get("x") or "")
             self._safe("self_poke_snd", self._room_sound)
             return
         if False:
@@ -13140,7 +13142,7 @@ class Mascot:
         if now - last > max(60.0, float(getattr(self, "idle_thr", 120.0))):
             self._away_got.append((who, kind))
             del self._away_got[:-20]
-        self._char_fx_add(kind)               # 타이머 화면에서 터진다
+        self._char_fx_add(kind, ev.get("x") or "")   # 타이머 화면에서 터진다
         self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
@@ -13162,7 +13164,8 @@ class Mascot:
                       else "간식이 놓여 있어요", 3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
         self._room_flash[ev.get("f", "")] = now
-        self._room_fx_add(self.char, kind)     # 받은 것은 내 칸에서 터진다
+        # 받은 것은 내 칸에서 터진다
+        self._room_fx_add(self.char, kind, ev.get("x") or "")
 
     def _poke_sound(self):
         snd = getattr(self, "pokesnd", None)
@@ -14007,18 +14010,20 @@ class Mascot:
         to = self._room_pick
         if not to:
             return
+        # 간식은 그림 하나를 골라 신호에 실어 보낸다 — 받는 쪽도 같은 것을 본다
+        extra = self._snack_pick(time.time() * 1000) if kind == "snack" else ""
         if to == self.char:
-            self._room_fx_add(to, kind)
+            self._room_fx_add(to, kind, extra)
             self._room_toast_say(to, kind)
             self._room_flash[to] = time.time()
             self._room_note = (dict((b, a) for a, b, _c in self.ROOM_BTN).get(
                 kind, kind), time.time())
             self._safe("room_self", self._room_event,
-                       {"f": self.char, "k": kind})
+                       {"f": self.char, "k": kind, "x": extra})
             return
         if self.room_net is None:
             return
-        self.room_net.send(to, kind)
+        self.room_net.send(to, kind, extra or None)
         self._room_toast_say(to, kind)
         if to == "*":
             for q in self.room_people:
@@ -14082,10 +14087,61 @@ class Mascot:
 
     CHAR_FX = 2.2            # 캐릭터 창 연출이 보이는 시간(초)
 
-    def _char_fx_add(self, kind):
-        """내 캐릭터 창에서 터지는 연출 — 남이 눌러 줬을 때."""
+    SNACK_CACHE = 40         # 만들어 둘 간식 그림 장수 (한 장 60KB쯤)
+
+    def _snack_names(self):
+        """간식 그림 이름들 (없으면 빈 목록 — 그때는 그려서 낸다)."""
+        got = getattr(self, "_snack_list", None)
+        if got is None:
+            got = []
+            try:
+                d = os.path.join(self.dir, "snacks")
+                got = sorted(f[:-4] for f in os.listdir(d)
+                             if f.lower().endswith(".png"))
+            except Exception:
+                got = []
+            self._snack_list = got
+        return got
+
+    def _snack_pick(self, seed):
+        """무작위로 하나 — 같은 씨앗이면 늘 같은 것 (프레임마다 안 바뀐다)."""
+        names = self._snack_names()
+        if not names:
+            return ""
+        # 나머지 연산으로 고르면 씨앗이 규칙적일 때 몇 개만 돌아 나온다
+        # (1000씩 늘려 봤더니 열여덟 중 아홉만 나왔다). 섞어서 고른다.
+        return names[random.Random(int(seed)).randrange(len(names))]
+
+    def _snack_photo(self, name, long_px):
+        """그 크기의 간식 그림. 만든 것은 들고 있는다 (상한 있음)."""
+        key = (name, int(long_px))
+        cache = self._snack_cache
+        got = cache.get(key)
+        if got is not None:
+            return got
+        try:
+            im = Image.open(os.path.join(self.dir, "snacks", name + ".png"))
+            im = im.convert("RGBA")
+            w, h = im.size
+            r = float(long_px) / max(1, max(w, h))
+            im = im.resize((max(1, round(w * r)), max(1, round(h * r))),
+                           Image.LANCZOS)
+            got = ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+        if len(cache) > self.SNACK_CACHE:      # 오래된 절반만 버린다 (지뢰 18)
+            for k2 in list(cache)[:self.SNACK_CACHE // 2]:
+                cache.pop(k2, None)
+        cache[key] = got
+        return got
+
+    def _char_fx_add(self, kind, extra=""):
+        """내 캐릭터 창에서 터지는 연출 — 남이 눌러 줬을 때.
+
+        extra 는 간식 종류처럼 '무엇을 보냈는지'다 (보낸 쪽이 정한다).
+        """
         self._char_fx = [f for f in self._char_fx if f[0] != kind][-3:]
-        self._char_fx.append((kind, time.time()))
+        self._char_fx.append((kind, time.time(), str(extra or "")))
 
     def _draw_char_fx(self, now):
         """콕·응원·담요·간식이 캐릭터 위에서 보이게. draw() 끝에서 부른다."""
@@ -14098,7 +14154,7 @@ class Mascot:
         cx = self.ox + self.cw_px / 2
         top = self.oy + self.ch_px * 0.13         # 머리 언저리
         mid = self.oy + self.ch_px * 0.44
-        for kind, t0 in self._char_fx:
+        for kind, t0, extra in self._char_fx:
             p = (now - t0) / self.CHAR_FX          # 0 → 1
             if kind == "poke":
                 self._fx_poke(c, p, cx, mid, k)
@@ -14115,7 +14171,8 @@ class Mascot:
                                       text="\u2665", font=("Malgun Gothic", sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "snack":
-                self._fx_cake(c, p, cx, top, mid, k)
+                self._fx_cake(c, p, cx, top, mid, k,
+                              extra or self._snack_pick(t0 * 1000))
 
     POKE_RING = ("#ff9ec4", "#ffb6d2", "#ffd6e4")
 
@@ -14161,7 +14218,7 @@ class Mascot:
                          x, y + r, x - w, y + w, x - r, y, x - w, y - w,
                          fill=col, outline="", smooth=False)
 
-    def _fx_cake(self, c, p, cx, top, mid, k):
+    def _fx_cake(self, c, p, cx, top, mid, k, name=""):
         """케이크가 접시째 책상 위로 떨어진다.
 
         책상 그림이 있으면 상판 위에 놓는다. 캐릭터마다 책상 높이가 달라서
@@ -14182,7 +14239,17 @@ class Mascot:
         land = max(land, top + 20 * k)
         start = top - 48 * k
         q = min(1.0, p * 1.7)
-        self._mini_cake(c, cx, start + q * q * (land - start), r)
+        y = start + q * q * (land - start)
+        img = self._snack_photo(name, int(62 * k)) if name else None
+        if img is None:
+            self._mini_cake(c, cx, y, r)
+            return
+        # 접시 위에 놓인 것처럼 — 그림 밑선을 케이크 밑선에 맞춘다
+        bot = y + r * 1.16
+        pw = img.width() * 0.52
+        c.create_oval(cx - pw, bot - r * 0.32, cx + pw, bot + r * 0.34,
+                      fill="#ffffff", outline="#c6bfce", width=2)
+        c.create_image(cx, bot + r * 0.1, image=img, anchor="s")
 
     def _mini_cake(self, c, cx, cy, r):
         """접시에 놓인 조각 케이크 — 크림 위에 딸기 하나."""
@@ -14201,20 +14268,20 @@ class Mascot:
         c.create_line(cx, cy - r * 1.15, cx, cy - r * 1.4,
                       fill="#6aa84f", width=2)
 
-    def _room_fx_add(self, slot, kind):
+    def _room_fx_add(self, slot, kind, extra=""):
         """그 사람 칸에 연출을 띄운다 (보낸 쪽·받은 쪽 모두)."""
         if not slot:
             return
         self._room_fx = [f for f in self._room_fx if f[0] != slot][-8:]
-        self._room_fx.append((slot, kind, time.time()))
+        self._room_fx.append((slot, kind, time.time(), str(extra or "")))
 
     def _room_fx_draw(self, cv, k):
         """연출은 매 프레임 지웠다 다시 그린다 (한 번에 몇 개 안 된다)."""
         now = time.time()
         self._room_fx = [f for f in self._room_fx
-                         if now - f[2] < self.ROOM_FX]
+                         if len(f) == 4 and now - f[2] < self.ROOM_FX]
         cv.delete("fx")
-        for slot, kind, t0 in self._room_fx:
+        for slot, kind, t0, extra in self._room_fx:
             box = next((h for h in self._room_hit if h[4] == slot), None)
             if not box:
                 continue
@@ -14259,7 +14326,12 @@ class Mascot:
             elif kind == "snack":
                 q = min(1.0, p * 1.8)              # 간식이 툭 떨어진다
                 yy = cy - 40 * k + q * q * 66 * k
-                if q < 1:
+                pic = self._snack_photo(
+                    extra or self._snack_pick(t0 * 1000), int(34 * k))
+                if pic is not None:
+                    cv.create_image(cx, yy + 13 * k, image=pic, anchor="s",
+                                    tags="fx")
+                elif q < 1:
                     r = 13 * k
                     self._rr(cv, cx - r, yy - r * 0.8, cx + r, yy + r * 0.8,
                              5 * k, fill="#f0c98a", outline="#c99a55",
