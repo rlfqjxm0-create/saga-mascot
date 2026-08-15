@@ -3227,6 +3227,7 @@ class RoomNet:
         self.room, self.key = _room_keys(code)
         self._state = dict(state or {})
         self._out = []            # 보낼 신호
+        self._done = []           # 서버가 받아 준 신호 (보낸 쪽 확인용)
         self._roster = []         # 받은 사람들
         self._events = []         # 받은 신호
         self._lock = threading.Lock()
@@ -3257,6 +3258,14 @@ class RoomNet:
         with self._lock:
             if len(self._out) < 8:
                 self._out.append((str(to_slot)[:40], str(kind)[:16], extra))
+
+    def take_sent(self):
+        """서버가 받아 준 신호를 꺼내 간다 (앞에서 꺼내 비운다 — 지뢰 26)."""
+        out = []
+        with self._lock:
+            while self._done:
+                out.append(self._done.pop(0))
+        return out
 
     def drain(self):
         """쌓인 것을 꺼내 간다 — (사람들, 신호들)."""
@@ -3328,6 +3337,11 @@ class RoomNet:
                                "p_blob": _room_seal(
                                    self.key, {"f": self.slot, "k": kind,
                                               "x": extra})})
+                    # 서버가 받아 준 것만 적는다 — 눌렀다고 세면 '갔는지'를
+                    # 확인하는 뜻이 없어진다.
+                    with self._lock:
+                        if len(self._done) < 60:
+                            self._done.append((to, kind))
                 if now - t_list >= i_list:
                     t_list = now
                     rows = self._rpc("room_list", {"p_room": self.room}) or []
@@ -3828,6 +3842,7 @@ class Mascot:
         self._room_inbox_hit = None  # 배지를 누를 수 있는 자리
         self._room_inbox_panel = None    # 펼쳐진 목록의 자리
         self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
+        self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -12870,6 +12885,18 @@ class Mascot:
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now())
+        # 서버가 받아 준 신호를 세어 둔다 (그 사람 칸에 보인다)
+        take = getattr(self.room_net, "take_sent", None)
+        if take is not None:
+            for to, _kind in take():
+                if to == "*":
+                    # 방 전체에 보낸 것은 지금 있는 사람들 몫으로 나눈다
+                    for q in self.room_people:
+                        sl = q.get("slot")
+                        if sl and sl != self.char and not q.get("off"):
+                            self._safe("sent_add", self._sent_add, sl)
+                elif to and to != self.char:
+                    self._safe("sent_add", self._sent_add, to)
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
@@ -12970,6 +12997,8 @@ class Mascot:
                 pass
             if not isinstance(d.get("list"), list):
                 d["list"] = []
+            if not isinstance(d.get("sent"), dict):
+                d["sent"] = {}
             self._inbox = d
         self._inbox_roll()
         return self._inbox
@@ -12987,6 +13016,7 @@ class Mascot:
         if d.get("day") != day:
             d["day"] = day
             d["list"] = []
+            d["sent"] = {}
             self._inbox_save()
 
     def _inbox_save(self):
@@ -13004,6 +13034,28 @@ class Mascot:
         if len(d["list"]) > self.INBOX_MAX:
             d["list"] = d["list"][-self.INBOX_MAX:]
         self._inbox_save()
+
+    def _sent_add(self, slot):
+        """그 사람에게 보낸 것이 서버에 닿았다."""
+        d = self._inbox_get()
+        if not isinstance(d.get("sent"), dict):
+            d["sent"] = {}
+        d["sent"][slot] = int(d["sent"].get(slot, 0)) + 1
+        self._inbox_save()
+
+    def _sent_count(self, slot):
+        """오늘 그 사람에게 보낸 수 (서버가 받아 준 것만)."""
+        try:
+            return int((self._inbox_get().get("sent") or {}).get(slot, 0))
+        except Exception:
+            return 0
+
+    def _sent_total(self):
+        try:
+            return sum(int(v) for v in
+                       (self._inbox_get().get("sent") or {}).values())
+        except Exception:
+            return 0
 
     def _inbox_items(self):
         """새것이 위로 오게 뒤집어 돌려준다."""
@@ -13469,6 +13521,7 @@ class Mascot:
         return (tuple(who), self._room_pick, tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
+                self._sent_total(),
                 bool(ts and time.time() - ts[1] < self.ROOM_TOAST),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
@@ -13692,6 +13745,8 @@ class Mascot:
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
         slot = p.get("slot") or ""
+        if slot == self.char:
+            self._room_msg_box = None      # 이번 프레임의 말풍선 자리
         sleeping = p.get("s") == "sleep"
         off = bool(p.get("off"))
         col = self._room_tone(slot)
@@ -13753,15 +13808,10 @@ class Mascot:
             # 말풍선은 꼬리까지 그 안에 들어가야 머리를 안 가린다.
             f3 = self._uf(10)
             line = msg
+            # 말풍선은 늘 가운데, 제 폭 그대로. 자리가 모자라면 표가
+            # 비켜 준다(_room_inbox_badge) — 말풍선을 미는 쪽은 보기 안 좋다.
             room = (kx1 - kx0) - 34 * k
             bub = cx2
-            # 내 칸에는 오른쪽 위에 배지가 있다. 말풍선을 왼쪽으로 밀어
-            # 자리를 나눠 쓴다 — 가운데에 둔 채로 좁히면 훨씬 많이 잘린다
-            # (폭 321px 칸에서 99px 대 177px). 남이 보는 내 칸에는 배지가
-            # 없으니 잘리는 것은 내 화면의 내 칸뿐이다.
-            if slot == self.char and (self._inbox_get().get("list") or []):
-                room = (kx1 - kx0) - 104 * k
-                bub = (kx0 + 8 * k + kx1 - 68 * k) / 2
             while line and self._room_tw(cv, line, f3) > room:
                 line = line[:-1]
             tw3 = self._room_tw(cv, line, f3)
@@ -13780,6 +13830,9 @@ class Mascot:
                            tags="dyn")
             cv.create_text(bub, ny, text=line, font=f3,
                            fill=self._shade(col, 0.25), tags="dyn")
+            if slot == self.char:      # 표가 피해 갈 자리 (꼬리까지)
+                self._room_msg_box = (bub - tw3 / 2 - 14 * k, ny - 15 * k,
+                                      bub + tw3 / 2 + 14 * k, ny + 24 * k)
         lab = (str(p.get("n") or "")[:12] if off
                else "Lv.%d  %s" % (int(p.get("lv") or 1),
                                    str(p.get("n") or "")[:12]))
@@ -13792,6 +13845,9 @@ class Mascot:
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
                        fill=P["sub"] if (sleeping or off) else P["ink"],
                        tags="dyn")
+        if slot != self.char:
+            self._safe("sent_chip", self._room_sent_chip, cv, slot,
+                       px0 + tw + 24 * k, py0, kx1, k, col)
         # 이 자리는 칭호와 접속 여부를 알려 준다. 오늘 한 줄은 캐릭터
         # 위쪽 빈자리에 말풍선으로 따로 띄운다.
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
@@ -13823,19 +13879,45 @@ class Mascot:
         n = len(self._inbox_get().get("list") or [])
         if not n:
             return
-        w, h = 46 * k, 24 * k
-        x1 = kx1 - 10 * k
-        x0, y0 = x1 - w, ky0 + 8 * k
+        txt = "\u2665%d" % min(n, 99)
+        f = self._uf(8, True)
+        w = self._room_tw(cv, txt, f) + 13 * k
+        h = 19 * k
+        x1 = kx1 - 8 * k
+        x0, y0 = x1 - w, ky0 + 7 * k
+        # 오늘 한 줄이 길어 자리가 없으면 말풍선 바로 아래로 내려간다.
+        # 말풍선을 옆으로 미는 것보다 이쪽이 보기 낫다.
+        box = getattr(self, "_room_msg_box", None)
+        if box and box[2] + 3 * k > x0 and box[1] < y0 + h:
+            y0 = box[3] + 3 * k
         self._rr(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
                  outline="#ff8fb8", width=2)
-        cv.create_text((x0 + x1) / 2, y0 + h / 2, text="\u2665 %d" % min(n, 99),
-                       font=self._uf(9, True), fill="#ff6f9f", tags="dyn")
+        cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt,
+                       font=f, fill="#ff6f9f", tags="dyn")
         if self._inbox_unread():
-            cv.create_oval(x1 - 6 * k, y0 - 5 * k, x1 + 5 * k, y0 + 6 * k,
+            cv.create_oval(x1 - 5 * k, y0 - 4 * k, x1 + 4 * k, y0 + 5 * k,
                            fill="#ff4d6d", outline="#ffffff", width=2,
                            tags="dyn")
-        self._room_inbox_hit = (x0 - 5 * k, y0 - 6 * k,
-                                x1 + 7 * k, y0 + h + 5 * k)
+        self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
+                                x1 + 6 * k, y0 + h + 5 * k)
+
+    def _room_sent_chip(self, cv, slot, x0, py0, kx1, k, col):
+        """내가 오늘 그 사람에게 보낸 수 — 이름표 바로 오른쪽에.
+
+        칸 위쪽은 '오늘 한 줄' 말풍선 자리라 거기 두면 긴 한 줄이 잘린다.
+        서버가 받아 준 것만 세므로, 눌렀는데 안 늘면 안 간 것이다.
+        """
+        n = self._sent_count(slot)
+        if not n:
+            return
+        txt = "\u2192 %d" % min(n, 99)
+        f = self._uf(8, True)
+        w = self._room_tw(cv, txt, f) + 14 * k
+        x0 = min(x0 + 4 * k, kx1 - 6 * k - w)
+        self._rr(cv, x0, py0 + 3 * k, x0 + w, py0 + 21 * k, 9 * k,
+                 fill="#ffffff", outline=self._tint(col, 0.35), width=1)
+        cv.create_text(x0 + w / 2, py0 + 12 * k, text=txt, font=f,
+                       fill=self._shade(col, 0.2), tags="dyn")
 
     ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
                 ("담요", "blanket", "#d6e8ff"), ("간식", "snack", "#def0d6"))
