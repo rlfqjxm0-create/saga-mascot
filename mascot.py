@@ -13566,20 +13566,28 @@ class Mascot:
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
         cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=P["sub"], tags="dyn")
-        self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
+        # 숫자를 띄울 때는 그 줄에 방 번호가 이미 들어 있다 (겹치지 않게)
+        if not self._safe_str(self._room_numbers, on, live):
+            self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
         tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
-        cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
-                       text="오늘 다 같이  %d시간 %d분" % (tot // 60, tot % 60),
-                       font=self._uf(10, True), fill=P["ink"], tags="dyn")
-        gx0, gx1 = W - 200 * k, W - 20 * k
-        gy = mid + 9 * k
-        self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
-                 fill="#ffffff", outline=P["line"], width=1)
-        goal = max(1, on) * 6 * 60
-        if tot > 0:
-            self._rr(cv, gx0, gy - 5 * k,
-                     gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
-                     gy + 5 * k, 5 * k, fill="#ffc87a", width=0)
+        nums = self._safe_str(self._room_numbers, on, live)
+        if nums:
+            cv.create_text(W - 20 * k, mid, anchor="e", text=nums,
+                           font=self._uf(8), fill=P["sub"], tags="dyn")
+        else:
+            cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
+                           text="오늘 다 같이  %d시간 %d분"
+                           % (tot // 60, tot % 60),
+                           font=self._uf(10, True), fill=P["ink"], tags="dyn")
+            gx0, gx1 = W - 200 * k, W - 20 * k
+            gy = mid + 9 * k
+            self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
+                     fill="#ffffff", outline=P["line"], width=1)
+            goal = max(1, on) * 6 * 60
+            if tot > 0:
+                self._rr(cv, gx0, gy - 5 * k,
+                         gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
+                         gy + 5 * k, 5 * k, fill="#ffc87a", width=0)
         # 사람들
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
@@ -14252,6 +14260,13 @@ class Mascot:
         cv.create_text(x1 - tw / 2 - 9 * k, mid, text=tag, font=f,
                        fill=P["sub"], tags="dyn")
 
+    def _safe_str(self, fn, *args):
+        """글자를 돌려주는 것이 터지면 빈 글자로 (홈은 떠야 한다)."""
+        try:
+            return fn(*args) or ""
+        except Exception:
+            return ""
+
     def _room_tag(self):
         """이 방의 번호표 (앞 네 자). 통신층이 없으면 코드로 직접 만든다."""
         try:
@@ -14277,10 +14292,12 @@ class Mascot:
             net = self.room_net
             st = dict(getattr(net, "stat", None) or {})
             born = time.time() - float(getattr(net, "born", 0) or 0)
-            if born > 60:
+            # 감시견이 통신층을 새로 만들면 born 이 0으로 돌아간다. 그것만
+            # 보면 '켠 지 얼마 안 됨'이 영영 이어져 진단이 가려진다.
+            if born > 30 or int(getattr(self, "_room_retry", 0) or 0):
                 # 자리를 한 번도 못 알렸다 — 남에게는 안 켠 것으로 보인다
                 if st.get("beat") not in (None, "보냄"):
-                    return "내 자리를 아직 못 알렸어요 (%s)" % st.get("beat")
+                    return "내 자리를 아직 못 알렸어요"
                 # 자리는 받았는데 하나도 못 읽었다 — 방 코드가 다른 것이다
                 if int(st.get("rows") or 0) > 0 and not int(st.get("read") or 0):
                     return "다른 사람 자리를 못 읽어요 (방 코드가 달라요)"
@@ -14288,10 +14305,36 @@ class Mascot:
                 if st.get("beat") == "보냄" and st.get("mine") is False:
                     return "서버가 내 자리를 안 받아요"
                 if on <= 1:
-                    return "지금은 나만 있어요 (방 번호를 맞춰 보세요)"
+                    return "지금은 나만 있어요"
             return "%d명 접속 중" % on
         except Exception:
             return "%d명 접속 중" % on
+
+    def _room_numbers(self, on, live):
+        """나 혼자일 때 위쪽 오른편에 띄우는 숫자.
+
+        파일을 주고받지 않고 화면 사진 하나로 갈리게 한다. 왼쪽 한 줄에
+        붙이면 방 번호표와 겹쳐서(실측) 여기에 둔다. 혼자일 때는
+        '오늘 다 같이'가 0이라 그 자리를 내줘도 잃는 것이 없다.
+        """
+        try:
+            if on > 1 or self.room_net is None:
+                return ""
+            st = dict(getattr(self.room_net, "stat", None) or {})
+            born = time.time() - float(
+                getattr(self.room_net, "born", 0) or 0)
+            retry = int(getattr(self, "_room_retry", 0) or 0)
+            if born <= 30 and not retry:
+                return ""
+            beat = {"보냄": "보냄", "보낼 값이 아직 없음": "값없음",
+                    "아직": "아직"}.get(st.get("beat"), str(st.get("beat"))[:8])
+            return ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 다시 %d"
+                    % (self._room_tag(), beat, st.get("rows"),
+                       st.get("read"),
+                       {True: "있음", False: "없음"}.get(st.get("mine"), "?"),
+                       ("%d초" % live) if live < 8640000 else "없음", retry))
+        except Exception:
+            return ""
 
     def _room_why(self):
         """방에 못 붙는 이유를 짧게 (없으면 빈 글자)."""
