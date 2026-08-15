@@ -1,7 +1,7 @@
 {
- "version": 1786834250,
+ "version": 1786834996,
  "files": {
-  "mascot.py": "5e3e1c67fcf55493e9c6e480391fd0e50d42c25776a8264f8a82180e0ea440a7",
+  "mascot.py": "05ab15e2503d393d6981134286139f6c9cb2d733cc9f833118bc672000997468",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -290,8 +290,6 @@
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
- "notes": [
-  "타이머 안정성",
-  "소품 추가"
- ]
+ "notes": [],
+ "silent": true
 }

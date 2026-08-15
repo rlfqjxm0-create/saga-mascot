@@ -4185,6 +4185,17 @@ class Mascot:
         pad.paste(solid, (1, 1))
         ImageDraw.floodfill(pad, (0, 0), 128)        # 바깥 투명 영역만 표시
         holes = pad.point(lambda v: 255 if v == 0 else 0).crop((1, 1, w + 1, h + 1))
+        # 큰 구멍은 '메워야 할 틈'이 아니라 원래 뚫린 모양이다. 화관처럼
+        # 가운데가 뻥 뚫린 소품까지 메우면 그 자리에 그림의 RGB(검정)가
+        # 드러난다 (사가 화관 안쪽이 까맣게 보이던 원인).
+        # 메워야 할 것(옅은 음영선 때문에 생긴 틈)은 가늘고, 반지 구멍은
+        # 굵다 — 굵기로 가른다. 깎았다가(MinFilter) 도로 부풀리면(MaxFilter)
+        # 가는 것은 사라지고 굵은 것만 남는다.
+        from PIL import ImageFilter
+        n = 9
+        big = holes.filter(ImageFilter.MinFilter(n)).filter(
+            ImageFilter.MaxFilter(n))
+        holes = ImageChops.subtract(holes, big)
         return ImageChops.lighter(solid, holes)
 
     # 뒤쪽 조각의 기본 움직임 — config의 prop_back으로 캐릭터마다 덮어쓴다
