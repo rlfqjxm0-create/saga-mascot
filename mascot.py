@@ -3759,116 +3759,10 @@ class Mascot:
         self._prop_back_cfg = {}     # 뽑힌 소품의 뒤쪽 조각 움직임 설정
         self._load_parts()
 
-        # ── 상태 ──────────────────────────────────────────────────────────
-        self.key_events = 0
-        self._seen_keys = 0
-        self.squash_until = 0.0
-        self.mouse_pressed = False
-        self.last_drag = 0.0
-        self.last_pointer = 0.0
-        self.last_key = 0.0
-        self.tap_side = False
-        self.key_ang_t = 0.0
-        self.key_ang = 0.0
-        self.left_down_until = 0.0
-        self.pen_ang_t = 0.0
-        self.pen_ang = 0.0
-        self.pen_down_until = 0.0
-        self.strokes = []
-        self._new_stroke = True
-        self.blink_until = 0.0
-        self.next_blink = time.time() + random.uniform(2.5, 5.5)
-        self._pen_xy = list(self.pen_base_tip)
-        self._force = {}
-
-        # ── 타이머 상태 ───────────────────────────────────────────────────
-        self.work_secs = 0.0
-        self._t_last = time.time()
-        self._t_save = 0.0
-        self._fg_checked = 0.0
-        self._fg_work = False
-        self.state_path = os.path.join(self.state_dir, ".timer_state.json")
-        if self.timer_on:
-            if self.ws_path is None:
-                self._timer_load()
-            else:
-                self._lv_load()      # 연동 중이면 레벨만 (기록은 에이전트 몫)
-        self._lv_seen = self._level()
-        # 혼자 재는 캐릭터는 지금 누적을 기준으로 잡아 둔다 — 안 그러면 켤
-        # 때마다 첫 프레임 몫을 한 번씩 흘린다. 연동 중이면 첫 틱에 에이전트
-        # 누적이 통째로 들어오므로 그때 기준을 잡는다(None으로 둔다).
-        if self.ws_path is None:
-            self._lv_work = float(self.work_secs)
-
-        # ── 슬라임(책상 위 말랑이) ───────────────────────────────────────
-        # 그리는 도중에 쓰는 값은 하나도 빠짐없이 여기서 만들어 둔다. 조건문
-        # 뒤쪽에서 처음 만들면 단락 평가 때문에 몇 분 뒤에 터진다 (지뢰 13).
-        self.slime = None            # 꺼내 놓은 슬라임 (없으면 None)
-        self._slime_grab = None      # 지금 잡고 있는 자리 (없으면 None)
-        self._slime_snd = None       # 만질 때 나는 소리
-        self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
-        self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
-        self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
-        self._slime_hand = None      # 슬라임을 만지는 손이 지금 있는 자리
-        self._sl_touched = False     # 꺼낸 뒤 한 번이라도 만졌나
-        # ── 같이 작업하는 방 ─────────────────────────────────────────
-        self.room_net = None         # 서버와 주고받는 층 (없으면 꺼진 것)
-        self.room_win = None         # 방 창
-        self.room_cv = None
-        self.room_people = []        # 방에 있는 사람들
-        self._room_job = None        # 방 창 다시 그리기 예약
-        self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
-        self._room_hit = []          # 방 창에서 누를 수 있는 자리
-        self._room_flash = {}        # 신호를 주고받아 반짝일 사람
-        self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
-        self._room_tone_cache = {}
-        self._room_pastel_cache = {}
-        self._room_pal_cache = {}
-        self._room_art_bad = set()   # 그림을 못 받은 자리 (다시 안 조른다)
-        self._room_art_th = None
-        self._photo_after = None     # 단체사진 안내 예약
-        self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
-        self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
-        self._room_cur = ""          # 지금 방 창 커서 (같은 값을 다시 넣으면 깜빡)
-        self._room_rows = 2          # 방 창에 들어가는 줄 수
-        self._room_cols = 3          # 방 창에 들어가는 칸 수 (창 크기에 따라)
-        self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
-        self._room_toast = None      # '보냈어요' 알림 (글, 시각)
-        self._msg_win = None         # 오늘 한 줄 적는 창
-        self._inbox = None           # 오늘 받은 반응 (첫 사용 때 읽는다)
-        self._inbox_open = False     # 목록이 펼쳐져 있나
-        self._inbox_scroll = 0       # 목록에서 몇 번째부터 보이나
-        self._away_got = []          # 자리 비운 사이에 온 것 (돌아오면 알린다)
-        self._room_inbox_hit = None  # 배지를 누를 수 있는 자리
-        self._room_inbox_panel = None    # 펼쳐진 목록의 자리
-        self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
-        self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
-        self._snack_list = None          # 간식 그림 이름들 (첫 사용 때 읽는다)
-        self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
-        self._room_btn_hit = []      # 아래 단추 자리
-        self._room_sent = None
-        self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
-        self._room_meta = {}         # 캐릭터별 책상 높이
-        self._room_bg = None
-        self._room_body = []
-        self._room_key_last = None
-        self._room_fx = []           # 지금 보이는 연출
-        self._char_fx = []           # 캐릭터 창에서 터지는 연출 (남이 눌러 줬을 때)         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
-        self._room_body = []         # 숨쉬며 움직이는 몸 그림
-        self._room_key_last = None
-        self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
-        # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
-        # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
-        self._sl_shape, self._sl_damp = self.SL_SHAPE, self.SL_DAMP
-        self._sl_area, self._sl_step = self.SL_AREA, self.SL_STEP
-        self._sl_edge, self._sl_stretch = self.SL_EDGE, self.SL_STRETCH
-        self._sl_reach, self._sl_stiff = self.SL_REACH, 0.0
-        self._sl_pin, self._sl_pitch = 1.0, 1.0
-        # 종류 목록 = sounds/slime/ 아래 wav가 든 폴더들
-        self.slime_kinds = self._list_slime_kinds()
-        if self.slime_kinds and self.us.get("slime_kind") not in self.slime_kinds:
-            self.us["slime_kind"] = self.slime_kinds[0]
-
+        # 상태 변수는 한곳에 모아 둔다. 새 값을 넣을 자리를 헤매지
+        # 않도록, 그리고 '반드시 __init__ 에서 초기화'(지뢰 14)를
+        # 지키기 쉽도록.
+        self._init_state()
         # ── 창 드래그 이동 / 카드 클릭 토글 / 우클릭 메뉴 ────────────────
         self._press = None
         self._dragged = False
@@ -4031,6 +3925,128 @@ class Mascot:
     # ── 파츠 로드 (모든 좌표는 표시 배율 + y 오프셋 적용) ─────────────────
     # 밑그림 위에만 놓이는지 검사할 파츠들 (얼굴 위에 얹히는 것들)
     COVER_CHECK = ("pupils", "lashes", "eyes_closed", "hair", "smile")
+
+
+    def _init_state(self):
+        """프레임마다 바뀌는 값들의 처음 상태.
+
+        새 상태 변수는 **반드시 여기에** 넣는다. 조건문 뒤쪽에서
+        처음 만들면 단락 평가 때문에 검사에서 안 걸리고 몇 분 뒤에
+        터진다 (지뢰 14 — celebrate_until 사건).
+        """
+        # ── 상태 ──────────────────────────────────────────────────────────
+        self.key_events = 0
+        self._seen_keys = 0
+        self.squash_until = 0.0
+        self.mouse_pressed = False
+        self.last_drag = 0.0
+        self.last_pointer = 0.0
+        self.last_key = 0.0
+        self.tap_side = False
+        self.key_ang_t = 0.0
+        self.key_ang = 0.0
+        self.left_down_until = 0.0
+        self.pen_ang_t = 0.0
+        self.pen_ang = 0.0
+        self.pen_down_until = 0.0
+        self.strokes = []
+        self._new_stroke = True
+        self.blink_until = 0.0
+        self.next_blink = time.time() + random.uniform(2.5, 5.5)
+        self._pen_xy = list(self.pen_base_tip)
+        self._force = {}
+
+        # ── 타이머 상태 ───────────────────────────────────────────────────
+        self.work_secs = 0.0
+        self._t_last = time.time()
+        self._t_save = 0.0
+        self._fg_checked = 0.0
+        self._fg_work = False
+        self.state_path = os.path.join(self.state_dir, ".timer_state.json")
+        if self.timer_on:
+            if self.ws_path is None:
+                self._timer_load()
+            else:
+                self._lv_load()      # 연동 중이면 레벨만 (기록은 에이전트 몫)
+        self._lv_seen = self._level()
+        # 혼자 재는 캐릭터는 지금 누적을 기준으로 잡아 둔다 — 안 그러면 켤
+        # 때마다 첫 프레임 몫을 한 번씩 흘린다. 연동 중이면 첫 틱에 에이전트
+        # 누적이 통째로 들어오므로 그때 기준을 잡는다(None으로 둔다).
+        if self.ws_path is None:
+            self._lv_work = float(self.work_secs)
+
+        # ── 슬라임(책상 위 말랑이) ───────────────────────────────────────
+        # 그리는 도중에 쓰는 값은 하나도 빠짐없이 여기서 만들어 둔다. 조건문
+        # 뒤쪽에서 처음 만들면 단락 평가 때문에 몇 분 뒤에 터진다 (지뢰 13).
+        self.slime = None            # 꺼내 놓은 슬라임 (없으면 None)
+        self._slime_grab = None      # 지금 잡고 있는 자리 (없으면 None)
+        self._slime_snd = None       # 만질 때 나는 소리
+        self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
+        self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
+        self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
+        self._slime_hand = None      # 슬라임을 만지는 손이 지금 있는 자리
+        self._sl_touched = False     # 꺼낸 뒤 한 번이라도 만졌나
+        # ── 같이 작업하는 방 ─────────────────────────────────────────
+        self.room_net = None         # 서버와 주고받는 층 (없으면 꺼진 것)
+        self.room_win = None         # 방 창
+        self.room_cv = None
+        self.room_people = []        # 방에 있는 사람들
+        self._room_job = None        # 방 창 다시 그리기 예약
+        self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
+        self._room_hit = []          # 방 창에서 누를 수 있는 자리
+        self._room_flash = {}        # 신호를 주고받아 반짝일 사람
+        self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
+        self._room_tone_cache = {}
+        self._room_pastel_cache = {}
+        self._room_pal_cache = {}
+        self._room_art_bad = set()   # 그림을 못 받은 자리 (다시 안 조른다)
+        self._room_art_th = None
+        self._photo_after = None     # 단체사진 안내 예약
+        self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
+        self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
+        self._room_cur = ""          # 지금 방 창 커서 (같은 값을 다시 넣으면 깜빡)
+        self._room_rows = 2          # 방 창에 들어가는 줄 수
+        self._room_cols = 3          # 방 창에 들어가는 칸 수 (창 크기에 따라)
+        self._room_size = (0, 0)     # 마지막으로 배치한 창 크기
+        self._room_toast = None      # '보냈어요' 알림 (글, 시각)
+        self._msg_win = None         # 오늘 한 줄 적는 창
+        self._inbox = None           # 오늘 받은 반응 (첫 사용 때 읽는다)
+        self._inbox_open = False     # 목록이 펼쳐져 있나
+        self._inbox_scroll = 0       # 목록에서 몇 번째부터 보이나
+        self._away_got = []          # 자리 비운 사이에 온 것 (돌아오면 알린다)
+        self._room_inbox_hit = None  # 배지를 누를 수 있는 자리
+        self._room_inbox_panel = None    # 펼쳐진 목록의 자리
+        self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
+        self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
+        self._snack_list = None          # 간식 그림 이름들 (첫 사용 때 읽는다)
+        self._fail_why = {}              # 구역별 마지막 실패 이유
+        self._told_off = set()            # 꺼졌다고 이미 말한 구역
+        self._health_at = 0.0             # .health.txt 를 마지막으로 쓴 시각
+        self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
+        self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
+        self._room_btn_hit = []      # 아래 단추 자리
+        self._room_sent = None
+        self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
+        self._room_meta = {}         # 캐릭터별 책상 높이
+        self._room_bg = None
+        self._room_body = []
+        self._room_key_last = None
+        self._room_fx = []           # 지금 보이는 연출
+        self._char_fx = []           # 캐릭터 창에서 터지는 연출 (남이 눌러 줬을 때)         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
+        self._room_body = []         # 숨쉬며 움직이는 몸 그림
+        self._room_key_last = None
+        self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
+        # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
+        # (조건문 뒤쪽에서 처음 만들면 몇 분 뒤에 터진다 — 지뢰 13).
+        self._sl_shape, self._sl_damp = self.SL_SHAPE, self.SL_DAMP
+        self._sl_area, self._sl_step = self.SL_AREA, self.SL_STEP
+        self._sl_edge, self._sl_stretch = self.SL_EDGE, self.SL_STRETCH
+        self._sl_reach, self._sl_stiff = self.SL_REACH, 0.0
+        self._sl_pin, self._sl_pitch = 1.0, 1.0
+        # 종류 목록 = sounds/slime/ 아래 wav가 든 폴더들
+        self.slime_kinds = self._list_slime_kinds()
+        if self.slime_kinds and self.us.get("slime_kind") not in self.slime_kinds:
+            self.us["slime_kind"] = self.slime_kinds[0]
 
     def _find_covered_parts(self):
         """'밑그림에 완전히 덮이는' 파츠 이름들.
@@ -4214,11 +4230,21 @@ class Mascot:
 
         '..._back'은 몸 뒤에 그리는 짝(악마 꼬리·천사 날개)이라 따로 뽑지
         않는다. 앞쪽 소품이 뽑히면 그 짝으로 같이 따라 나온다.
+
+        다만 **뒤쪽만 있는 소품**(준사 헤일로처럼 PSD 에서 몸체보다 아래에만
+        둔 것)도 후보에 넣는다. 앞쪽 그림이 있어야만 뽑던 때에는 그런
+        소품이 영영 안 나왔다.
         """
-        return sorted(n for n in layout
-                      if n.startswith("prop") and n != "prop"
-                      and not n.endswith("_back")
-                      and os.path.exists(os.path.join(folder, f"{n}.png")))
+        out = set()
+        for n in layout:
+            if not n.startswith("prop") or n == "prop":
+                continue
+            base = n[:-5] if n.endswith("_back") else n
+            front = os.path.join(folder, f"{base}.png")
+            back = os.path.join(folder, f"{base}_back.png")
+            if os.path.exists(front) or os.path.exists(back):
+                out.add(base)
+        return sorted(out)
 
     def _pick_prop(self):
         """이번 실행에 쓸 소품 하나를 고른다 (없으면 None).
@@ -4311,10 +4337,10 @@ class Mascot:
         # 이름 붙여 두면 overlays 순서대로 얼굴 위에 함께 그려진다.
         self.has["prop"] = False
         pick = self._pick_prop()
-        if pick:
+        front = os.path.join(self.prop_dir, f"{pick}.png") if pick else ""
+        if pick and os.path.exists(front):
             self.layout["prop"] = self._prop_layout[pick]
-            im = Image.open(os.path.join(self.prop_dir,
-                                         f"{pick}.png")).convert("RGBA")
+            im = Image.open(front).convert("RGBA")
             if s != 1.0:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
@@ -4338,6 +4364,9 @@ class Mascot:
                 pos = max(0, min(int(over), len(ov)))
             ov.insert(pos, "prop")
             self.layout["overlays"] = ov
+        if pick:
+            # 앞쪽 그림이 없어도(뒤쪽만 있는 소품) 뒤쪽은 그린다
+            self.prop_name = self.prop_name or pick
             self._load_prop_back(pick, s, pil_cache)
 
         # 타이머 카드 가로 중심 = 책상 내용의 중심 (캔버스 중심이 아니라)
@@ -10071,6 +10100,63 @@ class Mascot:
         except Exception:
             pass
 
+    # 구역 이름 → 사람이 알아들을 말. 없으면 조용히 넘어간다
+    # (안쪽 구역까지 다 알릴 필요는 없다 — 눈에 띄는 것만).
+    OFF_SAY = {"room": "홈 기능이 잠깐 멈췄어요",
+               "timer": "타이머 표시가 잠깐 멈췄어요",
+               "todo": "할 일 목록이 잠깐 멈췄어요",
+               "due": "마감 표시가 잠깐 멈췄어요",
+               "slime": "슬라임이 잠깐 멈췄어요",
+               "char_fx": "반응 연출이 잠깐 멈췄어요",
+               "music_btn": "음악 단추가 잠깐 멈췄어요"}
+
+    def _safe_off_told(self, where):
+        """구역이 처음 꺼질 때 한 번만 알린다.
+
+        조용히 사라지면 사람은 '원래 없는 기능인가' 하고 넘어간다.
+        한 번은 말해 줘야 제보라도 온다. 되풀이하면 성가시므로 한 번만.
+        """
+        if where in self._told_off:
+            return
+        self._told_off.add(where)
+        msg = self.OFF_SAY.get(where)
+        if not msg:
+            return
+        try:
+            self._say(msg + " (곧 다시 해 볼게요)", 5.0)
+        except Exception:
+            pass
+
+    def _health_tick(self, now):
+        """지금 무엇이 죽어 있는지 한 파일에 남긴다 (.health.txt).
+
+        홈은 `.room_diag.txt` 가 자세히 남기지만, 그 밖의 기능이 조용히
+        꺼졌을 때는 볼 것이 없었다. 구역 이름·횟수·마지막 이유만 있어도
+        '무엇이 언제부터 안 되는지'가 바로 갈린다.
+        """
+        if now - self._health_at < 30.0:
+            return
+        self._health_at = now
+        off = sorted(w for w in self._fail if self._safe_off(w))
+        rows = [time.strftime("%Y-%m-%d %H:%M:%S"),
+                "캐릭터=%s  켠 지 %.0f분  그린 프레임=%d"
+                % (self.char, (now - self._born_at) / 60.0,
+                   getattr(self, "_frames", 0)),
+                "지금 꺼진 구역=%s" % (", ".join(off) if off else "없음"),
+                ""]
+        bad = [(w, c) for w, c in sorted(self._fail.items()) if c]
+        if not bad:
+            rows.append("터진 구역 없음")
+        for w, c in bad:
+            ago = now - (self._fail_at.get(w) or 0)
+            rows.append("%-16s %d번  %.0f분 전  %s"
+                        % (w, c, ago / 60.0, self._fail_why.get(w, "")))
+        try:
+            _save_json_text(os.path.join(self.state_dir, ".health.txt"),
+                            "\n".join(rows) + "\n")
+        except Exception:
+            pass
+
     def _safe_off(self, name):
         """그 구역이 여러 번 터져서 꺼졌는가 (_safe 가 3번이면 끈다)."""
         try:
@@ -10149,10 +10235,15 @@ class Mascot:
             return
         try:
             fn(*args)
-        except Exception:
+        except Exception as e:
             self._fail[where] = n + 1
             self._fail_at[where] = time.time()
+            # 왜 터졌는지 한 줄로 기억한다 (.health.txt 가 이걸 보여 준다).
+            # .error.log 를 뒤지지 않아도 무엇이 죽었는지 알 수 있게.
+            self._fail_why[where] = "%s: %s" % (type(e).__name__, str(e)[:70])
             self._log_error(where)
+            if self._fail[where] >= 3:
+                self._safe_off_told(where)
 
     def tick(self):
         # 다음 프레임을 먼저 예약한다 — 중간에 예외가 나도 루프가 죽지 않게.
@@ -10208,6 +10299,10 @@ class Mascot:
         # 진단은 방 처리 밖에서 돈다. 안에 두면 방이 멈출 때 진단도 같이
         # 멈춰서, 정작 알아야 할 '멈췄다'는 사실이 안 남는다 (실제로 겪음).
         self._frames = getattr(self, "_frames", 0) + 1
+        try:      # 진단은 _safe 로 감싸지 않는다 — 같이 꺼지면 볼 것이 없다
+            self._health_tick(now)
+        except Exception:
+            pass
         self._room_dead = self._safe_off("room")
         if self._room_dead and now - self._fail_at.get("room", 0) > 60:
             # 이 구역이 꺼져 있는 동안은 자리도 못 알리고 남도 못 받는다.
