@@ -13843,7 +13843,14 @@ class Mascot:
     ROOM_TOAST = 2.0         # '보냈어요' 알림이 떠 있는 시간(초)
 
     def _room_toast_say(self, to, kind):
-        """무엇을 누구에게 보냈는지 잠깐 알린다."""
+        """무엇을 누구에게 보냈는지 잠깐 알린다 (보내는 쪽 소리도 여기서).
+
+        보내는 길이 셋(아래 단추·캐릭터 누르기·나에게)인데 모두 이곳을
+        거친다. 나에게 보낸 것만 빼는데, 그때는 곧이어 _room_event 가
+        불려 같은 소리를 내기 때문이다(안 빼면 두 번 겹친다).
+        """
+        if to != self.char:
+            self._safe("room_send_snd", self._room_sound)
         label = dict((b, a) for a, b, _c in self.ROOM_BTN).get(kind, kind)
         if to == "*":
             who = "모두"
