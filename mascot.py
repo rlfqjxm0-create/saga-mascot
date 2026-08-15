@@ -4024,6 +4024,7 @@ class Mascot:
         self._health_at = 0.0             # .health.txt 를 마지막으로 쓴 시각
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
+        self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -14329,29 +14330,41 @@ class Mascot:
                          x, y + r, x - w, y + w, x - r, y, x - w, y - w,
                          fill=col, outline="", smooth=False)
 
+    PAT_TIMES = 3            # 좌우로 몇 번 왕복하며 쓰다듬는가
+
     def _fx_pat(self, c, p, cx, top, k):
-        """쓰담 — 머리 위로 손이 내려와 토닥이고 하트가 떠오른다.
+        """쓰담 — 머리 위에서 손이 좌우로 호선을 그리고 하트가 떠오른다.
 
         머리 상자(`_head_box`)가 있으면 그 윗선을 쓴다. 캐릭터마다 머리
         크기가 달라서 비율로 잡으면 손이 이마에 박히거나 허공에 뜬다.
         """
         hb = getattr(self, "_head_box", None)
         hx = (hb[0] + hb[2]) / 2 if hb else cx
+        hw = (hb[2] - hb[0]) if hb else self.cw_px
         # _head_box 에는 oy(캐릭터가 아래로 내려간 만큼)가 빠져 있다.
         # 그대로 쓰면 손이 머리가 아니라 타이머 카드 위에 그려진다
         # (지뢰 43과 같은 함정 — 다른 곳도 self.oy 를 더해서 쓴다).
-        hy = (hb[1] + self.oy) if hb else top
-        # 세 번 토닥인다. 내려올 때 빠르고 올라갈 때 느리게 (손맛).
-        beat = min(1.0, p * 1.25)
-        s2 = math.sin(beat * math.pi * 3.0)
-        down = (1.0 - abs(s2)) if s2 > 0 else 1.0
-        # 머리 위에 남는 자리가 얼마 없다 (실측 28px). 멀리 띄우면 손이
-        # 창 밖으로 나가 잘린다 — 머리 윗선 언저리에서 오르내리게 한다.
-        r = 14 * k
-        y = hy - r * 0.5 + r * 1.15 * down
-        y = max(y, r * 1.0 + 2)          # 그래도 넘으면 끌어내린다
-        self._draw_hand(c, hx, y, r)
-        # 하트는 손 옆에서 떠오른다
+        # 머리 상자 맨 위는 위로 삐친 머리카락 한 올까지 잡는다(멸종은 실측
+        # 137인데 머리 뭉치는 190부터다). 상자 높이의 18%쯤 내려서 얹는다.
+        hy = (hb[1] + self.oy + (hb[3] - hb[1]) * 0.18) if hb else top
+        # 좌우로 부드럽게 왕복한다. 처음과 끝은 살짝 여려지게.
+        beat = min(1.0, p * 1.2)
+        u = math.sin(beat * math.pi * 2.0 * self.PAT_TIMES)
+        ease = math.sin(min(1.0, beat * 1.6) * math.pi / 2) * (1.0 - beat * 0.25)
+        u *= ease
+        # 머리가 둥그니까 가운데에서 높고 양끝에서 낮은 호선을 그린다.
+        span = hw * 0.24
+        sag = hw * 0.05
+        x = hx + span * u
+        # 머리 위에 살짝 얹힌 높이로. 그림 크기도 머리 폭에 맞춘다 —
+        # 고정 크기로 두면 머리 큰 캐릭터에서 손이 점처럼 작아 보인다.
+        y = hy + sag * (u * u)
+        img = self._hand_img(int(max(36, hw * 0.34)), u)
+        if img is None:
+            self._draw_hand(c, x, max(y, 16 * k), 14 * k)
+        else:
+            c.create_image(x, y, image=img, anchor="s")
+        # 하트는 머리 위에서 떠오른다
         for i in range(4):
             q = p * 1.4 - i * 0.16
             if 0 < q < 1:
@@ -14362,6 +14375,36 @@ class Mascot:
                               font=("Malgun Gothic", sz),
                               fill="#ff9ec4" if i % 2 else "#ffc0d4")
 
+    def _hand_img(self, long_px, u=0.0):
+        """쓰담 손 그림. 가는 쪽으로 조금 기울인다 (각도는 몇 개만 만들어 둔다).
+
+        그림이 없으면 None — 그때는 예전처럼 그려서 낸다. 자동 업데이트가
+        반쪽만 갔을 때도 연출이 통째로 사라지지 않게.
+        """
+        ang = round(max(-1.0, min(1.0, u)) * 14 / 7) * 7      # -14 ~ 14도
+        key = (int(long_px), ang)
+        got = self._hand_cache.get(key)
+        if got is not None:
+            return got
+        try:
+            im = Image.open(os.path.join(self.dir, "hand.png")).convert("RGBA")
+        except Exception:
+            self._hand_cache[key] = None
+            return None
+        w, h = im.size
+        r = float(long_px) / max(1, max(w, h))
+        im = im.resize((max(1, round(w * r)), max(1, round(h * r))),
+                       Image.LANCZOS)
+        if ang:
+            im = im.rotate(-ang, resample=Image.BICUBIC, expand=True)
+            a = im.getchannel("A")      # 돌리면 가장자리가 흐려진다 — 다시 굽는다
+            im.putalpha(a.point(lambda v: 255 if v >= 128 else 0))
+        got = ImageTk.PhotoImage(im)
+        if len(self._hand_cache) > 24:
+            for k2 in list(self._hand_cache)[:12]:
+                self._hand_cache.pop(k2, None)
+        self._hand_cache[key] = got
+        return got
     @staticmethod
     def _draw_hand(c, x, y, r):
         """토닥이는 손 — 손바닥과 손가락 넷. 글꼴을 안 써서 맥에서도 같다."""
