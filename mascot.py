@@ -433,6 +433,7 @@ DEFAULT_SETTINGS = {
     "yt_asked": False,       # 로그인 창을 한 번이라도 권했는가
     "shadow_on": False,      # 그림자를 한 번 켜 준 적이 있는가
     "room_on": True,         # 같이 작업하는 방 (기본 켜짐, 환경설정에서 끈다)
+    "stamp_share": False,    # 도장판 공개 (이번 달 도장이 친구들에게 보인다)
     "room_seen": False,      # 처음 열 때 무엇이 오가는지 한 번 알려 줬는가
     "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
     "room_code": "",         # 방 코드 (비우면 '홈')
@@ -4148,6 +4149,7 @@ class Mascot:
         self._poke_times = []        # 최근에 콕을 보낸 시각들 (연타 제한)
         self._lv_glow = 0.0          # 레벨업 테두리 반짝임이 시작된 시각
         self._room_goal_done = False # 오늘 다 같이 24시간을 채웠는가
+        self._fx_scale = 1.0         # zzZ·콧방울 배율 (앉은 모습 구울 때 확대)
         self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
         self._sky_key = None
         self._room_cal_btn = None    # 홈 타이틀의 달력 아이콘 자리
@@ -4156,6 +4158,15 @@ class Mascot:
         self._stamp_win = None       # 도장판 창
         self._stamp_off = 0          # 보고 있는 달 (0 = 이번 달)
         self._stamp_pick = None      # 눌러서 자세히 보는 날
+        self._stamp_slot = None      # 남의 도장판을 보는 중이면 그 자리
+        self._stamp_txt = None       # 일기 입력칸 (내 도장판에서만)
+        self._stamp_share_hit = None
+        self._stamp_pack_at = 0.0    # 공개용 꾸러미 캐시
+        self._stamp_pack_v = None
+        self._room_cal_btns = {}     # 남의 카드 달력 아이콘 자리
+        self._room_cal_data = {}     # 남이 공개한 도장 (slot → cal)
+        self._room_song_hits = {}    # 노래 말풍선 자리 (slot → (상자, 주소))
+        self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
         self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
@@ -4773,6 +4784,7 @@ class Mascot:
             return
         if r < 1.5:
             return
+        r *= self._fx_scale              # 앉은 모습을 구울 때는 크게
         x, y = nose[0] * self.s + self.ox, nose[1] * self.s
         x, y = self._tilt_xy(x, y, -deg)           # 캔버스 좌표는 회전 방향 반대
         x += tdx
@@ -5204,7 +5216,11 @@ class Mascot:
             self.pokesnd = None
         if self.snacksnd is not None:
             try:
-                self.snacksnd.close()
+                snds = (self.snacksnd.values()
+                        if isinstance(self.snacksnd, dict)
+                        else [self.snacksnd])
+                for snd in snds:
+                    snd.close()
             except Exception:
                 pass
             self.snacksnd = None
@@ -5264,14 +5280,26 @@ class Mascot:
                     room_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.roomsnd = None
-        # 간식 먹는 소리 — 폴더의 소리 중 하나가 랜덤으로, 음높이도 조금씩
+        # 간식 먹는 소리 — 종류별 폴더(crunch/drink/munch)에서 간식에 맞는
+        # 것을 낸다. 케이크에서 얼음 소리가 나면 이상하니까. 하위 폴더가
+        # 없는 옛 구성(평평한 wav)은 통째로 한 묶음으로 물러난다.
         snack_dir = os.path.join(self.dir, "sounds", "snack")
         if os.path.isdir(snack_dir):
-            try:
-                self.snacksnd = PokeSound(
-                    snack_dir, volume=float(self.us.get("poke_volume", 40)))
-            except Exception:
-                self.snacksnd = None
+            vol = float(self.us.get("poke_volume", 40))
+            pools = {}
+            for cat in os.listdir(snack_dir):
+                d2 = os.path.join(snack_dir, cat)
+                if os.path.isdir(d2):
+                    try:
+                        pools[cat] = PokeSound(d2, volume=vol)
+                    except Exception:
+                        pass
+            if not pools:
+                try:
+                    pools[""] = PokeSound(snack_dir, volume=vol)
+                except Exception:
+                    pass
+            self.snacksnd = pools or None
         slime_dir = self._slime_dir()
         if self.cfg.get("slime") and os.path.isdir(slime_dir):
             # 종류마다 원본 소리 크기가 딴판이다 (직접 녹음한 것과 받은 음원).
@@ -11826,16 +11854,19 @@ class Mascot:
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
+            fs = self._fx_scale          # 앉은 모습을 구울 때는 크게 (홈 카드용)
             hx0, hy0, hx1, hy1 = self._head_box
-            zx = min(hx1 - 14, self.W - 42)
+            zx = min(hx1 - 14 * fs, self.W - 42 * fs)
             zy = hy0 + self.oy + yo + 10
             for i, (dx, dy, size, color) in enumerate((
                     (0, 22, 10, "#aab7cc"),
                     (13, 4, 13, "#93a4c2"),
                     (28, -16, 16, "#7c90b5"))):
                 bob = math.sin(now * 1.6 + i * 0.9) * 3
-                c.create_text(zx + dx, zy + dy + bob, text="z" if i == 0 else "Z",
-                              font=("Malgun Gothic", size, "bold"), fill=color)
+                c.create_text(zx + dx * fs, zy + dy * fs + bob,
+                              text="z" if i == 0 else "Z",
+                              font=("Malgun Gothic", int(size * fs), "bold"),
+                              fill=color)
 
         if self.notes:                  # 음표는 머리보다 위로 떠오른다
             self._safe("notes", self._draw_notes)
@@ -13202,6 +13233,77 @@ class Mascot:
             return ""
         return str(self.us.get("room_msg") or "").strip()[:20]
 
+    @staticmethod
+    def _song_ok(url):
+        """유튜브 주소만 받는다 — 남의 말풍선을 눌러 여는 것이라 좁게 잡는다."""
+        try:
+            import urllib.parse
+            u = urllib.parse.urlparse(str(url).strip())
+            return (u.scheme == "https" and u.netloc.lower() in (
+                "www.youtube.com", "youtube.com", "m.youtube.com",
+                "music.youtube.com", "youtu.be"))
+        except Exception:
+            return False
+
+    def _room_song(self):
+        """오늘의 노래 (주소, 제목). 날이 바뀌면 비워진다."""
+        if str(self.us.get("room_song_day") or "") != self._my_workday():
+            return "", ""
+        return (str(self.us.get("room_song") or ""),
+                str(self.us.get("room_song_title") or ""))
+
+    def _room_song_set(self, url):
+        """오늘의 노래를 건다 (빈 글자면 내린다). 제목은 뒤에서 받아 온다."""
+        url = str(url or "").strip()
+        if not url:
+            self.us["room_song"] = self.us["room_song_title"] = ""
+            self.us["room_song_day"] = ""
+            self._save_settings()
+            self._room_push_now()
+            return True
+        if not self._song_ok(url):
+            self._say("유튜브 주소만 걸 수 있어요", 3.5)
+            return False
+        self.us["room_song"] = url
+        self.us["room_song_title"] = "…"       # 제목 받는 중
+        self.us["room_song_day"] = self._my_workday()
+        self._save_settings()
+        self._room_push_now()
+
+        def fetch():
+            # 유튜브 oEmbed — 열쇠 없이 제목만 받아 오는 공식 길
+            import urllib.parse
+            import urllib.request
+            try:
+                q = urllib.parse.quote(url, safe="")
+                api = ("https://www.youtube.com/oembed?format=json&url=" + q)
+                with urllib.request.urlopen(
+                        urllib.request.Request(api, headers={
+                            "User-Agent": "mascot-song"}),
+                        timeout=12, context=_ssl_ctx()) as r:
+                    got = json.loads(r.read().decode("utf-8"))
+                title = str(got.get("title") or "")[:40]
+            except Exception:
+                title = "노래 들으러 가기"
+            self.us["room_song_title"] = title
+            try:
+                self._save_settings()
+            except Exception:
+                pass
+            self._room_push_now()
+
+        threading.Thread(target=fetch, daemon=True).start()
+        return True
+
+    def _room_push_now(self):
+        """지금 상태를 곧바로 방에 알린다 (다음 주기를 안 기다린다)."""
+        try:
+            self.room_net.push(self._room_state_now())
+            self.room_net.wake()
+        except Exception:
+            pass
+        self._room_key_last = None
+
     def _room_msg_set(self, text):
         """오늘 한 줄을 정한다 (빈 글자면 지운다)."""
         text = str(text or "").strip()[:20]
@@ -13249,12 +13351,23 @@ class Mascot:
                        highlightbackground=cd["fill"],
                        highlightcolor=cd["fill"])
         ent.pack(ipady=u(7), padx=u(20))
+        tk.Label(win, text="\u266a 오늘의 노래 추천 (유튜브 주소)",
+                 bg=cd["panel"], fg=cd["sub"], font=self._uf(8, True)
+                 ).pack(padx=u(20), pady=(u(12), u(2)))
+        svar = tk.StringVar(value=self._room_song()[0])
+        sent = tk.Entry(win, textvariable=svar, font=self._uf(9),
+                        relief="flat", bg="#ffffff", fg=cd["text"],
+                        justify="center", width=30, highlightthickness=1,
+                        highlightbackground=cd["border"],
+                        highlightcolor=cd["fill"])
+        sent.pack(ipady=u(5), padx=u(20))
         row = tk.Frame(win, bg=cd["panel"])
         row.pack(pady=(u(14), u(16)))
 
         def done(save):
             if save:
                 self._safe("room_msg_set", self._room_msg_set, var.get())
+                self._safe("room_song_set", self._room_song_set, svar.get())
             try:
                 win.destroy()
             except Exception:
@@ -13303,11 +13416,21 @@ class Mascot:
             # 최근에 무엇을 만졌는지 — 방에서 그 자세로 보여 준다
             act = "key" if (now - self.last_pointer > 2.0
                             and now - self.last_key < 1.8) else "pen"
-        return {"n": self._room_nick()[:14], "m": self._room_msg(),
-                "lv": self._level(),
-                "ti": self._title()[:14], "t": int(today // 60), "s": st,
-                "p": round(min(1.0, today / goal), 3),
-                "a": act, "sl": bool(self.slime)}
+        out = {"n": self._room_nick()[:14], "m": self._room_msg(),
+               "lv": self._level(),
+               "ti": self._title()[:14], "t": int(today // 60), "s": st,
+               "p": round(min(1.0, today / goal), 3),
+               "a": act, "sl": bool(self.slime)}
+        if self.us.get("stamp_share"):
+            # 도장판 공개 — 이번 달 도장(분)이 같이 실린다. 일기는 안 실린다.
+            try:
+                out["cal"] = self._stamp_pack()
+            except Exception:
+                pass
+        su, st2 = self._room_song()
+        if su:
+            out["sg"] = {"u": su, "t": st2}
+        return out
 
     def _room_start(self):
         if self.room_net is not None or not self._room_on():
@@ -13496,7 +13619,8 @@ class Mascot:
     INBOX_WORD = {"poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
                   "cheer": ("응원했어요", "응원", "#ffbe55"),
                   "blanket": ("쓰담쓰담 해 줬어요", "쓰담", "#ff9ec4"),
-                  "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f")}
+                  "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
+                  "praise": ("칭찬해 줬어요", "칭찬", "#ffd75e")}
     # '인사'는 뺐다 — 보내는 길이 없어진 뒤로 아무도 못 쓴다. 아주 오래된
     # 판이 보내더라도 '반응을 보냈어요'로 받아 준다 (_inbox_line).
 
@@ -13595,9 +13719,21 @@ class Mascot:
         d["snack"] = self._snack_on
         self._inbox_save()
 
-    def _snack_sound(self):
-        """간식 먹는 소리 — 전용 소리가 없으면 평소 클릭 소리로 물러난다."""
-        snd = getattr(self, "snacksnd", None) or getattr(self, "pokesnd", None)
+    # 간식 이름 → 소리 종류. 없는 이름은 munch(오물오물).
+    SNACK_CAT = {"apple": "crunch", "watermelon": "crunch", "bar": "crunch",
+                 "chocolate-chip-cookies": "crunch", "cartoon-cat": "crunch",
+                 "coconut": "crunch", "kiwi": "crunch",
+                 "drink": "drink"}
+
+    def _snack_sound(self, name=""):
+        """간식에 맞는 먹는 소리 — 없으면 아무거나, 그것도 없으면 클릭 소리."""
+        pools = getattr(self, "snacksnd", None)
+        if isinstance(pools, dict) and pools:
+            cat = self.SNACK_CAT.get(str(name), "munch")
+            snd = pools.get(cat) or pools.get("munch") or pools.get("")                 or next(iter(pools.values()))
+            snd.play()
+            return
+        snd = pools or getattr(self, "pokesnd", None)
         if snd is not None:
             snd.play()
 
@@ -13610,12 +13746,13 @@ class Mascot:
             d["snack"] = sn
             self._inbox_save()
             self.smile_until = max(self.smile_until, time.time() + 2.0)
-            self._safe("snack_snd", self._snack_sound)
+            self._safe("snack_snd", self._snack_sound, sn.get("k") or "")
             self._say("냠", 1.6)
             return
+        kind_name = (sn or {}).get("k") or ""
         self._snack_take()
         self.smile_until = max(self.smile_until, time.time() + 2.5)
-        self._safe("snack_snd", self._snack_sound)
+        self._safe("snack_snd", self._snack_sound, kind_name)
         self._say(random.choice(self.SNACK_EAT), 3.0)
 
     SNACK_EAT = ("잘 먹었습니다!", "맛있다…", "고마워요!", "힘이 나요!")
@@ -13739,6 +13876,10 @@ class Mascot:
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say(("%s 응원했어요" % _josa(who)) if who
                       else "누가 응원했어요", 3.5)
+        elif kind == "praise":
+            self.smile_until = max(self.smile_until, now + 5.0)
+            self._say(("%s 칭찬해 줬어요! 오늘 목표 달성!" % _josa(who))
+                      if who else "칭찬 받았어요! 오늘 목표 달성!", 4.5)
         elif kind == "snack":
             self._say(("%s 간식을 놓고 갔어요" % _josa(who)) if who
                       else "간식이 놓여 있어요", 3.5)
@@ -14292,6 +14433,25 @@ class Mascot:
             except Exception:
                 self._room_body = []
                 return
+        # 노래가 걸린 카드 — 캐릭터 옆에 음표가 둥실거린다
+        cv.delete("songfx")
+        for item, _d2, slot, base, _s2, _p2 in self._room_body:
+            if slot not in self._room_song_slots:
+                continue
+            try:
+                x, _y = cv.coords(item)
+            except Exception:
+                continue
+            kk2 = self.ui_k
+            ph2 = hash(slot) % 5
+            for j2, (dx2, sp) in enumerate(((-46, 1.0), (44, 1.35))):
+                yy2 = base - 72 * kk2 - ((now * 14 * sp + ph2 * 9 + j2 * 23)
+                                         % (46 * kk2))
+                cv.create_text(x + dx2 * kk2, yy2,
+                               text="\u266a" if j2 == 0 else "\u266b",
+                               font=self._uf(10 + 2 * j2),
+                               fill=self._tint(self._room_raw(slot), 0.25),
+                               tags=("dyn", "songfx"))
         # 다 같이 24시간을 채운 날 — 캐릭터 옆에 반짝이가 돈다
         cv.delete("glit")
         if self._room_goal_done:
@@ -14424,6 +14584,9 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
+        self._room_cal_btns = {}
+        self._room_song_hits = {}
+        self._room_song_slots = set()
         cols = max(1, self._room_cols)
         cap = cols * max(1, self._room_rows)
         if len(people) > cap:
@@ -14651,6 +14814,10 @@ class Mascot:
                      else self._tint(self._room_raw(slot), 0.5), width=0)
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
+        sg = p.get("sg")
+        if isinstance(sg, dict) and self._song_ok(sg.get("u")):
+            self._safe("room_song", self._room_song_draw,
+                       cv, p, kx0, ky0, kx1, ky1, k, col, slot)
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
         if slot == self.char:
             self._room_inbox_card = (kx0, ky0, kx1, ky1)
@@ -14658,6 +14825,11 @@ class Mascot:
                        cv, kx0, ky0, kx1, k)
             self._safe("room_cal", self._room_cal_draw,
                        cv, kx0, ky0, k, self._room_raw(slot))
+        elif isinstance(p.get("cal"), dict):
+            # 도장판을 공개한 사람 — 그 카드에도 달력 아이콘이 뜬다
+            self._room_cal_data[slot] = p["cal"]
+            self._safe("room_cal2", self._room_cal_draw,
+                       cv, kx0, ky0, k, self._room_raw(slot), slot)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
 
     def _room_inbox_badge(self, cv, kx0, ky0, kx1, k):
@@ -14688,7 +14860,29 @@ class Mascot:
         self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
                                 x1 + 6 * k, y0 + h + 5 * k)
 
-    def _room_cal_draw(self, cv, kx0, ky0, k, col):
+    def _room_song_draw(self, cv, p, kx0, ky0, kx1, ky1, k, col, slot):
+        """카드 오른쪽 여백의 노래 말풍선 — 누르면 유튜브로 간다."""
+        sg = p["sg"]
+        title = str(sg.get("t") or "노래 들으러 가기")
+        if len(title) > 9:
+            title = title[:9] + "…"
+        f = self._uf(8)
+        txt = "\u266a " + title
+        tw = self._room_tw(cv, txt, f)
+        h = 20 * k
+        x1 = kx1 - 6 * k
+        x0 = max(kx0 + 6 * k, x1 - tw - 14 * k)
+        y0 = ky0 + 34 * k                # 하트 배지 아래, 오른쪽 여백
+        self._rr(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
+                 outline=self._tint(col, 0.35), width=1)
+        cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt, font=f,
+                       fill=self._shade(col, 0.15), tags="dyn")
+        self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
+                                       x1 + 3 * k, y0 + h + 3 * k),
+                                      str(sg.get("u")))
+        self._room_song_slots.add(slot)
+
+    def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None):
         """내 칸 왼쪽 위의 달력 아이콘 — 하트 배지와 짝, 테마색으로.
 
         누르면 이 달의 도장판이 열린다.
@@ -14715,7 +14909,11 @@ class Mascot:
                                cx + dx + k, y0 + dy + k,
                                fill=self._tint(col, 0.35), width=0,
                                tags="dyn")
-        self._room_cal_btn = (x0 - 5 * k, y0 - 5 * k, x1 + 5 * k, y1 + 5 * k)
+        box = (x0 - 5 * k, y0 - 5 * k, x1 + 5 * k, y1 + 5 * k)
+        if slot is None:
+            self._room_cal_btn = box
+        else:
+            self._room_cal_btns[slot] = box
 
     # ── 도장판 ───────────────────────────────────────────────────────
     STAMP_TIERS = ((8 * 3600, "gold"), (4 * 3600, "flower"),
@@ -14752,21 +14950,62 @@ class Mascot:
                           - t) / 86400))
         return first, days
 
-    def _stamp_open(self):
+    def _stamp_pack(self):
+        """공개용 이번 달 도장 꾸러미 — {"m": "2026-08", "d": {"14": 분}}.
+
+        자리 신호에 실려 30초마다 나가므로 60초 캐시로 계산을 아낀다.
+        일기는 넣지 않는다 — 내 컴퓨터에만 남는 것.
+        """
+        now = time.time()
+        if self._stamp_pack_v is not None and now - self._stamp_pack_at < 60:
+            return self._stamp_pack_v
+        t = time.localtime()
+        days = self._stamp_days(t.tm_year, t.tm_mon)
+        self._stamp_pack_v = {
+            "m": "%04d-%02d" % (t.tm_year, t.tm_mon),
+            "d": {str(d): int(v[0] // 60) for d, v in days.items()
+                  if v[0] >= 60}}
+        self._stamp_pack_at = now
+        return self._stamp_pack_v
+
+    def _stamp_diary_path(self):
+        return os.path.join(self.state_dir, ".stamp_diary.json")
+
+    def _stamp_diary(self):
+        try:
+            with open(self._stamp_diary_path(), encoding="utf-8") as fp:
+                d = json.load(fp)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _stamp_diary_set(self, key, text):
+        d = self._stamp_diary()
+        text = str(text).strip()[:300]
+        if text:
+            d[key] = text
+        else:
+            d.pop(key, None)
+        _save_json(self._stamp_diary_path(), d)
+
+    def _stamp_open(self, slot=None):
         """도장판 창 — 이 달에 며칠, 얼마나 그렸는지 도장으로 본다."""
         w = self._stamp_win
         if w is not None:
             try:
-                w.lift()
-                return
+                w.destroy()              # 다른 사람 것으로 바꿔 여는 경우
             except Exception:
-                self._stamp_win = None
+                pass
+            self._stamp_win = None
+        self._stamp_slot = slot
+        self._stamp_txt = None
         cd, u = self.card, self._ui
         win = tk.Toplevel(self.root)
         self._stamp_win = win
         self._stamp_off = 0
         self._stamp_pick = None
-        win.title("도장판")
+        win.title("도장판" if slot is None
+                  else "%s의 도장판" % self.ROOM_NAME.get(slot, ""))
         win.attributes("-topmost", True)
         win.resizable(False, False)
         win.configure(bg=cd["panel"])
@@ -14865,11 +15104,21 @@ class Mascot:
         W = int(cv.cget("width"))
         now = time.localtime()
         y, mo = now.tm_year, now.tm_mon
-        off = self._stamp_off
-        mo2 = mo + off
-        y2 = y + (mo2 - 1) // 12
-        mo2 = (mo2 - 1) % 12 + 1
-        days = self._stamp_days(y2, mo2)
+        other = self._stamp_slot          # 남의 판이면 그 자리 이름
+        if other is not None:
+            cal = self._room_cal_data.get(other) or {}
+            try:
+                y2, mo2 = (int(v) for v in str(cal.get("m")).split("-"))
+            except Exception:
+                y2, mo2 = y, mo
+            days = {int(d): (int(mn) * 60, 0)
+                    for d, mn in (cal.get("d") or {}).items()}
+        else:
+            off = self._stamp_off
+            mo2 = mo + off
+            y2 = y + (mo2 - 1) // 12
+            mo2 = (mo2 - 1) % 12 + 1
+            days = self._stamp_days(y2, mo2)
         first, ndays = self._month_shape(y2, mo2)
         today = self._my_workday()
 
@@ -14880,13 +15129,18 @@ class Mascot:
         # 머리 — 달 이름과 넘김 단추
         rr(u(14), u(12), W - u(14), u(48), u(14), fill=cd["soft"],
            outline=cd["border"], width=2)
-        cv.create_text(W / 2, u(30), text="%d년 %d월 도장판" % (y2, mo2),
+        head = "%d년 %d월 도장판" % (y2, mo2)
+        if other is not None:
+            head = "%s의 %d월 도장판" % (self.ROOM_NAME.get(other, ""), mo2)
+        cv.create_text(W / 2, u(30), text=head,
                        font=self._uf(11, True), fill=cd["text"])
         self._stamp_nav = []
-        for tx, lab, d in ((u(34), "◀", -1), (W - u(34), "▶", 1)):
-            cv.create_text(tx, u(30), text=lab, font=self._uf(11),
-                           fill=cd["sub"])
-            self._stamp_nav.append((tx - u(16), u(14), tx + u(16), u(46), d))
+        if other is None:                 # 남의 판은 받은 달 하나뿐이다
+            for tx, lab, d in ((u(34), "◀", -1), (W - u(34), "▶", 1)):
+                cv.create_text(tx, u(30), text=lab, font=self._uf(11),
+                               fill=cd["sub"])
+                self._stamp_nav.append((tx - u(16), u(14), tx + u(16), u(46),
+                                        d))
         # 요일 줄
         wk = "일월화수목금토"
         gx0, gy0 = u(18), u(58)
@@ -14896,6 +15150,7 @@ class Mascot:
             cv.create_text(gx0 + cell * (i + 0.5), gy0 + u(8), text=ch,
                            font=self._uf(8, True), fill=col)
         # 날짜 칸
+        diary = self._stamp_diary() if other is None else {}
         self._stamp_hit = []
         ch_ = u(42)
         yy0 = gy0 + u(20)
@@ -14921,9 +15176,13 @@ class Mascot:
             if kind:
                 self._stamp_flower(cv, (x0 + x1) / 2, (y0_ + y1_) / 2 + u(3),
                                    u(11), kind)
-            if runs > 0:     # 작업 종료를 누른 날 — 빨간 완료 체크
+            if runs > 0 and other is None:   # 작업 종료한 날 — 빨간 체크
                 cv.create_text(x1 - u(7), y0_ + u(8), text="✓",
                                font=self._uf(8, True), fill="#e0525c")
+            if other is None and diary.get(key):   # 일기 있는 날 — 연필 점
+                cv.create_oval(x1 - u(10), y1_ - u(10), x1 - u(4),
+                               y1_ - u(4), fill=cd.get("fill", "#f0a8c0"),
+                               width=0)
             self._stamp_hit.append((x0, y0_, x1, y1_, dd))
         # 발치 — 합계와 고른 날
         fy = yy0 + (row + 1) * ch_ + u(10)
@@ -14933,15 +15192,78 @@ class Mascot:
                                                    tot % 3600 // 60, n)
         if self._stamp_pick in days:
             secs, runs = days[self._stamp_pick]
-            line = "%d일 · %d시간 %d분 · 종료 %d번" % (
-                self._stamp_pick, secs // 3600, secs % 3600 // 60, runs)
+            line = "%d일 · %d시간 %d분" % (self._stamp_pick,
+                                           secs // 3600, secs % 3600 // 60)
+            if other is None:
+                line += " · 종료 %d번" % runs
         cv.create_text(W / 2, fy + u(6), text=line, font=self._uf(9, True),
                        fill=cd["text"])
-        h_need = int(fy + u(24))
+        fy += u(16)
+        # ── 일기 (내 판에서 날을 골랐을 때 — 아래가 늘어난다) ────────
+        if self._stamp_txt is not None:
+            try:
+                self._stamp_txt.destroy()
+            except Exception:
+                pass
+            self._stamp_txt = None
+        if other is None and self._stamp_pick is not None:
+            key = "%04d-%02d-%02d" % (y2, mo2, self._stamp_pick)
+            rr(u(18), fy + u(4), W - u(18), fy + u(96), u(12),
+               fill="#ffffff", outline=cd["border"], width=2)
+            cv.create_text(u(30), fy + u(17), anchor="w",
+                           text="\u270e %d일의 일기" % self._stamp_pick,
+                           font=self._uf(8, True), fill=cd["sub"])
+            # 입력칸의 부모는 캔버스여야 삐져나오지 않는다 (지뢰 22)
+            txt = tk.Text(cv, font=self._uf(9), relief="flat",
+                          bg="#ffffff", fg=cd["text"], wrap="char",
+                          height=3, highlightthickness=0)
+            txt.insert("1.0", self._stamp_diary().get(key, ""))
+            cv.create_window(u(30), fy + u(26), anchor="nw", window=txt,
+                             width=W - u(60), height=u(48))
+            self._stamp_txt = txt
+            self._stamp_diary_key = key
+
+            def save_diary(_e=None):
+                try:
+                    self._stamp_diary_set(self._stamp_diary_key,
+                                          txt.get("1.0", "end-1c"))
+                except Exception:
+                    pass
+                return "break"
+            txt.bind("<FocusOut>", save_diary, add="+")
+            txt.bind("<Return>", save_diary, add="+")
+            cv.create_text(W - u(34), fy + u(85), text="엔터로 저장",
+                           font=self._uf(7), fill=cd["sub"])
+            fy += u(100)
+        # ── 공개 토글 (내 판에서만) ──────────────────────────────────
+        self._stamp_share_hit = None
+        if other is None:
+            on = bool(self.us.get("stamp_share"))
+            pw = u(150)
+            x0_ = W / 2 - pw / 2
+            rr(x0_, fy + u(6), x0_ + pw, fy + u(32), u(13),
+               fill=self._tint(cd.get("fill", "#f0a8c0"), 0.85) if on
+               else "#ffffff",
+               outline=cd.get("fill") if on else cd["line"], width=2)
+            cv.create_text(W / 2, fy + u(19),
+                           text=("\U0001f513 공개 중 — 친구들이 봐요" if on
+                                 else "\U0001f512 비공개 — 나만 봐요"),
+                           font=self._uf(8, True),
+                           fill=cd["text"] if on else cd["sub"])
+            self._stamp_share_hit = (x0_, fy + u(6), x0_ + pw, fy + u(32))
+            fy += u(36)
+        h_need = int(fy + u(10))
         if int(cv.cget("height")) != h_need:
             cv.configure(height=h_need)
 
     def _stamp_click(self, e):
+        sh = self._stamp_share_hit
+        if sh and sh[0] <= e.x <= sh[2] and sh[1] <= e.y <= sh[3]:
+            self.us["stamp_share"] = not bool(self.us.get("stamp_share"))
+            self._save_settings()
+            self._stamp_pack_at = 0.0    # 다음 신호에 바로 실리게
+            self._safe("stamp_draw", self._stamp_draw)
+            return
         for x0, y0, x1, y1, d in getattr(self, "_stamp_nav", []):
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 self._stamp_off += d
@@ -14982,7 +15304,8 @@ class Mascot:
     # 신호 이름(blanket)은 그대로 둔다 — 친구마다 업데이트 시점이 달라서
     # 이름을 바꾸면 옛 판이 보낸 것을 못 알아본다. 보이는 글자만 바꾼다.
     ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
-                ("쓰담", "blanket", "#ffe0ee"), ("간식", "snack", "#def0d6"))
+                ("쓰담", "blanket", "#ffe0ee"), ("간식", "snack", "#def0d6"),
+                ("칭찬", "praise", "#ffe9a0"))
 
     ROOM_TOAST = 2.0         # '보냈어요' 알림이 떠 있는 시간(초)
 
@@ -15053,15 +15376,22 @@ class Mascot:
         live = who is not None or pick == "*"
         x = W / 2 - row / 2
         for label, kind, col in self.ROOM_BTN:
-            fill = col if live else self._tint(col, 0.62)
+            on = live
+            if kind == "praise":
+                # 칭찬은 목표(게이지 100%)를 채운 사람에게만 켜진다
+                on = (who is not None
+                      and float(who.get("p") or 0) >= 1.0)
+            elif kind == "snack" and pick == self.char:
+                on = False               # 간식은 자기 자신에게는 못 준다
+            fill = col if on else self._tint(col, 0.62)
             cv.create_oval(x + 2, by + 2, x + bw + 2, by + bw + 2,
                            fill=P["line"], width=0, tags="dyn")
             cv.create_oval(x, by, x + bw, by + bw, fill=fill,
                            outline="#ffffff", width=2, tags="dyn")
             cv.create_text(x + bw / 2, by + bw / 2, text=label,
                            font=self._uf(9, True),
-                           fill=P["ink"] if live else P["sub"], tags="dyn")
-            if live:
+                           fill=P["ink"] if on else P["sub"], tags="dyn")
+            if on:
                 self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
 
@@ -15096,6 +15426,16 @@ class Mascot:
             return
         if kind == "poke" and not self._poke_ok():
             return
+        if kind == "snack" and to == self.char:
+            self._room_toast = ("간식은 자기한테는 못 줘요", time.time())
+            return
+        if kind == "praise":
+            who = next((q for q in self.room_people
+                        if q.get("slot") == to), None)
+            if to == self.char or who is None                     or float(who.get("p") or 0) < 1.0:
+                self._room_toast = ("목표를 다 채운 사람에게만 칭찬할 수 "
+                                    "있어요", time.time())
+                return
         # 간식은 그림 하나를 골라 신호에 실어 보낸다 — 받는 쪽도 같은 것을 본다
         extra = self._snack_pick(time.time() * 1000) if kind == "snack" else ""
         if to == self.char:
@@ -15283,6 +15623,21 @@ class Mascot:
                         c.create_text(hx, yy,
                                       text="\u2665", font=("Malgun Gothic", sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
+            elif kind == "praise":
+                # 금별이 사방으로 터진다 — 목표 달성 축하
+                n2 = 7
+                for i in range(n2):
+                    q = p * 1.3 - i * 0.05
+                    if 0 < q < 1:
+                        a = i * (math.tau / n2) + p * 1.2
+                        e = 1.0 - (1.0 - q) ** 2
+                        r2 = (18 + 92 * e) * k
+                        self._fx_spark(c, cx + math.cos(a) * r2,
+                                       mid + math.sin(a) * r2 * 0.7,
+                                       (5 + 7 * (1 - q)) * k, "#ffd75e")
+                if p < 0.5:
+                    c.create_text(cx, top + 8 * k, text="\ud83c\udf89",
+                                  font=("Segoe UI Emoji", int(16 * k)))
             elif kind == "snack":
                 pass      # 간식은 연출이 아니라 책상에 놓인다 (_draw_snack_on)
 
@@ -15556,6 +15911,15 @@ class Mascot:
                                        text="\u2665",
                                        font=self._uf(int(9 + 4 * (1 - q))),
                                        fill=self._mix(col, soft, q), tags="fx")
+            elif kind == "praise":
+                for i in range(5):
+                    q = p * 1.3 - i * 0.08
+                    if 0 < q < 1:
+                        a = i * (math.tau / 5) + p
+                        r2 = (10 + 40 * q) * k
+                        self._fx_spark(cv, cx + math.cos(a) * r2,
+                                       cy + math.sin(a) * r2 * 0.7,
+                                       (4 + 4 * (1 - q)) * k, "#ffd75e")
             elif kind == "blanket":
                 q = min(1.0, p * 2.2)              # 쓰담 (손이 토닥인다)
                 h = 52 * k * q
@@ -15931,6 +16295,16 @@ class Mascot:
         if cb and cb[0] <= e.x <= cb[2] and cb[1] <= e.y <= cb[3]:
             self._safe("stamp_open", self._stamp_open)
             return
+        for slot2, box in list(self._room_cal_btns.items()):
+            if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+                self._safe("stamp_open", self._stamp_open, slot2)
+                return
+        for slot2, (box, url) in list(self._room_song_hits.items()):
+            if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+                if self._song_ok(url):     # 유튜브 주소만 연다
+                    import webbrowser
+                    self._safe("song_open", webbrowser.open, url)
+                return
         hit = self._room_inbox_hit
         if hit and hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3]:
             self._inbox_open = not self._inbox_open
