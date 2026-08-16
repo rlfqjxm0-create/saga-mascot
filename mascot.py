@@ -13612,8 +13612,12 @@ class Mascot:
         try:
             seen = self._room_seen_get()
             day = self._my_workday()
+            cap = self._day_min() + 5
+            if t_min > cap:            # 06시 경계 — 아직 안 넘어간 어제 누적
+                pv = round(pv * (cap / max(t_min, 1)), 3)
+                t_min = int(cap)
             row = seen.get(self.char)
-            if isinstance(row, list) and len(row) >= 3 and row[2] == day:
+            if self._seen_ok(row, day):
                 t_min = max(t_min, int(row[0]))
                 pv = max(pv, float(row[1]))
             if (not isinstance(row, list) or len(row) < 3 or row[2] != day
@@ -13741,6 +13745,24 @@ class Mascot:
             self._room_seen = got if isinstance(got, dict) else {}
         return self._room_seen
 
+    def _day_min(self):
+        """오늘 작업일이 시작(06:00)한 뒤 흐른 분 — '오늘치'의 물리적 상한.
+
+        06시 직후에는 타이머가 하루를 넘기기 전 몇 초 동안 어제 누적이
+        '오늘' 날짜로 찍히는 시간차가 있다 (게이지 안 꺼짐 사건). 오늘
+        일한 분이 이 값을 넘으면 그 기록은 오염된 것이다.
+        """
+        now = time.time()
+        t = time.localtime(now - 6 * 3600)
+        start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 6, 0, 0,
+                             0, 0, -1))
+        return max(0.0, (now - start) / 60.0)
+
+    def _seen_ok(self, row, day):
+        """오늘 기록으로 믿어도 되는 줄인가 — 날짜와 물리 상한을 같이 본다."""
+        return (isinstance(row, list) and len(row) >= 3 and row[2] == day
+                and int(row[0]) <= self._day_min() + 30)
+
     def _room_seen_note(self, now):
         """접속 중인 사람들의 시간·게이지를 적어 둔다.
 
@@ -13756,8 +13778,12 @@ class Mascot:
             if not slot or slot == self.char:
                 continue
             t2, p2 = int(q.get("t") or 0), float(q.get("p") or 0)
+            cap = self._day_min() + 5
+            if t2 > cap:               # 06시 경계의 시간차 — 어제 누적이 온다
+                p2 = p2 * (cap / max(t2, 1))
+                t2 = int(cap)
             old = seen.get(slot)
-            if isinstance(old, list) and len(old) >= 3 and old[2] == day:
+            if self._seen_ok(old, day):
                 # 같은 날 안에서는 큰 쪽만 남긴다 — 그 사람이 컴퓨터를
                 # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다
                 t2 = max(t2, int(old[0]))
@@ -16323,7 +16349,7 @@ class Mascot:
             if (q.get("slot") or "") == self.char:
                 continue
             row = seen.get(q.get("slot") or "")
-            if isinstance(row, list) and len(row) >= 3 and row[2] == day:
+            if self._seen_ok(row, day):
                 # 접속 중인 사람도 오늘 최고치 아래로는 안 보여 준다 —
                 # 옛 판이 재시작해 0을 보내와도 게이지가 안 꺼진다
                 t2 = max(int(q.get("t") or 0), int(row[0]))
@@ -16350,7 +16376,7 @@ class Mascot:
             # 접속을 껐어도 오늘 본 마지막 시간·게이지는 그대로 보여 준다
             st, sp = 0, 0
             row = self._room_seen_get().get(slot)
-            if row and len(row) >= 3 and row[2] == self._my_workday():
+            if self._seen_ok(row, self._my_workday()):
                 st, sp = int(row[0]), float(row[1])
             seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
                           "lv": 1, "ti": "", "t": st, "s": "off", "p": sp,
