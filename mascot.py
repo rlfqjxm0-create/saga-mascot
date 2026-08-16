@@ -4112,6 +4112,8 @@ class Mascot:
         self._room_hit = []          # 방 창에서 누를 수 있는 자리
         self._room_flash = {}        # 신호를 주고받아 반짝일 사람
         self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
+        self._room_head_cache = {}   # 앉은 그림의 머리 자리 (작은 튜플)
+        self._room_hat_cache = {}    # 방 카드용 고깔모자 그림 (상한 있음)
         self._room_tone_cache = {}
         self._room_pastel_cache = {}
         self._room_pal_cache = {}
@@ -7307,15 +7309,58 @@ class Mascot:
         """창이 살아 있는 동안 타이머(항상 위)보다 앞을 지킨다.
 
         캐릭터를 누르는 순간 캐릭터 창이 맨 앞으로 올라오며 다른 창을
-        덮는다 (지뢰 15). 0.7초마다 다시 올려 두면 체감상 늘 앞이다.
+        덮는다 (지뢰 15). 처음에는 0.7초마다 무조건 올렸는데, 올릴 때마다
+        창이 깜빡였다 — 지뢰 15의 '밀렸는지 먼저 재고 올릴 것'을 안 지킨
+        값이다. 이제 내 다른 창(캐릭터·말풍선)이 이 창을 실제로 덮었을
+        때만 올린다. 윈도우가 아니면 잴 길이 없어 예전대로 주기 올림.
         """
+        try:
+            win.attributes("-topmost", True)   # 한 번만 — 주기로 걸면 깜빡인다
+        except Exception:
+            pass
+
+        def covered():
+            # 같은 프로세스의 '항상 위' 창이 이 창보다 앞에서 겹치는가.
+            # z순서는 눈이 아니라 GetWindow 로 잰다 (지뢰 15).
+            try:
+                u = ctypes.windll.user32
+                target = int(win.wm_frame(), 16)
+                kin = set()
+                if self._main_hwnd:
+                    kin.add(self._main_hwnd)
+                for holder in (self.shadow, self.todo_panel,
+                               self.due_panel, self._fx):
+                    h = getattr(holder, "hwnd", None)
+                    if h:
+                        kin.add(h)
+                    top = getattr(holder, "top", None)
+                    if top is not None:
+                        try:
+                            kin.add(int(top.wm_frame(), 16))
+                        except Exception:
+                            pass
+                r = (ctypes.c_long * 4)()
+                u.GetWindowRect(target, ctypes.byref(r))
+                tx0, ty0, tx1, ty1 = r[0], r[1], r[2], r[3]
+                cur = u.GetTopWindow(0)
+                while cur and cur != target:
+                    if cur in kin and u.IsWindowVisible(cur):
+                        u.GetWindowRect(cur, ctypes.byref(r))
+                        if not (r[2] <= tx0 or tx1 <= r[0]
+                                or r[3] <= ty0 or ty1 <= r[1]):
+                            return True
+                    cur = u.GetWindow(cur, 2)      # GW_HWNDNEXT
+            except Exception:
+                return False
+            return False
+
         def raise_loop():
             try:
                 if not win.winfo_exists():
                     return
-                win.lift()
-                win.attributes("-topmost", True)
-                win.after(700, raise_loop)
+                if not IS_WIN or covered():
+                    win.lift()
+                win.after(400 if IS_WIN else 700, raise_loop)
             except Exception:
                 pass
 
@@ -14013,6 +14058,99 @@ class Mascot:
         self._room_img_cache[k] = pair
         return pair
 
+    def _room_head(self, slot, tag):
+        """방 카드 그림에서 머리 자리 — (중심 x, 꼭대기 y, 반폭, 그림 폭, 높이).
+
+        그림 왼쪽 위 기준 픽셀 좌표. 캐릭터마다 머리 위치가 달라 알파로
+        잰다 — 맨 윗줄 언저리의 불투명 픽셀 띠가 곧 머리(머리카락)다.
+        """
+        h = int(self.ROOM_FIG * self.ui_k * self.ROOM_SIZE.get(slot, 1.0))
+        key = (slot, tag, h)
+        hit = self._room_head_cache.get(key)
+        if hit is not None:
+            return hit
+        p = self._room_art_file(slot, tag + ".png")
+        if p is None:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            im = im.resize((max(1, int(im.width * h / im.height)), h),
+                           Image.LANCZOS)
+            a = im.split()[3]
+            bb = a.getbbox()
+            if not bb:
+                return None
+            top = bb[1]
+            band = a.crop((0, top, im.width,
+                           min(h, top + max(4, int(h * 0.16)))))
+            b2 = band.getbbox()
+            if b2:
+                got = ((b2[0] + b2[2]) / 2.0, float(top),
+                       (b2[2] - b2[0]) / 2.0, float(im.width), float(h))
+            else:
+                got = (im.width / 2.0, float(top), im.width * 0.25,
+                       float(im.width), float(h))
+        except Exception:
+            return None
+        self._room_head_cache[key] = got
+        return got
+
+    def _room_hat_img(self, hh):
+        """방 카드용 고깔모자 — 높이 hh 로 줄이고 살짝 기울인 것 (캐시)."""
+        hh = max(10, int(hh))
+        hit = self._room_hat_cache.get(hh)
+        if hit is not None:
+            return hit
+        p = os.path.join(self.parts_dir, "hat.png")
+        if not os.path.exists(p):
+            p = os.path.join(self.dir, "hat.png")
+        if not os.path.exists(p):
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            im = im.resize((max(6, round(im.width * hh / im.height)), hh),
+                           Image.LANCZOS)
+            im = im.rotate(14, expand=True, resample=self._resample())
+            got = ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+        if len(self._room_hat_cache) > 8:
+            for old in list(self._room_hat_cache)[:4]:   # 지뢰 18
+                self._room_hat_cache.pop(old, None)
+        self._room_hat_cache[hh] = got
+        return got
+
+    def _room_party_draw(self, cv, slot, pose, cx, base, k, col):
+        """목표를 다 채운 사람 — 고깔모자와 파티 화관을 씌워 준다.
+
+        게이지(p)가 100%면 누구 화면에서나 이렇게 보인다. 따로 보내는
+        값은 없다 — 이미 실려 오는 진행률로 각자 그린다.
+        """
+        got = self._room_head(slot, pose)
+        if not got:
+            return
+        hx, hy, hw, iw, ih = got
+        # 그림은 anchor="s" 로 (cx, base) 에 붙는다 → 왼쪽 위 = (cx-iw/2, base-ih)
+        px = cx - iw / 2 + hx
+        py = base - ih + hy
+        hat = self._room_hat_img(hw * 1.2)
+        if hat is not None:            # 머리 왼쪽에 비스듬히 (본체와 같은 각)
+            cv.create_image(px - hw * 0.5, py + hw * 0.55, image=hat,
+                            anchor="s", tags="dyn")
+        # 파티 화관 — 머리를 가로지르는 색색 구슬. 가운데가 살짝 높은 아치.
+        beads = ("#ff9db5", "#ffd166", "#8fd06a", "#7fc8f8",
+                 "#c69df5", "#ffab73", "#f6e27f")
+        n = len(beads)
+        r = max(2.4 * k, hw * 0.085)
+        for i in range(n):
+            u2 = i / (n - 1) * 2 - 1              # -1 … 1
+            gx = px + u2 * hw * 0.86
+            gy = py + 7 * k + (u2 * u2) * hw * 0.38
+            cv.create_oval(gx - r, gy - r, gx + r, gy + r, fill=beads[i],
+                           outline=self._shade(beads[i], 0.22), tags="dyn")
+            cv.create_oval(gx - r * 0.32, gy - r * 0.42, gx + r * 0.05,
+                           gy - r * 0.05, fill="#ffffff", width=0, tags="dyn")
+
     # ── 방 창 ───────────────────────────────────────────────────────────
     def _room_palette(self):
         """방 배경은 내 캐릭터 테마색의 파스텔.
@@ -14726,6 +14864,10 @@ class Mascot:
                 # 책상은 붙박이고 이음매도 안 보인다.
                 ditem = cv.create_image(cx, base, image=desk, anchor="s",
                                         tags="dyn")
+            if float(p.get("p") or 0) >= 1.0:
+                # 목표를 다 채운 사람 — 남들 화면에서도 축하 모습으로
+                self._safe("room_party", self._room_party_draw,
+                           cv, slot, pose, cx, base + bob, k, col)
             if not off:
                 # 안 켠 사람은 숨쉬지 않는다 — 켜 있는 사람과 구분이 된다
                 self._room_body.append((item, ditem, slot, base, sleeping,
