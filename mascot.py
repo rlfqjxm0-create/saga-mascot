@@ -3940,6 +3940,9 @@ class Mascot:
             menu.add_command(label="시계 펼치기 / 접기", command=self._toggle_clock)
         if self.timer_on and self.ws_path is None:
             menu.add_command(label="타이머 초기화", command=self._timer_reset)
+            menu.add_command(label="초기화 되돌리기",
+                             command=lambda: self._safe(
+                                 "unreset", self._timer_unreset))
         menu.add_separator()
         menu.add_command(label="종료", command=self.close)
         self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
@@ -3949,10 +3952,7 @@ class Mascot:
             # 메뉴는 켤 때 한 번만 만든다. 지금 상태(꺼내 놨는지·어떤 종류인지)는
             # 띄우기 직전에 맞춰 준다 — 안 그러면 처음 값에 굳어 있다.
             self._safe("slime_menu_sync", self._slime_menu_sync)
-            try:
-                menu.tk_popup(e.x_root, e.y_root)
-            finally:
-                menu.grab_release()
+            self._menu_popup(e.x_root, e.y_root)
 
         self.canvas.bind("<Button-3>", _pop)
         self.tray = None
@@ -4150,6 +4150,10 @@ class Mascot:
         self._room_goal_done = False # 오늘 다 같이 24시간을 채웠는가
         self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
         self._sky_key = None
+        self._room_cal_btn = None    # 홈 타이틀의 달력 아이콘 자리
+        self._stamp_win = None       # 도장판 창
+        self._stamp_off = 0          # 보고 있는 달 (0 = 이번 달)
+        self._stamp_pick = None      # 눌러서 자세히 보는 날
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
         self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
@@ -7580,12 +7584,90 @@ class Mascot:
         self._rec_prev_run = 0.0
         self._rec_armed = True
 
+    def _menu_popup(self, x, y):
+        """우클릭 메뉴 — 캐릭터('항상 위')에 안 가리게 띄운다.
+
+        캐릭터·말풍선이 전부 항상 위라서, 메뉴가 캐릭터와 겹치면 뒤로
+        깔렸다 (지뢰 15). 메뉴가 떠 있는 동안만 캐릭터의 항상 위를 내려
+        두고, 닫히면 되돌린다.
+        """
+        was = bool(self.us.get("topmost", True))
+        if was:
+            try:
+                self.root.attributes("-topmost", False)
+            except Exception:
+                pass
+        try:
+            self._menu.tk_popup(int(x), int(y))
+        finally:
+            self._menu.grab_release()
+        if was:
+            def back(tries=0):
+                try:
+                    if self._menu.winfo_ismapped() and tries < 100:
+                        self.root.after(300, lambda: back(tries + 1))
+                        return
+                    self.root.attributes("-topmost", True)
+                    self.root.lift()
+                except Exception:
+                    pass
+            self.root.after(250, back)
+
+    RESET_KEEP = 5           # 초기화 백업을 몇 벌 남길지
+
+    def _reset_backup(self):
+        """초기화 직전 상태를 남긴다 — 잘못 눌러도 되돌릴 수 있게."""
+        try:
+            with open(self.state_path, encoding="utf-8") as fp:
+                cur = json.load(fp)
+        except Exception:
+            return
+        path = os.path.join(self.state_dir, ".reset_backup.json")
+        try:
+            with open(path, encoding="utf-8") as fp:
+                got = json.load(fp)
+            backs = got if isinstance(got, list) else []
+        except Exception:
+            backs = []
+        backs.append({"ts": time.time(), "state": cur})
+        _save_json(path, backs[-self.RESET_KEEP:])
+
+    def _timer_unreset(self):
+        """'초기화 되돌리기' — 가장 최근 백업으로 되살린다."""
+        path = os.path.join(self.state_dir, ".reset_backup.json")
+        try:
+            with open(path, encoding="utf-8") as fp:
+                backs = json.load(fp)
+            back = backs.pop()
+        except Exception:
+            self._say("되돌릴 초기화 기록이 없어요", 3.5)
+            return
+        st = back.get("state") or {}
+        self.work_secs = float(st.get("seconds", 0))
+        self.zero_at = float(st.get("zero_at", 0))
+        self.day_base = float(st.get("day_base", 0))
+        self.lv_secs = max(self.lv_secs, float(st.get("lv_secs", 0)))
+        if isinstance(st.get("stat"), dict):
+            self.stat = st["stat"]
+            self._act = set(self.stat.get("mins") or [])
+        if isinstance(st.get("rec"), dict):
+            self.rec = st["rec"]
+        self._timer_save()
+        _save_json(path, backs)
+        ago = max(0, time.time() - float(back.get("ts") or 0))
+        self._say("초기화 전으로 돌려놨어요 (%d분 전 상태)" % (ago // 60), 4.5)
+
     def _timer_reset(self):
+        # 잘못 누르는 일이 있어서, 지우기 전에 통째로 백업해 둔다.
+        self._safe("reset_backup", self._reset_backup)
         self.work_secs = 0.0
         self.zero_at = 0.0
         self.day_base = 0.0
         self._reset_records()
         self._timer_save()
+        if self.can_talk:
+            self._say("초기화했어요. 잘못 눌렀으면 메뉴의 '초기화 되돌리기'!",
+                      4.5)
 
     @staticmethod
     def _app_key(s):
@@ -13088,7 +13170,7 @@ class Mascot:
     ROOM_TINT = dict((c["slot"], c["tint"]) for c in CHARS)
     ROOM_NAME = dict((c["slot"], c["name"]) for c in CHARS)
     ROOM_SIZE = dict((c["slot"], c["size"]) for c in CHARS if c.get("size"))
-    ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
+    ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 84
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
     def _room_on(self):
@@ -14229,6 +14311,7 @@ class Mascot:
         self._safe("room_sky", self._room_sky_draw, cv, W, top, k, period)
         ink2, sub2 = self.SKY[period][1], self.SKY[period][2]
         people = self._room_seats()
+        self._room_cal_btn = None    # 달력 아이콘은 내 칸에서 그린다
         cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
                        font=self._uf(13, True), fill=ink2, tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
@@ -14239,9 +14322,9 @@ class Mascot:
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
         cv.create_text(28 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=sub2, tags="dyn")
-        # 숫자를 띄울 때는 그 줄에 방 번호가 이미 들어 있다 (겹치지 않게)
-        if not self._safe_str(self._room_numbers, on, live):
-            self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
+        # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
+        # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
+        # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
         tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
         # 다 같이 24시간을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다
         self._room_goal_done = tot >= 24 * 60
@@ -14249,13 +14332,13 @@ class Mascot:
         if nums:
             self._rr(cv, W - 216 * k, mid - 14 * k, W - 12 * k, mid + 14 * k,
                      12 * k, fill="#ffffff", outline=P["line"], width=1)
-            cv.create_text(W - 20 * k, mid, anchor="e", text=nums,
+            cv.create_text(W - 114 * k, mid, anchor="center", text=nums,
                            font=self._uf(8), fill=P["sub"], tags="dyn")
         else:
             # 흰 라운드 판 — 하늘이 어두운 시간대에도 시간이 또렷하게
             self._rr(cv, W - 216 * k, mid - 25 * k, W - 12 * k, mid + 22 * k,
                      14 * k, fill="#ffffff", outline=P["line"], width=1)
-            cv.create_text(W - 22 * k, mid - 10 * k, anchor="e",
+            cv.create_text(W - 114 * k, mid - 10 * k, anchor="center",
                            text="오늘 다 같이  %d시간 %d분"
                            % (tot // 60, tot % 60),
                            font=self._uf(10, True), fill=P["ink"], tags="dyn")
@@ -14264,10 +14347,18 @@ class Mascot:
             self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
                      fill="#ffffff", outline=P["line"], width=1)
             goal = 24 * 60           # 다 같이 하루 24시간이 목표
+            frac = min(1.0, tot / goal)
+            # 채워질수록 색이 익는다 — 주황 → 노랑 → 연두 → (다 차면) 초록
+            if frac >= 1.0:
+                gcol = "#5fc48f"
+            elif frac < 0.5:
+                gcol = self._mix("#ffb37a", "#ffd75e", frac / 0.5)
+            else:
+                gcol = self._mix("#ffd75e", "#8fd06a", (frac - 0.5) / 0.5)
             if tot > 0:
                 self._rr(cv, gx0, gy - 5 * k,
                          gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
-                         gy + 5 * k, 5 * k, fill="#ffc87a", width=0)
+                         gy + 5 * k, 5 * k, fill=gcol, width=0)
         # 사람들
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
@@ -14285,16 +14376,22 @@ class Mascot:
             ids = set(id(q) for q in keep)
             people = [q for q in people if id(q) in ids][:cap]
         left = max(int(8 * k), (W - cols * cw) // 2)
+        # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
+        # 아래 단추 줄(126k)을 뺀 나머지 공간의 한가운데에 놓는다.
+        H2 = cv.winfo_height() or int(self.room_win.winfo_height())
+        rows_used = max(1, -(-len(people) // cols))
+        voff = max(0, (H2 - int(126 * k) - top - rows_used * chh) // 2)
+        self._room_voff = voff
         for i, p in enumerate(people):
             cx0 = left + (i % cols) * cw
-            cy0 = top + (i // cols) * chh
+            cy0 = top + voff + (i // cols) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
         # 마지막 줄에 남는 칸도 카드 모양만 그려 둔다. 비워 두면 그 줄만
         # 휑하게 뚫려 보인다.
         used = len(people)
         for i in range(used, -(-used // cols) * cols):
             cx0 = left + (i % cols) * cw
-            cy0 = top + (i // cols) * chh
+            cy0 = top + voff + (i // cols) * chh
             self._rr(cv, cx0 + 8 * k, cy0 + 6 * k, cx0 + cw - 8 * k,
                      cy0 + chh - 16 * k, 18 * k, fill=P["card"],
                      outline=P["line"], width=1)
@@ -14498,6 +14595,8 @@ class Mascot:
             self._room_inbox_card = (kx0, ky0, kx1, ky1)
             self._safe("inbox_badge", self._room_inbox_badge,
                        cv, kx0, ky0, kx1, k)
+            self._safe("room_cal", self._room_cal_draw,
+                       cv, kx0, ky0, k, self._room_raw(slot))
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
 
     def _room_inbox_badge(self, cv, kx0, ky0, kx1, k):
@@ -14527,6 +14626,237 @@ class Mascot:
                            tags="dyn")
         self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
                                 x1 + 6 * k, y0 + h + 5 * k)
+
+    def _room_cal_draw(self, cv, kx0, ky0, k, col):
+        """내 칸 왼쪽 위의 달력 아이콘 — 하트 배지와 짝, 테마색으로.
+
+        누르면 이 달의 도장판이 열린다.
+        """
+        r = 10 * k
+        cx = kx0 + 8 * k + r
+        cy = ky0 + 7 * k + r
+        x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r
+        line = self._shade(col, 0.12)
+        self._rr(cv, x0, y0, x1, y1, 4 * k, fill="#ffffff",
+                 outline=line, width=2)
+        self._rr(cv, x0, y0, x1, y0 + 7 * k, 4 * k, fill=col, width=0)
+        cv.create_rectangle(x0, y0 + 4 * k, x1, y0 + 7 * k,
+                            fill=col, width=0, tags="dyn")
+        for gx in (cx - 4.5 * k, cx + 4.5 * k):   # 고리 두 개
+            cv.create_line(gx, y0 - 2.5 * k, gx, y0 + 2.5 * k, fill=line,
+                           width=max(1, int(1.7 * k)), capstyle="round",
+                           tags="dyn")
+        for row in range(2):                      # 날짜 점
+            for col_ in range(3):
+                dx = (col_ - 1) * 5 * k
+                dy = 10.5 * k + row * 4.5 * k
+                cv.create_oval(cx + dx - k, y0 + dy - k,
+                               cx + dx + k, y0 + dy + k,
+                               fill=self._tint(col, 0.35), width=0,
+                               tags="dyn")
+        self._room_cal_btn = (x0 - 5 * k, y0 - 5 * k, x1 + 5 * k, y1 + 5 * k)
+
+    # ── 도장판 ───────────────────────────────────────────────────────
+    STAMP_TIERS = ((8 * 3600, "gold"), (4 * 3600, "flower"),
+                   (2 * 3600, "bud"), (1, "sprout"))
+
+    def _stamp_days(self, year, month):
+        """그 달의 날짜별 (작업 초, 종료 횟수). 오늘은 지금 재는 값으로."""
+        hist = self._hist_load() or {}       # 이미 days 껍데기를 벗겨 준다
+        out = {}
+        for key, d in hist.items():
+            try:
+                y, mo, dd = (int(v) for v in key.split("-"))
+            except Exception:
+                continue
+            if y == year and mo == month and isinstance(d, dict):
+                out[dd] = (float(d.get("work", 0)), int(d.get("runs", 0)))
+        today = self._my_workday()
+        try:
+            ty, tm, td = (int(v) for v in today.split("-"))
+            if ty == year and tm == month:
+                secs, runs = out.get(td, (0.0, 0))
+                out[td] = (max(secs, float(self._today_secs())), runs)
+        except Exception:
+            pass
+        return out
+
+    @staticmethod
+    def _month_shape(year, month):
+        """(1일의 요일 0=일요일, 그 달의 날수) — calendar 없이 time 만으로."""
+        t = time.mktime((year, month, 1, 12, 0, 0, 0, 0, -1))
+        first = (time.localtime(t).tm_wday + 1) % 7      # tm_wday 0=월
+        ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
+        days = int(round((time.mktime((ny, nm, 1, 12, 0, 0, 0, 0, -1))
+                          - t) / 86400))
+        return first, days
+
+    def _stamp_open(self):
+        """도장판 창 — 이 달에 며칠, 얼마나 그렸는지 도장으로 본다."""
+        w = self._stamp_win
+        if w is not None:
+            try:
+                w.lift()
+                return
+            except Exception:
+                self._stamp_win = None
+        cd, u = self.card, self._ui
+        win = tk.Toplevel(self.root)
+        self._stamp_win = win
+        self._stamp_off = 0
+        self._stamp_pick = None
+        win.title("도장판")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=cd["panel"])
+        W, H = u(348), u(372)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0)
+        cv.pack()
+        cv.bind("<Button-1>", lambda e: self._safe(
+            "stamp_click", self._stamp_click, e))
+
+        def bye():
+            self._stamp_win = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        win.protocol("WM_DELETE_WINDOW", bye)
+        win.bind("<Escape>", lambda _e: bye())
+        self._stamp_cv = cv
+        self._place_near(win)
+        self._dialog_keep(win, "stamp")
+        self._safe("stamp_draw", self._stamp_draw)
+
+    def _stamp_flower(self, cv, cx, cy, r, kind):
+        """도장 그림 — 새싹·꽃봉오리·꽃·금테 꽃."""
+        if kind == "sprout":
+            cv.create_line(cx, cy + r * 0.8, cx, cy - r * 0.2,
+                           fill="#5c8a2c", width=2, capstyle="round")
+            for sign in (-1, 1):
+                cv.create_oval(cx + (0.15 * sign - 0.55 * (sign > 0)) * r * 2,
+                               cy - r * 0.7,
+                               cx + (0.15 * sign + 0.55 * (sign < 0)) * r * 2,
+                               cy + r * 0.1,
+                               fill="#8fc34a", width=0)
+            return
+        if kind == "bud":
+            cv.create_oval(cx - r * 0.55, cy - r * 0.8, cx + r * 0.55,
+                           cy + r * 0.3, fill="#f6a8c8", outline="#e07aa8",
+                           width=1)
+            cv.create_line(cx, cy + r * 0.3, cx, cy + r * 0.9,
+                           fill="#5c8a2c", width=2, capstyle="round")
+            return
+        # 꽃 (flower / gold)
+        petal = "#ffb6d2" if kind == "flower" else "#ffd75e"
+        edge = "#e07aa8" if kind == "flower" else "#e0a83c"
+        for i in range(5):
+            a = math.radians(i * 72 - 90)
+            px_, py_ = cx + math.cos(a) * r * 0.55, cy + math.sin(a) * r * 0.55
+            cv.create_oval(px_ - r * 0.42, py_ - r * 0.42, px_ + r * 0.42,
+                           py_ + r * 0.42, fill=petal, outline=edge, width=1)
+        cv.create_oval(cx - r * 0.3, cy - r * 0.3, cx + r * 0.3, cy + r * 0.3,
+                       fill="#fff2b8" if kind == "flower" else "#ff9e5c",
+                       outline=edge, width=1)
+
+    def _stamp_draw(self):
+        cv = getattr(self, "_stamp_cv", None)
+        if cv is None or self._stamp_win is None:
+            return
+        cd, u = self.card, self._ui
+        cv.delete("all")
+        W = int(cv.cget("width"))
+        now = time.localtime()
+        y, mo = now.tm_year, now.tm_mon
+        off = self._stamp_off
+        mo2 = mo + off
+        y2 = y + (mo2 - 1) // 12
+        mo2 = (mo2 - 1) % 12 + 1
+        days = self._stamp_days(y2, mo2)
+        first, ndays = self._month_shape(y2, mo2)
+        today = self._my_workday()
+
+        def rr(x0, y0, x1, y1, r, **kw):
+            self._rr(cv, x0, y0, x1, y1, r, **kw)
+            cv.itemconfigure("dyn", tags="")     # 이 창은 dyn 태그를 안 쓴다
+
+        # 머리 — 달 이름과 넘김 단추
+        rr(u(14), u(12), W - u(14), u(48), u(14), fill=cd["soft"],
+           outline=cd["border"], width=2)
+        cv.create_text(W / 2, u(30), text="%d년 %d월 도장판" % (y2, mo2),
+                       font=self._uf(11, True), fill=cd["text"])
+        self._stamp_nav = []
+        for tx, lab, d in ((u(34), "◀", -1), (W - u(34), "▶", 1)):
+            cv.create_text(tx, u(30), text=lab, font=self._uf(11),
+                           fill=cd["sub"])
+            self._stamp_nav.append((tx - u(16), u(14), tx + u(16), u(46), d))
+        # 요일 줄
+        wk = "일월화수목금토"
+        gx0, gy0 = u(18), u(58)
+        cell = (W - u(36)) / 7.0
+        for i, ch in enumerate(wk):
+            col = "#e06a7a" if i == 0 else ("#5a7ac0" if i == 6 else cd["sub"])
+            cv.create_text(gx0 + cell * (i + 0.5), gy0 + u(8), text=ch,
+                           font=self._uf(8, True), fill=col)
+        # 날짜 칸
+        self._stamp_hit = []
+        ch_ = u(42)
+        yy0 = gy0 + u(20)
+        row = 0
+        for dd in range(1, ndays + 1):
+            colx = (first + dd - 1) % 7
+            row = (first + dd - 1) // 7
+            x0 = gx0 + cell * colx + u(2)
+            y0_ = yy0 + row * ch_ + u(2)
+            x1, y1_ = x0 + cell - u(4), y0_ + ch_ - u(4)
+            key = "%04d-%02d-%02d" % (y2, mo2, dd)
+            is_today = key == today
+            secs, runs = days.get(dd, (0.0, 0))
+            fill = "#ffffff" if secs <= 0 else self._tint(
+                cd.get("fill", "#f0a8c0"), 0.88)
+            rr(x0, y0_, x1, y1_, u(9), fill=fill,
+               outline=cd.get("fill") if is_today else cd["line"],
+               width=2 if is_today else 1)
+            cv.create_text(x0 + u(8), y0_ + u(8), text=str(dd),
+                           font=self._uf(7), fill=cd["sub"])
+            kind = next((nm for thr, nm in self.STAMP_TIERS if secs >= thr),
+                        None)
+            if kind:
+                self._stamp_flower(cv, (x0 + x1) / 2, (y0_ + y1_) / 2 + u(3),
+                                   u(11), kind)
+            if runs > 0:     # 작업 종료를 누른 날 — 빨간 완료 체크
+                cv.create_text(x1 - u(7), y0_ + u(8), text="✓",
+                               font=self._uf(8, True), fill="#e0525c")
+            self._stamp_hit.append((x0, y0_, x1, y1_, dd))
+        # 발치 — 합계와 고른 날
+        fy = yy0 + (row + 1) * ch_ + u(10)
+        tot = sum(v[0] for v in days.values())
+        n = sum(1 for v in days.values() if v[0] > 0)
+        line = "이번 달 %d시간 %d분 · 도장 %d개" % (tot // 3600,
+                                                   tot % 3600 // 60, n)
+        if self._stamp_pick in days:
+            secs, runs = days[self._stamp_pick]
+            line = "%d일 · %d시간 %d분 · 종료 %d번" % (
+                self._stamp_pick, secs // 3600, secs % 3600 // 60, runs)
+        cv.create_text(W / 2, fy + u(6), text=line, font=self._uf(9, True),
+                       fill=cd["text"])
+        h_need = int(fy + u(24))
+        if int(cv.cget("height")) != h_need:
+            cv.configure(height=h_need)
+
+    def _stamp_click(self, e):
+        for x0, y0, x1, y1, d in getattr(self, "_stamp_nav", []):
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._stamp_off += d
+                self._stamp_pick = None
+                self._safe("stamp_draw", self._stamp_draw)
+                return
+        for x0, y0, x1, y1, dd in getattr(self, "_stamp_hit", []):
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._stamp_pick = None if self._stamp_pick == dd else dd
+                self._safe("stamp_draw", self._stamp_draw)
+                return
 
     def _room_sent_chip(self, cv, slot, x0, py0, kx1, k, col):
         """내가 오늘 그 사람에게 보낸 수 — 이름표 바로 오른쪽에.
@@ -15491,6 +15821,10 @@ class Mascot:
             cv.configure(cursor=want)
 
     def _room_click(self, e):
+        cb = self._room_cal_btn
+        if cb and cb[0] <= e.x <= cb[2] and cb[1] <= e.y <= cb[3]:
+            self._safe("stamp_open", self._stamp_open)
+            return
         hit = self._room_inbox_hit
         if hit and hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3]:
             self._inbox_open = not self._inbox_open
