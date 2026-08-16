@@ -3984,6 +3984,7 @@ class Mascot:
         self.pensnd = None
         self.pokesnd = None
         self.roomsnd = None          # 홈에서 남이 눌러 줬을 때 (평소와 다른 소리)
+        self.snacksnd = None         # 간식을 먹을 때 (오물오물)
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -4146,6 +4147,9 @@ class Mascot:
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
         self._poke_times = []        # 최근에 콕을 보낸 시각들 (연타 제한)
         self._lv_glow = 0.0          # 레벨업 테두리 반짝임이 시작된 시각
+        self._room_goal_done = False # 오늘 다 같이 24시간을 채웠는가
+        self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
+        self._sky_key = None
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
         self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
@@ -5192,6 +5196,12 @@ class Mascot:
             except Exception:
                 pass
             self.pokesnd = None
+        if self.snacksnd is not None:
+            try:
+                self.snacksnd.close()
+            except Exception:
+                pass
+            self.snacksnd = None
         if self.roomsnd is not None:
             try:
                 self.roomsnd.close()
@@ -5248,6 +5258,14 @@ class Mascot:
                     room_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.roomsnd = None
+        # 간식 먹는 소리 — 폴더의 소리 중 하나가 랜덤으로, 음높이도 조금씩
+        snack_dir = os.path.join(self.dir, "sounds", "snack")
+        if os.path.isdir(snack_dir):
+            try:
+                self.snacksnd = PokeSound(
+                    snack_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.snacksnd = None
         slime_dir = self._slime_dir()
         if self.cfg.get("slime") and os.path.isdir(slime_dir):
             # 종류마다 원본 소리 크기가 딴판이다 (직접 녹음한 것과 받은 음원).
@@ -5831,6 +5849,7 @@ class Mascot:
             txt.bind(ev, lambda _e: paint(), add="+")
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
+        self._dialog_keep(win, "todo")
         txt.focus_force()
         if edit is not None:
             # 저장돼 있던 구간별 꾸밈을 입력칸에 그대로 되살린다
@@ -6324,6 +6343,7 @@ class Mascot:
             e.bind("<Return>", commit)
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
+        self._dialog_keep(win, "due")
         ents[0].focus_force()
 
     def _hist_load(self):
@@ -7194,6 +7214,66 @@ class Mascot:
         """캐릭터가 놓인 화면의 세로 크기 — 창 높이를 정할 때 쓴다."""
         l, t, r, b = self._screen_box()
         return max(400, b - t)
+
+    def _dialog_keep(self, win, name):
+        """따로 뜨는 입력 창 공통 — 앞에 붙들어 두고, 닫은 자리를 기억한다.
+
+        캐릭터·말풍선이 전부 '항상 위'라서, 입력 창이 떠도 0.5초 주기의
+        다시 올리기에 밀려 타이머 뒤로 들어가 버렸다 (지뢰 15). 입력 창도
+        살아 있는 동안 주기적으로 다시 올린다. 자리는 .ui_prefs.json 에
+        창 이름별로 남겨, 다음에 열 때 그 자리에서 뜬다.
+        """
+        try:
+            with open(self.ui_prefs_path, encoding="utf-8") as fp:
+                prefs = json.load(fp)
+        except Exception:
+            prefs = {}
+        pos = (prefs.get("dlg") or {}).get(name)
+        if pos:
+            try:
+                x, y = int(pos[0]), int(pos[1])
+                sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+                if -80 < x < sw - 80 and 0 <= y < sh - 80:   # 화면 밖이면 버림
+                    win.geometry("+%d+%d" % (x, y))
+            except Exception:
+                pass
+        state = {"xy": None}
+
+        def took(e):
+            if e.widget is win:
+                try:
+                    state["xy"] = (win.winfo_x(), win.winfo_y())
+                except Exception:
+                    pass
+
+        def raise_loop():
+            try:
+                if not win.winfo_exists():
+                    return
+                win.lift()
+                win.attributes("-topmost", True)
+                win.after(700, raise_loop)
+            except Exception:
+                pass
+
+        def gone(e):
+            if e.widget is not win or not state["xy"]:
+                return
+            try:
+                with open(self.ui_prefs_path, encoding="utf-8") as fp:
+                    d = json.load(fp)
+            except Exception:
+                d = {}
+            d.setdefault("dlg", {})[name] = list(state["xy"])
+            try:
+                _save_json(self.ui_prefs_path, d)
+            except Exception:
+                pass
+
+        win.bind("<Configure>", took, add="+")
+        win.bind("<Destroy>", gone, add="+")
+        win.after(150, raise_loop)
+        win.after(80, lambda: win.focus_force() if win.winfo_exists() else None)
 
     def _place_near(self, win, dx=40, dy=20):
         """캐릭터 옆에, 캐릭터가 있는 화면 안으로 창을 놓는다."""
@@ -13097,6 +13177,7 @@ class Mascot:
         x = self.root.winfo_rootx() + (self.W - win.winfo_width()) // 2
         y = self.root.winfo_rooty() + u(60)
         win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        self._dialog_keep(win, "msg")
         ent.focus_set()
         ent.select_range(0, "end")
 
@@ -13374,6 +13455,12 @@ class Mascot:
         d["snack"] = self._snack_on
         self._inbox_save()
 
+    def _snack_sound(self):
+        """간식 먹는 소리 — 전용 소리가 없으면 평소 클릭 소리로 물러난다."""
+        snd = getattr(self, "snacksnd", None) or getattr(self, "pokesnd", None)
+        if snd is not None:
+            snd.play()
+
     def _snack_eat(self):
         """간식을 눌렀을 때 — 첫 입은 베어 물고, 또 누르면 다 먹는다."""
         sn = self._snack_get()
@@ -13383,12 +13470,12 @@ class Mascot:
             d["snack"] = sn
             self._inbox_save()
             self.smile_until = max(self.smile_until, time.time() + 2.0)
-            self._safe("snack_snd", self._poke_sound)
+            self._safe("snack_snd", self._snack_sound)
             self._say("냠", 1.6)
             return
         self._snack_take()
         self.smile_until = max(self.smile_until, time.time() + 2.5)
-        self._safe("snack_snd", self._poke_sound)
+        self._safe("snack_snd", self._snack_sound)
         self._say(random.choice(self.SNACK_EAT), 3.0)
 
     SNACK_EAT = ("잘 먹었습니다!", "맛있다…", "고마워요!", "힘이 나요!")
@@ -13657,13 +13744,10 @@ class Mascot:
         h = time.localtime().tm_hour
         if 6 <= h < 17:                      # 낮 — 가장 밝게
             d, ink, sub = 0.0, "#6f5460", "#a8919c"
-            warm, amt = None, 0.0
-        elif 17 <= h < 20:                   # 저녁 — 조금 진하고 따뜻하게
+        elif 17 <= h < 20:                   # 저녁 — 조금 진하게
             d, ink, sub = 0.022, "#6d4e58", "#a68b95"
-            warm, amt = "#ffd9b0", 0.06
-        else:                                # 밤 — 한 단계 더, 보랏빛으로
+        else:                                # 밤 — 한 단계 더
             d, ink, sub = 0.045, "#584a5c", "#96879a"
-            warm, amt = "#c9c2e8", 0.07
         key = (self.char, int(d * 1000))
         hit = self._room_pal_cache.get(key)
         if hit:
@@ -13678,11 +13762,6 @@ class Mascot:
                "bar": p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
                "lamp": p(self.char, 0.870 - d, 0.45, 0.70),
                "ink": ink, "sub": sub}
-        if warm:
-            # 색만 살짝 섞는다 — 저녁 노을·밤 조명의 기운. 계산은 팔레트를
-            # 만들 때 한 번뿐이라 비용이 없다.
-            for kk in ("wall", "dot", "card", "bar", "line", "lamp"):
-                out[kk] = self._mix(out[kk], warm, amt)
         if len(self._room_pal_cache) > 12:
             self._room_pal_cache = {}
         self._room_pal_cache[key] = out
@@ -13908,6 +13987,131 @@ class Mascot:
             return 0.0
         return -5.0 * k * math.sin(math.pi * t / 0.5)
 
+    # 시간대 → (하늘색, 글자색, 보조색). 그림은 _room_sky_draw 가 그린다.
+    SKY = {"아침": ("#a9ddff", "#33566f", "#6c8ba1"),
+           "낮": ("#8fd0ff", "#2f5470", "#6488a0"),
+           "저녁": ("#ffb083", "#6d3a2a", "#996a58"),
+           "밤": ("#283158", "#eceaf8", "#b6b3d6"),
+           "새벽": ("#3a4370", "#e2e0f0", "#aca9cc")}
+
+    @staticmethod
+    def _sky_period(hour=None):
+        h = time.localtime().tm_hour if hour is None else int(hour)
+        if 6 <= h < 10:
+            return "아침"
+        if 10 <= h < 17:
+            return "낮"
+        if 17 <= h < 20:
+            return "저녁"
+        if 20 <= h or h < 2:
+            return "밤"
+        return "새벽"
+
+    # 시간대별 하늘 그라데이션 (위 → 아래)
+    SKY_GRAD = {"아침": ("#79c4f8", "#cdeaff"),
+                "낮": ("#5fb8f4", "#b8e2ff"),
+                "저녁": ("#ff8e5e", "#ffd2a3"),
+                "밤": ("#1e2648", "#3d4775"),
+                "새벽": ("#2c3459", "#525d8a")}
+
+    def _room_sky_img(self, W, top, period):
+        """타이틀 띠의 하늘 그림 — 시간대·크기가 바뀔 때만 다시 만든다.
+
+        Tk 캔버스 도형은 안티앨리어싱이 없어 계단이 진다. 3배로 그려
+        LANCZOS 로 줄이면 가장자리가 부드럽고, 그라데이션도 여기서 그린다.
+        """
+        key = (int(W), int(top), period)
+        if self._sky_key == key and self._sky_img is not None:
+            return self._sky_img
+        S = 3
+        k = self.ui_k * S
+        w, h = int(W * S), int(top * S)
+
+        def hx(c):
+            return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+
+        t_c, b_c = map(hx, self.SKY_GRAD[period])
+        im = Image.new("RGB", (w, h))
+        dr = ImageDraw.Draw(im)
+        for y in range(h):                     # 세로 그라데이션
+            t = y / max(1, h - 1)
+            dr.line([(0, y), (w, y)],
+                    fill=tuple(int(t_c[i] + (b_c[i] - t_c[i]) * t)
+                               for i in range(3)))
+        ov = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d2 = ImageDraw.Draw(ov)
+        rnd = random.Random(7)                 # 별·구름 자리는 늘 같게
+
+        def ball(cx, cy, r, col, alpha=255):
+            d2.ellipse([cx - r, cy - r, cx + r, cy + r],
+                       fill=col + (alpha,))
+
+        if period in ("아침", "낮", "저녁"):
+            sy = {"아침": h * 0.62, "낮": h * 0.34, "저녁": h * 0.86}[period]
+            sx = w - 320 * k
+            col = (255, 215, 94) if period != "저녁" else (255, 122, 74)
+            for r, a in ((20 * k, 60), (16 * k, 90), (12 * k, 255)):
+                ball(sx, sy, r, col, a)        # 겹친 반투명 원 = 은은한 햇무리
+        if period == "낮":
+            for cx, cy, sc in ((w - 402 * k, h * 0.30, 1.0),
+                               (w - 362 * k, h * 0.52, 0.75)):
+                for dx, dy, rr_ in ((0, 0, 11), (9, 3, 9), (-9, 3, 8)):
+                    ball(cx + dx * k, cy + dy * k, rr_ * k * sc,
+                         (255, 255, 255), 235)
+            for bx, by in ((w - 448 * k, h * 0.28),
+                           (w - 425 * k, h * 0.44)):
+                for sign in (-1, 1):           # 새 — 갈매기 획
+                    d2.line([(bx, by), (bx + 7 * k * sign,
+                                        by - 5 * k)],
+                            fill=(58, 94, 122, 220), width=max(2, int(k * 1.2)))
+        if period == "저녁":
+            for i2 in range(3):                # 노을 줄구름
+                yy = h * (0.30 + 0.18 * i2)
+                xx = w - (360 - i2 * 55) * k
+                ww, hh2 = (90 - i2 * 18) * k, 6 * k
+                d2.rounded_rectangle([xx, yy, xx + ww, yy + hh2],
+                                     radius=hh2 / 2,
+                                     fill=(255, 226, 186, 130))
+        if period in ("밤", "새벽"):
+            faint = period == "새벽"
+            star = (238, 234, 200, 120) if faint else (255, 242, 168, 235)
+            n = 9 if faint else 7
+            for _i in range(n):
+                sx = w * 0.34 + (w - 300 * k - w * 0.34) * rnd.random()
+                sy = h * (0.15 + 0.6 * rnd.random())
+                r = (1.3 if faint else 1.8) * k
+                ball(sx, sy, r, star[:3], star[3])
+            if not faint:
+                sx, sy = w - 362 * k, h * 0.3
+                a = 7 * k                  # 네 갈래 큰 별
+                d2.polygon([(sx, sy - a), (sx + a * 0.3, sy - a * 0.3),
+                            (sx + a, sy), (sx + a * 0.3, sy + a * 0.3),
+                            (sx, sy + a), (sx - a * 0.3, sy + a * 0.3),
+                            (sx - a, sy), (sx - a * 0.3, sy - a * 0.3)],
+                           fill=(255, 242, 168, 245))
+                mx, my, mr = w - 320 * k, h * 0.44, 12 * k
+                ball(mx, my, mr * 1.5, (255, 233, 168), 45)   # 달무리
+                ball(mx, my, mr, (255, 233, 168), 255)
+                # 초승달 — 하늘색 원을 겹쳐 깎아낸다 (그 자리 그라데이션 색으로)
+                px = im.load()
+                # 창이 채 안 잡힌 첫 프레임에는 폭이 1px 라 좌표가 음수가
+                # 된다 — 양끝을 다 막는다 (음수 인덱스는 그대로 터진다)
+                sample = px[max(0, min(w - 1, int(mx))),
+                            max(0, min(h - 1, int(my - mr * 2)))]
+                d2.ellipse([mx - mr + 7 * k, my - mr - 4 * k,
+                            mx + mr + 7 * k, my + mr - 4 * k],
+                           fill=sample + (255,))
+        im = Image.alpha_composite(im.convert("RGBA"), ov)
+        im = im.resize((int(W), int(top)), Image.LANCZOS)
+        self._sky_img = ImageTk.PhotoImage(im)
+        self._sky_key = key
+        return self._sky_img
+
+    def _room_sky_draw(self, cv, W, top, k, period):
+        """홈 타이틀 띠의 하늘 — 시간대 5종 (그림 한 장으로)."""
+        img = self._room_sky_img(W, top, period)
+        cv.create_image(0, 0, image=img, anchor="nw", tags="dyn")
+
     def _room_frame(self):
         cv = self.room_cv
         if cv is None or self.room_win is None:
@@ -13946,17 +14150,48 @@ class Mascot:
             except Exception:
                 self._room_body = []
                 return
+        # 다 같이 24시간을 채운 날 — 캐릭터 옆에 반짝이가 돈다
+        cv.delete("glit")
+        if self._room_goal_done:
+            kk = self.ui_k
+            for item, _d, slot, base, _s, _p in self._room_body:
+                try:
+                    x, _y = cv.coords(item)
+                except Exception:
+                    continue
+                for j, (dx, dy, ph) in enumerate(
+                        ((-52, -86, 0.0), (46, -62, 2.1), (-38, -34, 4.2))):
+                    tw = 0.5 + 0.5 * math.sin(now * 3.1 + ph + hash(slot) % 7)
+                    a = (2.2 + 3.2 * tw) * kk
+                    if a < 2.6 * kk:
+                        continue               # 잦아든 별은 잠깐 쉰다
+                    sx, sy = x + dx * kk, base + dy * kk
+                    cv.create_polygon(
+                        sx, sy - a, sx + a * 0.3, sy - a * 0.3, sx + a, sy,
+                        sx + a * 0.3, sy + a * 0.3, sx, sy + a,
+                        sx - a * 0.3, sy + a * 0.3, sx - a, sy,
+                        sx - a * 0.3, sy - a * 0.3,
+                        fill="#ffd75e", outline="#f0b83c",
+                        width=1, tags=("dyn", "glit"))
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
+        """둥근 사각형. smooth 스플라인을 쓰지 않는다.
+
+        스플라인 판(smooth=True)은 아래 변 한가운데가 볼록 튀어나왔다
+        (홈 게이지 혹 제보 — 같은 코드만 따로 그려 실측으로 재현했다).
+        모서리를 9단계 호로 직접 찍으면 반지름 27px에서도 어긋남이
+        0.2px 이 안 돼 눈으로 구분이 안 된다.
+        """
         kw.setdefault("tags", "dyn")
+        r = max(1.0, min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
         pts = []
         for cx, cy, a0, a1 in ((x1 - r, y0 + r, -90, 0), (x1 - r, y1 - r, 0, 90),
                                (x0 + r, y1 - r, 90, 180),
                                (x0 + r, y0 + r, 180, 270)):
-            for i in range(7):
-                a = math.radians(a0 + (a1 - a0) * i / 6)
+            for i in range(9):
+                a = math.radians(a0 + (a1 - a0) * i / 8)
                 pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
-        return cv.create_polygon(pts, smooth=True, **kw)
+        return cv.create_polygon(pts, smooth=False, **kw)
 
     def _room_draw(self):
         cv = self.room_cv
@@ -13988,39 +14223,47 @@ class Mascot:
             cv.create_line(0, top, W, top, fill=P["line"], width=2, tags="bg")
         else:
             cv.delete("dyn")
-        # 위쪽 줄 — 왼쪽 덩어리와 오른쪽 덩어리를 각각 가운데 정렬한다
+        # 위쪽 줄 — 타이틀 띠는 시간대별 하늘이 된다 (방 안은 그대로)
         mid = top / 2
-        cv.create_oval(18 * k, mid - 10 * k, 38 * k, mid + 10 * k,
-                       fill=P["lamp"], width=0, tags="dyn")
+        period = self._sky_period()
+        self._safe("room_sky", self._room_sky_draw, cv, W, top, k, period)
+        ink2, sub2 = self.SKY[period][1], self.SKY[period][2]
         people = self._room_seats()
-        cv.create_text(50 * k, mid - 9 * k, anchor="w", text="HOME",
-                       font=self._uf(13, True), fill=P["ink"], tags="dyn")
+        cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
+                       font=self._uf(13, True), fill=ink2, tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
         on = sum(1 for q in people if not q.get("off"))
         # 왜 안 되는지 여기서 바로 보이게. 지금까지는 RoomNet 이 오류를
         # 들고만 있고 아무 데도 안 보여 줘서, 친구 화면에서는 '다들 안 켰네'
         # 로만 보였다 (사가가 방에 못 붙는데도 그 이유를 알 수 없었다).
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
-        cv.create_text(50 * k, mid + 11 * k, anchor="w", text=sub,
-                       font=self._uf(9), fill=P["sub"], tags="dyn")
+        cv.create_text(28 * k, mid + 11 * k, anchor="w", text=sub,
+                       font=self._uf(9), fill=sub2, tags="dyn")
         # 숫자를 띄울 때는 그 줄에 방 번호가 이미 들어 있다 (겹치지 않게)
         if not self._safe_str(self._room_numbers, on, live):
             self._safe("room_tag", self._room_tag_draw, cv, W, mid, P, k)
         tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
+        # 다 같이 24시간을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다
+        self._room_goal_done = tot >= 24 * 60
         nums = self._safe_str(self._room_numbers, on, live)
         if nums:
+            self._rr(cv, W - 216 * k, mid - 14 * k, W - 12 * k, mid + 14 * k,
+                     12 * k, fill="#ffffff", outline=P["line"], width=1)
             cv.create_text(W - 20 * k, mid, anchor="e", text=nums,
                            font=self._uf(8), fill=P["sub"], tags="dyn")
         else:
-            cv.create_text(W - 20 * k, mid - 10 * k, anchor="e",
+            # 흰 라운드 판 — 하늘이 어두운 시간대에도 시간이 또렷하게
+            self._rr(cv, W - 216 * k, mid - 25 * k, W - 12 * k, mid + 22 * k,
+                     14 * k, fill="#ffffff", outline=P["line"], width=1)
+            cv.create_text(W - 22 * k, mid - 10 * k, anchor="e",
                            text="오늘 다 같이  %d시간 %d분"
                            % (tot // 60, tot % 60),
                            font=self._uf(10, True), fill=P["ink"], tags="dyn")
-            gx0, gx1 = W - 200 * k, W - 20 * k
+            gx0, gx1 = W - 204 * k, W - 24 * k
             gy = mid + 9 * k
             self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
                      fill="#ffffff", outline=P["line"], width=1)
-            goal = max(1, on) * 6 * 60
+            goal = 24 * 60           # 다 같이 하루 24시간이 목표
             if tot > 0:
                 self._rr(cv, gx0, gy - 5 * k,
                          gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
