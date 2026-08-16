@@ -6162,8 +6162,26 @@ class Mascot:
         """
         try:
             if int(st.get("lv_epoch", 0)) == LV_EPOCH:
-                return max(0.0, float(st.get("lv_secs") or 0))
+                return max(self._lv_floor(),
+                           float(st.get("lv_secs") or 0))
         except (TypeError, ValueError):
+            pass
+        return self._lv_floor()
+
+    def _lv_floor(self):
+        """config의 레벨 복구 바닥 — 사고로 지워진 레벨을 되살린다.
+
+        기뽀가 중복 실행 사고로 상태 파일을 잃고 Lv12 → Lv1이 됐다.
+        친구 컴퓨터를 원격에서 고칠 통로가 배포되는 config뿐이라, 기한이
+        있는 바닥값을 둔다. 기한이 지나면 무시한다 (일부러 처음부터
+        시작하려는 사람을 막지 않게).
+        """
+        try:
+            fl = self.cfg.get("lv_floor") or {}
+            until = str(fl.get("until") or "")
+            if until and self._my_workday() <= until:
+                return max(0.0, float(fl.get("secs") or 0))
+        except Exception:
             pass
         return 0.0
 
@@ -14277,21 +14295,23 @@ class Mascot:
         return got
 
     def _room_hat_img(self, hh):
-        """방 카드용 고깔모자 — 높이 hh 로 줄이고 살짝 기울인 것 (캐시)."""
+        """방 카드용 왕관 — 높이 hh 로 줄인 것 (캐시). 기울이지 않는다."""
         hh = max(10, int(hh))
         hit = self._room_hat_cache.get(hh)
         if hit is not None:
             return hit
-        p = os.path.join(self.parts_dir, "hat.png")
+        p = os.path.join(self.dir, "crown.png")
         if not os.path.exists(p):
-            p = os.path.join(self.dir, "hat.png")
+            p = os.path.join(self.dir, "hat.png")   # 옛 배포본 폴백
         if not os.path.exists(p):
             return None
         try:
             im = Image.open(p).convert("RGBA")
+            bb = im.split()[3].getbbox()
+            if bb:
+                im = im.crop(bb)
             im = im.resize((max(6, round(im.width * hh / im.height)), hh),
                            Image.LANCZOS)
-            im = im.rotate(14, expand=True, resample=self._resample())
             got = ImageTk.PhotoImage(im)
         except Exception:
             return None
@@ -14314,11 +14334,11 @@ class Mascot:
         # 그림은 anchor="s" 로 (cx, base) 에 붙는다 → 왼쪽 위 = (cx-iw/2, base-ih)
         px = cx - iw / 2 + hx
         py = base - ih + hy
-        hat = self._room_hat_img(hw * 1.2)
-        if hat is not None:            # 머리 왼쪽에 비스듬히 (본체와 같은 각)
-            cv.create_image(px - hw * 0.5, py + hw * 0.55, image=hat,
+        hat = self._room_hat_img(hw * 0.72)
+        if hat is not None:            # 왕관 — 정수리 한가운데에 똑바로
+            cv.create_image(px, py + hw * 0.3, image=hat,
                             anchor="s", tags="dyn")
-        # 구슬 화관도 있었는데 고깔만 남겼다 (사용자 요청)
+        # 고깔(기울인 모자)·구슬 화관을 거쳐 왕관으로 정착 (사용자 요청)
 
     # ── 방 창 ───────────────────────────────────────────────────────────
     def _room_palette(self):
@@ -14781,7 +14801,7 @@ class Mascot:
                         sx + a * 0.3, sy + a * 0.3, sx, sy + a,
                         sx - a * 0.3, sy + a * 0.3, sx - a, sy,
                         sx - a * 0.3, sy - a * 0.3,
-                        fill="#ffd75e", outline="#f0b83c",
+                        fill="#ffeeb8", outline="#f5deA0",
                         width=1, tags=("dyn", "glit"))
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
