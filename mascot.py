@@ -3982,7 +3982,9 @@ class Mascot:
         if self.has_clock:
             menu.add_command(label="시계 펼치기 / 접기", command=self._toggle_clock)
         if (self.timer_on and self.ws_path is None
-                and self.cfg.get("reset_menu", True)):
+                and self.cfg.get("reset_menu", False)):
+            # 기본은 숨김 — 잘못 눌러 하루를 날리는 사고가 잦았다.
+            # 필요한 캐릭터만 config 의 reset_menu 로 켠다.
             menu.add_command(label="타이머 초기화", command=self._timer_reset)
             menu.add_command(label="초기화 되돌리기",
                              command=lambda: self._safe(
