@@ -14315,7 +14315,8 @@ class Mascot:
         self._room_cols, self._room_rows = cols, rows
         self._room_size = (0, 0)
         win = tk.Toplevel(self.root)
-        self._keep_front(win, focus=False)
+        # 홈은 보통 창이다 — 다른 창을 누르면 그 뒤로 내려간다. 항상 위로
+        # 걸어 두면 홈이 화면을 계속 차지해 오히려 걸리적거린다.
         win.title("같이 작업 중")
         win.resizable(True, True)
         win.minsize(int(self.ROOM_CW * k) + int(20 * k),
