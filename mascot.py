@@ -7228,6 +7228,14 @@ class Mascot:
         """
         if not IS_WIN:
             return
+        try:
+            # 파이썬으로 띄운 창은 작업표시줄이 '파이썬 프로그램'으로 묶어
+            # 파이썬 기본 아이콘이 뜬다. 앱 아이디를 따로 주면 창 아이콘이
+            # 그대로 단추에 보인다 (지뢰 21 — 공용 windll 은 안 건드린다).
+            ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID(
+                "ena.mascot." + self.char)
+        except Exception:
+            pass
         ico = self._tray_ico_path()
         if ico and os.path.exists(ico):
             self.root.iconbitmap(default=ico)
@@ -14266,20 +14274,25 @@ class Mascot:
             if not bb:
                 return None
             # '맨 위 불투명 픽셀'을 머리로 보면 안 된다 — 자는 그림에는
-            # zzZ·콧방울이, 도로롱은 가는 머리장식이 그 위에 떠 있어
-            # 고깔이 허공에 얹힌다. 폭이 그림의 1/6을 넘는 첫 줄부터가
-            # 머리(정수리)다.
+            # zzZ·콧방울이, 도로롱은 머리장식·리본이 그 위에 떠 있어
+            # 왕관이 허공에 얹힌다. 폭이 그림의 30%를 넘는 줄이 3줄
+            # 연속되는 첫 자리가 머리(정수리)다 — 가는 장식은 못 넘는다.
             pxa = a.load()
-            thr_w = im.width * 0.16
+            thr_w = im.width * 0.30
             top = bb[1]
+            run = 0
             for y in range(bb[1], min(h, bb[1] + int(h * 0.6))):
                 cnt = 0
                 for x in range(bb[0], bb[2], 2):
                     if pxa[x, y] > 40:
                         cnt += 1
                 if cnt * 2 >= thr_w:
-                    top = y
-                    break
+                    run += 1
+                    if run >= 3:
+                        top = y - 2
+                        break
+                else:
+                    run = 0
             band = a.crop((0, top, im.width,
                            min(h, top + max(4, int(h * 0.16)))))
             b2 = band.getbbox()
@@ -14335,8 +14348,8 @@ class Mascot:
         px = cx - iw / 2 + hx
         py = base - ih + hy
         hat = self._room_hat_img(hw * 0.72)
-        if hat is not None:            # 왕관 — 정수리 한가운데에 똑바로
-            cv.create_image(px, py + hw * 0.3, image=hat,
+        if hat is not None:            # 왕관 — 정수리에 눌러 쓴 느낌으로
+            cv.create_image(px, py + hw * 0.42, image=hat,
                             anchor="s", tags="dyn")
         # 고깔(기울인 모자)·구슬 화관을 거쳐 왕관으로 정착 (사용자 요청)
 
