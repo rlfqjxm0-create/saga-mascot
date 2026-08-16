@@ -1968,7 +1968,7 @@ CHARS = [
     {"slot": "parts_myeoljong", "repo": "myeoljong-mascot", "name": "멸종",
      "tint": "#ba2028"},
     {"slot": "parts_peugo", "repo": "peugo-mascot", "name": "프고",
-     "tint": "#1562f0", "size": 0.84},
+     "tint": "#4f9d3f", "size": 0.84},   # 초록 (수트 파랑은 그림이 맡는다)
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -3306,14 +3306,17 @@ class RoomNet:
 
     BEAT = 5.0        # 내 자리를 알리는 간격 (서버는 3초에 한 번만 받는다)
     LIST = 6.0        # 방 사람들을 받아 오는 간격
-    TAKE = 2.5        # 신호를 받아 오는 간격
+    TAKE = 2.0        # 신호를 받아 오는 간격
     # 홈 창이 닫혀 있을 때 쓰는 간격. 명단은 창이 떠 있을 때만 보는데도
     # 6초마다 받아 오고 있었고, 그것이 전송량의 대부분이었다(실측 96%).
     # 자리는 90초 안에만 알리면 남에게 보이고, 신호(콕·응원)는 늦으면
     # 티가 나므로 조금만 늦춘다.
     IDLE_BEAT = 30.0
     IDLE_LIST = 120.0
-    IDLE_TAKE = 8.0   # 신호는 번호로 가져오니 늦어도 안 놓친다 (2분 남음)
+    IDLE_TAKE = 5.0   # 신호는 번호로 가져오니 늦어도 안 놓친다 (2분 남음).
+    # 8초였는데, 홈이 닫힌 채 받는 것이 대부분이라 체감 지연의 대부분이
+    # 여기였다. 5초로 줄이면 시간당 요청이 450 → 720번이지만 실측 통신량이
+    # 0.32MB/시간이라 여유가 크다.
 
     def __init__(self, slot, code=None, state=None):
         # 보낼 값은 **만들 때 같이 받는다.** 스레드가 __init__ 끝에서 바로
@@ -3335,6 +3338,7 @@ class RoomNet:
         self.born = time.time()   # 언제 시작했나 (멈춤 판정에 쓴다)
         self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
         self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
+        self._kick = False        # 보낼 신호가 생기면 잠을 깨운다
         self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
         self.fails = 0            # 그중 실패한 횟수
         # 왜 방에 못 붙는지 사람이 알 수 있게 — 요청마다 결과를 적어 둔다.
@@ -3352,10 +3356,11 @@ class RoomNet:
             self._state = dict(state)
 
     def send(self, to_slot, kind, extra=None):
-        """콕 찌르기 같은 한 번짜리 신호."""
+        """콕 찌르기 같은 한 번짜리 신호. 다음 바퀴를 기다리지 않는다."""
         with self._lock:
             if len(self._out) < 8:
                 self._out.append((str(to_slot)[:40], str(kind)[:16], extra))
+        self._kick = True         # 바퀴 사이 잠(최대 1초)을 깨워 바로 보낸다
 
     def take_sent(self):
         """서버가 받아 준 신호를 꺼내 간다 (앞에서 꺼내 비운다 — 지뢰 26)."""
@@ -3489,6 +3494,9 @@ class RoomNet:
             for _ in range(10):           # 0.1초씩 나눠 자야 빨리 닫힌다
                 if self._stop:
                     return
+                if self._kick:            # 보낼 신호가 생겼다 — 바로 일어난다
+                    self._kick = False
+                    break
                 time.sleep(0.1)
 
 
@@ -4952,7 +4960,11 @@ class Mascot:
             # 그림자가 진다. _draw_deco와 모양을 맞춰 둘 것.
             deco = self.card.get("deco")
             mx = (cx0 + cx1) / 2
-            if deco == "ribbon":                   # 사가: 리본 실루엣
+            if deco == "frog":                     # 프고: 개구리 눈 실루엣
+                for ex in (mx - 26, mx + 26):
+                    d.ellipse([ex - 17, cy0 - 16, ex + 17, cy0 + 10],
+                              fill=(0, 0, 0, 255))
+            elif deco == "ribbon":                 # 사가: 리본 실루엣
                 for sign in (-1, 1):
                     d.polygon([(mx, cy0 - 1), (mx + 17 * sign, cy0 - 14),
                                (mx + 19 * sign, cy0 + 1), (mx + 15 * sign, cy0 + 6)],
@@ -7705,6 +7717,20 @@ class Mascot:
                               fill="#2b2b2b", outline="")
                 c.create_oval(ex - 9, y0 - 7, ex + 3, y0 + 14,
                               fill="#4a4a4a", outline="")
+        elif deco == "frog":
+            # 프고: 개구리 눈 두 개가 카드 위로 빼꼼 — 몸(페페)이 파랑이라
+            # 눈은 초록으로, 테마의 '초록+파랑'을 카드에서도 잇는다.
+            green, line = "#69a63c", "#49781f"
+            mx = (x0 + x1) / 2
+            for ex in (mx - 26, mx + 26):
+                c.create_oval(ex - 17, y0 - 16, ex + 17, y0 + 10,
+                              fill=green, outline=line, width=2)
+                c.create_oval(ex - 11, y0 - 11, ex + 11, y0 + 6,
+                              fill="#ffffff", outline=line, width=2)
+                c.create_oval(ex - 4, y0 - 5, ex + 4, y0 + 3,
+                              fill="#20261c", outline="")
+                c.create_oval(ex - 1, y0 - 4, ex + 3, y0 - 1,
+                              fill="#ffffff", outline="")
         elif deco == "rabbit":
             base = self.card.get("bg", "#ffffff")
             inner = self.card.get("track", "#c9d3e6")
@@ -13408,6 +13434,12 @@ class Mascot:
             del self._away_got[:-20]
         self._char_fx_add(kind, ev.get("x") or "")   # 타이머 화면에서 터진다
         self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
+        if self.stretch_pending:
+            # 스트레칭 알림이 말풍선을 붙잡고 기지개를 되풀이하는 동안에는
+            # 반응이 3초 만에 도로 덮이고, 기울인 머리가 연출을 가린다.
+            # 몸짓을 그 자리에서 멈추고 잠깐 쉰다 (알림 자체는 그대로).
+            self.gest = None
+            self.stretch_replay = now + 6.0
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
             self._say(("%s 콕 찔렀어요" % _josa(who)) if who
@@ -13425,6 +13457,9 @@ class Mascot:
             self._say(("%s 간식을 놓고 갔어요" % _josa(who)) if who
                       else "간식이 놓여 있어요", 3.5)
             self.smile_until = max(self.smile_until, now + 3.0)
+        if self.stretch_pending and self.bubble:
+            # 알림 문구가 곧 도로 덮으므로, 반응 말풍선을 조금 더 잡아 둔다
+            self.bubble = (self.bubble[0], now + 5.0)
         self._room_flash[ev.get("f", "")] = now
         # 받은 것은 내 칸에서 터진다
         self._room_fx_add(self.char, kind, ev.get("x") or "")
