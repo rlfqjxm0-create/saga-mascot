@@ -14307,6 +14307,9 @@ class Mascot:
         self._room_head_cache[key] = got
         return got
 
+    # 왕관 세로 보정 (hw 배수) — 그림 생김새 때문에 표준 위치가 안 맞는 캐릭터
+    CROWN_FIT = {"parts_peugo": -0.25}
+
     def _room_hat_img(self, hh):
         """방 카드용 왕관 — 높이 hh 로 줄인 것 (캐시). 기울이지 않는다."""
         hh = max(10, int(hh))
@@ -14349,7 +14352,9 @@ class Mascot:
         py = base - ih + hy
         hat = self._room_hat_img(hw * 0.72)
         if hat is not None:            # 왕관 — 정수리에 눌러 쓴 느낌으로
-            cv.create_image(px, py + hw * 0.42, image=hat,
+            # 개구리(프고)는 눈이 정수리에 있어 그대로 두면 눈에 씌워진다
+            dy = self.CROWN_FIT.get(slot, 0.0) * hw
+            cv.create_image(px, py + hw * 0.42 + dy, image=hat,
                             anchor="s", tags="dyn")
         # 고깔(기울인 모자)·구슬 화관을 거쳐 왕관으로 정착 (사용자 요청)
 
