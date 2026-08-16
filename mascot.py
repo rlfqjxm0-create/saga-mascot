@@ -3983,10 +3983,12 @@ class Mascot:
             menu.add_command(label="시계 펼치기 / 접기", command=self._toggle_clock)
         if (self.timer_on and self.ws_path is None
                 and self.cfg.get("reset_menu", False)):
-            # 기본은 숨김 — 잘못 눌러 하루를 날리는 사고가 잦았다.
+            # 초기화는 기본 숨김 — 작업 종료의 '새로 시작'과 겹친다.
             # 필요한 캐릭터만 config 의 reset_menu 로 켠다.
             menu.add_command(label="타이머 초기화", command=self._timer_reset)
-            menu.add_command(label="초기화 되돌리기",
+        if self.timer_on and self.ws_path is None:
+            # 복구는 남긴다 — 실수로 날린 기록을 되살리는 길
+            menu.add_command(label="타이머 복구",
                              command=lambda: self._safe(
                                  "unreset", self._timer_unreset))
         menu.add_separator()
@@ -4931,13 +4933,16 @@ class Mascot:
         """타이머 카드가 차지하는 캐릭터 위 여백."""
         if not self.timer_on:
             return 0
+        # 그림 위쪽에 빈 여백이 큰 캐릭터(햄북이 86px)는 카드와 머리가
+        # 늘 그만큼 떨어진다 — 여백만큼 캐릭터를 올려 틈을 좁힌다.
+        lift = int(self.cfg.get("char_lift", 0))
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
-            return (base + self._yt_bar() + GOAL_ROW
-                    + max(0, self._lv_row() - LV_TRIM))
+            return max(0, base + self._yt_bar() + GOAL_ROW
+                       + max(0, self._lv_row() - LV_TRIM) - lift)
         extra = int(self.cfg.get("card_top", 22)) - 22        # 장식 여유 (토끼 귀)
-        return (TIMER_H + extra + self._yt_bar()
-                + max(0, self._lv_row() - LV_TRIM))
+        return max(0, TIMER_H + extra + self._yt_bar()
+                   + max(0, self._lv_row() - LV_TRIM) - lift)
 
     def _bake_oy(self):
         """oy(카드 높이)에 의존하는 좌표들 — 시계 토글로 oy가 바뀌면 다시 부른다."""
@@ -12559,13 +12564,65 @@ class Mascot:
                                text=f"{self.cfg.get('name', self.char)} 설정",
                                font=(FONT, FS(12), "bold"), fill=cd["text"])
                 return y + 78
-            ec = {"cat": "#f5bdd2", "rose": "#f5bdd2"}.get(deco, "#2b2b2b")
-            for ex in (hx0 + 34, hx1 - 34):
-                if deco == "cat":
-                    cv.create_polygon(ex - 13, y + 18, ex + 2, y - 8, ex + 13, y + 17,
-                                      fill=ec, outline=cd["border"], width=2)
-                else:
-                    cv.create_oval(ex - 13, y - 8, ex + 13, y + 18, fill=ec, outline="")
+            # 캐릭터마다 제 데코를 쓴다 — 판다귀가 아닌 캐릭터에 검은 귀가
+            # 얹혀 있었다 (햄북이 제보). 타이머 카드의 _draw_deco 와 맞춘다.
+            mx = (hx0 + hx1) / 2
+            if deco == "burger":               # 햄북이: 미니 햄버거
+                cv.create_arc(mx - 26, y - 12, mx + 26, y + 26, start=0,
+                              extent=180, style="pieslice",
+                              fill="#ecbf6b", outline="#a8763e", width=2)
+                for dx2 in (-11, 0, 11):
+                    cv.create_oval(mx + dx2 - 2, y - 4 + abs(dx2) // 5,
+                                   mx + dx2 + 2, y - 1 + abs(dx2) // 5,
+                                   fill="#fdf3d9", outline="")
+                for i2 in range(6):
+                    lx = mx - 22 + i2 * 9
+                    cv.create_oval(lx - 4, y + 3, lx + 4, y + 11,
+                                   fill="#7cb956", outline="#578a35")
+                cv.create_rectangle(mx - 21, y + 8, mx + 21, y + 14,
+                                    fill="#8a5a34", outline="#6d4426")
+            elif deco == "frog":               # 프고: 개구리 눈
+                for ex2 in (mx - 24, mx + 24):
+                    cv.create_oval(ex2 - 15, y - 8, ex2 + 15, y + 16,
+                                   fill="#69a63c", outline="#49781f", width=2)
+                    cv.create_oval(ex2 - 9, y - 4, ex2 + 9, y + 12,
+                                   fill="#ffffff", outline="#49781f", width=2)
+                    cv.create_oval(ex2 - 3, y + 1, ex2 + 3, y + 8,
+                                   fill="#20261c", outline="")
+            elif deco == "sprout":             # 기뽀: 새싹
+                cv.create_line(mx, y + 18, mx, y - 2, fill="#4c8a3f", width=3)
+                for sign in (-1, 1):
+                    cv.create_polygon(mx, y - 1, mx + 9 * sign, y - 12,
+                                      mx + 16 * sign, y - 3,
+                                      mx + 7 * sign, y + 4, smooth=True,
+                                      fill="#6db54e", outline="#4c8a3f",
+                                      width=1)
+            elif deco == "ribbon":             # 사가: 리본
+                for sign in (-1, 1):
+                    cv.create_polygon(mx, y + 5, mx + 18 * sign, y - 9,
+                                      mx + 20 * sign, y + 6,
+                                      mx + 15 * sign, y + 11, smooth=True,
+                                      fill="#f9b6d2", outline="#e07aa8",
+                                      width=2)
+                cv.create_oval(mx - 5, y, mx + 5, y + 10, fill="#f9b6d2",
+                               outline="#e07aa8", width=2)
+            elif deco == "dog":                # 개: 늘어진 강아지 귀
+                for ex2 in (hx0 + 30, hx1 - 30):
+                    cv.create_oval(ex2 - 14, y - 8, ex2 + 10, y + 30,
+                                   fill="#2b2b2b", outline="")
+                    cv.create_oval(ex2 - 8, y, ex2 + 2, y + 18,
+                                   fill="#4a4a4a", outline="")
+            else:
+                ec = {"cat": "#f5bdd2", "rose": "#f5bdd2"}.get(deco, "#2b2b2b")
+                for ex in (hx0 + 34, hx1 - 34):
+                    if deco == "cat":
+                        cv.create_polygon(ex - 13, y + 18, ex + 2, y - 8,
+                                          ex + 13, y + 17,
+                                          fill=ec, outline=cd["border"],
+                                          width=2)
+                    else:
+                        cv.create_oval(ex - 13, y - 8, ex + 13, y + 18,
+                                       fill=ec, outline="")
             rrect(hx0, y + 10, hx1, y + 62, 18, fill=SOFT,
                   outline=cd["border"], width=2)
             cv.create_text(W / 2, y + 36, text=f"{self.cfg.get('name', self.char)} 설정",
