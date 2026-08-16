@@ -15747,14 +15747,16 @@ class Mascot:
         except Exception:
             return None
         zoom = self._deco_zoom(what)
-        key = (what, w, h, mt, zoom)
+        ox, oy = self._deco_off(what)
+        key = (what, w, h, mt, zoom, ox, oy)
         cache = self._room_deco_cache
         if key in cache:
             return cache[key]
         got = None
         try:
             im = Image.open(p).convert("RGBA")
-            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r, zoom))
+            got = ImageTk.PhotoImage(
+                self._deco_fit(im, w, h, r, zoom, ox, oy))
         except Exception:
             got = None
         if len(cache) > 12:              # 지뢰 18·42 — 오래된 절반만
@@ -15764,23 +15766,25 @@ class Mascot:
         return got
 
     @staticmethod
-    def _deco_fit(im, w, h, r=0, zoom=1.0):
-        """그림을 (w, h)에 가운데로 맞춘다. zoom 1 = 꽉 채움(cover).
+    def _deco_fit(im, w, h, r=0, zoom=1.0, ox=0.0, oy=0.0):
+        """그림을 (w, h)에 맞춘다. zoom 1 = 꽉 채움, ox·oy(-1~1) = 위치.
 
-        키우면 가운데를 확대해 자르고, 줄이면 가장자리에 빈자리가 생긴다
-        (빈자리는 투명 — 그리는 쪽이 바탕색으로 받친다). r이면 둥글게.
+        키우면 확대해 자르고, 줄이면 빈자리가 생긴다(투명 — 그리는 쪽이
+        바탕색으로 받친다). ox가 +면 그림이 오른쪽으로, oy가 +면 아래로
+        간다. r이면 모서리를 둥글게.
         """
         zoom = max(0.5, min(2.5, float(zoom or 1.0)))
+        ox = max(-1.0, min(1.0, float(ox or 0.0)))
+        oy = max(-1.0, min(1.0, float(oy or 0.0)))
         kk = max(w / im.width, h / im.height) * zoom
         im = im.resize((max(1, round(im.width * kk)),
                         max(1, round(im.height * kk))), Image.LANCZOS)
-        if im.width >= w and im.height >= h:
-            ix, iy = (im.width - w) // 2, (im.height - h) // 2
-            im = im.crop((ix, iy, ix + w, iy + h))
-        else:
-            base = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-            base.paste(im, ((w - im.width) // 2, (h - im.height) // 2), im)
-            im = base
+        # 캔버스에 붙이는 방식 하나로 자르기·빈자리를 같이 처리한다
+        px = round((w - im.width) / 2 + ox * abs(w - im.width) / 2)
+        py = round((h - im.height) / 2 + oy * abs(h - im.height) / 2)
+        base = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        base.paste(im, (px, py), im)
+        im = base
         if r:
             from PIL import ImageChops, ImageDraw
             mask = Image.new("L", im.size, 0)
@@ -15788,6 +15792,16 @@ class Mascot:
                 [0, 0, im.width - 1, im.height - 1], radius=int(r), fill=255)
             im.putalpha(ImageChops.multiply(im.split()[3], mask))
         return im
+
+    def _deco_off(self, what):
+        """꾸미기 그림 위치 설정 (-1 ~ 1, 기본 0·가운데)."""
+        try:
+            return (max(-1.0, min(1.0, float(
+                        self.us.get("room_%s_x" % what, 0)) / 100.0)),
+                    max(-1.0, min(1.0, float(
+                        self.us.get("room_%s_y" % what, 0)) / 100.0)))
+        except Exception:
+            return 0.0, 0.0
 
     def _room_card_thumb(self):
         """내 방 칸 그림의 작은 사본 — 방 신호에 실어 남에게도 보인다.
@@ -15803,17 +15817,18 @@ class Mascot:
         except Exception:
             return None, ""
         zoom = self._deco_zoom("card")
+        ox, oy = self._deco_off("card")
         mem = getattr(self, "_cd_mem", None)
-        if mem and mem[0] == (mt, zoom):
+        if mem and mem[0] == (mt, zoom, ox, oy):
             return mem[1], mem[2]
         try:
             import base64
             import io as _io
             im = Image.open(p).convert("RGBA")
-            # 크기 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
+            # 크기·위치 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
             # 화면과 같은 모습이 된다. 빈자리는 흰색(칸 색)으로 받친다.
             th = max(60, int(180 * self.ROOM_CH / self.ROOM_CW))
-            im = self._deco_fit(im, 180, th, 0, zoom)
+            im = self._deco_fit(im, 180, th, 0, zoom, ox, oy)
             base = Image.new("RGB", im.size, (255, 255, 255))
             base.paste(im, (0, 0), im)
             b64 = ""
@@ -15828,7 +15843,7 @@ class Mascot:
             h = hashlib.sha256(b64.encode("ascii")).hexdigest()[:10]
         except Exception:
             return None, ""
-        self._cd_mem = ((mt, zoom), b64, h)
+        self._cd_mem = ((mt, zoom, ox, oy), b64, h)
         return b64, h
 
     def _room_peer_hash_path(self):
@@ -15965,7 +15980,7 @@ class Mascot:
         win.resizable(False, False)
         tk.Label(win, text="홈 꾸미기", font=self._uf(12, True),
                  bg=cd["panel"], fg=cd["text"]).pack(pady=(u(16), u(4)))
-        tk.Label(win, text="내 화면에만 적용돼요",
+        tk.Label(win, text="배경은 내 화면에만 · 방 칸은 친구들에게도 보여요",
                  font=self._uf(8), bg=cd["panel"], fg=cd["sub"]
                  ).pack(pady=(0, u(8)))
 
@@ -15986,21 +16001,26 @@ class Mascot:
                       command=lambda: self._safe(
                           "deco_clear", self._room_deco_clear, what)
                       ).pack(side="left")
-            # 크기 조절 — 100% = 꽉 채움, 줄이면 가장자리가 바탕색으로
-            sc = tk.Scale(win, from_=50, to=250, orient="horizontal",
-                          resolution=5, showvalue=True, length=u(230),
-                          label="크기 (%)", font=self._uf(7),
-                          bg=cd["panel"], fg=cd["sub"],
-                          highlightthickness=0, troughcolor="#ffffff",
-                          activebackground=cd["fill"])
-            sc.set(int(float(self.us.get("room_%s_zoom" % what, 100))))
-            sc.pack(padx=u(24))
+            # 크기·위치 조절 — 놓는 순간 적용된다
+            def slider(label, key, lo, hi, default, res=5):
+                sc = tk.Scale(win, from_=lo, to=hi, orient="horizontal",
+                              resolution=res, showvalue=True, length=u(230),
+                              label=label, font=self._uf(7),
+                              bg=cd["panel"], fg=cd["sub"],
+                              highlightthickness=0, troughcolor="#ffffff",
+                              activebackground=cd["fill"])
+                sc.set(int(float(self.us.get(key, default))))
+                sc.pack(padx=u(24))
 
-            def zoom_done(_e, w2=what, s2=sc):
-                self.us["room_%s_zoom" % w2] = int(s2.get())
-                self._save_settings()
-                self._room_deco_bump()
-            sc.bind("<ButtonRelease-1>", zoom_done)
+                def done(_e, k2=key, s2=sc):
+                    self.us[k2] = int(s2.get())
+                    self._save_settings()
+                    self._room_deco_bump()
+                sc.bind("<ButtonRelease-1>", done)
+
+            slider("크기 (%)", "room_%s_zoom" % what, 50, 250, 100)
+            slider("가로 위치", "room_%s_x" % what, -100, 100, 0)
+            slider("세로 위치", "room_%s_y" % what, -100, 100, 0)
 
         row("배경", "bg")
         row("방 칸", "card")
