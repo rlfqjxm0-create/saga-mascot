@@ -3239,6 +3239,7 @@ class RoomNet:
         self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
         self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
         self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
+        self.fails = 0            # 그중 실패한 횟수
         # 왜 방에 못 붙는지 사람이 알 수 있게 — 요청마다 결과를 적어 둔다.
         # 요청이 성공하는데 자리가 0개면 방 번호가 다른 것이고, 자리는
         # 받았는데 못 읽으면 코드가 다른 것이다. 그 둘을 갈라 준다.
@@ -3317,6 +3318,7 @@ class RoomNet:
             if self._wake:            # 홈을 막 열었다 — 기다리지 않는다
                 self._wake = False
                 t_beat = t_list = t_take = 0.0
+            before = self.calls          # 이 바퀴에서 실제로 뭔가 했는가
             try:
                 if now - t_beat >= i_beat:
                     t_beat = now
@@ -3376,9 +3378,15 @@ class RoomNet:
                             with self._lock:
                                 if len(self._events) < 30:
                                     self._events.append(d)
-                self.err = None
-                self.ok_at = now
+                # **한 번이라도 실제로 통했을 때만** 성공으로 친다.
+                # 아무 일도 안 한 바퀴까지 성공으로 치면, 다 실패하고 있어도
+                # 화면에는 '방금 통했다'로 보인다 (사가 사례 — 75번 실패하는
+                # 동안 계속 '통신 0초'였다).
+                if self.calls > before:
+                    self.err = None
+                    self.ok_at = now
             except Exception as e:
+                self.fails += 1
                 self.err = "%s: %s" % (type(e).__name__, str(e)[:80])
             for _ in range(10):           # 0.1초씩 나눠 자야 빨리 닫힌다
                 if self._stop:
@@ -14706,15 +14714,22 @@ class Mascot:
             th = getattr(net, "_th", None)
             alive = "O" if (th is not None and th.is_alive()) else "X"
             err = str(getattr(net, "err", "") or "")
-            line = ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 다시 %d"
-                    " · 부름 %d · 스레드 %s"
+            fails = int(getattr(net, "fails", 0) or 0)
+            # 늘 붙이는 것만 짧게. 나머지는 '이상할 때'만 — 안 그러면 줄이
+            # 길어져 왼쪽 글자와 겹친다(실측).
+            line = ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 부름 %d"
                     % (self._room_tag(), beat, st.get("rows"),
                        st.get("read"),
                        {True: "있음", False: "없음"}.get(st.get("mine"), "?"),
-                       ("%d초" % live) if live < 8640000 else "없음", retry,
-                       calls, alive))
+                       ("%d초" % live) if live < 8640000 else "없음", calls))
+            if fails:
+                line += " · 실패 %d" % fails
+            if retry:
+                line += " · 다시 %d" % retry
+            if alive != "O":
+                line += " · 스레드 끊김"
             if err:
-                line += " · 오류 " + err[:42]
+                line += " · " + err[:40]
             return line
         except Exception:
             return ""
