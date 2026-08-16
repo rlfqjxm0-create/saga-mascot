@@ -1,7 +1,7 @@
 {
- "version": 1786866057,
+ "version": 1786881285,
  "files": {
-  "mascot.py": "dc12cbac9015bb692d630ad6b620cca8afaa05beb224f545ae3df2068b21eb16",
+  "mascot.py": "8f4074ec01b158a4d5689c7e4f515e341874e50865bec5ca50abf4b19284a714",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -291,6 +291,5 @@
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
  },
- "notes": [],
- "silent": true
+ "notes": []
 }

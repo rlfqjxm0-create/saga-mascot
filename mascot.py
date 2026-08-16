@@ -2188,6 +2188,31 @@ def _parts_broken(char_dir):
     return False
 
 
+def _manifest_stale(base_dir):
+    """런처가 받아 둔 version.json 과 실제 파일이 어긋나 있는가.
+
+    반쪽 업데이트 중에는 '옛 판끼리 맞물린' 상태가 생긴다 — 옛 layout.json
+    에 옛 PNG 라 크기는 서로 맞아서 `_parts_broken` 이 정상으로 본다
+    (프고 팔 사건). 번호는 이미 최신이라 런처도 다시 안 받는다.
+    매니페스트의 해시와 대조하면 이 상태가 잡힌다. 로컬만 읽는다.
+    """
+    import hashlib
+    try:
+        with open(os.path.join(base_dir, "version.json"),
+                  encoding="utf-8") as fp:
+            files = json.load(fp).get("files") or {}
+        if not files:
+            return True
+        for rel, want in files.items():
+            p = os.path.join(base_dir, rel.replace("/", os.sep))
+            with open(p, "rb") as fp:
+                if hashlib.sha256(fp.read()).hexdigest() != want:
+                    return True
+        return False
+    except Exception:
+        return True         # 매니페스트나 파일을 못 읽으면 섞인 것으로 본다
+
+
 def repair_parts(char_dir, state_dir=None):
     """파츠가 섞여 있으면 배포 레포에서 다시 받아 맞춘다 (선물 exe 전용).
 
@@ -2200,7 +2225,7 @@ def repair_parts(char_dir, state_dir=None):
         return                              # 개발 환경에서는 건드리지 않는다
     base_dir = os.path.dirname(char_dir)
     done = os.path.exists(os.path.join(base_dir, "version.json"))
-    if done and not _parts_broken(char_dir):
+    if done and not _parts_broken(char_dir) and not _manifest_stale(base_dir):
         return                              # 정상 — 네트워크 접근 없음
     import hashlib
     import urllib.parse
@@ -4111,6 +4136,7 @@ class Mascot:
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
+        self._poke_times = []        # 최근에 콕을 보낸 시각들 (연타 제한)
         self._room_meta = {}         # 캐릭터별 책상 높이
         self._room_bg = None
         self._room_body = []
@@ -14150,10 +14176,17 @@ class Mascot:
         n = self._sent_count(slot)
         if not n:
             return
-        txt = "\u2192 %d" % min(n, 99)
         f = self._uf(8, True)
-        w = self._room_tw(cv, txt, f) + 14 * k
-        x0 = min(x0 + 4 * k, kx1 - 6 * k - w)
+        # 수가 커지면 알약이 넓어지는데, 예전에는 왼쪽으로 밀어 넣어서
+        # 이름표를 덮었다 ('→ 99' 제보). 자리가 모자라면 짧은 글로 물러나고,
+        # 그래도 안 들어가면 이름을 가리느니 안 그린다.
+        x0 = x0 + 4 * k
+        for txt in ("\u2192 %d" % min(n, 99), "9+" if n > 9 else "%d" % n):
+            w = self._room_tw(cv, txt, f) + 14 * k
+            if x0 + w <= kx1 - 6 * k:
+                break
+        else:
+            return
         self._rr(cv, x0, py0 + 3 * k, x0 + w, py0 + 21 * k, 9 * k,
                  fill="#ffffff", outline=self._tint(col, 0.35), width=1)
         cv.create_text(x0 + w / 2, py0 + 12 * k, text=txt, font=f,
@@ -14240,6 +14273,26 @@ class Mascot:
                 self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
 
+    POKE_BURST = 5           # 10초 안에 이 횟수째부터 막는다
+    POKE_WINDOW = 10.0
+
+    def _poke_ok(self):
+        """콕 연타 제한 — 10초 안에 다섯 번째부터는 안 보낸다.
+
+        보내는 길이 둘(아래 단추·캐릭터 직접 누르기)이라 여기 한 곳에서
+        센다. 서버에도 방 전체 제한(10초에 40개)이 있지만, 그건 넘치면
+        조용히 버려서 보낸 사람이 모른다 — 여기서 미리 막고 말해 준다.
+        """
+        now = time.time()
+        self._poke_times = [t for t in self._poke_times
+                            if now - t < self.POKE_WINDOW]
+        if len(self._poke_times) >= self.POKE_BURST - 1:
+            self._room_toast = ("콕은 잠깐 쉬었다가 눌러 주세요", now)
+            self._safe("room_draw", self._room_draw)
+            return False
+        self._poke_times.append(now)
+        return True
+
     def _room_send(self, kind):
         """단추를 눌렀을 때 — 고른 상대에게만 간다.
 
@@ -14248,6 +14301,8 @@ class Mascot:
         """
         to = self._room_pick
         if not to:
+            return
+        if kind == "poke" and not self._poke_ok():
             return
         # 간식은 그림 하나를 골라 신호에 실어 보낸다 — 받는 쪽도 같은 것을 본다
         extra = self._snack_pick(time.time() * 1000) if kind == "snack" else ""
@@ -15077,6 +15132,8 @@ class Mascot:
                     self._safe("room_msg_win", self._room_msg_win)
                 elif self.room_net is not None:
                     kind = "blanket" if sleeping else "poke"
+                    if kind == "poke" and not self._poke_ok():
+                        return
                     self.room_net.send(slot, kind)
                     self._room_flash[slot] = time.time()
                     self._room_fx_add(slot, kind)
