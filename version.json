@@ -1,7 +1,7 @@
 {
- "version": 1786902838,
+ "version": 1786903640,
  "files": {
-  "mascot.py": "25fd99325741d2e36c507454eb51c9dc9c0c0af80316e75eb93d20eb0f011017",
+  "mascot.py": "c2ee07b5210ecefcc28bbee534fd840b7d31ff3721e3ba6ede48e8cbd5122a93",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -336,9 +336,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "간식을 주면 가끔 스페셜 컵케이크가 나가요\n기뽀님이 캐릭터마다 하나씩 그려 준 컵케이크예요. 간식을 주다 보면 가끔 내 캐릭터의 컵케이크가 나가고, 받은 캐릭터는 샤라랑~ 반짝이며 한참 웃어요.",
-  "홈을 내 그림으로 꾸밀 수 있어요\n반응 단추 줄 오른쪽 '꾸미기'에서 배경과 방 칸 그림을 고를 수 있어요. 방 칸 그림은 친구들 화면의 내 칸에도 똑같이 보여요.",
-  "글씨가 더 예뻐졌어요\n프리텐다드 글꼴을 품고 나와요. 따로 설치하지 않아도 모든 창의 글씨 모양이 더 또렷해져요."
- ]
+ "notes": [],
+ "silent": true
 }

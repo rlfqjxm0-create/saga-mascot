@@ -13419,6 +13419,25 @@ class Mascot:
         if self.room_win is not None:
             self._safe("room_draw", self._room_draw)
 
+    def _paste_into(self, ent, clear=False):
+        """클립보드를 입력칸에 직접 넣는다 — Tk 기본 바인딩에 안 기댄다."""
+        try:
+            txt = str(self.root.clipboard_get())
+        except Exception:
+            return "break"
+        try:
+            if clear:
+                ent.delete(0, "end")
+            elif ent.selection_present():
+                ent.delete("sel.first", "sel.last")
+        except Exception:
+            pass
+        try:
+            ent.insert("insert", txt.strip())
+        except Exception:
+            pass
+        return "break"
+
     def _room_msg_win(self):
         """오늘 한 줄을 적는 작은 창 — 우클릭 메뉴에서 바로 연다."""
         w = getattr(self, "_msg_win", None)
@@ -13458,6 +13477,22 @@ class Mascot:
                         highlightbackground=cd["border"],
                         highlightcolor=cd["fill"])
         sent.pack(ipady=u(5), padx=u(20))
+        # 맥에서는 Cmd+V 기본 바인딩이 안 걸리는 Tk 판이 있어 링크를 못
+        # 붙여넣는다는 제보가 왔다. 손수 만든 바인딩 + 붙여넣기 단추의
+        # 두 겹으로 간다 (둘 다 클립보드를 직접 읽으므로 Tk 판과 무관).
+        for w2 in (ent, sent):
+            for seq in ("<Command-v>", "<Command-V>", "<Control-v>",
+                        "<Control-V>"):
+                try:
+                    w2.bind(seq, lambda _e, t=w2: self._paste_into(t))
+                except Exception:
+                    pass
+        if IS_MAC:
+            tk.Button(win, text="링크 붙여넣기", font=self._uf(8),
+                      relief="flat", bg="#ffffff", fg=cd["text"],
+                      activebackground="#ffffff", cursor="hand2",
+                      command=lambda: self._paste_into(sent, clear=True)
+                      ).pack(pady=(u(6), 0))
         row = tk.Frame(win, bg=cd["panel"])
         row.pack(pady=(u(14), u(16)))
 
@@ -14977,7 +15012,10 @@ class Mascot:
             cimg = (self._room_peer_img(slot, cdh, kx1 - kx0, ky1 - ky0,
                                         18 * k) if cdh else None)
         if cimg is not None:
-            # 골라 둔 방 그림 — 둥근 모서리로 오려 깔고 테두리만 두른다
+            # 골라 둔 방 그림 — 칸 색으로 받치고(줄였을 때 빈자리),
+            # 둥근 모서리로 오려 깔고 테두리를 두른다
+            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
+                     width=0)
             cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
             self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
                      outline=col if picked else P["line"],
@@ -15153,7 +15191,7 @@ class Mascot:
         title = str(sg.get("t") or "노래 들으러 가기")
         if len(title) > 9:
             title = title[:9] + "…"
-        f = self._uf(8)
+        f = self._uf(8, True)
         txt = "\u266a " + title
         tw = self._room_tw(cv, txt, f)
         h = 20 * k
@@ -15652,6 +15690,14 @@ class Mascot:
         """꾸미기 그림 파일 (bg = 배경, card = 방 칸). 내 컴퓨터에만 있다."""
         return os.path.join(self.state_dir, ".room_%s.png" % what)
 
+    def _deco_zoom(self, what):
+        """꾸미기 그림 크기 설정 (0.5 ~ 2.5, 기본 1)."""
+        try:
+            return max(0.5, min(2.5, float(
+                self.us.get("room_%s_zoom" % what, 100)) / 100.0))
+        except Exception:
+            return 1.0
+
     def _room_deco_img(self, what, w, h, r=0):
         """골라 둔 꾸미기 그림을 그 크기로 (가운데를 꽉 채워 자름) — 캐시."""
         w, h = int(w), int(h)
@@ -15662,14 +15708,15 @@ class Mascot:
             mt = int(os.path.getmtime(p))
         except Exception:
             return None
-        key = (what, w, h, mt)
+        zoom = self._deco_zoom(what)
+        key = (what, w, h, mt, zoom)
         cache = self._room_deco_cache
         if key in cache:
             return cache[key]
         got = None
         try:
             im = Image.open(p).convert("RGBA")
-            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r))
+            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r, zoom))
         except Exception:
             got = None
         if len(cache) > 12:              # 지뢰 18·42 — 오래된 절반만
@@ -15679,13 +15726,23 @@ class Mascot:
         return got
 
     @staticmethod
-    def _deco_fit(im, w, h, r=0):
-        """그림을 (w, h)에 가운데로 꽉 채워 자르고, r이면 모서리를 둥글게."""
-        kk = max(w / im.width, h / im.height)
+    def _deco_fit(im, w, h, r=0, zoom=1.0):
+        """그림을 (w, h)에 가운데로 맞춘다. zoom 1 = 꽉 채움(cover).
+
+        키우면 가운데를 확대해 자르고, 줄이면 가장자리에 빈자리가 생긴다
+        (빈자리는 투명 — 그리는 쪽이 바탕색으로 받친다). r이면 둥글게.
+        """
+        zoom = max(0.5, min(2.5, float(zoom or 1.0)))
+        kk = max(w / im.width, h / im.height) * zoom
         im = im.resize((max(1, round(im.width * kk)),
                         max(1, round(im.height * kk))), Image.LANCZOS)
-        ix, iy = (im.width - w) // 2, (im.height - h) // 2
-        im = im.crop((ix, iy, ix + w, iy + h))
+        if im.width >= w and im.height >= h:
+            ix, iy = (im.width - w) // 2, (im.height - h) // 2
+            im = im.crop((ix, iy, ix + w, iy + h))
+        else:
+            base = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+            base.paste(im, ((w - im.width) // 2, (h - im.height) // 2), im)
+            im = base
         if r:
             from PIL import ImageChops, ImageDraw
             mask = Image.new("L", im.size, 0)
@@ -15707,18 +15764,24 @@ class Mascot:
             mt = int(os.path.getmtime(p))
         except Exception:
             return None, ""
+        zoom = self._deco_zoom("card")
         mem = getattr(self, "_cd_mem", None)
-        if mem and mem[0] == mt:
+        if mem and mem[0] == (mt, zoom):
             return mem[1], mem[2]
         try:
             import base64
             import io as _io
-            im = Image.open(p).convert("RGB")
-            im.thumbnail((180, 180), Image.LANCZOS)
+            im = Image.open(p).convert("RGBA")
+            # 크기 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
+            # 화면과 같은 모습이 된다. 빈자리는 흰색(칸 색)으로 받친다.
+            th = max(60, int(180 * self.ROOM_CH / self.ROOM_CW))
+            im = self._deco_fit(im, 180, th, 0, zoom)
+            base = Image.new("RGB", im.size, (255, 255, 255))
+            base.paste(im, (0, 0), im)
             b64 = ""
             for q in (60, 45, 32):       # 20KB 안에 들 때까지 낮춘다
                 buf = _io.BytesIO()
-                im.save(buf, "JPEG", quality=q)
+                base.save(buf, "JPEG", quality=q)
                 b64 = base64.b64encode(buf.getvalue()).decode("ascii")
                 if len(b64) <= 20000:
                     break
@@ -15727,7 +15790,7 @@ class Mascot:
             h = hashlib.sha256(b64.encode("ascii")).hexdigest()[:10]
         except Exception:
             return None, ""
-        self._cd_mem = (mt, b64, h)
+        self._cd_mem = ((mt, zoom), b64, h)
         return b64, h
 
     def _room_peer_hash_path(self):
@@ -15885,6 +15948,21 @@ class Mascot:
                       command=lambda: self._safe(
                           "deco_clear", self._room_deco_clear, what)
                       ).pack(side="left")
+            # 크기 조절 — 100% = 꽉 채움, 줄이면 가장자리가 바탕색으로
+            sc = tk.Scale(win, from_=50, to=250, orient="horizontal",
+                          resolution=5, showvalue=True, length=u(230),
+                          label="크기 (%)", font=self._uf(7),
+                          bg=cd["panel"], fg=cd["sub"],
+                          highlightthickness=0, troughcolor="#ffffff",
+                          activebackground=cd["fill"])
+            sc.set(int(float(self.us.get("room_%s_zoom" % what, 100))))
+            sc.pack(padx=u(24))
+
+            def zoom_done(_e, w2=what, s2=sc):
+                self.us["room_%s_zoom" % w2] = int(s2.get())
+                self._save_settings()
+                self._room_deco_bump()
+            sc.bind("<ButtonRelease-1>", zoom_done)
 
         row("배경", "bg")
         row("방 칸", "card")
