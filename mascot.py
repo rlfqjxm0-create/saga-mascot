@@ -1934,20 +1934,64 @@ def monitor_work(x, y):
     return monitor_at(x, y)
 
 
-UPDATE_REPOS = {                 # 선물 캐릭터 자동 업데이트 배포 레포
-    "parts_junsa": "rlfqjxm0-create/junsa-mascot",
-    "parts_dog": "rlfqjxm0-create/dog-mascot",
-    "parts_quincy": "rlfqjxm0-create/quincy-mascot",
-    "parts_dororong_gift": "rlfqjxm0-create/dororong-mascot",
-    "parts_saga": "rlfqjxm0-create/saga-mascot",
-    "parts_gippo": "rlfqjxm0-create/gippo-mascot",
-}
+OWNER = "rlfqjxm0-create"        # 배포 레포 주인
+
+# ── 캐릭터 한 표 ─────────────────────────────────────────────────────
+# **캐릭터를 늘릴 때 손대는 곳은 여기 하나다.**
+# 예전에는 같은 이름을 여섯 군데(UPDATE_REPOS·ROOM_ART·ROOM_ALL·ROOM_TINT·
+# ROOM_NAME 과 make_manifest 의 배포 목록)에 적어야 했고, 실제로 멸종·프고가
+# UPDATE_REPOS 에서 빠진 채 지냈다 — 그 둘만 '업데이트 소식'이 비고
+# (news.json 을 안 받아 옴) 반쪽 업데이트를 스스로 못 고쳤다(repair_parts).
+#
+#   slot  파츠 폴더 이름. 방에서의 자리 이름이기도 하다.
+#   repo  배포 레포 이름 (OWNER/<repo>)
+#   name  방에 보여 줄 이름
+#   tint  방 카드 색. 남의 config.json 은 친구 컴퓨터에 없어서 여기 적는다.
+#   mac   맥 앱인가 (윈도우 전용 꾸러미를 안 보낸다)
+#   gift  선물본인가. 소스로 도는 내 도로롱만 False —
+#         업데이트 확인을 원격이 아니라 제 폴더의 .version.json 으로 한다(지뢰 29).
+#   art   앉은 모습을 받아 올 폴더가 slot 과 다를 때만 (내 도로롱)
+#   size  방에서 그리는 크기 배율. 얼굴이 넓적한 캐릭터만 줄인다.
+CHARS = [
+    {"slot": "parts_junsa", "repo": "junsa-mascot", "name": "준사",
+     "tint": "#4a4a52"},
+    {"slot": "parts_dog", "repo": "dog-mascot", "name": "개",
+     "tint": "#555555"},
+    {"slot": "parts_quincy", "repo": "quincy-mascot", "name": "퀸시",
+     "tint": "#3c5488", "mac": True},
+    {"slot": "parts_dororong_gift", "repo": "dororong-mascot", "name": "도로롱",
+     "tint": "#f2a7c5"},
+    {"slot": "parts_saga", "repo": "saga-mascot", "name": "사가",
+     "tint": "#f486b6", "mac": True},
+    {"slot": "parts_gippo", "repo": "gippo-mascot", "name": "기뽀",
+     "tint": "#7fb436"},
+    {"slot": "parts_myeoljong", "repo": "myeoljong-mascot", "name": "멸종",
+     "tint": "#ba2028"},
+    {"slot": "parts_peugo", "repo": "peugo-mascot", "name": "프고",
+     "tint": "#1562f0", "size": 0.84},
+    # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
+    {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
+     "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
+]
+
+
+def char_info(slot):
+    """그 캐릭터의 표 한 줄 (모르는 이름이면 None)."""
+    for c in CHARS:
+        if c["slot"] == slot:
+            return c
+    return None
+
+
+# 아래는 전부 위 표에서 뽑은 것이다. 손으로 고치지 말 것.
+UPDATE_REPOS = dict(                 # 선물 캐릭터 자동 업데이트 배포 레포
+    (c["slot"], "%s/%s" % (OWNER, c["repo"]))
+    for c in CHARS if c.get("gift", True))
 
 
 # 지난 안내(news.json)를 받아 올 곳. 배포 레포가 없는 캐릭터(소스로 도는
 # 내 도로롱)도 같은 캐릭터의 배포 레포에서 소식만 받아 본다.
-NEWS_REPOS = dict(UPDATE_REPOS,
-                  parts_dororong="rlfqjxm0-create/dororong-mascot")
+NEWS_REPOS = dict((c["slot"], "%s/%s" % (OWNER, c["repo"])) for c in CHARS)
 
 UPDATE_FLAG = ".updated"          # 업데이트 알림 신호 파일
 
@@ -4269,8 +4313,14 @@ class Mascot:
         pil_cache["prop_back"] = im
         self.im["prop_back"] = ImageTk.PhotoImage(self._hard(im))
         self.has["prop_back"] = True
-        # 기본 몸 뒤 파츠(기뽀 요정 날개)는 숨긴다 — 날개가 겹쳐 보이지 않게
-        self.has["back"] = False
+        # 기본 몸 뒤 파츠를 숨길지는 **캐릭터가 정한다.**
+        # back.png 는 캐릭터마다 뜻이 다르다 — 기뽀는 요정 날개지만
+        # 사가는 양갈래다. 예전에는 무조건 숨겨서, 뒤조각이 있는 소품이
+        # 뽑히면 사가의 머리카락이 통째로 사라졌다 (열넷 중 셋).
+        # 기본은 그대로 두는 쪽이다 — 잘못돼도 '겹쳐 보인다'로 끝나지
+        # '일부가 사라진다'가 되지 않는다.
+        if self.cfg.get("back_hide_on_prop"):
+            self.has["back"] = False
         cfg = dict(self.PROP_BACK_MOTION.get(pick) or {})
         cfg.update((self.cfg.get("prop_back") or {}).get(pick) or {})
         self._prop_back_cfg = cfg
@@ -11420,11 +11470,15 @@ class Mascot:
         # 개는 머리를 팔 위에 그려야 어깨가 안 튀어나오므로, 얼굴을 팔 뒤로 미룬다.
         head_early = bool(self.cfg.get("arms_over_head") and self.has.get("head"))
         # 몸 뒤 파츠(사가 양갈래·기뽀 날개) — 몸보다 먼저, 살아 있게 움직인다.
-        # 소품의 뒤쪽 조각(악마 꼬리·천사 날개)이 있으면 그것이 자리를 대신한다.
+        # 소품의 뒤쪽 조각(악마 꼬리·천사 날개)은 그 위에 겹쳐 그린다.
+        # 예전에는 둘 중 하나만 그렸다(elif). back.png 의 뜻이 캐릭터마다
+        # 달라서 — 기뽀는 날개지만 사가는 양갈래다 — 뒤조각 있는 소품이
+        # 뽑히면 사가의 머리카락이 통째로 사라졌다 (열넷 중 셋).
+        # 겹쳐 보이는 게 싫은 캐릭터는 config 의 back_hide_on_prop 로 끈다.
+        if self.has.get("back"):
+            self._safe("back", self._draw_back, now, yo)
         if self.has.get("prop_back"):
             self._safe("prop_back", self._draw_prop_back, now, yo)
-        elif self.has.get("back"):
-            self._safe("back", self._draw_back, now, yo)
         bx, by = self._pos("body_open")
         self._safe("body", self._put, "body_open", bx, by + yo)
         if not self.has.get("head"):
@@ -12838,37 +12892,21 @@ class Mascot:
         self.close()
 
     # ── 같이 작업하는 방 ─────────────────────────────────────────────────
-    # 자리 이름(=파츠 폴더)으로 그 사람의 '앉은 모습'을 어디서 받아올지 안다.
-    # 내 도로롱은 배포 레포가 선물본 쪽이라 폴더 이름이 다르다.
-    ROOM_ART = {
-        "parts_junsa": ("junsa-mascot", "parts_junsa"),
-        "parts_dog": ("dog-mascot", "parts_dog"),
-        "parts_quincy": ("quincy-mascot", "parts_quincy"),
-        "parts_saga": ("saga-mascot", "parts_saga"),
-        "parts_gippo": ("gippo-mascot", "parts_gippo"),
-        "parts_myeoljong": ("myeoljong-mascot", "parts_myeoljong"),
-        "parts_peugo": ("peugo-mascot", "parts_peugo"),
-        "parts_dororong_gift": ("dororong-mascot", "parts_dororong_gift"),
-        "parts_dororong": ("dororong-mascot", "parts_dororong_gift"),
-    }
-    # 선물용 타이머를 받은 사람들 — 접속해 있지 않아도 자리는 늘 보인다.
-    ROOM_ALL = ("parts_junsa", "parts_dog", "parts_quincy",
-                "parts_dororong_gift", "parts_saga", "parts_gippo",
-                "parts_myeoljong", "parts_peugo")
-    # 남의 테마색은 그 사람 config.json 에 있는데, 친구 컴퓨터에는 자기
-    # 파츠 폴더밖에 없다. 그래서 여기에 적어 둔다 (없으면 전부 회색이 된다).
-    ROOM_TINT = {"parts_junsa": "#4a4a52", "parts_dog": "#555555",
-                 "parts_quincy": "#3c5488", "parts_dororong": "#f2a7c5",
-                 "parts_dororong_gift": "#f2a7c5", "parts_saga": "#f486b6",
-                 "parts_gippo": "#7fb436", "parts_myeoljong": "#ba2028",
-                 "parts_peugo": "#1562f0"}
-    ROOM_NAME = {"parts_junsa": "준사", "parts_dog": "개", "parts_quincy": "퀸시",
-                 "parts_dororong_gift": "도로롱", "parts_dororong": "도로롱",
-                 "parts_saga": "사가", "parts_gippo": "기뽀",
-                 "parts_myeoljong": "멸종", "parts_peugo": "프고"}
-    # 얼굴이 넓적한 캐릭터는 같은 높이로 맞추면 옆으로 커 보인다.
-    # 그 캐릭터만 조금 줄인다 (1.0 이 기본).
-    ROOM_SIZE = {"parts_peugo": 0.84}
+    # 아래 넷은 전부 맨 위 CHARS 표에서 뽑는다. 캐릭터를 늘릴 때는 그 표에만
+    # 한 줄 넣으면 된다 — 여기는 손대지 않는다.
+    #
+    # ROOM_ART   자리 이름(=파츠 폴더)으로 '앉은 모습'을 어디서 받아올지.
+    #            내 도로롱은 배포 레포가 선물본 쪽이라 폴더 이름이 다르다.
+    # ROOM_ALL   선물용 타이머를 받은 사람들. 접속해 있지 않아도 자리는 보인다.
+    # ROOM_TINT  남의 테마색. 그 사람 config.json 은 친구 컴퓨터에 없다
+    #            (없으면 방 카드가 전부 회색이 된다).
+    # ROOM_SIZE  얼굴이 넓적한 캐릭터는 같은 높이로 맞추면 옆으로 커 보인다.
+    ROOM_ART = dict((c["slot"], (c["repo"], c.get("art") or c["slot"]))
+                    for c in CHARS)
+    ROOM_ALL = tuple(c["slot"] for c in CHARS if c.get("gift", True))
+    ROOM_TINT = dict((c["slot"], c["tint"]) for c in CHARS)
+    ROOM_NAME = dict((c["slot"], c["name"]) for c in CHARS)
+    ROOM_SIZE = dict((c["slot"], c["size"]) for c in CHARS if c.get("size"))
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 62
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
@@ -13136,8 +13174,9 @@ class Mascot:
     INBOX_WORD = {"poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
                   "cheer": ("응원했어요", "응원", "#ffbe55"),
                   "blanket": ("쓰담쓰담 해 줬어요", "쓰담", "#ff9ec4"),
-                  "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
-                  "wave": ("손을 흔들었어요", "인사", "#c9a0ff")}
+                  "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f")}
+    # '인사'는 뺐다 — 보내는 길이 없어진 뒤로 아무도 못 쓴다. 아주 오래된
+    # 판이 보내더라도 '반응을 보냈어요'로 받아 준다 (_inbox_line).
 
     def _inbox_path(self):
         return os.path.join(self.state_dir, ".room_inbox.json")
@@ -13352,10 +13391,6 @@ class Mascot:
                       else "쓰담쓰담 받았어요", 3.5)
             # 쓰다듬는 동안 계속 웃는다 (연출이 끝날 때까지)
             self.smile_until = max(self.smile_until, now + self.CHAR_FX)
-        elif kind == "wave":
-            self.smile_until = max(self.smile_until, now + 2.0)
-            self._say(("%s 손을 흔들어요" % _josa(who)) if who
-                      else "누가 손을 흔들어요", 3.0)
         elif kind == "cheer":
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say(("%s 응원했어요" % _josa(who)) if who
@@ -14671,17 +14706,6 @@ class Mascot:
                              5 * k, fill=self._mix("#f0c98a", soft, p),
                              outline=self._mix("#c99a55", soft, p),
                              width=max(1, int(1.6 * k)), tags="fx")
-            elif kind == "wave":
-                a = math.sin(p * 22) * 26          # 손이 좌우로
-                hx, hy = cx + 42 * k, cy - 4 * k
-                cv.create_line(hx, hy + 18 * k, hx, hy,
-                               fill=self._shade(col, 0.1),
-                               width=max(2, int(3 * k)), tags="fx")
-                cv.create_oval(hx - 9 * k + a * 0.3 * k, hy - 9 * k,
-                               hx + 9 * k + a * 0.3 * k, hy + 9 * k,
-                               fill=self._mix(col, soft, 0.35),
-                               outline=self._shade(col, 0.15),
-                               width=max(1, int(1.6 * k)), tags="fx")
 
     def _room_tw(self, cv, text, font):
         """글자 폭 — 캔버스에 잠깐 그려 재고 지운다 (캐시는 안 쌓는다)."""
