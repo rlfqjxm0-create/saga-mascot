@@ -16309,6 +16309,12 @@ class Mascot:
         rest.sort(key=lambda q: (order.get(q.get("slot") or "", 99),
                                  q.get("slot") or ""))
         seats.extend(rest)
+        # 페이지로 나뉘면서 순서가 곧 페이지 배정이 됐다 — 켜 있는 사람이
+        # 앞 페이지에 오도록, 나를 뺀 전원을 '접속 먼저'로 다시 세운다.
+        seats[1:] = sorted(
+            seats[1:], key=lambda q: (1 if q.get("off") else 0,
+                                      order.get(q.get("slot") or "", 99),
+                                      q.get("slot") or ""))
         here = set(q.get("slot") or "" for q in seats)
         for slot in self.ROOM_ALL:
             if slot in here:
