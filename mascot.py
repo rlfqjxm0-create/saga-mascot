@@ -14247,7 +14247,21 @@ class Mascot:
             bb = a.getbbox()
             if not bb:
                 return None
+            # '맨 위 불투명 픽셀'을 머리로 보면 안 된다 — 자는 그림에는
+            # zzZ·콧방울이, 도로롱은 가는 머리장식이 그 위에 떠 있어
+            # 고깔이 허공에 얹힌다. 폭이 그림의 1/6을 넘는 첫 줄부터가
+            # 머리(정수리)다.
+            pxa = a.load()
+            thr_w = im.width * 0.16
             top = bb[1]
+            for y in range(bb[1], min(h, bb[1] + int(h * 0.6))):
+                cnt = 0
+                for x in range(bb[0], bb[2], 2):
+                    if pxa[x, y] > 40:
+                        cnt += 1
+                if cnt * 2 >= thr_w:
+                    top = y
+                    break
             band = a.crop((0, top, im.width,
                            min(h, top + max(4, int(h * 0.16)))))
             b2 = band.getbbox()
