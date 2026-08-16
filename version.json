@@ -1,7 +1,7 @@
 {
- "version": 1786887425,
+ "version": 1786888852,
  "files": {
-  "mascot.py": "dcae33fd82f7daa3ba916c88eaca52432e464162640a6857e4a7a622ea5f0cac",
+  "mascot.py": "04f5c49271e90b060a12375bb9d7e1328b30788fea91e6615c715cd60518c3f2",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -275,15 +275,15 @@
   "parts_saga/sounds/slime/치즈/stretch8.wav": "ed5338aff14d75c84053b6f299bae8aa35efe7c5fa09070eb566c5b8238c236c",
   "parts_saga/sounds/slime/치즈/stretch9.wav": "7b7d32cc9ebd271261600d950dff0d4e3af37b75c95a80e4f67554e8c70d6ee9",
   "parts_saga/sounds/slime/치즈/unroll.wav": "fe0a01708986fd68ad0974f6feec3ab912cd97de9f0a0677db2a0d590e87f190",
-  "parts_saga/sounds/snack/eat01.wav": "5a0d103d9faeabfe3587f4c31b44e3934dcd6cc304313de1f4ac9e7c96ea7401",
-  "parts_saga/sounds/snack/eat02.wav": "0f5bba0f1848b5e3398a606901e30b759f03b804823c3b3bf413d1ff81714f28",
-  "parts_saga/sounds/snack/eat03.wav": "27bd262be462eb4accdabdb6b03edefab8cba0c2395395e8c404736f45f044e3",
-  "parts_saga/sounds/snack/eat04.wav": "1cf8c2bb1708a13e1c8812d3d58d001637778f73e3e48b73d62ede9e11a90297",
-  "parts_saga/sounds/snack/eat05.wav": "070ec08367d247853c99971fdc6abaae13c0ce857a166da4d909eac159170ef7",
-  "parts_saga/sounds/snack/eat06.wav": "1b5b5f28ea32d55057663f6868f4d4560757363bb5de8e79ce2cdc9292402256",
-  "parts_saga/sounds/snack/eat07.wav": "44e112d95d372d4082b5e4aec186f5dfecc451eb6caac6f2bec9423e34f4fcc9",
-  "parts_saga/sounds/snack/eat08.wav": "7b4501f783a450fd643a784bbb8ad96f57b5a1412eb9a9a1744105b1204c4939",
-  "parts_saga/sounds/snack/eat09.wav": "a7925ca9ea974886bc62be81c31b9fd99fd90d485b4f00263e5633dd15fe7f36",
+  "parts_saga/sounds/snack/eat01.wav": "3f3e07bcfef570284ddf28e29914d2b95745bb6ea117faf5e030be9da845156a",
+  "parts_saga/sounds/snack/eat02.wav": "9c0695d7c48c362956da8d666c64aebaa341d1e2c906d81d4edb7367f32867fd",
+  "parts_saga/sounds/snack/eat03.wav": "92b4f127faf9e1e1d305e82ba30772b204666c4e18540fe38eb64b48ab7daadb",
+  "parts_saga/sounds/snack/eat04.wav": "8c1fd1e22464f08eaba6af8f052e7f885efee26de37ca0db3fc07247a6ffd208",
+  "parts_saga/sounds/snack/eat05.wav": "774ce5b4ad91c40650cef0080adfd60ae48e6415145ceb809e2bac5d45ab5df4",
+  "parts_saga/sounds/snack/eat06.wav": "d6328ff063ff58c8701d8d15dc4c5bce888047192006e932c6fdd14ec30a8ede",
+  "parts_saga/sounds/snack/eat07.wav": "79c80da65ce541bb57728b8da7a9f2cfa6da4a2e61b40885fe1098f294e8d4f9",
+  "parts_saga/sounds/snack/eat08.wav": "96707214f804aebc4e8234f7c6804c7e62a58b942f4e2bd85ae130c72f932759",
+  "parts_saga/sounds/snack/eat09.wav": "8c1174dd35b97a7c07c682a1ea2ea6e91535d0aec80f7b91d6ea093a5b60bba2",
   "parts_saga/sounds/tealios-v2_Akira/back.wav": "72c5142e29793443f094aad7be3401059752bb956187b58e9c0e145a65937301",
   "parts_saga/sounds/tealios-v2_Akira/caps.wav": "f8400f05bbb96d942fc9a659df83b4ff890c086cdccb907db4960bce9a77d72b",
   "parts_saga/sounds/tealios-v2_Akira/config.json": "e678ae54ac8212f32a3b040599462fd61d4f6ad2c4d48f263eb370ad18382743",
@@ -298,12 +298,11 @@
   "parts_saga/sounds/tealios-v2_Akira/LICENSE.txt": "2e8578f16b6ea265412166e8b4b1da045fcc11f28db03d664908410124a2f01e",
   "parts_saga/sounds/tealios-v2_Akira/shift.wav": "96ba5efe7c5b612c480d8f1193eeb8fc7a006208badac0a36c0858423b19c9ec",
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
-  "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6"
+  "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6",
+  "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
+  "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
+  "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "달력 도장판이 생겼어요\n홈에서 내 칸 왼쪽 위의 달력을 누르면 이 달의 도장판이 열립니다. 그린 시간에 따라 도장이 달라져요 — 새싹, 꽃봉오리, 꽃, 여덟 시간 넘게 그린 날은 금꽃. 작업 종료를 누른 날에는 빨간 체크가 붙습니다. 날짜를 누르면 그날 얼마나 그렸는지 나오고, ◀▶로 지난달도 볼 수 있어요.",
-  "다 같이 24시간 도전\n홈 위의 '오늘 다 같이'가 모두의 작업 시간을 더해 하루 24시간을 목표로 잽니다. 채워질수록 게이지 색이 주황에서 노랑, 연두로 익어 가고, 다 채우면 초록이 되면서 모든 캐릭터 옆에 반짝이가 떠요. 타이틀에는 아침·낮·저녁·밤·새벽 하늘이 시간 따라 바뀝니다.",
-  "간식 먹는 소리가 나요\n다른 사람이 준 간식을 누르면 오물오물 먹는 소리가 납니다. 아홉 가지 중 하나가 랜덤으로 나오고 음높이도 조금씩 달라져요. 첫 입에는 베어 문 자국이 남고, 한 번 더 누르면 다 먹습니다.",
-  "타이머 초기화를 되돌릴 수 있어요\n실수로 초기화를 눌러도 괜찮습니다. 우클릭 메뉴의 '초기화 되돌리기'를 누르면 초기화 직전 상태로 돌아와요. 할 일 추가 같은 입력 창들도 이제 타이머 뒤로 안 숨고, 닫은 자리를 기억합니다."
- ]
+ "notes": [],
+ "silent": true
 }

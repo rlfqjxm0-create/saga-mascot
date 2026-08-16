@@ -4151,6 +4151,8 @@ class Mascot:
         self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
         self._sky_key = None
         self._room_cal_btn = None    # 홈 타이틀의 달력 아이콘 자리
+        self._room_seen = None       # 오늘 마지막으로 본 남들의 시간·게이지
+        self._room_seen_at = 0.0
         self._stamp_win = None       # 도장판 창
         self._stamp_off = 0          # 보고 있는 달 (0 = 이번 달)
         self._stamp_pick = None      # 눌러서 자세히 보는 날
@@ -5467,9 +5469,13 @@ class Mascot:
             mb = getattr(self, "_yt_btn", None)
             dot = getattr(self, "_dot_btn", None)
             box = self._snack_box
-            if (box and self._snack_get()
+            sn = self._snack_get()
+            if (box and sn
+                    and time.time() - float(sn.get("t") or 0) >= self.SNACK_DROP
                     and box[0] <= px <= box[2] and box[1] <= py <= box[3]):
-                # 간식을 눌렀다 — 먹고 치운다
+                # 간식을 눌렀다 — 먹고 치운다. 떨어지는 동안(1.2초)에는 누를
+                # 자리가 캐릭터 얼굴 위를 지나가서, 콕 찌르려던 클릭이
+                # 간식을 모르는 새에 먹어 버렸다 (멸종 제보) — 착지 후부터만.
                 self._safe("snack_eat", self._snack_eat)
                 self._press = None
                 return
@@ -13366,6 +13372,44 @@ class Mascot:
                 people if self.room_win is None else self._room_seats())
         for ev in events:
             self._safe("room_ev", self._room_event, ev)
+        self._safe("room_seen", self._room_seen_note, now)
+
+    def _room_seen_path(self):
+        return os.path.join(self.state_dir, ".room_seen.json")
+
+    def _room_seen_get(self):
+        """오늘 마지막으로 본 남들의 (시간, 게이지). 껐다 켜도 남는다."""
+        if self._room_seen is None:
+            got = {}
+            try:
+                with open(self._room_seen_path(), encoding="utf-8") as fp:
+                    got = json.load(fp)
+            except Exception:
+                got = {}
+            self._room_seen = got if isinstance(got, dict) else {}
+        return self._room_seen
+
+    def _room_seen_note(self, now):
+        """접속 중인 사람들의 시간·게이지를 적어 둔다.
+
+        자리는 서버에서 90초면 사라져서, 접속을 끄면 그 사람 게이지가 0이
+        되고 '오늘 다 같이'에서 그만큼 깎였다. 오늘 본 마지막 값을 남겨
+        하루가 넘어가기 전에는 그대로 쓴다.
+        """
+        seen = self._room_seen_get()
+        day = self._my_workday()
+        changed = False
+        for q in self.room_people:
+            slot = q.get("slot") or ""
+            if not slot or slot == self.char:
+                continue
+            row = [int(q.get("t") or 0), float(q.get("p") or 0), day]
+            if seen.get(slot) != row:
+                seen[slot] = row
+                changed = True
+        if changed and now - self._room_seen_at > 20.0:
+            self._room_seen_at = now
+            _save_json(self._room_seen_path(), seen)
 
     def _room_diag(self, now):
         """방 상태를 파일 하나에 적는다 (.room_diag.txt).
@@ -13839,7 +13883,7 @@ class Mascot:
         # 에서 벽이 눈에 띄게 붉어져 캐릭터가 묻힌다.
         out = {"wall": p(self.char, 0.970 - d * 0.6, 0.35, 0.50),
                "dot": p(self.char, 0.930 - d * 0.6, 0.35, 0.55),
-               "card": p(self.char, 0.993 - d * 0.4, 0.25, 0.40),
+               "card": "#ffffff",   # 방(칸)은 흰색 — 테마색은 바닥 띠가 맡는다
                "line": p(self.char, 0.920 - d, 0.35, 0.55),
                "bar": p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
                "lamp": p(self.char, 0.870 - d, 0.45, 0.70),
@@ -14074,7 +14118,7 @@ class Mascot:
            "낮": ("#8fd0ff", "#2f5470", "#6488a0"),
            "저녁": ("#ffb083", "#6d3a2a", "#996a58"),
            "밤": ("#283158", "#eceaf8", "#b6b3d6"),
-           "새벽": ("#3a4370", "#e2e0f0", "#aca9cc")}
+           "새벽": ("#5f7cb0", "#f4f7fd", "#dde6f4")}
 
     @staticmethod
     def _sky_period(hour=None):
@@ -14094,7 +14138,7 @@ class Mascot:
                 "낮": ("#5fb8f4", "#b8e2ff"),
                 "저녁": ("#ff8e5e", "#ffd2a3"),
                 "밤": ("#1e2648", "#3d4775"),
-                "새벽": ("#2c3459", "#525d8a")}
+                "새벽": ("#4c6aa5", "#8fabd6")}
 
     def _room_sky_img(self, W, top, period):
         """타이틀 띠의 하늘 그림 — 시간대·크기가 바뀔 때만 다시 만든다.
@@ -14325,7 +14369,8 @@ class Mascot:
         # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
         # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
-        tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
+        # 꺼진 사람도 오늘 본 마지막 값이 실려 있어 합계가 안 깎인다
+        tot = sum(int(q.get("t") or 0) for q in people)
         # 다 같이 24시간을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다
         self._room_goal_done = tot >= 24 * 60
         nums = self._safe_str(self._room_numbers, on, live)
@@ -14729,8 +14774,43 @@ class Mascot:
         self._dialog_keep(win, "stamp")
         self._safe("stamp_draw", self._stamp_draw)
 
+    def _stamp_img(self, kind, px):
+        """도장 스티커 그림 (PSD 에서 뽑은 것). 캐시하고, 없으면 None."""
+        cache = getattr(self, "_stamp_imgs", None)
+        if cache is None:
+            cache = self._stamp_imgs = {}
+        key = (kind, int(px))
+        if key in cache:
+            return cache[key]
+        name = "flower" if kind == "gold" else kind
+        p = os.path.join(self.dir, "stamps", name + ".png")
+        got = None
+        try:
+            im = Image.open(p).convert("RGBA")
+            im.thumbnail((int(px), int(px)), Image.LANCZOS)
+            got = ImageTk.PhotoImage(im)
+        except Exception:
+            got = None
+        cache[key] = got
+        return got
+
     def _stamp_flower(self, cv, cx, cy, r, kind):
-        """도장 그림 — 새싹·꽃봉오리·꽃·금테 꽃."""
+        """도장 — 그린 스티커(새싹·봉오리·꽃)로. 금꽃은 꽃 + 금별.
+
+        그림이 없으면(옛 배포본) 예전처럼 도형으로 그린다.
+        """
+        img = self._stamp_img(kind, r * 2.4)
+        if img is not None:
+            cv.create_image(cx, cy, image=img)
+            if kind == "gold":               # 여덟 시간 — 금별을 달아 준다
+                sx, sy, a = cx + r * 0.85, cy - r * 0.85, r * 0.5
+                cv.create_polygon(
+                    sx, sy - a, sx + a * 0.3, sy - a * 0.3, sx + a, sy,
+                    sx + a * 0.3, sy + a * 0.3, sx, sy + a,
+                    sx - a * 0.3, sy + a * 0.3, sx - a, sy,
+                    sx - a * 0.3, sy - a * 0.3,
+                    fill="#ffd75e", outline="#e0a83c", width=1)
+            return
         if kind == "sprout":
             cv.create_line(cx, cy + r * 0.8, cx, cy - r * 0.2,
                            fill="#5c8a2c", width=2, capstyle="round")
@@ -14926,8 +15006,13 @@ class Mascot:
             cap = "방에 있는 모두에게"
         else:
             cap = "보낼 사람을 골라 주세요"
+        capf = self._uf(10, True)
+        tw_ = self._room_tw(cv, cap, capf)
+        self._rr(cv, W // 2 - tw_ / 2 - 14 * k, by - 44 * k,
+                 W // 2 + tw_ / 2 + 14 * k, by - 16 * k, 14 * k,
+                 fill="#ffffff", outline=P["line"], width=1)
         cv.create_text(W // 2, by - 30 * k, anchor="center", text=cap,
-                       font=self._uf(9), fill=P["sub"], tags="dyn")
+                       font=capf, fill=P["ink"], tags="dyn")
         ts = self._room_toast
         if ts and time.time() - ts[1] < self.ROOM_TOAST:
             tw = self._room_tw(cv, ts[0], self._uf(9, True))
@@ -15046,8 +15131,13 @@ class Mascot:
                 continue
             if mine is not None and self.ROOM_ART.get(slot) == mine:
                 continue          # 내 캐릭터의 선물본 자리는 겹치니 뺀다
+            # 접속을 껐어도 오늘 본 마지막 시간·게이지는 그대로 보여 준다
+            st, sp = 0, 0
+            row = self._room_seen_get().get(slot)
+            if row and len(row) >= 3 and row[2] == self._my_workday():
+                st, sp = int(row[0]), float(row[1])
             seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
-                          "lv": 1, "ti": "", "t": 0, "s": "off", "p": 0,
+                          "lv": 1, "ti": "", "t": st, "s": "off", "p": sp,
                           "a": "", "off": True})
         return seats
 
