@@ -16218,6 +16218,8 @@ class Mascot:
 
         bite 가 1이면 오른쪽 위를 두 군데 둥글게 베어 문 그림을 낸다.
         """
+        if str(name).startswith("cup_"):
+            long_px = int(long_px * 1.5)     # 스페셜 컵케이크는 큼직하게
         key = (name, int(long_px), int(bite))
         cache = self._snack_cache
         got = cache.get(key)
