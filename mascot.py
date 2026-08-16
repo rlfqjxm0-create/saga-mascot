@@ -3981,7 +3981,8 @@ class Mascot:
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
         if self.has_clock:
             menu.add_command(label="시계 펼치기 / 접기", command=self._toggle_clock)
-        if self.timer_on and self.ws_path is None:
+        if (self.timer_on and self.ws_path is None
+                and self.cfg.get("reset_menu", True)):
             menu.add_command(label="타이머 초기화", command=self._timer_reset)
             menu.add_command(label="초기화 되돌리기",
                              command=lambda: self._safe(
@@ -5057,6 +5058,11 @@ class Mascot:
                     d.polygon([(mx, cy0 - 9), (mx + 8 * sign, cy0 - 18),
                                (mx + 15 * sign, cy0 - 10), (mx + 6 * sign, cy0 - 4)],
                               fill=(0, 0, 0, 255))
+            elif deco == "burger":                 # 햄북이: 미니 햄버거
+                d.pieslice([mx - 22, cy0 - 19, mx + 22, cy0 + 13],
+                           180, 360, fill=(0, 0, 0, 255))
+                d.rounded_rectangle([mx - 22, cy0 - 4, mx + 22, cy0 + 6],
+                                    radius=4, fill=(0, 0, 0, 255))
             elif deco == "scarf":                  # 퀸시: 목도리 띠 (귀 없음)
                 d.rounded_rectangle([cx0 + 14, cy0 - 15, cx1 - 14, cy0 + 7],
                                     radius=9, fill=(0, 0, 0, 255))
@@ -8108,6 +8114,23 @@ class Mascot:
                               fill="#20261c", outline="")
                 c.create_oval(ex - 1, y0 - 4, ex + 3, y0 - 1,
                               fill="#ffffff", outline="")
+        elif deco == "burger":
+            # 햄북이: 카드 위 한가운데 미니 햄버거 (번·양상추·패티)
+            mx = (x0 + x1) / 2
+            bun, line = "#ecbf6b", "#a8763e"
+            c.create_arc(mx - 22, y0 - 19, mx + 22, y0 + 13, start=0,
+                         extent=180, style="pieslice", fill=bun,
+                         outline=line, width=2)
+            for dx2 in (-10, 0, 10):               # 참깨
+                c.create_oval(mx + dx2 - 2, y0 - 12 + abs(dx2) // 5,
+                              mx + dx2 + 2, y0 - 9 + abs(dx2) // 5,
+                              fill="#fdf3d9", outline="")
+            for i2 in range(6):                    # 양상추 물결
+                lx = mx - 20 + i2 * 8
+                c.create_oval(lx - 4, y0 - 4, lx + 4, y0 + 4,
+                              fill="#7cb956", outline="#578a35")
+            c.create_rectangle(mx - 19, y0 + 1, mx + 19, y0 + 6,
+                               fill="#8a5a34", outline="#6d4426")
         elif deco == "rabbit":
             base = self.card.get("bg", "#ffffff")
             inner = self.card.get("track", "#c9d3e6")

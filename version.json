@@ -1,7 +1,7 @@
 {
- "version": 1786913663,
+ "version": 1786914689,
  "files": {
-  "mascot.py": "4a142f335681b238b693e948652f60eab90d0ebae2df4135d0bafd7431e5ab49",
+  "mascot.py": "8256a6d75a5c3a82af40376647dc4ca3190755eaa2a81097df08690ad47036c3",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -337,8 +337,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "새 주민이 이사 왔어요\n햄버거 캐릭터 '햄북이'가 홈에 들어왔어요. 사람이 많아져서 홈이 9명씩 페이지로 나뉩니다 — 오른쪽 화살표(▶)를 누르면 다음 페이지 주민들을 만날 수 있어요. 접속 중인 친구가 앞 페이지에 먼저 보여요.",
-  "'모두에게'는 모든 페이지에 갑니다\n반응을 '모두에게'로 보내면 지금 보고 있는 페이지만이 아니라 방의 모든 주민에게 전해져요."
- ]
+ "notes": [],
+ "silent": true
 }
