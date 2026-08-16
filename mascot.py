@@ -14701,11 +14701,21 @@ class Mascot:
                 return ""
             beat = {"보냄": "보냄", "보낼 값이 아직 없음": "값없음",
                     "아직": "아직"}.get(st.get("beat"), str(st.get("beat"))[:8])
-            return ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 다시 %d"
+            net = self.room_net
+            calls = int(getattr(net, "calls", 0) or 0)
+            th = getattr(net, "_th", None)
+            alive = "O" if (th is not None and th.is_alive()) else "X"
+            err = str(getattr(net, "err", "") or "")
+            line = ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 다시 %d"
+                    " · 부름 %d · 스레드 %s"
                     % (self._room_tag(), beat, st.get("rows"),
                        st.get("read"),
                        {True: "있음", False: "없음"}.get(st.get("mine"), "?"),
-                       ("%d초" % live) if live < 8640000 else "없음", retry))
+                       ("%d초" % live) if live < 8640000 else "없음", retry,
+                       calls, alive))
+            if err:
+                line += " · 오류 " + err[:42]
+            return line
         except Exception:
             return ""
 
