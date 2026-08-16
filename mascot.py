@@ -14532,7 +14532,7 @@ class Mascot:
         cw = int(self.ROOM_CW * k)
         n = max(1, len(self._room_seats()))
         cols, rows, W, H = self._room_fit(
-            int(16 * k) * 2 + cw * self.ROOM_COLS, n)
+            int(16 * k) * 2 + int(44 * k) * 2 + cw * self.ROOM_COLS, n)
         self._room_cols, self._room_rows = cols, rows
         self._room_size = (0, 0)
         win = tk.Toplevel(self.root)
@@ -14862,20 +14862,25 @@ class Mascot:
                 lw = max(1, int(width)) * S
                 im = Image.new("RGBA", (w * S, (h + th) * S), (0, 0, 0, 0))
                 d2 = ImageDraw.Draw(im)
-                if th:                     # 꼬리 먼저 — 몸통이 이음매를 덮는다
-                    d2.polygon([(tx * S - 8 * S, (h - 2) * S),
-                                ((tx - 3) * S, (h + th) * S),
-                                (tx * S + 8 * S, (h - 2) * S)],
-                               fill=fill, outline=outline or None, width=lw)
                 d2.rounded_rectangle(
                     [lw // 2, lw // 2, w * S - 1 - lw // 2,
                      h * S - 1 - lw // 2],
                     radius=int(r) * S, fill=fill,
                     outline=outline or None, width=lw)
-                if th:                     # 꼬리 이음매를 속색으로 다시 덮기
-                    d2.rectangle([tx * S - 7 * S, h * S - lw - 2 * S,
-                                  tx * S + 7 * S, h * S - lw // 2],
-                                 fill=fill)
+                if th:
+                    # 꼬리 — 속을 몸통 테두리 '위'까지 파고들게 칠해 아랫선을
+                    # 지우고(한 덩어리), 빗변 두 줄만 테두리색으로 긋는다.
+                    lx, rx = (tx - 8) * S, (tx + 8) * S
+                    tipx, tipy = (tx - 3) * S, (h + th) * S - lw
+                    topy = h * S - lw * 2 - S
+                    d2.polygon([(lx, topy), (rx, topy), (tipx, tipy)],
+                               fill=fill)
+                    if outline:
+                        ey = h * S - lw // 2 - 1
+                        d2.line([(lx, ey), (tipx, tipy)],
+                                fill=outline, width=lw)
+                        d2.line([(rx, ey), (tipx, tipy)],
+                                fill=outline, width=lw)
                 im = im.resize((w, h + th), Image.LANCZOS)
                 img = ImageTk.PhotoImage(im)
             except Exception:
@@ -17060,10 +17065,11 @@ class Mascot:
         줄 수에 상한을 두고, 그때는 칸을 늘려 가로로 눕힌다.
         """
         k = self.ui_k
+        n = min(n, self.ROOM_PAGE)   # 페이지로 나뉘므로 한 페이지가 기준
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         # +16 은 타이틀 띠와 첫 줄 사이의 최소 간격 (그리는 쪽과 같은 값)
         top, bot = int((self.ROOM_TOP + 16) * k), int(126 * k)
-        pad = int(20 * k)
+        pad = int(20 * k) + int(44 * k) * 2   # 양옆 페이지 화살표 자리 포함
         sh = self.root.winfo_screenheight()
         sw = self.root.winfo_screenwidth()
         maxr = max(1, int((sh * 0.92 - top - bot) // ch))
