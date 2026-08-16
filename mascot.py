@@ -14903,7 +14903,11 @@ class Mascot:
         # 아래 단추 줄(126k)을 뺀 나머지 공간의 한가운데에 놓는다.
         H2 = cv.winfo_height() or int(self.room_win.winfo_height())
         rows_used = max(1, -(-len(people) // cols))
-        voff = max(0, (H2 - int(126 * k) - top - rows_used * chh) // 2)
+        # 타이틀 띠 바로 밑에 첫 줄이 붙으면 말풍선이 하늘에 닿는다 —
+        # 최소 간격을 두고, 남는 공간이 있으면 그 안에서 가운데로.
+        gap = int(16 * k)
+        voff = gap + max(0, (H2 - int(126 * k) - top - gap
+                             - rows_used * chh) // 2)
         self._room_voff = voff
         for i, p in enumerate(people):
             cx0 = left + (i % cols) * cw
@@ -16903,7 +16907,8 @@ class Mascot:
         """
         k = self.ui_k
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
-        top, bot = int(self.ROOM_TOP * k), int(126 * k)
+        # +16 은 타이틀 띠와 첫 줄 사이의 최소 간격 (그리는 쪽과 같은 값)
+        top, bot = int((self.ROOM_TOP + 16) * k), int(126 * k)
         pad = int(20 * k)
         sh = self.root.winfo_screenheight()
         sw = self.root.winfo_screenwidth()
