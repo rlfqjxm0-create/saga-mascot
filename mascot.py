@@ -2170,7 +2170,8 @@ def repair_parts(char_dir, state_dir=None):
         req = urllib.request.Request(url, headers={"User-Agent": "mascot-repair"})
         for i in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=20) as r:
+                with urllib.request.urlopen(req, timeout=20,
+                                            context=_ssl_ctx()) as r:
                     return r.read()
             except Exception:
                 if i == 2:
@@ -3133,6 +3134,33 @@ def _ct_eq(a, b):
     return diff == 0
 
 
+_SSL_CTX = [None]
+
+
+def _ssl_ctx():
+    """HTTPS 규칙 — 굳힌 맥 앱에는 시스템 인증서 묶음이 없다.
+
+    PyInstaller 로 만든 앱은 인증서를 못 찾아 모든 https 요청이
+    `CERTIFICATE_VERIFY_FAILED` 로 막힌다. 런처(`*_mac.py`)는 certifi 를
+    명시적으로 쓰는데 여기에는 그 처리가 없어서, **자동 업데이트는 되는데
+    홈만 안 되는** 상태였다 (사가가 몇 시간 동안 아무에게도 안 보인 원인).
+
+    certifi 가 없으면(윈도우 exe) 기본값을 쓴다 — 윈도우는 시스템 인증서가
+    있어서 그대로 잘 된다. 한 번 만들어 두고 계속 쓴다.
+    """
+    if _SSL_CTX[0] is None:
+        import ssl
+        try:
+            import certifi
+            _SSL_CTX[0] = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            try:
+                _SSL_CTX[0] = ssl.create_default_context()
+            except Exception:
+                _SSL_CTX[0] = False        # 만들지 못함 — 그냥 기본값으로
+    return _SSL_CTX[0] or None
+
+
 def _room_keys(code):
     """방 코드에서 '방 번호'와 '자물쇠'를 따로 뽑는다.
 
@@ -3298,7 +3326,8 @@ class RoomNet:
                      "Authorization": "Bearer " + ROOM_KEY,
                      "Content-Type": "application/json",
                      "User-Agent": "mascot-room"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout,
+                                    context=_ssl_ctx()) as r:
             body = r.read().decode("utf-8")
         return json.loads(body) if body.strip() else None
 
@@ -6377,7 +6406,8 @@ class Mascot:
                     url, data=json.dumps({"content": body[:1900]}).encode(),
                     headers={"Content-Type": "application/json",
                              "User-Agent": "mascot-feedback"}, method="POST")
-                with urllib.request.urlopen(req, timeout=15) as r:
+                with urllib.request.urlopen(req, timeout=15,
+                                            context=_ssl_ctx()) as r:
                     if r.status >= 300:
                         left.append(it)
             except Exception:
@@ -9421,7 +9451,7 @@ class Mascot:
             try:
                 with urllib.request.urlopen(
                         urllib.request.Request(url, headers=head),
-                        timeout=12) as r:
+                        timeout=12, context=_ssl_ctx()) as r:
                     body = r.read()
                     self._news_etag = r.headers.get("ETag") or self._news_etag
             except urllib.error.HTTPError as e:
@@ -9453,7 +9483,7 @@ class Mascot:
             try:
                 with urllib.request.urlopen(
                         urllib.request.Request(url, headers=head),
-                        timeout=12) as r:
+                        timeout=12, context=_ssl_ctx()) as r:
                     body = r.read()
                     self._upd_etag = r.headers.get("ETag") or self._upd_etag
             except urllib.error.HTTPError as e:
@@ -13326,7 +13356,8 @@ class Mascot:
                 try:
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "mascot-room"})
-                    with urllib.request.urlopen(req, timeout=20) as r:
+                    with urllib.request.urlopen(req, timeout=20,
+                                            context=_ssl_ctx()) as r:
                         raw = r.read()
                     if len(raw) < 200:
                         raise ValueError("너무 작음")
