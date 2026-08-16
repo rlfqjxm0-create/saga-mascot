@@ -4062,6 +4062,8 @@ class Mascot:
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
+        self._snack_on = None            # 책상에 놓인 간식 (눌러야 없어진다)
+        self._snack_box = None           # 그 간식을 누를 수 있는 자리
         self._room_btn_hit = []      # 아래 단추 자리
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
@@ -5351,6 +5353,13 @@ class Mascot:
             on_card = (g["x0"] <= px <= g["x1"] and g["y0"] - 17 <= py <= g["y1"])
             mb = getattr(self, "_yt_btn", None)
             dot = getattr(self, "_dot_btn", None)
+            box = self._snack_box
+            if (box and self._snack_get()
+                    and box[0] <= px <= box[2] and box[1] <= py <= box[3]):
+                # 간식을 눌렀다 — 먹고 치운다
+                self._safe("snack_eat", self._snack_eat)
+                self._press = None
+                return
             if dot and (px - dot[0]) ** 2 + (py - dot[1]) ** 2 <= dot[2] ** 2:
                 self.open_update_news()
                 self._press = None
@@ -11508,6 +11517,8 @@ class Mascot:
             self._safe("bubble", self._draw_bubble, yo)
         # 남이 눌러 준 연출은 캐릭터 위에 얹는다. draw() 안에서 그려야 한다 —
         # 밖에서 그리면 다음 draw() 의 delete("all") 에 바로 지워진다.
+        self._snack_box = None      # 구역 밖에서 지운다 (지뢰 14)
+        self._safe("snack_on", self._draw_snack_on, now)
         self._safe("char_fx", self._draw_char_fx, now)
         self._safe("pet_shadow", self._update_pet_shadow)
 
@@ -13164,6 +13175,8 @@ class Mascot:
             d["day"] = day
             d["list"] = []
             d["sent"] = {}
+            d["snack"] = None
+            self._snack_on = False
             self._inbox_save()
 
     def _inbox_save(self):
@@ -13203,6 +13216,40 @@ class Mascot:
                        (self._inbox_get().get("sent") or {}).values())
         except Exception:
             return 0
+
+    SNACK_DROP = 1.2         # 간식이 떨어지는 데 걸리는 시간(초)
+
+    def _snack_get(self):
+        """책상에 놓인 간식 (없으면 None). 첫 사용 때 파일에서 읽는다."""
+        if self._snack_on is None:
+            d = self._inbox_get()
+            got = d.get("snack")
+            self._snack_on = got if isinstance(got, dict) else False
+        return self._snack_on or None
+
+    def _snack_place(self, name):
+        """간식을 책상에 놓는다. 이미 있으면 최신 것으로 바꾼다."""
+        self._snack_on = {"k": str(name or ""), "t": time.time()}
+        d = self._inbox_get()
+        d["snack"] = self._snack_on
+        self._inbox_save()
+
+    def _snack_eat(self):
+        """간식을 눌렀을 때 — 잘 먹었다고 하고 치운다."""
+        self._snack_take()
+        self.smile_until = max(self.smile_until, time.time() + 2.5)
+        self._safe("snack_snd", self._poke_sound)
+        self._say(random.choice(self.SNACK_EAT), 3.0)
+
+    SNACK_EAT = ("잘 먹었습니다!", "맛있다…", "고마워요!", "힘이 나요!")
+
+    def _snack_take(self):
+        """눌러서 먹었다 — 자리에서 치운다."""
+        self._snack_on = False
+        self._snack_box = None
+        d = self._inbox_get()
+        d["snack"] = None
+        self._inbox_save()
 
     def _inbox_items(self):
         """새것이 위로 오게 뒤집어 돌려준다."""
@@ -13266,6 +13313,9 @@ class Mascot:
                        "blanket": "혼자 쓰담쓰담 했어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
+            if k == "snack":
+                self._safe("snack_place", self._snack_place,
+                           ev.get("x") or self._snack_pick(time.time() * 1000))
             self._char_fx_add(k, ev.get("x") or "")
             self._safe("self_poke_snd", self._room_sound)
             return
@@ -13281,6 +13331,10 @@ class Mascot:
         kind = ev.get("k")
         now = time.time()
         self._safe("inbox_add", self._inbox_add, ev.get("f"), who, kind)
+        if kind == "snack":
+            # 간식은 책상에 남는다 — 눌러야 없어지고, 또 받으면 최신 것으로.
+            self._safe("snack_place", self._snack_place,
+                       ev.get("x") or self._snack_pick(time.time() * 1000))
         # 자리를 비운 사이에 온 것은 따로 적어 둔다 (돌아오면 알려 준다)
         last = max(getattr(self, "last_key", 0.0),
                    getattr(self, "last_pointer", 0.0))
@@ -14322,8 +14376,7 @@ class Mascot:
                                       text="\u2665", font=("Malgun Gothic", sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "snack":
-                self._fx_cake(c, p, cx, top, mid, k,
-                              extra or self._snack_pick(t0 * 1000))
+                pass      # 간식은 연출이 아니라 책상에 놓인다 (_draw_snack_on)
 
     POKE_RING = ("#ff9ec4", "#ffb6d2", "#ffd6e4")
 
@@ -14469,6 +14522,25 @@ class Mascot:
         c.create_rectangle(x - r * 0.34, y - r * 0.95, x + r * 0.34,
                            y - r * 0.5, fill=skin, outline=line, width=2)
 
+    def _draw_snack_on(self, now):
+        """책상에 놓인 간식 — 떨어진 뒤에는 누를 때까지 그대로 있는다.
+
+        받은 뒤 잠깐만 보이면 자리를 비운 사이에 받은 것을 못 본다.
+        누르면 먹고 사라지고, 또 받으면 최신 것으로 바뀐다.
+        """
+        sn = self._snack_get()
+        if not sn:
+            return
+        c = self.canvas
+        k = max(1.0, self.cw_px / 260.0)
+        cx = self.ox + self.cw_px / 2
+        top = self.oy + self.ch_px * 0.13
+        mid = self.oy + self.ch_px * 0.44
+        # 떨어지는 동안만 움직이고, 그 뒤로는 놓인 자리에 그대로.
+        p = min(1.0, max(0.0, (now - float(sn.get("t") or 0))
+                         / self.SNACK_DROP))
+        self._fx_cake(c, p, cx, top, mid, k, str(sn.get("k") or ""))
+
     def _fx_cake(self, c, p, cx, top, mid, k, name=""):
         """케이크가 접시째 책상 위로 떨어진다.
 
@@ -14489,11 +14561,13 @@ class Mascot:
             cx = dx + (bb[0] + bb[2]) / 2 + (bb[2] - bb[0]) * 0.28
         land = max(land, top + 20 * k)
         start = top - 48 * k
-        q = min(1.0, p * 1.7)
+        q = min(1.0, p)
         y = start + q * q * (land - start)
         img = self._snack_photo(name, int(62 * k)) if name else None
         if img is None:
             self._mini_cake(c, cx, y, r)
+            self._snack_box = (cx - r * 1.6, y - r * 1.5,
+                               cx + r * 1.6, y + r * 1.3)
             return
         # 접시 위에 놓인 것처럼 — 그림 밑선을 케이크 밑선에 맞춘다
         bot = y + r * 1.16
@@ -14501,6 +14575,10 @@ class Mascot:
         c.create_oval(cx - pw, bot - r * 0.32, cx + pw, bot + r * 0.34,
                       fill="#ffffff", outline="#c6bfce", width=2)
         c.create_image(cx, bot + r * 0.1, image=img, anchor="s")
+        # 누를 수 있는 자리 (조금 넉넉하게 — 작은 간식도 누르기 쉽게)
+        w2 = max(pw, img.width() * 0.5) + 4 * k
+        self._snack_box = (cx - w2, bot + r * 0.1 - img.height() - 4 * k,
+                           cx + w2, bot + r * 0.5)
 
     def _mini_cake(self, c, cx, cy, r):
         """접시에 놓인 조각 케이크 — 크림 위에 딸기 하나."""
