@@ -2008,6 +2008,8 @@ CHARS = [
      "tint": "#ba2028"},
     {"slot": "parts_peugo", "repo": "peugo-mascot", "name": "프고",
      "tint": "#4f9d3f", "size": 0.84},   # 초록 (수트 파랑은 그림이 맡는다)
+    {"slot": "parts_hambugi", "repo": "hambugi-mascot", "name": "햄북이",
+     "tint": "#c9954a"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -4155,6 +4157,10 @@ class Mascot:
         self._room_img_cache = {}    # 앉은 모습 그림 (상한 있음)
         self._room_head_cache = {}   # 앉은 그림의 머리 자리 (작은 튜플)
         self._room_hat_cache = {}    # 방 카드용 고깔모자 그림 (상한 있음)
+        self._room_page = 0          # 홈 페이지 (9명씩)
+        self._room_pages = 1
+        self._room_page_btn = []     # 페이지 화살표 자리
+        self._bubble_cache = {}      # 매끈한 말풍선 그림 (상한 있음)
         self._room_deco_cache = {}   # 홈 꾸미기 그림 (상한 있음)
         self._room_deco_ver = 0      # 꾸미기를 바꾸면 올라간다 (배경 다시)
         self._room_deco_btn = None   # 꾸미기 단추 자리
@@ -12969,12 +12975,10 @@ class Mascot:
                            text="어떤 프로그램을 쓰는지, 창 제목은 보내지 않습니다.",
                            font=(FONT, FS(8)), fill=cd["sub"])
             y += 26
-            for cap, ent, hint in (("오늘 한 줄", msg_entry,
-                                    "날이 바뀌면 지워집니다"),
-                                   ("방에서 보일 이름", nick_entry,
-                                    "비우면 캐릭터 이름"),
-                                   ("방 코드", code_entry,
-                                    "비우면 '홈'")):
+            # 오늘 한 줄은 홈(내 칸 클릭)에서, 방 코드는 설정 파일에서만 —
+            # 입력란이 겹치고 헷갈려서 뺐다 (사용자 요청)
+            for cap, ent, hint in (("방에서 보일 이름", nick_entry,
+                                    "비우면 캐릭터 이름"),):
                 cv.create_text(LX, y, anchor="w", text=cap,
                                font=(FONT, FS(8)), fill=cd["text"])
                 cv.create_text(W - PAD - 4, y, anchor="e", text=hint,
@@ -14604,7 +14608,8 @@ class Mascot:
         # 연출이 도는 동안은 개수만 열쇠에 넣는다 — 프레임마다 다시 그리되
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         ts = self._room_toast
-        return (tuple(who), self._room_pick, tuple(sorted(fresh)),
+        return (tuple(who), self._room_pick, self._room_page,
+                tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
                 self._sent_total(),
@@ -14714,11 +14719,13 @@ class Mascot:
         if period in ("밤", "새벽"):
             faint = period == "새벽"
             star = (238, 234, 200, 120) if faint else (255, 242, 168, 235)
-            n = 9 if faint else 7
+            # 별은 띠 전체에 성기게 — 가운데에만 몰리면 허전하다.
+            # 글자·알약은 나중에 위에 그려지므로 가려져도 괜찮다.
+            n = 13 if faint else 11
             for _i in range(n):
-                sx = w * 0.34 + (w - 300 * k - w * 0.34) * rnd.random()
-                sy = h * (0.15 + 0.6 * rnd.random())
-                r = (1.3 if faint else 1.8) * k
+                sx = w * 0.03 + (w * 0.94) * rnd.random()
+                sy = h * (0.12 + 0.68 * rnd.random())
+                r = (1.0 + 0.8 * rnd.random()) * (1.1 if faint else 1.4) * k
                 ball(sx, sy, r, star[:3], star[3])
             if not faint:
                 sx, sy = w - 362 * k, h * 0.3
@@ -14831,6 +14838,55 @@ class Mascot:
                         sx - a * 0.3, sy - a * 0.3,
                         fill="#ffeeb8", outline="#f5deA0",
                         width=1, tags=("dyn", "glit"))
+
+    def _rr_soft(self, cv, x0, y0, x1, y1, r, fill="#ffffff", outline="",
+                 width=1, tail=None, tags="dyn"):
+        """매끈한 둥근 사각형 — PIL로 3배로 그려 줄인다.
+
+        Tk 다각형(_rr)은 계단이 져서 말풍선이 못생겨 보인다는 제보.
+        tail=(tx, 높이)면 아래에 V자 꼬리를 붙인다. 실패하면 _rr로 물러난다.
+        """
+        w, h = int(round(x1 - x0)), int(round(y1 - y0))
+        if w < 4 or h < 4:
+            return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
+                            outline=outline, width=width, tags=tags)
+        th = int(round(tail[1])) if tail else 0
+        tx = int(round(tail[0] - x0)) if tail else 0
+        key = (w, h, int(r), fill, outline, int(width), tx, th)
+        cache = self._bubble_cache
+        img = cache.get(key)
+        if img is None:
+            try:
+                from PIL import ImageDraw
+                S = 3
+                lw = max(1, int(width)) * S
+                im = Image.new("RGBA", (w * S, (h + th) * S), (0, 0, 0, 0))
+                d2 = ImageDraw.Draw(im)
+                if th:                     # 꼬리 먼저 — 몸통이 이음매를 덮는다
+                    d2.polygon([(tx * S - 8 * S, (h - 2) * S),
+                                ((tx - 3) * S, (h + th) * S),
+                                (tx * S + 8 * S, (h - 2) * S)],
+                               fill=fill, outline=outline or None, width=lw)
+                d2.rounded_rectangle(
+                    [lw // 2, lw // 2, w * S - 1 - lw // 2,
+                     h * S - 1 - lw // 2],
+                    radius=int(r) * S, fill=fill,
+                    outline=outline or None, width=lw)
+                if th:                     # 꼬리 이음매를 속색으로 다시 덮기
+                    d2.rectangle([tx * S - 7 * S, h * S - lw - 2 * S,
+                                  tx * S + 7 * S, h * S - lw // 2],
+                                 fill=fill)
+                im = im.resize((w, h + th), Image.LANCZOS)
+                img = ImageTk.PhotoImage(im)
+            except Exception:
+                return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
+                                outline=outline, width=width, tags=tags)
+            if len(cache) > 60:            # 지뢰 18 — 오래된 절반만
+                for old in list(cache)[:30]:
+                    cache.pop(old, None)
+            cache[key] = img
+        return cv.create_image(int(x0), int(y0), image=img, anchor="nw",
+                               tags=tags)
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
         """둥근 사각형. smooth 스플라인을 쓰지 않는다.
@@ -14949,17 +15005,15 @@ class Mascot:
         self._room_song_hits = {}
         self._room_song_slots = set()
         cols = max(1, self._room_cols)
-        cap = cols * max(1, self._room_rows)
-        if len(people) > cap:
-            # 자리가 모자라면 안 켠 사람부터 뺀다 (차례는 그대로 둔다)
-            keep = [q for q in people if not q.get("off")][:cap]
-            for q in people:
-                if len(keep) >= cap:
-                    break
-                if q.get("off"):
-                    keep.append(q)
-            ids = set(id(q) for q in keep)
-            people = [q for q in people if id(q) in ids][:cap]
+        # 사람이 많아지면 페이지로 나눈다 — 첫 페이지 9명, 화살표로 넘김.
+        # '모두에게'는 서버가 방 전체에 돌리므로 페이지와 무관하게 다 간다.
+        allp = people
+        pages = max(1, -(-len(allp) // self.ROOM_PAGE))
+        self._room_page = max(0, min(getattr(self, "_room_page", 0),
+                                     pages - 1))
+        people = allp[self._room_page * self.ROOM_PAGE:
+                      (self._room_page + 1) * self.ROOM_PAGE]
+        self._room_pages = pages
         left = max(int(8 * k), (W - cols * cw) // 2)
         # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
         # 아래 단추 줄(126k)을 뺀 나머지 공간의 한가운데에 놓는다.
@@ -14984,7 +15038,29 @@ class Mascot:
             self._rr(cv, cx0 + 8 * k, cy0 + 6 * k, cx0 + cw - 8 * k,
                      cy0 + chh - 16 * k, 18 * k, fill=P["card"],
                      outline=P["line"], width=1)
-        self._room_bar(cv, W, H, P, k, people)
+        # 보낼 상대 찾기는 전체 명단으로 — 고른 사람이 다른 페이지에 있어도
+        self._room_bar(cv, W, H, P, k, allp)
+        # 페이지 화살표 — 카드 그리드 오른쪽·왼쪽 가운데
+        self._room_page_btn = []
+        if pages > 1:
+            ay = top + voff + rows_used * chh / 2
+            bw2 = 34 * k
+            for dxn, label, on in ((1, "▶", self._room_page < pages - 1),
+                                   (-1, "◀", self._room_page > 0)):
+                if not on:
+                    continue
+                ax = (W - 10 * k - bw2) if dxn > 0 else 10 * k
+                cv.create_oval(ax, ay - bw2 / 2, ax + bw2, ay + bw2 / 2,
+                               fill="#ffffff", outline=P["line"], width=2,
+                               tags="dyn")
+                cv.create_text(ax + bw2 / 2, ay, text=label,
+                               font=self._uf(9, True), fill=P["sub"],
+                               tags="dyn")
+                self._room_page_btn.append(
+                    ((ax, ay - bw2 / 2, ax + bw2, ay + bw2 / 2), dxn))
+            cv.create_text(W / 2, H - 16 * k,
+                           text="%d / %d" % (self._room_page + 1, pages),
+                           font=self._uf(8), fill=P["sub"], tags="dyn")
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
         self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
 
@@ -15136,8 +15212,9 @@ class Mascot:
                     else "!")
             # 알림 말풍선은 칸 맨 위로 — 연출·얼굴과 안 겹치게
             ny = ky0 + 16 * k
-            self._rr(cv, cx2 - 26 * k, ny - 12 * k, cx2 + 26 * k, ny + 12 * k,
-                     12 * k, fill="#ffffff", outline=col, width=2)
+            self._rr_soft(cv, cx2 - 26 * k, ny - 12 * k, cx2 + 26 * k,
+                          ny + 12 * k, 12 * k, fill="#ffffff", outline=col,
+                          width=2)
             cv.create_text(cx2, ny, text=note, font=self._uf(9, True),
                            fill=self._shade(col, 0.15), tags="dyn")
         elif msg:
@@ -15156,17 +15233,10 @@ class Mascot:
             tw3 = self._room_tw(cv, line, f3)
             ny = ky0 + 19 * k
             edge = self._tint(col, 0.35)
-            self._rr(cv, bub - tw3 / 2 - 14 * k, ny - 15 * k,
-                     bub + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
-                     fill="#ffffff", outline=edge, width=2)
-            # 꼬리 — 그린 뒤에 말풍선 아랫선을 흰 줄로 덮어야 이어져 보인다
-            cv.create_polygon(cx2 - 7 * k, ny + 14 * k, cx2 + 7 * k,
-                              ny + 14 * k, cx2 - 2 * k, ny + 24 * k,
-                              fill="#ffffff", outline=edge, width=2,
-                              tags="dyn")
-            cv.create_line(cx2 - 6 * k, ny + 15 * k, cx2 + 6 * k, ny + 15 * k,
-                           fill="#ffffff", width=max(2, int(3 * k)),
-                           tags="dyn")
+            self._rr_soft(cv, bub - tw3 / 2 - 14 * k, ny - 15 * k,
+                          bub + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
+                          fill="#ffffff", outline=edge, width=2,
+                          tail=(cx2, 9 * k))
             cv.create_text(bub, ny, text=line, font=f3,
                            fill=self._shade(col, 0.25), tags="dyn")
             if slot == self.char:      # 표가 피해 갈 자리 (꼬리까지)
@@ -15271,16 +15341,8 @@ class Mascot:
         x0 = max(kx0 + 6 * k, x1 - tw - 14 * k)
         y0 = ky0 + 34 * k                # 하트 배지 아래, 오른쪽 여백
         edge = self._tint(col, 0.35)
-        self._rr(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
-                 outline=edge, width=1)
-        # 꼬리 — 캐릭터 쪽(왼쪽 아래)을 향한다. 몸통 테두리에 물리게 그려
-        # 이음매가 안 보이게 흰 덮개 선을 한 줄 얹는다.
-        tx = x0 + 14 * k
-        cv.create_polygon(tx, y0 + h - 1, tx - 9 * k, y0 + h + 8 * k,
-                          tx + 9 * k, y0 + h - 1, fill="#ffffff",
-                          outline=edge, width=1, tags="dyn")
-        cv.create_line(tx - 4 * k, y0 + h - 1, tx + 8 * k, y0 + h - 1,
-                       fill="#ffffff", width=max(2, int(2 * k)), tags="dyn")
+        self._rr_soft(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
+                      outline=edge, width=1, tail=(x0 + 16 * k, 7 * k))
         cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt, font=f,
                        fill=self._shade(col, 0.15), tags="dyn")
         self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
@@ -16277,6 +16339,7 @@ class Mascot:
         return "seat_pen" if n % 2 else "seat_pen2"
 
     ROOM_FX = 1.5            # 연출이 보이는 시간(초)
+    ROOM_PAGE = 9            # 홈 한 페이지에 보이는 사람 수
 
     CHAR_FX = 2.2            # 캐릭터 창 연출이 보이는 시간(초)
 
@@ -17108,6 +17171,13 @@ class Mascot:
             pass
 
     def _room_click(self, e):
+        for box, dxn in list(getattr(self, "_room_page_btn", [])):
+            if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+                self._room_page = max(0, min(
+                    self._room_pages - 1, self._room_page + dxn))
+                self._room_key_last = None
+                self._safe("room_draw", self._room_draw)
+                return
         db = self._room_deco_btn
         if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
             self._safe("room_deco", self._room_deco_win)
