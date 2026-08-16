@@ -7113,6 +7113,7 @@ class Mascot:
         ent.bind("<Return>", commit)
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
+        self._keep_front(win)
         ent.focus_force()
 
     def _set_win_icon(self):
@@ -7256,16 +7257,6 @@ class Mascot:
                 except Exception:
                     pass
 
-        def raise_loop():
-            try:
-                if not win.winfo_exists():
-                    return
-                win.lift()
-                win.attributes("-topmost", True)
-                win.after(700, raise_loop)
-            except Exception:
-                pass
-
         def gone(e):
             if e.widget is not win or not state["xy"]:
                 return
@@ -7282,8 +7273,28 @@ class Mascot:
 
         win.bind("<Configure>", took, add="+")
         win.bind("<Destroy>", gone, add="+")
+        self._keep_front(win)
+
+    def _keep_front(self, win, focus=True):
+        """창이 살아 있는 동안 타이머(항상 위)보다 앞을 지킨다.
+
+        캐릭터를 누르는 순간 캐릭터 창이 맨 앞으로 올라오며 다른 창을
+        덮는다 (지뢰 15). 0.7초마다 다시 올려 두면 체감상 늘 앞이다.
+        """
+        def raise_loop():
+            try:
+                if not win.winfo_exists():
+                    return
+                win.lift()
+                win.attributes("-topmost", True)
+                win.after(700, raise_loop)
+            except Exception:
+                pass
+
         win.after(150, raise_loop)
-        win.after(80, lambda: win.focus_force() if win.winfo_exists() else None)
+        if focus:
+            win.after(80, lambda: win.focus_force()
+                      if win.winfo_exists() else None)
 
     def _place_near(self, win, dx=40, dy=20):
         """캐릭터 옆에, 캐릭터가 있는 화면 안으로 창을 놓는다."""
@@ -9394,6 +9405,7 @@ class Mascot:
         W, PAD = u(400), u(18)
         H = u(H0)
         win = tk.Toplevel(self.root)
+        self._keep_front(win, focus=False)
         self._brief_win = win
         win.title("오늘의 작업")
         win.attributes("-topmost", True)
@@ -9970,6 +9982,7 @@ class Mascot:
         page = [len(pages) - 1]          # 처음에는 가장 최근 것
 
         win = tk.Toplevel(self.root)
+        self._keep_front(win, focus=False)
         self._update_win = win
         win.title("업데이트")
         win.attributes("-topmost", True)
@@ -12285,6 +12298,7 @@ class Mascot:
         FONT = "Malgun Gothic"
         FS = lambda n: max(7, round(n * self.ui_k))   # 설정 창 글꼴
         win = tk.Toplevel(self.root)
+        self._keep_front(win, focus=False)
         self._settings_win = win
         win.title(f"{self.cfg.get('name', self.char)} 설정")
         win.attributes("-topmost", True)
@@ -13917,6 +13931,7 @@ class Mascot:
         cd, u = self.card, self._ui
         W, H = u(372), u(268)
         win = tk.Toplevel(self.root)
+        self._keep_front(win, focus=False)
         self._room_ask_win = win
         win.title("홈")
         win.attributes("-topmost", True)
@@ -14021,6 +14036,7 @@ class Mascot:
         self._room_cols, self._room_rows = cols, rows
         self._room_size = (0, 0)
         win = tk.Toplevel(self.root)
+        self._keep_front(win, focus=False)
         win.title("같이 작업 중")
         win.resizable(True, True)
         win.minsize(int(self.ROOM_CW * k) + int(20 * k),
