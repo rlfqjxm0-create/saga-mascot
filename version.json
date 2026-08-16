@@ -1,7 +1,7 @@
 {
- "version": 1786900718,
+ "version": 1786902838,
  "files": {
-  "mascot.py": "61f845ba79beecdbb758962a2db72605b18696f8f51b5bcc2a55dbc5c3e7c878",
+  "mascot.py": "25fd99325741d2e36c507454eb51c9dc9c0c0af80316e75eb93d20eb0f011017",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -41,6 +41,8 @@
   "parts_saga/seat_pen2.png": "395fa1cd7a8382877a1709bb7d989f3448c8822ebe67bf7a24efb03716fffbd2",
   "parts_saga/seat_type.png": "2868d9e3be1a062a4113bf6f085d0a33dd8dee814ec792616fa7c86426eec10e",
   "parts_saga/smile.png": "c65a153b0a380ab743b2a2fc293b80544ee6d41619e42f8769e7edc2202cf98d",
+  "parts_saga/fonts/Pretendard-Bold.otf": "2e91915fab54df71cc9598ebf608b2bdb54c6fe3c066ac61dff0bc44fca71cc7",
+  "parts_saga/fonts/Pretendard-Regular.otf": "3ffbacde6ab8411f1d2db54bb9b1f0b3ee2a738932033722cf0388c06aed1c93",
   "parts_saga/snacks/apple.png": "1b07368fb7e1ff3141b29e726727d47b1f369c962ea3635af5239bb7fa9ae01e",
   "parts_saga/snacks/banana.png": "16032c8970de5f4ac8ec73f44321f8c2e568fe3ff132890170cc6e629cdadab0",
   "parts_saga/snacks/bar.png": "a22cacddcd150bdb2dfab6600d93c27d01fc04523faa0407f7d97fb3d4be71ae",
@@ -69,6 +71,14 @@
   "parts_saga/snacks/tonkatsu.png": "6a826906975ff830d188a23d669bcc6d85ecabf7a128c2faeafa47b5906d0553",
   "parts_saga/snacks/tteokbokki.png": "83605f197c02c86ed37086995292c19386411576ccfe29d6a9078eea71576c1e",
   "parts_saga/snacks/watermelon.png": "b997eaf5d6d2ccda71ac393c9b5528ed21b16bbd3f9931c9295ec36f63b3e568",
+  "parts_saga/snacks_special/cup_dog.png": "e57f923f24926621854e9f9e86c3c9a3fabbcbcd36682f706db87fc3c85134f1",
+  "parts_saga/snacks_special/cup_dororong.png": "6ef084f8fc1407f1770d6ec1b00d25f695573fe6b2d6b9a15cca41e6d8ab87e3",
+  "parts_saga/snacks_special/cup_gippo.png": "504967bb3c681fc1d943bbf59046ef8e92a1e2795ca4ee8ad1c34075a0f666e5",
+  "parts_saga/snacks_special/cup_junsa.png": "8325e7128d6365bff7067d2c4feea7c2e4e8b48b95035f7af596c7d83a8de6e7",
+  "parts_saga/snacks_special/cup_myeoljong.png": "8dd1e4e2cdf912155102f37c2384c67eb1abd1c30d8106e2b2342dedbe1f6926",
+  "parts_saga/snacks_special/cup_peugo.png": "5ad6757e542d673da015468543ad5040563e5e091594917ce1bd20c25ebfb617",
+  "parts_saga/snacks_special/cup_quincy.png": "2fcf891de8701e334443e08bc548062dc7ab7def89980b4af67a8f046ed2088b",
+  "parts_saga/snacks_special/cup_saga.png": "192d17b286eba531876a0cba17345d3783736767d0cd6d51e88b91584e2b3583",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/key1.wav": "34ca127f328b29dfee7e5d777636cad708371d6bdadcfc3d05d988c1555fa97e",
@@ -306,6 +316,7 @@
   "parts_saga/sounds/snack/munch/eat10.wav": "61f02575a29391b6e08f8e45c4775f8dc15c4fc77751de622423af1381d3d515",
   "parts_saga/sounds/snack/munch/eat11.wav": "38c731609166ffef48fe77ffa46df8123c8fae36fc589c12ba46daaae20938c3",
   "parts_saga/sounds/snack/munch/eat12.wav": "8864eeb7fdb587369d42c7cd19aea6d67c7ccd5cdbaf53de57cc5e16d73df57a",
+  "parts_saga/sounds/special/sparkle.wav": "011086ea9e74a05a0b0ac43736f584d4792ab21d73954ec87699027b21d7a5a9",
   "parts_saga/sounds/tealios-v2_Akira/back.wav": "72c5142e29793443f094aad7be3401059752bb956187b58e9c0e145a65937301",
   "parts_saga/sounds/tealios-v2_Akira/caps.wav": "f8400f05bbb96d942fc9a659df83b4ff890c086cdccb907db4960bce9a77d72b",
   "parts_saga/sounds/tealios-v2_Akira/config.json": "e678ae54ac8212f32a3b040599462fd61d4f6ad2c4d48f263eb370ad18382743",
@@ -325,6 +336,9 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "간식을 주면 가끔 스페셜 컵케이크가 나가요\n기뽀님이 캐릭터마다 하나씩 그려 준 컵케이크예요. 간식을 주다 보면 가끔 내 캐릭터의 컵케이크가 나가고, 받은 캐릭터는 샤라랑~ 반짝이며 한참 웃어요.",
+  "홈을 내 그림으로 꾸밀 수 있어요\n반응 단추 줄 오른쪽 '꾸미기'에서 배경과 방 칸 그림을 고를 수 있어요. 방 칸 그림은 친구들 화면의 내 칸에도 똑같이 보여요.",
+  "글씨가 더 예뻐졌어요\n프리텐다드 글꼴을 품고 나와요. 따로 설치하지 않아도 모든 창의 글씨 모양이 더 또렷해져요."
+ ]
 }

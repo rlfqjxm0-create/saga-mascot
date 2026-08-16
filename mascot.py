@@ -453,6 +453,37 @@ DEFAULT_SETTINGS = {
 # 사람은 '이게 최대'라고 생각하고 더 키울 수 있는 줄 몰랐다. 그래서 예전
 # 160%(=1.6배)를 100%로 다시 매기고, 눈금을 45~100%로 바꿨다. 보이는
 # 숫자만 달라졌을 뿐 실제 크기의 폭은 그대로다.
+UI_FONT = "Malgun Gothic"     # 시작할 때 프리텐다드가 실리면 바뀐다
+
+
+def load_ui_font(char_dir):
+    """파츠에 실린 프리텐다드를 이 프로세스에만 등록한다 (설치 불필요).
+
+    글꼴 모양·자간이 맥(애플 SD 고딕 Neo)과 비슷해진다. 파일이 없거나
+    실패하면 맑은 고딕 그대로. 맥은 시스템 글꼴이 이미 그 모습이라 안 바꾼다.
+    """
+    global UI_FONT
+    if not IS_WIN:
+        return
+    try:
+        d = os.path.join(char_dir, "fonts")
+        if not os.path.isdir(d):
+            return
+        g = ctypes.WinDLL("gdi32")    # 지뢰 21 — 공용 windll 은 안 건드린다
+        g.AddFontResourceExW.argtypes = (ctypes.c_wchar_p, ctypes.c_uint32,
+                                         ctypes.c_void_p)
+        g.AddFontResourceExW.restype = ctypes.c_int
+        got = 0
+        for f in sorted(os.listdir(d)):
+            if f.lower().endswith((".ttf", ".otf")):
+                got += g.AddFontResourceExW(os.path.join(d, f),
+                                            0x10, None)      # FR_PRIVATE
+        if got:
+            UI_FONT = "Pretendard"
+    except Exception:
+        pass
+
+
 FONT_SPAN = 1.6
 FONT_MIN, FONT_MAX = 45, 100
 DOT_OTHER = "#f0b95e"     # 딴짓 중(작업앱 아님) 표시색
@@ -2614,7 +2645,7 @@ class TodoPanel:
         if idx is None:
             return
         m = tk.Menu(self.top, tearoff=0,
-                    font=("Malgun Gothic", self.MENU_FS))
+                    font=(UI_FONT, self.MENU_FS))
         if self.on_edit is not None:
             m.add_command(label="수정", command=lambda: self.on_edit(idx))
         m.add_command(label="완료", command=lambda: self.on_done(idx))
@@ -2624,7 +2655,7 @@ class TodoPanel:
         m.add_separator()
         m.add_command(label="꼬리 오른쪽으로" if self.flip else "꼬리 왼쪽으로",
                       command=self._toggle_flip)
-        sub = tk.Menu(m, tearoff=0, font=("Malgun Gothic", self.MENU_FS))
+        sub = tk.Menu(m, tearoff=0, font=(UI_FONT, self.MENU_FS))
         for z in self.ZOOMS:
             sub.add_command(label=("● " if z == self.zoom else "    ") + f"{z}%",
                             command=lambda p=z: self.set_zoom(p))
@@ -2766,7 +2797,7 @@ def runs_pack(segs):
 def run_font(bold, italic, base, size=0, k=1.0):
     """구간 하나를 그릴 글꼴."""
     name = ("bold " if bold else "") + ("italic" if italic else "")
-    return ("Malgun Gothic", max(6, round((base + size) * k)),
+    return (UI_FONT, max(6, round((base + size) * k)),
             name.strip() or "")
 
 
@@ -3540,6 +3571,8 @@ class Mascot:
         with open(os.path.join(self.dir, "config.json"), encoding="utf-8") as fp:
             self.cfg = json.load(fp)
         self._boot_step("config 읽음")
+        # 글꼴은 창을 만들기 전에 등록해야 한다 (파츠에 실려 자동 배포됨)
+        load_ui_font(self.dir)
 
         # 사용자 환경설정 (config 기본값 위에 덮어씀)
         tcfg = self.cfg.get("timer") or {}
@@ -3992,6 +4025,7 @@ class Mascot:
         self.pensnd = None
         self.pokesnd = None
         self.roomsnd = None          # 홈에서 남이 눌러 줬을 때 (평소와 다른 소리)
+        self.sparksnd = None         # 스페셜 컵케이크의 '샤라랑'
         self.snacksnd = None         # 간식을 먹을 때 (오물오물)
         self._pen_playing = False
         self._pen_release_t = None
@@ -4124,6 +4158,10 @@ class Mascot:
         self._room_deco_cache = {}   # 홈 꾸미기 그림 (상한 있음)
         self._room_deco_ver = 0      # 꾸미기를 바꾸면 올라간다 (배경 다시)
         self._room_deco_btn = None   # 꾸미기 단추 자리
+        self._cd_mem = None          # 내 방 칸 그림의 작은 사본 (mtime 기억)
+        self._cd_push = False        # 다음 신호에 그림을 실어 보낼지
+        self._cd_n = 0               # 그림을 이따금만 싣는 셈
+        self._room_peer_hash = None  # 남의 방 칸 그림 해시 (첫 사용 때 읽음)
         self._room_tone_cache = {}
         self._room_pastel_cache = {}
         self._room_pal_cache = {}
@@ -5292,6 +5330,14 @@ class Mascot:
                     room_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.roomsnd = None
+        # '샤라랑' — 스페셜 컵케이크를 받을 때만 나는 반짝임 소리
+        sp_dir = os.path.join(self.dir, "sounds", "special")
+        if os.path.isdir(sp_dir):
+            try:
+                self.sparksnd = PokeSound(
+                    sp_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.sparksnd = None
         # 간식 먹는 소리 — 종류별 폴더(crunch/drink/munch)에서 간식에 맞는
         # 것을 낸다. 케이크에서 얼음 소리가 나면 이상하니까. 하위 폴더가
         # 없는 옛 구성(평평한 wav)은 통째로 한 묶음으로 물러난다.
@@ -5823,7 +5869,7 @@ class Mascot:
         y0 = u(124)
         chip(u(20), u(74), y0, "굵게", "b", self._uf(9, True))
         chip(u(80), u(140), y0, "기울임", "i",
-             ("Malgun Gothic", max(7, round(9 * getattr(self, "ui_k", 1.0))),
+             (UI_FONT, max(7, round(9 * getattr(self, "ui_k", 1.0))),
               "italic"))
         chip(u(150), u(180), y0, "－", "minus")
         chip(u(184), u(250), y0, "크기 보통", "size")
@@ -7911,7 +7957,7 @@ class Mascot:
         w = self._tw_cache.get(text)
         if w is None:
             t = self.canvas.create_text(-2000, -2000, text=text, anchor="nw",
-                                        font=("Malgun Gothic", 8))
+                                        font=(UI_FONT, 8))
             bb = self.canvas.bbox(t)
             w = (bb[2] - bb[0]) if bb else len(text) * 11
             self.canvas.delete(t)
@@ -10360,7 +10406,7 @@ class Mascot:
         반영해야 어느 컴퓨터에서든 적당한 크기로 보인다.
         """
         n = max(7, round(size * getattr(self, "ui_k", 1.0)))
-        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+        return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
 
     def _ui(self, px):
         """별도 창의 치수(px)도 같은 배율로."""
@@ -10369,7 +10415,7 @@ class Mascot:
     def _cf(self, size, bold=False):
         """글자 크기 설정을 반영한 글꼴."""
         n = max(6, round(size * getattr(self, "font_k", 1.0)))
-        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+        return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
 
     TW_CACHE_MAX = 400           # 글자 폭 캐시 상한
 
@@ -10421,7 +10467,7 @@ class Mascot:
 
     @staticmethod
     def _cf_n(n, bold=False):
-        return ("Malgun Gothic", n, "bold") if bold else ("Malgun Gothic", n)
+        return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
 
     LV_PAD = 4                   # 칭호 알약과 카드 윗변 사이 여백
 
@@ -11916,7 +11962,7 @@ class Mascot:
                 bob = math.sin(now * 1.6 + i * 0.9) * 3
                 c.create_text(zx + dx * fs, zy + dy * fs + bob,
                               text="z" if i == 0 else "Z",
-                              font=("Malgun Gothic", int(size * fs), "bold"),
+                              font=(UI_FONT, int(size * fs), "bold"),
                               fill=color)
 
         if self.notes:                  # 음표는 머리보다 위로 떠오른다
@@ -12377,7 +12423,7 @@ class Mascot:
         PANEL, SOFT, LINE = cd["panel"], cd["soft"], cd["line"]
         W, PAD, ROW, IN = (self._ui(372), self._ui(20),
                            self._ui(40), self._ui(18))
-        FONT = "Malgun Gothic"
+        FONT = UI_FONT
         FS = lambda n: max(7, round(n * self.ui_k))   # 설정 창 글꼴
         win = tk.Toplevel(self.root)
         self._keep_front(win, focus=False)
@@ -13500,6 +13546,15 @@ class Mascot:
         su, st2 = self._room_song()
         if su:
             out["sg"] = {"u": su, "t": st2}
+        b64, ch = self._room_card_thumb()
+        if ch:
+            # 방 칸 꾸미기 — 해시는 늘 싣고, 그림 자체는 이따금만 (무겁다).
+            # 받는 쪽은 해시가 낯설 때 다음 그림이 올 때까지 기다린다.
+            out["cdh"] = ch
+            self._cd_n = (getattr(self, "_cd_n", 0) + 1) % 6
+            if self._cd_n == 1 or getattr(self, "_cd_push", False):
+                out["cd"] = b64
+                self._cd_push = False
         return out
 
     def _room_start(self):
@@ -13610,7 +13665,14 @@ class Mascot:
             slot = q.get("slot") or ""
             if not slot or slot == self.char:
                 continue
-            row = [int(q.get("t") or 0), float(q.get("p") or 0), day]
+            t2, p2 = int(q.get("t") or 0), float(q.get("p") or 0)
+            old = seen.get(slot)
+            if isinstance(old, list) and len(old) >= 3 and old[2] == day:
+                # 같은 날 안에서는 큰 쪽만 남긴다 — 그 사람이 컴퓨터를
+                # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다
+                t2 = max(t2, int(old[0]))
+                p2 = max(p2, float(old[1]))
+            row = [t2, p2, day]
             if seen.get(slot) != row:
                 seen[slot] = row
                 changed = True
@@ -13797,6 +13859,32 @@ class Mascot:
                  "tonkatsu": "crunch",
                  "drink": "drink"}
 
+    SNACK_CUP_RATE = 0.25    # 간식을 줄 때 스페셜 컵케이크가 나올 확률
+
+    def _cup_name(self):
+        """내 캐릭터의 스페셜 컵케이크 — 파일이 있어야 나온다.
+
+        기뽀 사용자가 캐릭터마다 하나씩 그려 준 그림. 이름은 그림(art)
+        기준이라 선물 도로롱(사탄)도 도로롱 컵케이크가 나온다.
+        """
+        art = self.ROOM_ART.get(self.char)
+        art = art[1] if isinstance(art, (tuple, list)) else (art or self.char)
+        short = str(art)
+        if short.startswith("parts_"):
+            short = short[6:]
+        if short == "dororong_gift":
+            short = "dororong"
+        name = "cup_" + short
+        p = os.path.join(self.dir, "snacks_special", name + ".png")
+        return name if os.path.isfile(p) else ""
+
+    def _sparkle_sound(self):
+        snd = getattr(self, "sparksnd", None)
+        if snd is not None:
+            snd.play()
+        else:                        # 소리가 없으면 평소 띠링으로 물러난다
+            self._room_sound()
+
     def _snack_sound(self, name=""):
         """간식에 맞는 먹는 소리 — 없으면 아무거나, 그것도 없으면 클릭 소리."""
         pools = getattr(self, "snacksnd", None)
@@ -13892,6 +13980,8 @@ class Mascot:
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
         who = ""
         mine = (ev.get("f") == self.char)     # 내가 나에게 (혼자 눌러 본 것)
+        cup = (ev.get("k") == "snack"
+               and str(ev.get("x") or "").startswith("cup_"))
         if mine:
             k = ev.get("k")
             self.smile_until = max(self.smile_until, time.time() + 2.5)
@@ -13903,7 +13993,12 @@ class Mascot:
                 self._safe("snack_place", self._snack_place,
                            ev.get("x") or self._snack_pick(time.time() * 1000))
             self._char_fx_add(k, ev.get("x") or "")
-            self._safe("self_poke_snd", self._room_sound)
+            if cup:                      # 혼자 뽑아도 반짝인다
+                self.smile_until = max(self.smile_until, time.time() + 6.0)
+                self._char_fx_add("praise", "")
+                self._safe("sparkle_snd", self._sparkle_sound)
+            else:
+                self._safe("self_poke_snd", self._room_sound)
             return
         if False:
             pass
@@ -13928,7 +14023,13 @@ class Mascot:
             self._away_got.append((who, kind))
             del self._away_got[:-20]
         self._char_fx_add(kind, ev.get("x") or "")   # 타이머 화면에서 터진다
-        self._safe("room_poke_snd", self._room_sound)   # 띠링 (평소와 다르게)
+        if cup:
+            # 스페셜 컵케이크 — 샤라랑 + 반짝임 + 한참 웃는 얼굴
+            self.smile_until = max(self.smile_until, now + 6.0)
+            self._char_fx_add("praise", "")
+            self._safe("sparkle_snd", self._sparkle_sound)
+        else:
+            self._safe("room_poke_snd", self._room_sound)  # 띠링 (평소와 다르게)
         if self.stretch_pending:
             # 스트레칭 알림이 말풍선을 붙잡고 기지개를 되풀이하는 동안에는
             # 반응이 3초 만에 도로 덮이고, 기울인 머리가 연출을 가린다.
@@ -13952,6 +14053,10 @@ class Mascot:
             self.smile_until = max(self.smile_until, now + 5.0)
             self._say(("%s 칭찬해 줬어요! 오늘 목표 달성!" % _josa(who))
                       if who else "칭찬 받았어요! 오늘 목표 달성!", 4.5)
+        elif kind == "snack" and cup:
+            self._say(("%s 스페셜 컵케이크를 줬어요!" % _josa(who)) if who
+                      else "스페셜 컵케이크가 왔어요!", 5.0)
+            self.smile_until = max(self.smile_until, now + 6.0)
         elif kind == "snack":
             self._say(("%s 간식을 놓고 갔어요" % _josa(who)) if who
                       else "간식이 놓여 있어요", 3.5)
@@ -14395,7 +14500,7 @@ class Mascot:
     def _room_key(self):
         """다시 그려야 하는지 가르는 값 — 바뀌면 통째로 그린다."""
         who = [(q.get("slot"), q.get("n"), q.get("lv"), q.get("ti"),
-                q.get("t"), q.get("p"), q.get("s"))
+                q.get("t"), q.get("p"), q.get("s"), q.get("cdh"))
                for q in self.room_people]
         fresh = [k for k, v in self._room_flash.items()
                  if v > time.time() - 1.6]
@@ -14860,7 +14965,17 @@ class Mascot:
         kx0, ky0 = cx0 + 8 * k, cy0 + 6 * k
         kx1, ky1 = cx0 + cw - 8 * k, cy0 + ch - 16 * k
         picked = (self._room_pick == slot)
-        cimg = self._room_deco_img("card", kx1 - kx0, ky1 - ky0, r=18 * k)
+        if slot == self.char:
+            # 내 칸은 내가 고른 그림 — 남들 화면에도 같은 그림이 실려 간다
+            cimg = self._room_deco_img("card", kx1 - kx0, ky1 - ky0,
+                                       r=18 * k)
+        else:
+            cdh = str(p.get("cdh") or "")
+            if p.get("cd") and cdh:
+                self._safe("deco_peer", self._room_peer_save,
+                           slot, cdh, p.get("cd"))
+            cimg = (self._room_peer_img(slot, cdh, kx1 - kx0, ky1 - ky0,
+                                        18 * k) if cdh else None)
         if cimg is not None:
             # 골라 둔 방 그림 — 둥근 모서리로 오려 깔고 테두리만 두른다
             cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
@@ -15554,22 +15669,145 @@ class Mascot:
         got = None
         try:
             im = Image.open(p).convert("RGBA")
-            kk = max(w / im.width, h / im.height)
-            im = im.resize((max(1, round(im.width * kk)),
-                            max(1, round(im.height * kk))), Image.LANCZOS)
-            ix, iy = (im.width - w) // 2, (im.height - h) // 2
-            im = im.crop((ix, iy, ix + w, iy + h))
-            if r:
-                from PIL import ImageChops, ImageDraw
-                mask = Image.new("L", im.size, 0)
-                ImageDraw.Draw(mask).rounded_rectangle(
-                    [0, 0, im.width - 1, im.height - 1],
-                    radius=int(r), fill=255)
-                im.putalpha(ImageChops.multiply(im.split()[3], mask))
-            got = ImageTk.PhotoImage(im)
+            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r))
         except Exception:
             got = None
         if len(cache) > 12:              # 지뢰 18·42 — 오래된 절반만
+            for old in list(cache)[:6]:
+                cache.pop(old, None)
+        cache[key] = got
+        return got
+
+    @staticmethod
+    def _deco_fit(im, w, h, r=0):
+        """그림을 (w, h)에 가운데로 꽉 채워 자르고, r이면 모서리를 둥글게."""
+        kk = max(w / im.width, h / im.height)
+        im = im.resize((max(1, round(im.width * kk)),
+                        max(1, round(im.height * kk))), Image.LANCZOS)
+        ix, iy = (im.width - w) // 2, (im.height - h) // 2
+        im = im.crop((ix, iy, ix + w, iy + h))
+        if r:
+            from PIL import ImageChops, ImageDraw
+            mask = Image.new("L", im.size, 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [0, 0, im.width - 1, im.height - 1], radius=int(r), fill=255)
+            im.putalpha(ImageChops.multiply(im.split()[3], mask))
+        return im
+
+    def _room_card_thumb(self):
+        """내 방 칸 그림의 작은 사본 — 방 신호에 실어 남에게도 보인다.
+
+        (base64 글, 해시) 를 돌려준다. 꺼져 있으면 (None, ""). 자주
+        불리므로 파일 mtime 으로 기억해 두고 다시 만들지 않는다.
+        """
+        if not self.us.get("room_card_on"):
+            return None, ""
+        p = self._room_deco_path("card")
+        try:
+            mt = int(os.path.getmtime(p))
+        except Exception:
+            return None, ""
+        mem = getattr(self, "_cd_mem", None)
+        if mem and mem[0] == mt:
+            return mem[1], mem[2]
+        try:
+            import base64
+            import io as _io
+            im = Image.open(p).convert("RGB")
+            im.thumbnail((180, 180), Image.LANCZOS)
+            b64 = ""
+            for q in (60, 45, 32):       # 20KB 안에 들 때까지 낮춘다
+                buf = _io.BytesIO()
+                im.save(buf, "JPEG", quality=q)
+                b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+                if len(b64) <= 20000:
+                    break
+            if len(b64) > 20000:
+                return None, ""
+            h = hashlib.sha256(b64.encode("ascii")).hexdigest()[:10]
+        except Exception:
+            return None, ""
+        self._cd_mem = (mt, b64, h)
+        return b64, h
+
+    def _room_peer_hash_path(self):
+        return os.path.join(self.state_dir, ".deco_peers.json")
+
+    def _room_peer_hashes(self):
+        got = getattr(self, "_room_peer_hash", None)
+        if got is None:
+            try:
+                with open(self._room_peer_hash_path(),
+                          encoding="utf-8") as fp:
+                    got = json.load(fp)
+            except Exception:
+                got = {}
+            self._room_peer_hash = got if isinstance(got, dict) else {}
+        return self._room_peer_hash
+
+    @staticmethod
+    def _slot_sane(slot):
+        return "".join(ch for ch in str(slot)
+                       if ch.isalnum() or ch == "_")[:40]
+
+    def _room_peer_save(self, slot, cdh, b64):
+        """남이 보낸 방 칸 그림을 받아 둔다 (해시가 바뀌었을 때만)."""
+        hs = self._room_peer_hashes()
+        if not slot or hs.get(slot) == cdh:
+            return
+        try:
+            import base64
+            raw = base64.b64decode(str(b64)[:30000])
+        except Exception:
+            return
+        if not raw or len(raw) > 80000:
+            return
+        try:
+            import io as _io
+            im = Image.open(_io.BytesIO(raw))
+            im.load()
+            if im.width * im.height > 4000000:
+                return                   # 작은 파일이 큰 그림인 척하는 것 방지
+        except Exception:
+            return
+        try:
+            out = os.path.join(self.state_dir,
+                               ".deco_%s.png" % self._slot_sane(slot))
+            tmp = out + ".tmp"
+            im.convert("RGB").save(tmp, "PNG")
+            os.replace(tmp, out)
+        except Exception:
+            return
+        hs[slot] = cdh
+        try:
+            _save_json(self._room_peer_hash_path(), hs)
+        except Exception:
+            pass
+        # 크기별 캐시에 옛 그림이 남아 있으니 그 사람 것만 비운다
+        for k2 in [k3 for k3 in self._room_deco_cache
+                   if k3 and k3[0] == "peer" and k3[1] == slot]:
+            self._room_deco_cache.pop(k2, None)
+
+    def _room_peer_img(self, slot, cdh, w, h, r):
+        """남의 방 칸 그림 (받아 둔 것과 해시가 맞을 때만)."""
+        w, h = int(w), int(h)
+        if not cdh or w < 4 or h < 4:
+            return None
+        if self._room_peer_hashes().get(slot) != cdh:
+            return None                  # 아직 그림이 안 왔다 — 곧 온다
+        key = ("peer", slot, w, h, cdh)
+        cache = self._room_deco_cache
+        if key in cache:
+            return cache[key]
+        got = None
+        try:
+            p = os.path.join(self.state_dir,
+                             ".deco_%s.png" % self._slot_sane(slot))
+            im = Image.open(p).convert("RGBA")
+            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r))
+        except Exception:
+            got = None
+        if len(cache) > 12:
             for old in list(cache)[:6]:
                 cache.pop(old, None)
         cache[key] = got
@@ -15608,11 +15846,14 @@ class Mascot:
         self._room_deco_bump()
 
     def _room_deco_bump(self):
-        """꾸미기가 바뀌었다 — 배경을 다시 그리게 한다."""
+        """꾸미기가 바뀌었다 — 배경을 다시 그리고, 방에도 바로 알린다."""
         self._room_deco_cache.clear()
+        self._cd_mem = None
+        self._cd_push = True             # 다음 신호에 그림을 실어 보낸다
         self._room_deco_ver += 1
         self._room_bg = None
         self._safe("room_draw", self._room_draw)
+        self._safe("room_push", self._room_push_now)
 
     def _room_deco_win(self):
         """홈 꾸미기 창 — 배경·방 그림을 고르거나 되돌린다."""
@@ -15772,6 +16013,10 @@ class Mascot:
                 return
         # 간식은 그림 하나를 골라 신호에 실어 보낸다 — 받는 쪽도 같은 것을 본다
         extra = self._snack_pick(time.time() * 1000) if kind == "snack" else ""
+        if kind == "snack":
+            cup = self._cup_name()
+            if cup and random.random() < self.SNACK_CUP_RATE:
+                extra = cup              # 내 스페셜 컵케이크가 나왔다!
         if to == self.char:
             self._room_fx_add(to, kind, extra)
             self._room_toast_say(to, kind)
@@ -15809,8 +16054,21 @@ class Mascot:
         # 서버는 '최근에 신호한 순'으로 준다. 그대로 쓰면 5초마다 자리가
         # 뒤바뀌어 보인다 — 정해진 차례로 다시 세운다.
         order = dict((sl, i) for i, sl in enumerate(self.ROOM_ALL))
-        rest = [q for q in self.room_people
-                if (q.get("slot") or "") != self.char]
+        seen = self._room_seen_get()
+        day = self._my_workday()
+        rest = []
+        for q in self.room_people:
+            if (q.get("slot") or "") == self.char:
+                continue
+            row = seen.get(q.get("slot") or "")
+            if isinstance(row, list) and len(row) >= 3 and row[2] == day:
+                # 접속 중인 사람도 오늘 최고치 아래로는 안 보여 준다 —
+                # 옛 판이 재시작해 0을 보내와도 게이지가 안 꺼진다
+                t2 = max(int(q.get("t") or 0), int(row[0]))
+                p2 = max(float(q.get("p") or 0), float(row[1]))
+                if t2 != q.get("t") or p2 != q.get("p"):
+                    q = dict(q, t=t2, p=p2)
+            rest.append(q)
         rest.sort(key=lambda q: (order.get(q.get("slot") or "", 99),
                                  q.get("slot") or ""))
         seats.extend(rest)
@@ -15888,7 +16146,11 @@ class Mascot:
         if got is not None:
             return got
         try:
-            im = Image.open(os.path.join(self.dir, "snacks", name + ".png"))
+            p2 = os.path.join(self.dir, "snacks", name + ".png")
+            if not os.path.isfile(p2) and name.startswith("cup_"):
+                # 스페셜 컵케이크는 따로 둔다 (일반 뽑기에 안 섞이게)
+                p2 = os.path.join(self.dir, "snacks_special", name + ".png")
+            im = Image.open(p2)
             im = im.convert("RGBA")
             if bite:
                 # 이빨 자국 — 알파에서 원 두 개를 빼낸다
@@ -15951,11 +16213,11 @@ class Mascot:
                         # 꼬리 — 방금 지나온 자리에 작은 옅은 하트를 남긴다
                         c.create_text(hx - math.cos(q * 5.5 + i * 2.3) * 6 * k,
                                       yy + 13 * k, text="\u2665",
-                                      font=("Malgun Gothic",
+                                      font=(UI_FONT,
                                             max(7, int(sz * 0.55))),
                                       fill="#ffd7e6")
                         c.create_text(hx, yy,
-                                      text="\u2665", font=("Malgun Gothic", sz),
+                                      text="\u2665", font=(UI_FONT, sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "praise":
                 # 금별이 사방으로 터진다 — 목표 달성 축하
@@ -16079,7 +16341,7 @@ class Mascot:
                 yy = hy - q * 62 * k
                 sz = int((13 + 7 * (1 - q)) * k)
                 c.create_text(hx + dx + (i - 1.5) * 20 * k, yy, text="\u2665",
-                              font=("Malgun Gothic", sz),
+                              font=(UI_FONT, sz),
                               fill="#ff9ec4" if i % 2 else "#ffc0d4")
 
     def _hand_img(self, long_px, u=0.0):
@@ -16273,6 +16535,14 @@ class Mascot:
                 yy = cy - 40 * k + q * q * 66 * k
                 pic = self._snack_photo(
                     extra or self._snack_pick(t0 * 1000), int(34 * k))
+                if str(extra).startswith("cup_"):
+                    # 스페셜 컵케이크 — 금빛 반짝임이 두른다
+                    for i2 in range(6):
+                        a2 = i2 * (math.tau / 6) + p * 4
+                        r3 = (24 + 10 * math.sin(p * 7 + i2 * 1.3)) * k
+                        self._fx_spark(cv, cx + math.cos(a2) * r3,
+                                       yy - 6 * k + math.sin(a2) * r3 * 0.6,
+                                       (3.2 + 2.4 * (1 - p)) * k, "#ffd75e")
                 if pic is not None:
                     cv.create_image(cx, yy + 13 * k, image=pic, anchor="s",
                                     tags="fx")
