@@ -14083,7 +14083,10 @@ class Mascot:
         if now - last > max(60.0, float(getattr(self, "idle_thr", 120.0))):
             self._away_got.append((who, kind))
             del self._away_got[:-20]
-        self._char_fx_add(kind, ev.get("x") or "")   # 타이머 화면에서 터진다
+        # 타이머 화면에서 터진다. 칭찬은 금별 대신 쓰담 손이 나온다 —
+        # 아래 칭찬 분기에서 고깔·폭죽과 한 묶음으로 연출한다.
+        self._char_fx_add("blanket" if kind == "praise" else kind,
+                          ev.get("x") or "")
         if cup:
             # 스페셜 컵케이크 — 샤라랑 + 반짝임 + 한참 웃는 얼굴
             self.smile_until = max(self.smile_until, now + 6.0)
@@ -14111,7 +14114,11 @@ class Mascot:
             self._say(("%s 응원했어요" % _josa(who)) if who
                       else "누가 응원했어요", 3.5)
         elif kind == "praise":
-            self.smile_until = max(self.smile_until, now + 5.0)
+            # 목표를 다 채운 사람에게 오는 축하 — 웃는 얼굴로 쓰담을 받고,
+            # 고깔모자가 얹히고, 폭죽이 터진다.
+            self.smile_until = max(self.smile_until, now + 8.0)
+            self.hat_until = max(self.hat_until, now + 10.0)
+            self._safe("praise_burst", self._burst, 26, 60)
             self._say(("%s 칭찬해 줬어요! 오늘 목표 달성!" % _josa(who))
                       if who else "칭찬 받았어요! 오늘 목표 달성!", 4.5)
         elif kind == "snack" and cup:
@@ -15186,8 +15193,14 @@ class Mascot:
                        text="아직 안 켰어요" if off
                        else str(p.get("ti") or "")[:14],
                        font=self._uf(8), fill=P["sub"], tags="dyn")
-        bx0, bx1 = kx0 + 22 * k, kx1 - 42 * k
+        # 게이지 왼쪽에 오늘 몇 시간째인지 (3h 13m 꼴, 1시간 전에는 분만)
+        tmin = max(0, int(p.get("t") or 0))
+        tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) if tmin >= 60 \
+            else ("%dm" % tmin)
+        bx0, bx1 = kx0 + 60 * k, kx1 - 42 * k
         by = py0 + 48 * k
+        cv.create_text(bx0 - 6 * k, by + 5 * k, anchor="e", text=tlab,
+                       font=self._uf(8), fill=P["sub"], tags="dyn")
         # 바탕은 흰색, 채우는 색은 그 사람 테마색 그대로
         self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill="#ffffff",
                  outline=self._tint(col, 0.55), width=1)
@@ -16359,7 +16372,10 @@ class Mascot:
             if kind == "poke":
                 self._fx_poke(c, p, cx, mid, k)
             elif kind == "blanket":
-                self._fx_pat(c, p, cx, top, k)
+                # 고깔모자(왼쪽)와 겹치지 않게 — 칭찬 연출은 모자가 같이
+                # 얹히므로 손을 오른쪽으로 비켜 쓰다듬는다
+                hx2 = cx + (80 * k if now < self.hat_until else 0)
+                self._fx_pat(c, p, hx2, top, k)
             elif kind == "cheer":
                 n = 7
                 for i in range(n):
