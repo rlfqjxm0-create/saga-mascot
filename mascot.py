@@ -14344,9 +14344,19 @@ class Mascot:
         # _head_box 에는 oy(캐릭터가 아래로 내려간 만큼)가 빠져 있다.
         # 그대로 쓰면 손이 머리가 아니라 타이머 카드 위에 그려진다
         # (지뢰 43과 같은 함정 — 다른 곳도 self.oy 를 더해서 쓴다).
-        # 머리 상자 맨 위는 위로 삐친 머리카락 한 올까지 잡는다(멸종은 실측
-        # 137인데 머리 뭉치는 190부터다). 상자 높이의 18%쯤 내려서 얹는다.
-        hy = (hb[1] + self.oy + (hb[3] - hb[1]) * 0.18) if hb else top
+        # 정수리가 아니라 이마 언저리를 쓰다듬는다. 머리 상자 맨 위는 위로
+        # 삐친 머리카락 한 올까지 잡으므로(멸종은 실측 137인데 머리 뭉치는
+        # 190부터다) 상자 높이의 38%쯤 내려서 얹는다.
+        hy = (hb[1] + self.oy + (hb[3] - hb[1]) * 0.38) if hb else top
+        # 머리 상자가 짧은 캐릭터(프고는 개구리 모자만 잡혀 102px)에서는
+        # 같은 비율이 눈을 덮는다 — 눈동자 자리를 위 한계로 둔다.
+        try:
+            pu = self.layout.get("pupils") or {}
+            if pu.get("pos"):
+                eye = pu["pos"][1] * self.s + self.oy
+                hy = min(hy, eye - (hb[3] - hb[1]) * 0.04 if hb else eye)
+        except Exception:
+            pass
         # 좌우로 부드럽게 왕복한다. 처음과 끝은 살짝 여려지게.
         beat = min(1.0, p * 1.2)
         u = math.sin(beat * math.pi * 2.0 * self.PAT_TIMES)
