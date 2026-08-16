@@ -4145,6 +4145,9 @@ class Mascot:
         self._room_sent = None
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
         self._poke_times = []        # 최근에 콕을 보낸 시각들 (연타 제한)
+        self._lv_glow = 0.0          # 레벨업 테두리 반짝임이 시작된 시각
+        self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
+        self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
         self._room_bg = None
         self._room_body = []
@@ -6091,6 +6094,7 @@ class Mascot:
             return                       # 처음 켠 순간에는 축하하지 않는다
         title = self._title(lv)
         self._say("Lv.%d! %s" % (lv, title) if title else "Lv.%d!" % lv, 4.5)
+        self._lv_glow = now              # 카드 테두리를 한 바퀴 도는 반짝이
         self._safe("burst", self._burst, 18, 40)
 
     HIST_DAYS = 60               # 하루 기록을 며칠치 보관할지
@@ -7687,6 +7691,39 @@ class Mascot:
                                 y + (ct * ny + st * ty) * w))
         return [v for p in left + cap + right[::-1] for v in p]
 
+    LV_GLOW = 1.8            # 레벨업 반짝이가 테두리를 도는 시간(초)
+
+    @staticmethod
+    def _rect_point(x0, y0, x1, y1, f):
+        """사각형 둘레 위의 한 점 — f(0~1)는 왼쪽 위에서 시계 방향."""
+        w, h = x1 - x0, y1 - y0
+        per = 2 * (w + h)
+        d = (f % 1.0) * per
+        if d < w:
+            return x0 + d, y0
+        d -= w
+        if d < h:
+            return x1, y0 + d
+        d -= h
+        if d < w:
+            return x1 - d, y1
+        d -= w
+        return x0, y1 - d
+
+    def _draw_lv_glow(self, x0, y0, x1, y1, now):
+        """레벨업 — 반짝이 혜성이 카드 테두리를 한 바퀴 돈다."""
+        p = (now - self._lv_glow) / self.LV_GLOW
+        if not 0.0 <= p < 1.0:
+            return
+        c = self.canvas
+        e = 1.0 - (1.0 - p) ** 2               # 빠르게 나가 천천히 멎는다
+        col = self.card.get("fill", "#f0a8c0")
+        for j, (back, r) in enumerate(((0.0, 4), (0.018, 3), (0.040, 2))):
+            px, py = self._rect_point(x0, y0, x1, y1, e - back)
+            c.create_oval(px - r, py - r, px + r, py + r,
+                          fill=col if j else "#ffffff",
+                          outline=col, width=1)
+
     def _draw_deco(self, x0, y0, x1, y1):
         """카드 위 장식(귀 등) — 캐릭터 컨셉별."""
         c = self.canvas
@@ -8136,10 +8173,18 @@ class Mascot:
         return pts
 
     def _draw_bubble(self, yo):
-        """머리 위 말풍선 — 둥근 모서리 + 아래 V자 꼬리."""
+        """머리 위 말풍선 — 둥근 모서리 + 아래 V자 꼬리.
+
+        새 글이 뜨는 순간 아래에서 톡 올라온다 (0.16초). 글이 바뀐 것을
+        여기서 알아채므로, 말풍선을 채우는 쪽 코드는 아무것도 몰라도 된다.
+        """
         if not (self.can_talk and self.bubble):
             return
         text = self.bubble[0]
+        if text != self._bubble_text_last:
+            self._bubble_text_last = text
+            self._bubble_born = time.time()
+        u = min(1.0, max(0.0, (time.time() - self._bubble_born) / 0.16))
         c, cd = self.canvas, self.card
         # 말풍선은 카드와 달리 크기가 고정이 아니라, 글자에 맞춰 상자가 늘어난다.
         # 그래서 글자 크기 설정을 그대로 따라도 겹칠 일이 없다. 다만 창보다
@@ -8154,7 +8199,9 @@ class Mascot:
         top = self._pos("head" if self.has.get("head") else "body_open")[1] + yo
         # 카드와 겹치지 않게 카드 아래로 (머리 위쪽에 걸침)
         card_bottom = self._card_geom()["y1"] if self.timer_on else self.oy
-        by = max(top + 10, card_bottom + 40)
+        # 톡 등장 — max 로 자리를 정한 '뒤에' 더해야 한다. yo 에 더하면
+        # 카드 아래 기준(max 의 오른쪽)이 이겨서 오프셋이 통째로 사라진다.
+        by = max(top + 10, card_bottom + 40) + (1.0 - u) ** 2 * 8
         x0, x1 = cx - w / 2, cx + w / 2
         pts = self._bubble_pts(x0, by - h, x1, by, 13, cx + 4, 17, 13)
         c.create_polygon([p + 2 for p in pts], fill="#e6e2e8", outline="")
@@ -10185,6 +10232,8 @@ class Mascot:
         self._draw_deco(x0, y0, x1, y1)
         self._rrect(x0 + 2, y0 + 3, x1 + 2, y1 + 3, 16, fill="#e3e6ee", outline="")
         self._rrect(x0, y0, x1, y1, 16, fill=cd["bg"], outline=cd["border"], width=2)
+        if now < self._lv_glow + self.LV_GLOW:
+            self._safe("lv_glow", self._draw_lv_glow, x0, y0, x1, y1, now)
 
         # 맨 윗줄 — 레벨과 칭호. 아래 칸들은 그만큼 내려간다.
         lvh = self._lv_row()
@@ -13326,7 +13375,17 @@ class Mascot:
         self._inbox_save()
 
     def _snack_eat(self):
-        """간식을 눌렀을 때 — 잘 먹었다고 하고 치운다."""
+        """간식을 눌렀을 때 — 첫 입은 베어 물고, 또 누르면 다 먹는다."""
+        sn = self._snack_get()
+        if sn and not sn.get("b"):
+            sn["b"] = 1                  # 한 입 — 그림에 이빨 자국이 남는다
+            d = self._inbox_get()
+            d["snack"] = sn
+            self._inbox_save()
+            self.smile_until = max(self.smile_until, time.time() + 2.0)
+            self._safe("snack_snd", self._poke_sound)
+            self._say("냠", 1.6)
+            return
         self._snack_take()
         self.smile_until = max(self.smile_until, time.time() + 2.5)
         self._safe("snack_snd", self._poke_sound)
@@ -13598,10 +13657,13 @@ class Mascot:
         h = time.localtime().tm_hour
         if 6 <= h < 17:                      # 낮 — 가장 밝게
             d, ink, sub = 0.0, "#6f5460", "#a8919c"
-        elif 17 <= h < 20:                   # 저녁 — 조금 진하게
+            warm, amt = None, 0.0
+        elif 17 <= h < 20:                   # 저녁 — 조금 진하고 따뜻하게
             d, ink, sub = 0.022, "#6d4e58", "#a68b95"
-        else:                                # 밤 — 한 단계 더
+            warm, amt = "#ffd9b0", 0.06
+        else:                                # 밤 — 한 단계 더, 보랏빛으로
             d, ink, sub = 0.045, "#584a5c", "#96879a"
+            warm, amt = "#c9c2e8", 0.07
         key = (self.char, int(d * 1000))
         hit = self._room_pal_cache.get(key)
         if hit:
@@ -13616,6 +13678,11 @@ class Mascot:
                "bar": p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
                "lamp": p(self.char, 0.870 - d, 0.45, 0.70),
                "ink": ink, "sub": sub}
+        if warm:
+            # 색만 살짝 섞는다 — 저녁 노을·밤 조명의 기운. 계산은 팔레트를
+            # 만들 때 한 번뿐이라 비용이 없다.
+            for kk in ("wall", "dot", "card", "bar", "line", "lamp"):
+                out[kk] = self._mix(out[kk], warm, amt)
         if len(self._room_pal_cache) > 12:
             self._room_pal_cache = {}
         self._room_pal_cache[key] = out
@@ -13827,6 +13894,20 @@ class Mascot:
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
 
+    @staticmethod
+    def _room_hop(slot, now, k):
+        """이따금 한 번 깡총 — 자리마다 9~16초에 한 번, 0.5초 동안.
+
+        상태를 들지 않는다. 시간과 자리 이름만으로 정해지는 순수 함수라
+        칸을 다시 그려도, 창을 껐다 켜도 이어진다.
+        """
+        ph = hash(slot) % 97
+        cyc = 9.0 + ph % 8
+        t = (now + ph) % cyc
+        if t >= 0.5:
+            return 0.0
+        return -5.0 * k * math.sin(math.pi * t / 0.5)
+
     def _room_frame(self):
         cv = self.room_cv
         if cv is None or self.room_win is None:
@@ -13843,6 +13924,8 @@ class Mascot:
             bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self.ui_k)
             if sleeping:
                 bob *= 0.6
+            else:
+                bob += self._room_hop(slot, now, self.ui_k)
             try:
                 x, y = cv.coords(item)
                 # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
@@ -14441,9 +14524,12 @@ class Mascot:
         # (1000씩 늘려 봤더니 열여덟 중 아홉만 나왔다). 섞어서 고른다.
         return names[random.Random(int(seed)).randrange(len(names))]
 
-    def _snack_photo(self, name, long_px):
-        """그 크기의 간식 그림. 만든 것은 들고 있는다 (상한 있음)."""
-        key = (name, int(long_px))
+    def _snack_photo(self, name, long_px, bite=0):
+        """그 크기의 간식 그림. 만든 것은 들고 있는다 (상한 있음).
+
+        bite 가 1이면 오른쪽 위를 두 군데 둥글게 베어 문 그림을 낸다.
+        """
+        key = (name, int(long_px), int(bite))
         cache = self._snack_cache
         got = cache.get(key)
         if got is not None:
@@ -14451,6 +14537,17 @@ class Mascot:
         try:
             im = Image.open(os.path.join(self.dir, "snacks", name + ".png"))
             im = im.convert("RGBA")
+            if bite:
+                # 이빨 자국 — 알파에서 원 두 개를 빼낸다
+                from PIL import ImageChops, ImageDraw
+                mask = Image.new("L", im.size, 0)
+                dr = ImageDraw.Draw(mask)
+                w, h = im.size
+                r = max(6, int(min(w, h) * 0.20))
+                for mx, my in ((int(w * 0.80), int(h * 0.22)),
+                               (int(w * 0.62), int(h * 0.10))):
+                    dr.ellipse([mx - r, my - r, mx + r, my + r], fill=255)
+                im.putalpha(ImageChops.subtract(im.getchannel("A"), mask))
             w, h = im.size
             r = float(long_px) / max(1, max(w, h))
             im = im.resize((max(1, round(w * r)), max(1, round(h * r))),
@@ -14497,7 +14594,14 @@ class Mascot:
                         dx = math.sin(q * 5.5 + i * 2.3) * 32 * k
                         yy = mid + 32 * k - q * (mid - top + 52 * k)
                         sz = int((18 + 10 * (1 - q)) * k)
-                        c.create_text(cx + dx + (i - n // 2) * 25 * k, yy,
+                        hx = cx + dx + (i - n // 2) * 25 * k
+                        # 꼬리 — 방금 지나온 자리에 작은 옅은 하트를 남긴다
+                        c.create_text(hx - math.cos(q * 5.5 + i * 2.3) * 6 * k,
+                                      yy + 13 * k, text="\u2665",
+                                      font=("Malgun Gothic",
+                                            max(7, int(sz * 0.55))),
+                                      fill="#ffd7e6")
+                        c.create_text(hx, yy,
                                       text="\u2665", font=("Malgun Gothic", sz),
                                       fill="#ff9ec4" if i % 2 else "#ffc0d4")
             elif kind == "snack":
@@ -14514,6 +14618,14 @@ class Mascot:
         """
         for i in range(3):                         # 물결이 퍼진다
             q = p * 1.9 - i * 0.16
+            # 잔상 — 한 박자 늦은 옅은 물결이 따라온다. 색상키 창은
+            # 반투명이 안 되므로, 늦은 만큼 옅은 색과 얇은 선으로 흉내낸다.
+            q2 = q - 0.10
+            if 0 < q2 < 1:
+                e2 = 1.0 - (1.0 - q2) ** 2
+                r2 = (20 + 96 * e2) * k
+                c.create_oval(cx - r2, cy - r2, cx + r2, cy + r2,
+                              outline=self.POKE_RING[2], width=1)
             if 0 < q < 1:
                 e = 1.0 - (1.0 - q) ** 2           # 톡 튀어나가 천천히 멎는다
                 r = (20 + 96 * e) * k
@@ -14664,9 +14776,10 @@ class Mascot:
         # 떨어지는 동안만 움직이고, 그 뒤로는 놓인 자리에 그대로.
         p = min(1.0, max(0.0, (now - float(sn.get("t") or 0))
                          / self.SNACK_DROP))
-        self._fx_cake(c, p, cx, top, mid, k, str(sn.get("k") or ""))
+        self._fx_cake(c, p, cx, top, mid, k, str(sn.get("k") or ""),
+                      bite=int(sn.get("b") or 0))
 
-    def _fx_cake(self, c, p, cx, top, mid, k, name=""):
+    def _fx_cake(self, c, p, cx, top, mid, k, name="", bite=0):
         """케이크가 접시째 책상 위로 떨어진다.
 
         책상 그림이 있으면 상판 위에 놓는다. 캐릭터마다 책상 높이가 달라서
@@ -14688,7 +14801,8 @@ class Mascot:
         start = top - 48 * k
         q = min(1.0, p)
         y = start + q * q * (land - start)
-        img = self._snack_photo(name, int(62 * k)) if name else None
+        img = (self._snack_photo(name, int(62 * k), bite=bite)
+               if name else None)
         if img is None:
             self._mini_cake(c, cx, y, r)
             self._snack_box = (cx - r * 1.6, y - r * 1.5,
