@@ -1,7 +1,7 @@
 {
- "version": 1786974619,
+ "version": 1786975709,
  "files": {
-  "mascot.py": "089c9e8757762c96ff4f82ce91f871f444c26dda881a6d049995df2c7b6401ba",
+  "mascot.py": "9fa0b54a6a042887bf71e7bce619ecd0a3f77b1e86ecd44e2e35f556b14afba7",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -342,12 +342,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "홈 꾸미기가 새로워졌어요!\n배경을 없음·이미지·그라데이션에서 골라요. 그라데이션은 시작·끝 색과 방향을 직접 정하고, 밝은 오버레이로 배경을 연하게 누르면 카드가 또렷해져요.",
-  "심플모드 한마디 말풍선\n자리가 좁아도 항상 보이고, 마우스를 올리면 잘린 글이 옆으로 흘러요.",
-  "홈에 '모두 보기'가 생겼어요!\n왼쪽 아래 단추를 누르면 전원이 캡슐로 한 화면에 보여요 (심플모드). 다시 누르면 일반모드로 돌아와요.",
-  "캡슐에는 다 들어 있어요\n레벨·칭호·한마디 말풍선·노래(♪·하트)·게이지·작업 시간, 그리고 배경은 테마색이 그 사람의 방 이미지로 녹아들어요.",
-  "심플모드에도 살아 있는 것들\n숨쉬기, 음표, 24시간 반짝임이 캡슐에서도 돌아요.",
-  "준사의 홈 모습이 메이드복으로 보여요."
- ]
+ "notes": [],
+ "silent": true
 }

@@ -17698,27 +17698,39 @@ class Mascot:
                              fg=cd["sub"], width=8, anchor="w"
                              ).pack(side="left")
                     cur = str(self.us.get(key) or "")
-                    b2 = tk.Button(fr, text="    ", relief="flat", bd=1,
+                    b2 = tk.Button(fr, text="    ", relief="solid", bd=1,
                                    bg=cur if cur.startswith("#")
-                                   else "#ffffff")
-                    hx = tk.Label(fr, text=cur or "(눌러서 고르기)",
+                                   else "#f3edf5")
+                    hx = tk.Label(fr, text=cur or "직접 고르기",
                                   font=self._uf(8), bg="#ffffff",
-                                  fg=cd["text"])
+                                  fg=cd["text"], cursor="hand2")
 
-                    def go(k2=key, b3=b2, h3=hx):
+                    def put(c4, k2=key, b3=b2, h3=hx):
+                        self.us[k2] = c4
+                        self._save_settings()
+                        b3.config(bg=c4, activebackground=c4)
+                        h3.config(text=c4)
+                        grad_preview()
+                        refresh_bg()
+
+                    def go(_e=None, k2=key):
                         cur2 = str(self.us.get(k2) or "")
                         got = self._pick_color(
                             cur2 if cur2.startswith("#") else "#f6eef4")
                         if got:
-                            self.us[k2] = got
-                            self._save_settings()
-                            b3.config(bg=got, activebackground=got)
-                            h3.config(text=got)
-                            grad_preview()
-                            refresh_bg()
+                            put(got)
                     b2.config(command=go)
                     b2.pack(side="left", padx=(0, u(6)), ipadx=u(4))
                     hx.pack(side="left")
+                    hx.bind("<Button-1>", go)    # 글자를 눌러도 열린다
+                    # 창 안 팔레트 — 누르면 바로 그 색이 된다
+                    for c4 in ("#ffffff", "#ffd3e0", "#f7a8c3", "#ffe9b8",
+                               "#d6ecc9", "#bfe3dc", "#cfe2ff", "#e3d8f7",
+                               "#8e86b8", "#463f56"):
+                        sw = tk.Label(fr, text="  ", bg=c4, relief="solid",
+                                      bd=1, cursor="hand2")
+                        sw.pack(side="left", padx=1)
+                        sw.bind("<Button-1>", lambda _e, cc=c4: put(cc))
                 well("시작 색상", "room_bgc1")
                 well("끝 색상", "room_bgc2")
                 tk.Label(body_fr, text="하나만 고르면 단색이 돼요",
