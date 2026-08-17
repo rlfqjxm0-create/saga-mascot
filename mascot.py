@@ -12375,8 +12375,9 @@ class Mascot:
         cx, cy = cursor_pos()
         wx = self.root.winfo_rootx() + self.W // 2
         wy = self.root.winfo_rooty() + self.H // 2
-        pdx = max(-5, min(5, (cx - wx) / 60))
-        pdy = max(-3, min(4, (cy - wy) / 90))
+        em = float(self.cfg.get("eye_move", 1.0))
+        pdx = max(-5 * em, min(5 * em, (cx - wx) / 60 * em))
+        pdy = max(-3 * em, min(4 * em, (cy - wy) / 90 * em))
         # 몸짓 중에는 눈동자를 가운데로 모은다. 고개를 기울이면 미리 합쳐 둔
         # 머리(눈동자가 가운데에 구워져 있다)로 그려지는데, 기울기가 0 근처를
         # 오갈 때마다 두 방식이 번갈아 쓰여 눈동자가 대각선으로 튄다.
@@ -12699,6 +12700,7 @@ class Mascot:
             c.create_image(tx_ + offx, ty_ + offy + bob,
                            image=self._rotated_hop("arm_right_typing", self.pen_ang),
                            anchor="nw")
+            self._pen_draw = None      # 타자 중에는 펜을 손에서 놓는다
             if self._pen_grain and self.pensnd is not None:
                 self.pensnd.tick(now, enabled=False)    # 타이핑 중엔 펜 소리 정지
         else:
