@@ -2011,6 +2011,8 @@ CHARS = [
      "tint": "#4f9d3f", "size": 0.84},   # 초록 (수트 파랑은 그림이 맡는다)
     {"slot": "parts_hambugi", "repo": "hambugi-mascot", "name": "햄북이",
      "tint": "#c9954a"},
+    {"slot": "parts_yeoneo", "repo": "yeoneo-mascot", "name": "연어",
+     "tint": "#e08a6a"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -5081,6 +5083,9 @@ class Mascot:
                            180, 360, fill=(0, 0, 0, 255))
                 d.rounded_rectangle([mx - 22, cy0 - 4, mx + 22, cy0 + 6],
                                     radius=4, fill=(0, 0, 0, 255))
+            elif deco == "sushi":                  # 연어: 초밥 실루엣
+                d.ellipse([mx - 23, cy0 - 17, mx + 23, cy0 + 12],
+                          fill=(0, 0, 0, 255))
             elif deco == "scarf":                  # 퀸시: 목도리 띠 (귀 없음)
                 d.rounded_rectangle([cx0 + 14, cy0 - 15, cx1 - 14, cy0 + 7],
                                     radius=9, fill=(0, 0, 0, 255))
@@ -8149,6 +8154,18 @@ class Mascot:
                               fill="#7cb956", outline="#578a35")
             c.create_rectangle(mx - 19, y0 + 1, mx + 19, y0 + 6,
                                fill="#8a5a34", outline="#6d4426")
+        elif deco == "sushi":
+            # 연어: 카드 위 한가운데 연어 초밥 (밥 + 연어 살 + 살 결)
+            mx = (x0 + x1) / 2
+            c.create_oval(mx - 20, y0 - 8, mx + 20, y0 + 12,
+                          fill="#fdfdf6", outline="#d8d0bf", width=2)
+            c.create_oval(mx - 23, y0 - 17, mx + 23, y0 + 1,
+                          fill="#ef9d76", outline="#c96f4e", width=2)
+            for i2 in range(3):
+                sx2 = mx - 12 + i2 * 11
+                c.create_arc(sx2 - 6, y0 - 15, sx2 + 8, y0 - 1, start=40,
+                             extent=120, style="arc",
+                             outline="#f8cfb6", width=2)
         elif deco == "rabbit":
             base = self.card.get("bg", "#ffffff")
             inner = self.card.get("track", "#c9d3e6")
@@ -12592,6 +12609,16 @@ class Mascot:
                                    fill="#7cb956", outline="#578a35")
                 cv.create_rectangle(mx - 21, y + 8, mx + 21, y + 14,
                                     fill="#8a5a34", outline="#6d4426")
+            elif deco == "sushi":              # 연어: 연어 초밥
+                cv.create_oval(mx - 24, y + 2, mx + 24, y + 24,
+                               fill="#fdfdf6", outline="#d8d0bf", width=2)
+                cv.create_oval(mx - 27, y - 9, mx + 27, y + 11,
+                               fill="#ef9d76", outline="#c96f4e", width=2)
+                for i2 in range(3):
+                    sx2 = mx - 14 + i2 * 13
+                    cv.create_arc(sx2 - 7, y - 7, sx2 + 9, y + 9, start=40,
+                                  extent=120, style="arc",
+                                  outline="#f8cfb6", width=2)
             elif deco == "frog":               # 프고: 개구리 눈
                 for ex2 in (mx - 24, mx + 24):
                     cv.create_oval(ex2 - 15, y - 8, ex2 + 15, y + 16,
