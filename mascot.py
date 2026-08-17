@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 import tkinter as tk
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageTk
 
 if sys.platform == "darwin":
     # 맥에서는 pynput을 쓰지 않는다. pynput의 맥 리스너는 별도 스레드에서
@@ -4251,6 +4251,7 @@ class Mascot:
         self._pl_btn = None          # 헤더 ♪ 단추 자리
         self._pl_panel = None        # 패널 전체 자리
         self._self_cup_at = 0.0      # 본인 컵케이크를 먹은 시각 (10분에 1번)
+        self._soft_cache = {}        # 매끈한 원·그림자 그림 (상한 있음)
         self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
@@ -10881,7 +10882,7 @@ class Mascot:
 
     FAIL_FORGET = 300            # 이 시간(초) 넘게 안 터졌으면 실패 횟수를 잊는다
 
-    def _safe(self, where, fn, *args):
+    def _safe(self, where, fn, *args, **kw):
         """부분 실패가 화면 전체를 지우지 못하게 — 3번 터지면 그 구역만 끈다.
 
         다만 영영 꺼지면 안 된다. 아침에 잠깐 터진 것 때문에 저녁까지 팔이
@@ -10894,7 +10895,7 @@ class Mascot:
         if n >= 3:
             return
         try:
-            fn(*args)
+            fn(*args, **kw)
         except Exception as e:
             self._fail[where] = n + 1
             self._fail_at[where] = time.time()
@@ -14992,9 +14993,31 @@ class Mascot:
         Tk 캔버스 도형은 안티앨리어싱이 없어 계단이 진다. 3배로 그려
         LANCZOS 로 줄이면 가장자리가 부드럽고, 그라데이션도 여기서 그린다.
         """
-        key = (int(W), int(top), period)
+        # 캐릭터 폴더에 시간대 그림(.sky_아침.png 등)이 있으면 그것을 쓴다.
+        # 점파일이라 배포 꾸러미에는 안 실린다 — 한 캐릭터만 시험 적용 가능.
+        pic = os.path.join(self.dir, ".sky_%s.png" % period)
+        try:
+            mt = os.path.getmtime(pic)
+        except OSError:
+            mt = 0.0
+        key = (int(W), int(top), period, mt)
         if self._sky_key == key and self._sky_img is not None:
             return self._sky_img
+        if mt:
+            try:
+                im0 = Image.open(pic).convert("RGB")
+                r = max(W / im0.width, top / im0.height)   # cover 맞춤
+                im0 = im0.resize((max(1, int(im0.width * r + 0.5)),
+                                  max(1, int(im0.height * r + 0.5))),
+                                 Image.LANCZOS)
+                x0 = (im0.width - int(W)) // 2
+                y0 = (im0.height - int(top)) // 2
+                im0 = im0.crop((x0, y0, x0 + int(W), y0 + int(top)))
+                self._sky_key = key
+                self._sky_img = ImageTk.PhotoImage(im0)
+                return self._sky_img
+            except Exception:
+                pass                       # 못 읽으면 그리는 하늘로 물러난다
         S = 3
         k = self._room_k() * S
         w, h = int(W * S), int(top * S)
@@ -15197,6 +15220,62 @@ class Mascot:
                         fill="#ffeeb8", outline="#f5deA0",
                         width=1, tags=("dyn", "glit"))
 
+    def _soft_dot(self, cv, cx, cy, r, fill, outline="", width=0,
+                  shadow=False, tags="dyn"):
+        """매끈한 원 — PIL 3배 렌더 (Tk 원은 계단이 진다).
+
+        같은 생김새는 그림을 캐시해 다시 쓴다 (상한 있음 — 지뢰 18·42).
+        shadow=True 면 아래로 살짝 처진 그림자까지 한 장에 넣는다.
+        """
+        d = int(r * 2 + 0.5)
+        key = ("dot", d, fill, outline, int(width * 10), shadow)
+        ph = self._soft_cache.get(key)
+        if ph is None:
+            S = 3
+            pad = S * (3 if shadow else 1)
+            side = d * S + pad * 2
+            im = Image.new("RGBA", (side, side + (2 * S if shadow else 0)),
+                           (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            if shadow:
+                dr.ellipse([pad, pad + 2 * S, pad + d * S, pad + d * S + 2 * S],
+                           fill=(120, 100, 120, 70))
+                im = im.filter(ImageFilter.GaussianBlur(S))
+                dr = ImageDraw.Draw(im)
+            dr.ellipse([pad, pad, pad + d * S, pad + d * S], fill=fill,
+                       outline=(outline or None),
+                       width=(max(1, int(width * S)) if outline else 0))
+            im = im.resize((im.width // S, im.height // S), Image.LANCZOS)
+            ph = ImageTk.PhotoImage(im)
+            if len(self._soft_cache) > 200:
+                for k2 in list(self._soft_cache)[:100]:
+                    self._soft_cache.pop(k2, None)
+            self._soft_cache[key] = ph
+        cv.create_image(cx, cy + (1 if shadow else 0), image=ph, tags=tags)
+
+    def _card_shadow(self, cv, x0, y0, x1, y1, r, tags="dyn"):
+        """카드 밑 부드러운 그림자 — 같은 크기 카드는 한 장을 같이 쓴다."""
+        w, h = int(x1 - x0), int(y1 - y0)
+        key = ("cshadow", w, h, int(r))
+        ph = self._soft_cache.get(key)
+        if ph is None:
+            pad = 12
+            S = 2
+            im = Image.new("RGBA", ((w + pad * 2) * S, (h + pad * 2) * S),
+                           (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle(
+                [pad * S, pad * S, (pad + w) * S, (pad + h) * S],
+                radius=int(r * S), fill=(105, 85, 105, 46))
+            im = im.filter(ImageFilter.GaussianBlur(4 * S))
+            im = im.resize((w + pad * 2, h + pad * 2), Image.LANCZOS)
+            ph = ImageTk.PhotoImage(im)
+            if len(self._soft_cache) > 200:
+                for k2 in list(self._soft_cache)[:100]:
+                    self._soft_cache.pop(k2, None)
+            self._soft_cache[key] = ph
+        cv.create_image(x0 - 12, y0 - 12 + 5, image=ph, anchor="nw", tags=tags)
+
     def _rr_soft(self, cv, x0, y0, x1, y1, r, fill="#ffffff", outline="",
                  width=1, tail=None, tags="dyn"):
         """매끈한 둥근 사각형 — PIL로 3배로 그려 줄인다.
@@ -15364,9 +15443,9 @@ class Mascot:
         pbx, pbr = W - 234 * k, 14 * k
         on_pl = bool(getattr(self, "_pl_on", False))
         mine2 = self._room_tone(self.char)
-        cv.create_oval(pbx - pbr, mid - pbr, pbx + pbr, mid + pbr,
-                       fill=(mine2 if on_pl else "#ffffff"),
-                       outline=P["line"], width=1, tags="dyn")
+        self._safe("soft_btn", self._soft_dot, cv, pbx, mid, pbr,
+                   mine2 if on_pl else "#ffffff",
+                   outline=P["line"], width=1, shadow=True)
         cv.create_text(pbx, mid, text="♪", font=self._uf(12, True),
                        fill=("#ffffff" if on_pl else P["ink"]), tags="dyn")
         self._pl_btn = (pbx - pbr - 3 * k, mid - pbr - 3 * k,
@@ -15428,9 +15507,9 @@ class Mascot:
                 if not on:
                     continue
                 ax = (W - 10 * k - bw2) if dxn > 0 else 10 * k
-                cv.create_oval(ax, ay - bw2 / 2, ax + bw2, ay + bw2 / 2,
-                               fill="#ffffff", outline=P["line"], width=2,
-                               tags="dyn")
+                self._safe("soft_btn", self._soft_dot, cv, ax + bw2 / 2, ay,
+                           bw2 / 2, "#ffffff", outline=P["line"], width=2,
+                           shadow=True)
                 cv.create_text(ax + bw2 / 2, ay, text=label,
                                font=self._uf(9, True), fill=P["sub"],
                                tags="dyn")
@@ -15494,10 +15573,10 @@ class Mascot:
                     (("▶", "play"), ("■", "stop"), ("▶▶", "next"))):
                 bx2 = px + 34 * k + i2 * 40 * k
                 r2 = 14 * k
-                cv.create_oval(bx2 - r2, cy2 - r2, bx2 + r2, cy2 + r2,
-                               fill=self._tint(mine, 0.55),
-                               outline=self._tint(mine, 0.25), width=1,
-                               tags="dyn")
+                self._safe("soft_btn", self._soft_dot, cv, bx2, cy2, r2,
+                           self._tint(mine, 0.55),
+                           outline=self._tint(mine, 0.25), width=1,
+                           shadow=True)
                 cv.create_text(bx2, cy2, text=glyph, font=self._uf(8, True),
                                fill=self._shade(mine, 0.25), tags="dyn")
                 self._pl_hits.append((bx2 - r2, cy2 - r2, bx2 + r2, cy2 + r2,
@@ -15522,8 +15601,8 @@ class Mascot:
                          yy + rh / 2 - 2 * k, 8 * k,
                          fill=self._tint(mine, 0.68), width=0)
             dot = self._room_tone(s2["slot"])
-            cv.create_oval(px + 18 * k, yy - 6 * k, px + 30 * k, yy + 6 * k,
-                           fill=dot, width=0, tags="dyn")
+            self._safe("soft_btn", self._soft_dot, cv, px + 24 * k, yy,
+                       6 * k, dot)
             tail = ("♥%d" % min(s2["lk"], 99)) if s2["lk"] > 0 else ""
             line = "%s · %s" % (s2["n"] or "?", s2["t"])
             lim = pw - (86 if tail else 60) * k
@@ -15651,8 +15730,8 @@ class Mascot:
         f = self._uf(10)
         for it in rows:
             text, col = self._inbox_line(it)
-            cv.create_oval(px + 18 * k, yy - 7 * k, px + 32 * k, yy + 7 * k,
-                           fill=col, width=0, tags="dyn")
+            self._safe("soft_btn", self._soft_dot, cv, px + 25 * k, yy,
+                       7 * k, col)
             when = time.strftime("%H:%M", time.localtime(float(it.get("t") or 0)))
             lim = pw - 100 * k
             line = text
@@ -15700,6 +15779,9 @@ class Mascot:
                            slot, cdh, p.get("cd"))
             cimg = (self._room_peer_img(slot, cdh, kx1 - kx0, ky1 - ky0,
                                         18 * k) if cdh else None)
+        # 카드 밑 부드러운 그림자 — 아기자기하게 떠 보이게
+        self._safe("soft_btn", self._card_shadow, cv, kx0, ky0, kx1, ky1,
+                   18 * k)
         if cimg is not None:
             # 골라 둔 방 그림 — 칸 색으로 받치고(줄였을 때 빈자리) 깐다.
             # 테두리는 바닥 색까지 그린 뒤 맨 나중에 두른다.
@@ -17095,10 +17177,8 @@ class Mascot:
                 # 단추를 눌러도 토스트로 남은 시간을 알려 준다.
                 on = True
             fill = col if on else self._tint(col, 0.62)
-            cv.create_oval(x + 2, by + 2, x + bw + 2, by + bw + 2,
-                           fill=P["line"], width=0, tags="dyn")
-            cv.create_oval(x, by, x + bw, by + bw, fill=fill,
-                           outline="#ffffff", width=2, tags="dyn")
+            self._safe("soft_btn", self._soft_dot, cv, x + bw / 2, by + bw / 2,
+                       bw / 2, fill, outline="#ffffff", width=2, shadow=True)
             cv.create_text(x + bw / 2, by + bw / 2, text=label,
                            font=self._uf(9, True),
                            fill=P["ink"] if on else P["sub"], tags="dyn")
@@ -17107,11 +17187,9 @@ class Mascot:
             x += bw + gap
         # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
         dx0 = W - 20 * k - bw
-        cv.create_oval(dx0 + 2, by + 2, dx0 + bw + 2, by + bw + 2,
-                       fill=P["line"], width=0, tags="dyn")
-        cv.create_oval(dx0, by, dx0 + bw, by + bw,
-                       fill=cust or "#f6f0f8",
-                       outline="#ffffff", width=2, tags="dyn")
+        self._safe("soft_btn", self._soft_dot, cv, dx0 + bw / 2, by + bw / 2,
+                   bw / 2, cust or "#f6f0f8", outline="#ffffff", width=2,
+                   shadow=True)
         cv.create_text(dx0 + bw / 2, by + bw / 2, text="꾸미기",
                        font=self._uf(8, True), fill=P["sub"], tags="dyn")
         self._room_deco_btn = (dx0, by, dx0 + bw, by + bw)
