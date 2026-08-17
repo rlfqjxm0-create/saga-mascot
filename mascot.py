@@ -17275,6 +17275,12 @@ class Mascot:
                 cv.create_image(W / 2, fy + u(10), image=bim, anchor="n")
                 self._stamp_brief_ref = bim        # 참조 유지 (GC 방지)
                 fy += u(24) + bh
+            else:
+                # 기록이 없는 날 — 고장처럼 보이지 않게 이유를 말해 준다
+                cv.create_text(W / 2, fy + u(10),
+                               text="이날의 브리핑 기록이 없어요 — 작업 종료 때 저장돼요",
+                               font=self._uf(7), fill=cd["sub"])
+                fy += u(22)
         # ── 공개 토글 (내 판에서만) ──────────────────────────────────
         self._stamp_share_hit = None
         if other is None:
