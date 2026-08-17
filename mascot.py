@@ -17464,7 +17464,10 @@ class Mascot:
         sw = self.root.winfo_screenwidth()
         maxr = max(1, int((sh * 0.92 - top - bot) // ch))
         maxc = max(1, int((sw * 0.95 - pad) // cw))
-        cols = max(1, min(maxc, int((W - pad) // cw)))
+        # 열은 기본 3(ROOM_COLS)까지만 — 창을 넓혀도 5열로 눕지 않는다.
+        # (사가 맥 화면이 5열 2줄로 퍼져 윈도우와 다르게 보이던 원인.
+        #  세로가 모자란 작은 화면에서만 아래 폴백이 열을 늘린다.)
+        cols = max(1, min(maxc, self.ROOM_COLS, int((W - pad) // cw)))
         rows = max(1, -(-n // cols))              # 올림 나눗셈
         if rows > maxr:                           # 세로가 모자라면 옆으로
             rows = maxr
