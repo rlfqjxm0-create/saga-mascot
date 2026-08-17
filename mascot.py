@@ -6211,7 +6211,9 @@ class Mascot:
                 except Exception:
                     pass
                 self._stk_after = None
-            if self.timer_on and self.ws_path is None:
+            if self.timer_on:
+                # 연동 중이어도 저장한다 — 시간은 에이전트가 주지만
+                # 획·클릭·되돌리기·거리는 캐릭터만 세기 때문이다.
                 self._timer_save()
             if self._kb is not None:
                 self._kb.stop()
@@ -6266,6 +6268,9 @@ class Mascot:
             self.lv_secs = self._lv_of(st)
             saved = st.get("stat")
             if isinstance(saved, dict):
+                # 여기서 어제 몫을 지우면 안 된다 — 그 값은 아직 '어제
+                # 하루 기록'으로 넘어가야 한다. 넘긴 뒤 비우는 일은
+                # _day_roll → _hist_add 가 맡는다 (지뢰 28).
                 self.stat.update({k: saved.get(k, v) for k, v in self.stat.items()})
                 # 시계에 칠할 분은 집합으로 되살린다 (강제 종료로 사라지지 않게)
                 self._act = {int(v) for v in self.stat.get("mins", [])
@@ -6289,6 +6294,7 @@ class Mascot:
                         "lv_secs": round(self.lv_secs),
                         "lv_epoch": LV_EPOCH,
                         "goal_cheered": self.goal_cheered,
+                        "stat_day": self._my_workday(),
                         "stat": self.stat, "rec": self.rec})
         except Exception:
             pass
@@ -7950,6 +7956,12 @@ class Mascot:
         self.zero_at = self.work_secs       # 카드도 오늘치부터
         self.stat["day"] = key
         self._act.clear()
+        # 어제 몫은 여기서 끝난다. _hist_add 를 탔으면 이미 0이지만,
+        # 기록이 꺼져 있거나 1분도 안 된 날은 그 함수를 안 지나가서
+        # 어제 획·클릭이 오늘로 새어 들어왔다.
+        for k2 in ("strokes", "keys", "clicks", "undo", "px",
+                   "best", "runs", "_run", "first", "last"):
+            self.stat[k2] = 0 if isinstance(self.stat.get(k2), int) else 0.0
         self._safe("timer_save", self._timer_save)
 
     def _reset_records(self):
@@ -8127,6 +8139,12 @@ class Mascot:
             st[state] = st.get(state, 0.0) + dt
             self._log_work(now, state, st, dt)
             self._safe("level", self._lv_tick, now)
+            # 연동 모드에서도 저장해야 껐다 켜도 획·클릭·거리가 이어진다.
+            # (예전에는 자체 측정 경로에만 저장이 있어, 연동 중이면 그
+            #  값들이 통째로 사라졌다 — 4시간 그렸는데 7획으로 보였다)
+            if now - self._t_save > 30:
+                self._t_save = now
+                self._timer_save()
             return state
 
         return self._own_tick(now, idle)
@@ -12712,6 +12730,13 @@ class Mascot:
             # 미세하게 달라져 팔 이미지를 끝없이 새로 만들게 된다(메모리 증가).
             # 어깨가 1~2px 오르내리는 것은 그린 위치만 옮겨 표현한다.
             sx, sy = self.arm_top
+            # 어깨를 몸 안쪽으로 조금 밀어 넣는다 — 팔이 크게 뻗으면
+            # 회전 때문에 어깨의 잘린 단면이 몸 밖으로 드러나, 팔이
+            # 몸에서 떨어져 보인다 (연어처럼 몸통이 좁으면 특히).
+            sh = self.cfg.get("arm_shoulder")
+            if sh:
+                sx += float(sh[0]) * self.s
+                sy += float(sh[1]) * self.s
             hx_, hy_ = self.arm_bottom[0] + ddx, self.arm_bottom[1] + ddy
             # 펜을 팔 각도로 돌리고 손목을 팔 끝에 붙인다 — 안 그러면
             # 연어처럼 펜 파츠가 길쭉한 캐릭터는 팔 끝에서 펜만 삐죽
