@@ -457,6 +457,7 @@ DEFAULT_SETTINGS = {
     "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
     "room_code": "",         # 방 코드 (비우면 '홈')
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
+    "room_mute": False,      # 반응 받지 않기 — 남이 보낸 콕·응원 등을 무시
     "room_all": False,       # 홈 '모두 보기' — 전원을 캡슐 목록으로
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
@@ -13402,6 +13403,8 @@ class Mascot:
                 lambda ry: toggle(ry, "친구들과 같이 보기", "room_on"),
                 lambda ry: toggle(ry, "홈에서 내 캐릭터를 비활성화",
                                   "room_hide_me"),
+                lambda ry: toggle(ry, "반응 받지 않기 (콕·응원·간식 등)",
+                                  "room_mute"),
             ])
             y -= 12
             cv.create_text(LX, y, anchor="w",
@@ -14589,6 +14592,11 @@ class Mascot:
 
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
+        # 반응 받지 않기 — 남이 보낸 것은 조용히 버린다 (내가 나에게
+        # 보낸 것은 그대로). 신호 번호는 이미 소비돼, 토글을 다시 켜도
+        # 꺼져 있던 동안 것이 쏟아지지 않고 새 반응부터 받는다.
+        if self.us.get("room_mute") and ev.get("f") != self.char:
+            return
         who = ""
         mine = (ev.get("f") == self.char)     # 내가 나에게 (혼자 눌러 본 것)
         cup = (ev.get("k") == "snack"
