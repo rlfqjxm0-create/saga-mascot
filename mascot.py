@@ -414,6 +414,7 @@ DEFAULT_SETTINGS = {
     "stretch_every": "20분마다",   # 스트레칭 알림 간격 ("끄기"면 안 뜸)
     "pen_monitor": "자동", # 펜을 따라갈 화면 (자동 = 커서가 있는 화면)
     "scale_pct": 100,     # 캐릭터 크기(%)
+    "card_gap": 0,        # 타이머 카드와 머리 사이 여백 보정(px, -20~60)
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%) — 100%가 가장 큼
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
@@ -4232,7 +4233,7 @@ class Mascot:
         self._room_song_hits = {}    # 노래 말풍선 자리 (slot → (상자, 주소))
         self._room_song_box = {}     # 말풍선 그대로의 상자 (마퀴용)
         self._song_hover = None      # 커서가 올라간 노래 말풍선
-        self._song_liked = set()     # 이번 실행에 좋아요 누른 (slot, 주소)
+        self._song_liked = {}        # (slot, 주소) → 마지막으로 보낸 시각
         self._mq_cache = {}          # 마퀴 글자 띠 (상한 있음)
         self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
@@ -4944,13 +4945,15 @@ class Mascot:
         # 그림 위쪽에 빈 여백이 큰 캐릭터(햄북이 86px)는 카드와 머리가
         # 늘 그만큼 떨어진다 — 여백만큼 캐릭터를 올려 틈을 좁힌다.
         lift = int(self.cfg.get("char_lift", 0))
+        # 사람이 환경설정에서 직접 맞추는 보정 (머리가 카드에 겹치면 +)
+        gap = max(-20, min(60, int(self.us.get("card_gap") or 0)))
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
             return max(0, base + self._yt_bar() + GOAL_ROW
-                       + max(0, self._lv_row() - LV_TRIM) - lift)
+                       + max(0, self._lv_row() - LV_TRIM) - lift + gap)
         extra = int(self.cfg.get("card_top", 22)) - 22        # 장식 여유 (토끼 귀)
         return max(0, TIMER_H + extra + self._yt_bar()
-                   + max(0, self._lv_row() - LV_TRIM) - lift)
+                   + max(0, self._lv_row() - LV_TRIM) - lift + gap)
 
     def _bake_oy(self):
         """oy(카드 높이)에 의존하는 좌표들 — 시계 토글로 oy가 바뀌면 다시 부른다."""
@@ -13015,6 +13018,8 @@ class Mascot:
                                                   self.skin_names))
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
+                lambda ry: slider(ry, "타이머와 머리 사이 여백", "card_gap",
+                                  -20, 60),
                 lambda ry: stepper(ry, "글자 크기", "font_pct",
                                    FONT_MIN, FONT_MAX, 5, "%"),
                 lambda ry: toggle(ry, "캐릭터 그림자", "shadow"),
@@ -13202,6 +13207,7 @@ class Mascot:
             new["sleep_min"] = max(1, int(new["sleep_min"]))
             new["day_start"] = max(0, min(12, int(new.get("day_start", 6))))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
+            new["card_gap"] = max(-20, min(60, int(new.get("card_gap", 0))))
             new["font_pct"] = max(FONT_MIN, min(FONT_MAX,
                                                 int(new["font_pct"])))
             for k in ("sound_volume", "pen_volume", "poke_volume",
@@ -13233,6 +13239,8 @@ class Mascot:
                 self._safe("slime_swap", self._slime_open)
             self._apply_autostart()
             self._safe("stickers_apply", self._apply_stickers)
+            # 여백 보정은 재시작 없이 그 자리에서 — 창이 위로 자라거나 줄어든다
+            self._safe("card_gap", self._relayout_card)
             win.destroy()
             if need_restart:
                 self._restart()
@@ -14290,17 +14298,30 @@ class Mascot:
             self._say(("%s 응원했어요" % _josa(who)) if who
                       else "누가 응원했어요", 3.5)
         elif kind == "songlike":
-            # 내 오노추에 좋아요 — 세어서 방에 하트로 보여 준다
+            # 내 오노추에 좋아요 — '누가 눌렀나'로 세서 한 사람당 하나만.
+            # 누르는 쪽은 다시 보내도 되게 풀어 두었으므로 (옛 버전에게
+            # 흘린 좋아요를 재시도할 수 있게), 중복 거르기는 여기서 한다.
             su, _t2 = self._room_song()
+            frm = str(ev.get("f") or "")
+            counted = False
             if su:
                 d2 = self.us.get("room_song_likes") or {}
-                n2 = (int(d2.get("n") or 0) + 1) if d2.get("u") == su else 1
-                self.us["room_song_likes"] = {"u": su, "n": n2}
-                self._save_settings()
-                self._room_push_now()
-            self.smile_until = max(self.smile_until, now + 3.0)
-            self._say(("%s 내 노래를 좋아해요 ♥" % _josa(who)) if who
-                      else "누가 내 노래를 좋아해요 ♥", 3.5)
+                if d2.get("u") != su:
+                    d2 = {"u": su, "n": 0, "who": []}
+                likers = list(d2.get("who") or [])
+                if not frm or frm not in likers:
+                    if frm:
+                        likers.append(frm)
+                    self.us["room_song_likes"] = {
+                        "u": su, "n": int(d2.get("n") or 0) + 1,
+                        "who": likers[-30:]}
+                    self._save_settings()
+                    self._room_push_now()
+                    counted = True
+            if counted:
+                self.smile_until = max(self.smile_until, now + 3.0)
+                self._say(("%s 내 노래를 좋아해요 ♥" % _josa(who)) if who
+                          else "누가 내 노래를 좋아해요 ♥", 3.5)
         elif kind == "praise":
             # 목표를 다 채운 사람에게 오는 축하 — 웃는 얼굴로 쓰담을 받고,
             # 고깔모자가 얹히고, 폭죽이 터진다.
@@ -15671,10 +15692,10 @@ class Mascot:
             gap = 1.5 * k
             bx = x1 - 4 * k
             cy2 = y0 - 2 * k
-            ow = max(20 * k, (hw + gap + nw) / 2 + 5 * k)
-            cv.create_oval(bx - ow, cy2 - 7 * k, bx + ow, cy2 + 7 * k,
-                           fill="#ffffff", outline=self._tint(col, 0.35),
-                           tags="dyn")
+            bh = 7 * k                   # 배지 반높이
+            half = (hw + gap + nw) / 2 + 4.5 * k
+            self._rr(cv, bx - half, cy2 - bh, bx + half, cy2 + bh, bh,
+                     fill="#ffffff", outline=self._tint(col, 0.35), width=1)
             hx = bx - (hw + gap + nw) / 2 + hw / 2   # 하트 중심 x
             r2 = hw * 0.27               # 봉우리 원 반지름
             ty = cy2 - hw * 0.18         # 봉우리 원 중심 y
@@ -17809,14 +17830,18 @@ class Mascot:
                                     time.time())
                 self._safe("room_draw", self._room_draw)
                 return
+            # 다시 눌러도 된다 — 세는 쪽이 '누가 눌렀나'로 중복을 거르므로
+            # (상대가 옛 버전이라 신호를 흘렸을 때 재시도 길을 막지 않는다).
+            # 연타로 신호가 쏟아지는 것만 10초 간격으로 막는다.
             key = (slot, url)
-            if key in self._song_liked:
-                self._room_toast = ("이미 좋아요를 눌렀어요", time.time())
+            last = self._song_liked.get(key, 0.0)
+            if time.time() - last < 10.0:
+                self._room_toast = ("방금 좋아요를 보냈어요", time.time())
                 self._safe("room_draw", self._room_draw)
                 return
             if self.room_net is not None:
                 self.room_net.send(slot, "songlike")
-                self._song_liked.add(key)
+                self._song_liked[key] = time.time()
                 self._room_toast = ("노래에 좋아요를 보냈어요 ♥",
                                     time.time())
                 self._safe("room_draw", self._room_draw)
