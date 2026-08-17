@@ -11537,16 +11537,25 @@ class Mascot:
         self._sl_pitch = max(0.5, min(float(look.get("pitch", 1.0)), 1.6))
         # 기준 모양 — 돌아갈 자리이자 변 길이의 기준.
         # "bar"면 버터 한 조각처럼 모서리가 둥근 네모, 아니면 납작한 타원.
-        if str(look.get("shape", "")) == "bar":
+        if str(look.get("shape", "")) in ("bar", "cup"):
+            cup = str(look.get("shape", "")) == "cup"
             bw = r * float(look.get("bar_w", 1.18))
             bh = r * self.SL_FLAT * float(look.get("bar_h", 0.86))
             e = 2.0 / max(2.5, float(look.get("bar_edge", 5.0)))   # 클수록 각짐
+            # "cup"은 푸딩처럼 위가 좁고 아래가 넓은 원뿔대다. 세로 자리에
+            # 따라 가로 폭을 좁혀 만든다 (위 = cup_top 배, 아래 = 1배).
+            tw = max(0.2, min(float(look.get("cup_top", 0.66)), 1.0))
             rx, ry = [], []
             for i in range(n):
                 a = math.tau * i / n
                 ca, sa = math.cos(a), math.sin(a)
-                rx.append(bw * (1 if ca >= 0 else -1) * abs(ca) ** e)
-                ry.append(bh * (1 if sa >= 0 else -1) * abs(sa) ** e)
+                yy = bh * (1 if sa >= 0 else -1) * abs(sa) ** e
+                # 폭은 '각도'가 아니라 '세로 자리'로 좁혀야 사다리꼴이 된다.
+                # 각도로 걸면 가장 넓은 자리(좌우 끝)가 모두 같은 값을 받아
+                # 그냥 조금 홀쭉해질 뿐이다 (처음에 그렇게 만들어 실패했다).
+                f = (tw + (1.0 - tw) * (yy / bh + 1.0) / 2.0) if cup else 1.0
+                rx.append(bw * f * (1 if ca >= 0 else -1) * abs(ca) ** e)
+                ry.append(yy)
         else:
             rx = [math.cos(math.tau * i / n) * r for i in range(n)]
             ry = [math.sin(math.tau * i / n) * r * self.SL_FLAT for i in range(n)]
@@ -12091,21 +12100,10 @@ class Mascot:
         top = [i for i in range(n) if sl["ry"][i] < 0]
         if len(top) > 2:
             band = [ring[i] for i in top]
-            band += [(px, cy + (py - cy) * 0.30) for px, py in reversed(band)]
+            band += [(px, cy + (py - cy) * 0.46) for px, py in reversed(band)]
             c.create_polygon(*[v for p in band for v in p],
                              fill=self.PUD_TOP, outline="",
                              smooth=True, splinesteps=4)
-        # 흘러내림 — 카라멜 아래 경계에서 방울이 아래로 늘어진다.
-        # 방울의 세로 자리를 윗면과 같은 비율(0.30)로 잡아야 경계에
-        # 붙는다. 둘레 좌표 그대로 쓰면 카라멜 '안'에 찍혀 얼룩이 된다.
-        for a, wide, deep in ((3.55, 0.15, 0.42), (4.55, 0.12, 0.62),
-                              (5.45, 0.14, 0.38)):
-            dx, dy = self._slime_pt(sl, a, 0.92)
-            dx, dy = cx + (dx - cx) * k, cy + (dy - cy) * k
-            ey = cy + (dy - cy) * 0.30
-            c.create_oval(dx - r0 * wide, ey - r0 * 0.14,
-                          dx + r0 * wide, ey + r0 * deep,
-                          fill=self.PUD_DRIP, outline="")
         # 카라멜 윤기 — 왼쪽 위에 밝은 한 점
         hx, hy = self._slime_pt(sl, 3.90, 0.55)
         hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
