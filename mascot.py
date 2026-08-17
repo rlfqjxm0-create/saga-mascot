@@ -4253,6 +4253,7 @@ class Mascot:
         self._self_cup_at = 0.0      # 본인 컵케이크를 먹은 시각 (10분에 1번)
         self._soft_cache = {}        # 매끈한 원·그림자 그림 (상한 있음)
         self._room_dxc = {}          # 방 그림의 책상 중심 치우침 (slot,tag)→px
+        self._room_meta_h = {}       # 방 그림의 머리선 캐시 (slot → 0~1)
         self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
@@ -14537,6 +14538,21 @@ class Mascot:
         self._room_meta[slot] = v
         return v
 
+    def _room_headline(self, slot):
+        """그림에서 머리가 끝나는 높이 (0~1). 모르면 None (옛 배포본)."""
+        if slot in self._room_meta_h:
+            return self._room_meta_h[slot]
+        v = None
+        p = self._room_art_file(slot, "seat_meta.json")
+        if p:
+            try:
+                with open(p, encoding="utf-8") as fp:
+                    v = float(json.load(fp).get("head"))
+            except Exception:
+                v = None
+        self._room_meta_h[slot] = v
+        return v
+
     def _room_img(self, slot, tag):
         """방에 그릴 그림 — (몸, 책상) 두 조각. 아직 없으면 None.
 
@@ -14584,21 +14600,26 @@ class Mascot:
                     round(im.width / 2 - (bb2[0] + bb2[2]) / 2) if bb2 else 0)
             except Exception:
                 self._room_dxc[(slot, tag)] = 0
-            if line and 0.2 < line < 0.95:
-                # 몸은 통짜로 두고, 책상 조각을 그 위에 고정으로 덮는다.
-                # 몸을 잘라 올리면 잘린 자리가 그대로 드러난다 (실제로 겪음).
+            hline = self._room_headline(slot)
+            if hline and 0.05 < hline < 0.9:
+                # 머리/몸 분리 — 전신은 고정하고 머리 조각만 숨쉬게 한다.
+                # 머리 조각은 목 아래로 살짝 겹쳐 잘라, 위로 떠도 틈이 없다.
+                lap = int(4 * self._room_k())
+                hcut = min(h, int(h * hline) + lap)
+                pair = (ImageTk.PhotoImage(im.crop((0, 0, im.width, hcut))),
+                        ImageTk.PhotoImage(im), h, "head")
+            elif line and 0.2 < line < 0.95:
+                # 옛 배포본(머리선 없음) — 몸이 숨쉬고 책상 조각이 위에 덮는다.
                 cut = int(h * line)
-                # 몸이 숨쉬며 오르내릴 때(±1.6k) 흰 테두리가 이음새로
-                # 드러나지 않게 책상 조각을 살짝만 위로 겹친다. 크게 겹치면
-                # 그 띠 안의 몸 그림이 붙박이가 돼 '잘린 선'으로 보인다
-                # (연어 제보 — 8k였을 때).
+                # 겹침은 숨쉬기 진폭만 가릴 만큼만 (크면 잘린 선으로 보인다 —
+                # 연어 제보, 8k였을 때)
                 lap = int(3 * self._room_k())
                 cut2 = max(0, cut - lap)
                 pair = (ImageTk.PhotoImage(im),
                         ImageTk.PhotoImage(im.crop((0, cut2, im.width, h))),
-                        h - cut2)
+                        h - cut2, "desk")
             else:
-                pair = (ImageTk.PhotoImage(im), None, 0)
+                pair = (ImageTk.PhotoImage(im), None, 0, "desk")
         except Exception:
             self._room_art_bad.add(slot)
             return None
@@ -15963,8 +15984,8 @@ class Mascot:
                  width=3 if picked else 2)
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
-            body, desk, cut = got
-            # 숨쉬듯 아주 살짝. 움직이는 것은 몸뿐이고 책상은 고정이다.
+            body, over, cut, mode = got
+            # 숨쉬듯 아주 살짝 — 머리 조각(있으면)만 들썩이고 몸·책상은 고정
             bob = math.sin(time.time() * 1.7 + hash(slot) % 7) * (1.6 * k)
             if sleeping:
                 bob *= 0.6
@@ -15972,21 +15993,30 @@ class Mascot:
             pose = self._room_pose(p)
             cx = (kx0 + kx1) / 2 + self._room_dxc.get(
                 (slot, pose), self._room_dxc.get((slot, "seat"), 0))
-            item = cv.create_image(cx, base + bob, image=body, anchor="s",
-                                   tags="dyn")
-            ditem = None
-            if desk is not None:
-                # 책상을 나중에 그려 위에 덮는다 — 뒤에서 몸이 움직여도
-                # 책상은 붙박이고 이음매도 안 보인다.
-                ditem = cv.create_image(cx, base, image=desk, anchor="s",
+            if mode == "head" and over is not None:
+                # body = 머리 조각(움직임), over = 전신(고정)
+                ditem = cv.create_image(cx, base, image=over, anchor="s",
                                         tags="dyn")
+                reg = base - over.height() + body.height()
+                item = cv.create_image(cx, reg + bob, image=body, anchor="s",
+                                       tags="dyn")
+            else:
+                reg = base
+                item = cv.create_image(cx, base + bob, image=body, anchor="s",
+                                       tags="dyn")
+                ditem = None
+                if over is not None:
+                    # 책상을 나중에 그려 위에 덮는다 — 뒤에서 몸이 움직여도
+                    # 책상은 붙박이고 이음매도 안 보인다.
+                    ditem = cv.create_image(cx, base, image=over, anchor="s",
+                                            tags="dyn")
             if float(p.get("p") or 0) >= 1.0:
                 # 목표를 다 채운 사람 — 남들 화면에서도 축하 모습으로
                 self._safe("room_party", self._room_party_draw,
                            cv, slot, pose, cx, base + bob, k, col)
             if not off:
                 # 안 켠 사람은 숨쉬지 않는다 — 켜 있는 사람과 구분이 된다
-                self._room_body.append((item, ditem, slot, base, sleeping,
+                self._room_body.append((item, ditem, slot, reg, sleeping,
                                         pose))
         else:
             cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
