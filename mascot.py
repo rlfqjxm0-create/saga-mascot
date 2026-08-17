@@ -19193,6 +19193,13 @@ class Mascot:
             alive = "O" if (th is not None and th.is_alive()) else "X"
             err = str(getattr(net, "err", "") or "")
             fails = int(getattr(net, "fails", 0) or 0)
+            # 다 정상인데 혼자일 뿐이면 아무것도 안 띄운다. 새벽처럼
+            # 친구들이 안 켠 시간에도 진단 줄이 '오늘 다 같이' 자리를
+            # 차지해서, 고장인 줄 알았다는 제보를 받았다.
+            if (st.get("beat") == "보냄" and st.get("mine") is True
+                    and not fails and not err and alive == "O"
+                    and not retry and live < 90):
+                return ""
             # 늘 붙이는 것만 짧게. 나머지는 '이상할 때'만 — 안 그러면 줄이
             # 길어져 왼쪽 글자와 겹친다(실측).
             line = ("%s · 자리 %s · 명단 %s/%s · 내자리 %s · 통신 %s · 부름 %d"
