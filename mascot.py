@@ -446,6 +446,7 @@ DEFAULT_SETTINGS = {
     "room_nick": "",         # 방에서 보일 이름 (비우면 캐릭터 이름)
     "room_code": "",         # 방 코드 (비우면 '홈')
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
+    "room_all": False,       # 홈 '모두 보기' — 전원을 캡슐 목록으로
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -4250,6 +4251,7 @@ class Mascot:
         self._pl_hits = []           # 패널 안 누를 수 있는 자리들
         self._pl_btn = None          # 헤더 ♪ 단추 자리
         self._pl_panel = None        # 패널 전체 자리
+        self._room_all_btn = None    # '모두 보기' 토글 자리
         self._self_cup_at = 0.0      # 본인 컵케이크를 먹은 시각 (10분에 1번)
         self._soft_cache = {}        # 매끈한 원·그림자 그림 (상한 있음)
         self._room_dxc = {}          # 방 그림의 책상 중심 치우침 (slot,tag)→px
@@ -15009,6 +15011,7 @@ class Mascot:
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         ts = self._room_toast
         return (tuple(who), self._room_pick, self._room_page,
+                bool(self.us.get("room_all")),
                 tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
@@ -15265,7 +15268,7 @@ class Mascot:
                 q = next((r for r in self.room_people
                           if r.get("slot") == slot), None)
                 want = self._room_pose(q) if q else pose
-                if want != pose:
+                if want != pose and pose != "mini":
                     got = self._room_img(slot, want)
                     if got:
                         cv.itemconfigure(item, image=got[0])
@@ -15297,6 +15300,8 @@ class Mascot:
             except Exception:
                 continue
             kk2 = self._room_k()
+            if self.us.get("room_all"):
+                kk2 *= 0.5           # 캡슐은 작으니 음표도 소박하게
             ph2 = hash(slot) % 5
             for j2, (dx2, sp) in enumerate(((-46, 1.0), (44, 1.35))):
                 yy2 = base - 72 * kk2 - ((now * 14 * sp + ph2 * 9 + j2 * 23)
@@ -15310,6 +15315,8 @@ class Mascot:
         cv.delete("glit")
         if self._room_goal_done:
             kk = self._room_k()
+            if self.us.get("room_all"):
+                kk *= 0.5            # 캡슐 크기에 맞춰 반짝이도 작게
             for item, _d, slot, base, _s, _p in self._room_body:
                 try:
                     x, _y = cv.coords(item)
@@ -15426,6 +15433,8 @@ class Mascot:
     def _card_shadow(self, cv, x0, y0, x1, y1, r, tags="dyn"):
         """카드 밑 부드러운 그림자 — 같은 크기 카드는 한 장을 같이 쓴다."""
         w, h = int(x1 - x0), int(y1 - y0)
+        if w <= 0 or h <= 0:
+            return                       # 창이 잡히기 전 첫 프레임 (크기 0/음수)
         key = ("cshadow", w, h, int(r))
         ph = self._soft_cache.get(key)
         if ph is None:
@@ -15656,6 +15665,17 @@ class Mascot:
         people = allp[self._room_page * page_n:
                       (self._room_page + 1) * page_n]
         self._room_pages = pages
+        if self.us.get("room_all"):
+            # 심플 모드 — 전원을 캡슐 목록으로. 페이지 없음.
+            self._room_pages = 1
+            self._room_page = 0
+            self._room_page_btn = []
+            self._safe("room_simple", self._room_simple_draw,
+                       cv, W, H, P, k, allp, top)
+            self._room_bar(cv, W, H, P, k, allp)
+            self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
+            self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
+            return
         left = max(int(8 * k), (W - cols * cw) // 2)
         # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
         # 아래 단추 줄(126k)을 뺀 나머지 공간의 한가운데에 놓는다.
@@ -15729,6 +15749,234 @@ class Mascot:
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
         self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
         self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
+
+    def _room_cap_bg(self, slot, col, w, h, r):
+        """캡슐 바탕 — 왼쪽은 테마색, 가운데부터 방 이미지로 녹아든다.
+
+        이미지가 없으면 테마색이 흰색으로 풀리는 그라데이션만 쓴다.
+        글자가 읽히게 이미지 쪽에는 흰색을 살짝 섞는다.
+        """
+        w, h = int(w), int(h)
+        if w < 8 or h < 8:
+            return None
+        if slot == self.char:
+            src = self._room_deco_path("card")
+        else:
+            src = os.path.join(self.state_dir,
+                               ".deco_%s.png" % self._slot_sane(slot))
+        try:
+            mt = os.path.getmtime(src)
+        except OSError:
+            mt = 0.0
+        key = ("capbg", slot, col, w, h, mt)
+        cache = self._room_deco_cache
+        if key in cache:
+            return cache[key]
+
+        def hx(c):
+            return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+
+        theme = hx(self._tint(col, 0.62))
+        base = Image.new("RGBA", (w, h), theme + (255,))
+        right = None
+        if mt:
+            try:
+                im = Image.open(src).convert("RGBA")
+                im = self._deco_fit(im, w, h, 0)
+                wash = Image.new("RGBA", (w, h), (255, 255, 255, 96))
+                right = Image.alpha_composite(im, wash)
+            except Exception:
+                right = None
+        if right is None:                # 이미지 없음 — 흰색으로 풀린다
+            right = Image.new("RGBA", (w, h), (255, 255, 255, 255))
+        # 가운데를 지나며 왼쪽 테마색 → 오른쪽 그림으로 녹아드는 띠
+        ramp = Image.new("L", (w, 1), 0)
+        rp = ramp.load()
+        x0f, x1f = int(w * 0.30), int(w * 0.62)
+        for x in range(w):
+            if x <= x0f:
+                v = 0
+            elif x >= x1f:
+                v = 255
+            else:
+                v = int(255 * (x - x0f) / max(1, x1f - x0f))
+            rp[x, 0] = v
+        ramp = ramp.resize((w, h))
+        out = Image.composite(right, base, ramp)
+        # 둥근 모서리
+        mask = Image.new("L", (w * 3, h * 3), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, w * 3 - 1, h * 3 - 1], radius=int(r * 3), fill=255)
+        out.putalpha(mask.resize((w, h), Image.LANCZOS))
+        got = ImageTk.PhotoImage(out)
+        if len(cache) > 48:
+            for k2 in list(cache)[:16]:
+                cache.pop(k2, None)
+        cache[key] = got
+        return got
+
+    def _room_mini(self, slot, hpx):
+        """캡슐용 작은 캐릭터 그림 (높이 hpx로 줄임)."""
+        key = ("mini", slot, int(hpx))
+        got = self._room_img_cache.get(key)
+        if got is not None:
+            return got
+        p = self._room_art_file(slot, "seat.png")
+        if p is None:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            w2 = max(1, int(im.width * hpx / im.height))
+            got = ImageTk.PhotoImage(im.resize((w2, int(hpx)),
+                                               Image.LANCZOS))
+        except Exception:
+            return None
+        if len(self._room_img_cache) > 40:
+            for k2 in list(self._room_img_cache)[:20]:
+                self._room_img_cache.pop(k2, None)
+        self._room_img_cache[key] = got
+        return got
+
+    def _room_simple_draw(self, cv, W, H, P, k, people, top):
+        """'모두 보기' — 전원을 캡슐로 (그림·이름·레벨·칭호·게이지·시간)."""
+        self._room_hit = []
+        self._room_body = []
+        self._room_cal_btns = {}
+        self._room_song_hits = {}
+        self._room_song_box = {}
+        self._room_song_slots = set()
+        n = len(people)
+        if n == 0 or W < 220 * k:
+            return                       # 창 크기가 아직 안 잡혔다
+        gap = int(12 * k)
+        pad = int(16 * k)
+        cols = 2 if W >= 620 * k and n > 6 else 1
+        area_h = H - int(126 * k) - top - 2 * gap
+        rows = -(-n // cols)
+        ch2 = min(int(92 * k), max(int(58 * k),
+                                   (area_h - (rows - 1) * gap)
+                                   // max(1, rows)))
+        cw2 = (W - pad * 2 - (cols - 1) * gap) // cols
+        y0 = top + gap + max(0, (area_h - rows * ch2 - (rows - 1) * gap) // 2)
+        f_name = self._uf(10, True)
+        f_sub = self._uf(8)
+        f_time = self._uf(10, True)
+        f_pct = self._uf(8)
+        for i, p in enumerate(people):
+            slot = p.get("slot") or ""
+            off = bool(p.get("off"))
+            col = self._room_tone(slot)
+            x0 = pad + (i % cols) * (cw2 + gap)
+            yy0 = y0 + (i // cols) * (ch2 + gap)
+            x1, yy1 = x0 + cw2, yy0 + ch2
+            cyc = (yy0 + yy1) / 2
+            picked = (self._room_pick == slot)
+            self._safe("soft_btn", self._card_shadow, cv, x0, yy0, x1, yy1,
+                       ch2 / 2)
+            self._rr(cv, x0, yy0, x1, yy1, ch2 / 2, fill="#ffffff",
+                     width=0)
+            bg = self._room_cap_bg(slot, col, cw2, ch2, ch2 / 2)
+            if bg is not None:   # 왼쪽 테마색 → 오른쪽 방 이미지 그라데이션
+                cv.create_image(x0, yy0, image=bg, anchor="nw", tags="dyn")
+            self._rr(cv, x0, yy0, x1, yy1, ch2 / 2, fill="",
+                     outline=col if picked else P["line"],
+                     width=3 if picked else 2)
+            # 왼쪽 동그란 바탕 + 작은 캐릭터
+            self._safe("soft_btn", self._soft_dot, cv, x0 + ch2 / 2 + 2 * k,
+                       cyc, ch2 / 2 - 5 * k, "#ffffff",
+                       outline=self._tint(col, 0.4), width=1.5)
+            mini = self._room_mini(slot, ch2 - 12 * k)
+            mitem = None
+            if mini is not None:
+                mitem = cv.create_image(x0 + ch2 / 2 + 2 * k, yy1 - 5 * k,
+                                        image=mini, anchor="s", tags="dyn")
+            tx = x0 + ch2 + 12 * k
+            tr = x1 - 88 * k             # 오른쪽 시간 칸 앞까지
+            name = str(p.get("n") or "")
+            lv = int(p.get("lv") or 0)
+            head = ("Lv.%d  %s" % (lv, name)) if lv > 0 else name
+            ink = P["sub"] if off else P["ink"]
+            hw2 = self._room_tw(cv, head, f_name)
+            sg = p.get("sg") if isinstance(p.get("sg"), dict) else None
+            tagt = ""
+            if sg and self._song_ok(sg.get("u")):
+                lk = int(sg.get("lk") or 0)
+                tagt = "♪" + (" ♥%d" % min(lk, 99) if lk else "")
+            tagw = (self._room_tw(cv, tagt, f_sub) + 8 * k) if tagt else 0
+            # 이름·레벨(+♪)은 흰 알약 위에 — 진한 방 이미지에서도 읽히게
+            self._rr_soft(cv, tx - 9 * k, cyc - 27 * k,
+                          tx + hw2 + tagw + 9 * k, cyc - 5 * k, 11 * k,
+                          fill="#ffffff", outline=self._tint(col, 0.4),
+                          width=1.5)
+            cv.create_text(tx, cyc - 16 * k, anchor="w", text=head,
+                           font=f_name, fill=ink, tags="dyn")
+            if tagt:
+                hx2 = tx + hw2 + 8 * k
+                cv.create_text(hx2, cyc - 16 * k, anchor="w", text=tagt,
+                               font=f_sub, fill="#f294ac", tags="dyn")
+                box = (hx2 - 4 * k, cyc - 26 * k, hx2 + tagw, cyc - 6 * k)
+                self._room_song_hits[slot] = (box, str(sg.get("u")))
+                self._room_song_slots.add(slot)
+            # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
+            ti = "아직 안 켰어요" if off else str(p.get("ti") or "")[:14]
+            cv.create_text(tx, cyc + 1 * k, anchor="w", text=ti,
+                           font=f_sub, fill=P["sub"], tags="dyn")
+            msg = "" if off else str(p.get("m") or "").strip()
+            if msg:
+                f_msg = self._uf(10, True)
+                bx1 = tr - 4 * k
+                avail = bx1 - (tx + hw2 + tagw + 20 * k)
+                while msg and self._room_tw(cv, msg, f_msg) > avail - 26 * k:
+                    msg = msg[:-1]
+                if msg and avail > 70 * k:
+                    mw = self._room_tw(cv, msg, f_msg)
+                    bx0 = bx1 - mw - 24 * k
+                    self._rr_soft(cv, bx0, cyc - 28 * k, bx1, cyc - 4 * k,
+                                  12 * k, fill="#ffffff",
+                                  outline=self._tint(col, 0.35), width=1.5,
+                                  tail=(bx0 + 16 * k, 6 * k))
+                    cv.create_text((bx0 + bx1) / 2 + 2 * k, cyc - 16 * k,
+                                   text=msg, font=f_msg,
+                                   fill=self._shade(col, 0.15), tags="dyn")
+            # 게이지 (테마색 그라데이션) — 시간 칸 앞까지
+            pr = max(0.0, min(1.0, float(p.get("p") or 0)))
+            raw = self._tint(self._room_raw(slot), 0.5) if off                 else self._room_raw(slot)
+            self._safe("soft_btn", self._soft_gauge, cv, tx, cyc + 10 * k,
+                       tr - 10 * k, cyc + 19 * k, 4.5 * k, raw, pr,
+                       self._tint(col, 0.55))
+            # 오른쪽: 시간(굵게) + 퍼센트
+            tmin = max(0, int(p.get("t") or 0))
+            tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) if tmin >= 60                 else ("%dm" % tmin)
+            cv.create_text(x1 - 16 * k, cyc - 8 * k, anchor="e", text=tlab,
+                           font=f_time,
+                           fill=P["sub"] if off else self._shade(col, 0.1),
+                           tags="dyn")
+            cv.create_text(x1 - 16 * k, cyc + 12 * k, anchor="e",
+                           text="%d%%" % round(pr * 100), font=f_pct,
+                           fill=P["sub"], tags="dyn")
+            sleeping = p.get("s") == "sleep"
+            if mitem is not None and not off:
+                # 심플모드에서도 숨쉬기·음표·반짝이 돌게 등록한다.
+                # pose "mini"는 프레임의 자세 갈아끼우기를 건너뛴다.
+                self._room_body.append((mitem, None, slot, yy1 - 5 * k,
+                                        sleeping, "mini"))
+            self._room_hit.append((x0, yy0, x1, yy1, slot, False))
+        # 빈 칸도 캡슐 모양으로 채운다 — 일반모드의 아홉 칸과 같은 마음
+        mut = "#b9a7b4"
+        for i in range(n, rows * cols):
+            x0 = pad + (i % cols) * (cw2 + gap)
+            yy0 = y0 + (i // cols) * (ch2 + gap)
+            x1, yy1 = x0 + cw2, yy0 + ch2
+            cyc = (yy0 + yy1) / 2
+            self._safe("soft_btn", self._card_shadow, cv, x0, yy0, x1, yy1,
+                       ch2 / 2)
+            self._rr(cv, x0, yy0, x1, yy1, ch2 / 2,
+                     fill=self._tint(mut, 0.86), outline=P["line"], width=2)
+            self._safe("soft_btn", self._soft_dot, cv, x0 + ch2 / 2 + 2 * k,
+                       cyc, ch2 / 2 - 5 * k, self._tint(mut, 0.74))
+            cv.create_text((x0 + x1) / 2, cyc, text="···",
+                           font=self._uf(11, True),
+                           fill=self._tint(mut, 0.3), tags="dyn")
 
     def _room_pl_songs(self):
         """모두의 오노추 목록 — 자리 순서(나 → 접속 → 나머지) 그대로."""
@@ -16997,8 +17245,8 @@ class Mascot:
             got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r))
         except Exception:
             got = None
-        if len(cache) > 12:
-            for old in list(cache)[:6]:
+        if len(cache) > 48:
+            for old in list(cache)[:16]:
                 cache.pop(old, None)
         cache[key] = got
         return got
@@ -17409,6 +17657,18 @@ class Mascot:
             if on:
                 self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
+        # '모두 보기' 토글 — 왼쪽 끝, 꾸미기와 같은 생김새
+        ax0 = 20 * k
+        allon = bool(self.us.get("room_all"))
+        self._safe("soft_btn", self._soft_dot, cv, ax0 + bw / 2, by + bw / 2,
+                   bw / 2, self._tint(self._room_tone(self.char), 0.55)
+                   if allon else "#f6f0f8",
+                   outline="#ffffff", width=3.5, shadow=True)
+        cv.create_text(ax0 + bw / 2, by + bw / 2,
+                       text="카드\n보기" if allon else "모두\n보기",
+                       font=self._uf(7, True), justify="center",
+                       fill=P["ink" if allon else "sub"], tags="dyn")
+        self._room_all_btn = (ax0, by, ax0 + bw, by + bw)
         # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
         dx0 = W - 20 * k - bw
         self._safe("soft_btn", self._soft_dot, cv, dx0 + bw / 2, by + bw / 2,
@@ -18486,6 +18746,14 @@ class Mascot:
         db = self._room_deco_btn
         if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
             self._safe("room_deco", self._room_deco_win)
+            return
+        ab2 = getattr(self, "_room_all_btn", None)
+        if ab2 and ab2[0] <= e.x <= ab2[2] and ab2[1] <= e.y <= ab2[3]:
+            self.us["room_all"] = not bool(self.us.get("room_all"))
+            self._save_settings()
+            self._room_key_last = None
+            self._room_bg = None      # 배경(벽지·배경 그림)까지 통째로 다시
+            self._safe("room_draw", self._room_draw)
             return
         pb2 = getattr(self, "_pl_btn", None)
         if pb2 and pb2[0] <= e.x <= pb2[2] and pb2[1] <= e.y <= pb2[3]:
