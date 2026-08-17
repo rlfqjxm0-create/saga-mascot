@@ -16207,19 +16207,25 @@ class Mascot:
             if sg and self._song_ok(sg.get("u")):
                 lk = int(sg.get("lk") or 0)
                 tagt = "♪" + (" ♥%d" % min(lk, 99) if lk else "")
-            tagw = (self._room_tw(cv, tagt, f_sub) + 8 * k) if tagt else 0
-            # 이름·레벨(+♪)은 흰 알약 위에 — 진한 방 이미지에서도 읽히게
+            # 이름·레벨은 흰 알약 위에 — 진한 방 이미지에서도 읽히게
             self._rr_soft(cv, tx - 9 * k, cyc - 27 * k,
-                          tx + hw2 + tagw + 9 * k, cyc - 5 * k, 11 * k,
+                          tx + hw2 + 9 * k, cyc - 5 * k, 11 * k,
                           fill="#ffffff", outline=self._tint(col, 0.4),
                           width=1.5)
             cv.create_text(tx, cyc - 16 * k, anchor="w", text=head,
                            font=f_name, fill=ink, tags="dyn")
             if tagt:
-                hx2 = tx + hw2 + 8 * k
-                cv.create_text(hx2, cyc - 16 * k, anchor="w", text=tagt,
-                               font=f_sub, fill="#f294ac", tags="dyn")
-                box = (hx2 - 4 * k, cyc - 26 * k, hx2 + tagw, cyc - 6 * k)
+                # 오노추 음표·받은 하트는 이름 알약 위의 작은 알약으로
+                tw4 = self._room_tw(cv, tagt, f_sub)
+                ty1 = cyc - 30 * k
+                self._rr_soft(cv, tx - 3 * k, ty1 - 16 * k,
+                              tx + tw4 + 9 * k, ty1, 8 * k,
+                              fill="#ffffff",
+                              outline=self._tint(col, 0.5), width=1)
+                cv.create_text(tx + 3 * k, ty1 - 8 * k, anchor="w",
+                               text=tagt, font=f_sub, fill="#f294ac",
+                               tags="dyn")
+                box = (tx - 3 * k, ty1 - 16 * k, tx + tw4 + 9 * k, ty1)
                 self._room_song_hits[slot] = (box, str(sg.get("u")))
                 self._room_song_slots.add(slot)
             # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
@@ -16231,16 +16237,18 @@ class Mascot:
             msg = full_msg
             if msg:
                 f_msg = self._uf(10, True)
-                bx1 = tr - 4 * k
+                bx0 = tx + hw2 + 16 * k  # 이름 알약 바로 옆에
+                bx1e = tr - 4 * k
                 # 한마디가 있으면 무조건 보인다 — 자리가 좁으면 최소 폭을
                 # 보장하고(알약을 살짝 덮더라도), 잘린 원문은 호버 마퀴가
                 # 흘려서 보여 준다.
-                avail = max(84 * k, bx1 - (tx + hw2 + tagw + 20 * k))
+                avail = max(84 * k, bx1e - bx0)  # 남는 폭을 다 쓴다
                 while len(msg) > 1 and                         self._room_tw(cv, msg, f_msg) > avail - 26 * k:
                     msg = msg[:-1]
                 if msg:
                     mw = self._room_tw(cv, msg, f_msg)
-                    bx0 = bx1 - mw - 24 * k
+                    bx1 = min(max(bx1e, bx0 + 40 * k),
+                              bx0 + mw + 24 * k)
                     self._rr_soft(cv, bx0, cyc - 28 * k, bx1, cyc - 4 * k,
                                   12 * k, fill="#ffffff",
                                   outline=self._tint(col, 0.35), width=1.5,
