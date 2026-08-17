@@ -458,6 +458,7 @@ DEFAULT_SETTINGS = {
     "room_code": "",         # 방 코드 (비우면 '홈')
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
     "room_mute": False,      # 반응 받지 않기 — 남이 보낸 콕·응원 등을 무시
+    "slime_seen": None,      # 슬라임 메뉴에서 이미 본 종류들 (새 것 알림용)
     "room_all": False,       # 홈 '모두 보기' — 전원을 캡슐 목록으로
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
@@ -4061,7 +4062,20 @@ class Mascot:
                     sub.add_radiobutton(
                         label=_k, value=_k, variable=self._slime_kind_var,
                         command=lambda n=_k: self._slime_set_kind(n))
-            menu.add_cascade(label="슬라임", menu=sub)
+            # 새 종류가 생겼으면 빨간 점 — 한 번 펼쳐 보면 사라진다.
+            # tk 메뉴는 글자 일부만 색을 못 주므로 점 문자를 붙이고 그
+            # 항목 전체를 빨갛게 한다.
+            _new = self._slime_new()
+            menu.add_cascade(label="슬라임  ●" if _new else "슬라임", menu=sub)
+            self._slime_menu_idx = menu.index("end")
+            if _new:
+                try:
+                    menu.entryconfig(self._slime_menu_idx,
+                                     foreground="#e0525c")
+                except Exception:
+                    pass
+                sub.config(postcommand=lambda: self._safe(
+                    "slime_seen_menu", self._slime_menu_seen))
             self._slime_menu = sub
         if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
             menu.add_separator()
@@ -11299,6 +11313,8 @@ class Mascot:
     SL_EDGE = 0.55           # 변 길이를 지키는 힘 (덩어리가 안 찢어지게)
     SL_STRETCH = 2.6         # 변이 늘어날 수 있는 최대 배율
     SL_AREA = 0.45           # 넓이를 지키는 힘 (길게 늘이면 가늘어진다)
+    # 처음부터 있던 종류들 — 이보다 뒤에 생긴 것만 '새 것'으로 본다
+    SLIME_BASE = ("말랑이", "버터바", "치즈")
     SL_SHAPE = 0.13          # 원래 모양으로 돌아가려는 힘
     SL_HOME = 0.06           # 제자리로 돌아가려는 힘
     SL_DAMP = 0.74           # 출렁임이 잦아드는 정도 (낮을수록 덜 촐랑인다)
@@ -11591,6 +11607,38 @@ class Mascot:
         k = getattr(self, "_slime_kind_var", None)
         if k is not None:
             k.set(self.us.get("slime_kind") or "")
+
+    def _slime_new(self):
+        """아직 안 본 슬라임 종류들. 깃발이 아니라 계산으로 낸다 (지뢰 30).
+
+        저장하는 것은 '어디까지 봤나'(본 종류 이름들) 하나뿐이라, 끄는
+        쪽이 안 불려서 빨간 점이 켜진 채 굳는 일이 없다. 옛 사용자는
+        저장된 목록이 없으니 새로 생긴 종류가 그대로 새 것으로 잡힌다.
+        """
+        seen = self.us.get("slime_seen")
+        if not isinstance(seen, list):
+            # 처음 보는 사람 — 기본 세 종류는 본 것으로 친다. 안 그러면
+            # 새로 설치한 사람에게도 '새로 추가됨' 점이 뜬다.
+            seen = list(self.SLIME_BASE)
+        return [k for k in self.slime_kinds if k not in seen]
+
+    def _slime_menu_seen(self):
+        """슬라임 메뉴를 펼쳤다 = 새 종류를 봤다. 그 자리에서 점을 끈다.
+
+        저장이 실패해도 메모리 값은 올린다 — 최악이 '다음에 한 번 더
+        뜨는 것'이다 (지뢰 30).
+        """
+        if not self._slime_new():
+            return
+        self.us["slime_seen"] = list(self.slime_kinds)
+        self._safe("slime_seen", self._save_settings)
+        m = getattr(self, "_menu", None)
+        idx = getattr(self, "_slime_menu_idx", None)
+        if m is not None and idx is not None:
+            try:
+                m.entryconfig(idx, label="슬라임", foreground="")
+            except Exception:
+                pass
 
     def _slime_toggle(self):
         self._safe("slime_menu",
@@ -12009,6 +12057,12 @@ class Mascot:
         if look.get("label") == "cheese":
             self._draw_cheese(col, ring, cx, cy, k)
             return
+        if look.get("label") == "mangosteen":
+            self._draw_mangosteen(col, cx, cy, k, now)
+            return
+        if look.get("label") == "pudding":
+            self._draw_pudding(col, ring, cx, cy, k)
+            return
         # 윤기 — 왼쪽 위에 두 점. 덩어리 안의 점이라 늘이면 같이 딸려 간다.
         wob = math.sin(now * 2.3) * 0.05
         hi = self._mix("#ffffff", col, 0.16)      # 거의 흰색이라야 윤기로 보인다
@@ -12019,6 +12073,105 @@ class Mascot:
             c.create_oval(hx - rr0 * wx, hy - rr0 * wy,
                           hx + rr0 * wx, hy + rr0 * wy,
                           fill=hi, outline="")
+
+    PUD_TOP = "#a55a17"              # 카라멜 (윗면)
+    PUD_DRIP = "#8d4711"             # 흘러내린 카라멜 (조금 진하게)
+
+    def _draw_pudding(self, col, ring, cx, cy, k):
+        """푸딩 한 개 — 크림빛 몸통 위에 갈색 카라멜이 얹히고 흘러내린다.
+
+        카라멜은 덩어리 '안'의 점들로 그린다(_slime_pt) — 그래야 누르거나
+        늘였을 때 푸딩을 따라 같이 일그러진다. 치즈 윗면과 같은 방법이다.
+        """
+        c = self.canvas
+        sl = self.slime
+        n = len(ring)
+        r0 = sl["r"] * k
+        # 윗면 카라멜 — 위쪽 둘레를 따라가다 중심 쪽으로 눌러 덮는다
+        top = [i for i in range(n) if sl["ry"][i] < 0]
+        if len(top) > 2:
+            band = [ring[i] for i in top]
+            band += [(px, cy + (py - cy) * 0.30) for px, py in reversed(band)]
+            c.create_polygon(*[v for p in band for v in p],
+                             fill=self.PUD_TOP, outline="",
+                             smooth=True, splinesteps=4)
+        # 흘러내림 — 카라멜 아래 경계에서 방울이 아래로 늘어진다.
+        # 방울의 세로 자리를 윗면과 같은 비율(0.30)로 잡아야 경계에
+        # 붙는다. 둘레 좌표 그대로 쓰면 카라멜 '안'에 찍혀 얼룩이 된다.
+        for a, wide, deep in ((3.55, 0.15, 0.42), (4.55, 0.12, 0.62),
+                              (5.45, 0.14, 0.38)):
+            dx, dy = self._slime_pt(sl, a, 0.92)
+            dx, dy = cx + (dx - cx) * k, cy + (dy - cy) * k
+            ey = cy + (dy - cy) * 0.30
+            c.create_oval(dx - r0 * wide, ey - r0 * 0.14,
+                          dx + r0 * wide, ey + r0 * deep,
+                          fill=self.PUD_DRIP, outline="")
+        # 카라멜 윤기 — 왼쪽 위에 밝은 한 점
+        hx, hy = self._slime_pt(sl, 3.90, 0.55)
+        hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
+        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.09,
+                      hx + r0 * 0.20, hy + r0 * 0.09,
+                      fill=self._tint(self.PUD_TOP, 0.45), outline="")
+        # 몸통 윤기 — 카라멜 아래 크림 부분
+        bx, by = self._slime_pt(sl, 2.90, 0.62)
+        bx, by = cx + (bx - cx) * k, cy + (by - cy) * k
+        c.create_oval(bx - r0 * 0.13, by - r0 * 0.09,
+                      bx + r0 * 0.13, by + r0 * 0.09,
+                      fill=self._mix("#ffffff", col, 0.25), outline="")
+
+    MANGO_LEAF = "#7ba832"           # 꼭지 초록
+    MANGO_STEM = "#8fbb46"           # 줄기 (조금 밝게)
+
+    def _draw_mangosteen(self, col, cx, cy, k, now):
+        """망고스틴 한 알 — 짙은 자주 껍질 위에 초록 꼭지.
+
+        꼭지는 덩어리 '안'의 점으로 잡는다(_slime_pt) — 그래야 누르거나
+        늘였을 때 껍질을 따라 같이 움직인다. 고정 좌표로 그리면 몸만
+        일그러지고 꼭지가 허공에 남는다.
+        """
+        c = self.canvas
+        sl = self.slime
+        r0 = sl["r"] * k
+        deep = self._shade(col, 0.22)          # 껍질 아래쪽 그늘
+        # 아래쪽 그늘 — 둥근 열매의 두께감
+        bx, by = self._slime_pt(sl, 1.571, 0.55)
+        bx, by = cx + (bx - cx) * k, cy + (by - cy) * k
+        c.create_oval(bx - r0 * 0.62, by - r0 * 0.30,
+                      bx + r0 * 0.62, by + r0 * 0.26,
+                      fill=deep, outline="")
+        # 윤기 — 왼쪽 위, 짙은 껍질이라 밝게 한 점만
+        hx, hy = self._slime_pt(sl, 3.95, 0.55)
+        hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
+        hi = self._mix("#ffffff", col, 0.30)
+        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.11,
+                      hx + r0 * 0.20, hy + r0 * 0.11,
+                      fill=hi, outline="")
+        # 꼭지 — 열매 '위 가장자리'에 얹힌다. rr 을 1.0 으로 잡아야 위쪽
+        # 껍질에 앉는다 (0.72 로 뒀더니 한복판에 뭉쳐 보였다). 슬라임은
+        # 납작해서(SL_FLAT) 위 가장자리도 중심에서 멀지 않으므로, 화면
+        # 세로로 조금 더 올려 얹는다.
+        tx, ty = self._slime_pt(sl, 4.712, 1.0)
+        tx, ty = cx + (tx - cx) * k, cy + (ty - cy) * k
+        ty -= r0 * 0.10
+        leaf = self.MANGO_LEAF
+        edge = self._shade(leaf, 0.34)
+        lr = r0 * 0.27
+        # 잎 다섯 장 — 바깥으로 넉넉히 벌려 둔다 (겹치면 덩어리로 보인다)
+        for i in range(5):
+            a = math.pi + math.tau * (i + 0.5) / 5.0
+            lx = tx + math.cos(a) * lr * 1.15
+            ly = ty + math.sin(a) * lr * 0.62
+            c.create_oval(lx - lr * 0.56, ly - lr * 0.40,
+                          lx + lr * 0.56, ly + lr * 0.40,
+                          fill=leaf, outline=edge, width=1)
+        # 가운데 잎 — 잎들이 만나는 자리를 메운다
+        c.create_oval(tx - lr * 0.46, ty - lr * 0.34,
+                      tx + lr * 0.46, ty + lr * 0.34,
+                      fill=leaf, outline=edge, width=1)
+        # 줄기 — 가운데서 위로 짧게 (잎보다 위에 그려 안 묻히게)
+        sw = max(2.0, r0 * 0.11)
+        c.create_line(tx, ty - lr * 0.18, tx, ty - lr * 1.15,
+                      fill=self.MANGO_STEM, width=sw, capstyle="round")
 
     def _draw_cheese(self, col, ring, cx, cy, k):
         """치즈 한 덩이 — 윗면(밝은 띠)과 숭숭 뚫린 구멍.

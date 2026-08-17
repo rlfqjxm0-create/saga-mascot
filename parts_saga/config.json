@@ -338,6 +338,26 @@
     "thick": 0.55,
     "stiff": 0.3,
     "vol": 1.0
+   },
+   "망고스틴": {
+    "label": "mangosteen",
+    "color": "#4a1a3f",
+    "size": 0.92,
+    "thick": 1.0,
+    "stiff": 0.55,
+    "reach": 1.9,
+    "vol": 1.15,
+    "pitch": 0.72
+   },
+   "푸딩": {
+    "label": "pudding",
+    "color": "#f6d79b",
+    "size": 0.98,
+    "thick": 0.25,
+    "stiff": 0.35,
+    "reach": 2.4,
+    "vol": 1.0,
+    "pitch": 0.95
    }
   }
  },
