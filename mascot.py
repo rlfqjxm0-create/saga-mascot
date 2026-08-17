@@ -4173,7 +4173,7 @@ class Mascot:
         self._deco_drag_st = None    # 드래그 시작점
         self._deco_dims = {}         # 그림 실제 크기 (드래그 환산용)
         self._cd_mem = None          # 내 방 칸 그림의 작은 사본 (mtime 기억)
-        self._cd_push = False        # 다음 신호에 그림을 실어 보낼지
+        self._cd_push = True         # 켠 직후 첫 신호에 그림을 실어 보냄
         self._cd_n = 0               # 그림을 이따금만 싣는 셈
         self._room_peer_hash = None  # 남의 방 칸 그림 해시 (첫 사용 때 읽음)
         self._room_tone_cache = {}
@@ -13702,11 +13702,13 @@ class Mascot:
             out["sg"] = {"u": su, "t": st2}
         b64, ch = self._room_card_thumb()
         if ch:
-            # 방 칸 꾸미기 — 해시는 늘 싣고, 그림 자체는 이따금만 (무겁다).
-            # 받는 쪽은 해시가 낯설 때 다음 그림이 올 때까지 기다린다.
+            # 방 칸 꾸미기 — 해시는 늘 싣고, 그림 자체는 시간창으로만.
+            # 예전엔 '여섯 번에 한 번' 셈이었는데 화면 그리기도 이 함수를
+            # 불러 셈을 소모해, 정작 네트워크 박자에 그림이 안 실렸다.
+            # 40초마다 8초 창이면 어떤 박자든 곧 걸린다.
             out["cdh"] = ch
-            self._cd_n = (getattr(self, "_cd_n", 0) + 1) % 6
-            if self._cd_n == 1 or getattr(self, "_cd_push", False):
+            now2 = time.time()
+            if getattr(self, "_cd_push", False) or (now2 % 40.0) < 8.0:
                 out["cd"] = b64
                 self._cd_push = False
         return out
@@ -16250,6 +16252,13 @@ class Mascot:
 
                 ofn = OFN()
                 ofn.lStructSize = ctypes.sizeof(OFN)
+                try:
+                    # 꾸미기 창이 '항상 위'라 소유자를 안 주면 파일 창이
+                    # 그 뒤에 숨는다 — '안 열려요'로 보인 원인
+                    w2 = getattr(self, "_deco_win", None) or self.root
+                    ofn.hwndOwner = int(w2.wm_frame(), 16)
+                except Exception:
+                    pass
                 ofn.lpstrFilter = ("그림\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0"
                                    "모든 파일\0*.*\0\0")
                 ofn.nFilterIndex = 1
@@ -16399,6 +16408,11 @@ class Mascot:
                 cust = (ctypes.c_uint32 * 16)()
                 cc = CC()
                 cc.lStructSize = ctypes.sizeof(CC)
+                try:
+                    w2 = getattr(self, "_deco_win", None) or self.root
+                    cc.hwndOwner = int(w2.wm_frame(), 16)
+                except Exception:
+                    pass
                 r0, g0, b0 = (int(init[i:i + 2], 16) for i in (1, 3, 5))
                 cc.rgbResult = r0 | (g0 << 8) | (b0 << 16)
                 cc.lpCustColors = ctypes.cast(cust, ctypes.c_void_p)
