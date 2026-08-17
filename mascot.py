@@ -4264,6 +4264,7 @@ class Mascot:
         self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
         self._room_bgc_img = None    # 직접 고른 배경 색 한 장 (참조 유지)
+        self._room_wash_img = None   # 밝은 오버레이 한 장 (참조 유지)
         self._room_bg = None
         self._room_body = []
         self._room_key_last = None
@@ -15542,21 +15543,33 @@ class Mascot:
                 pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
         return cv.create_polygon(pts, smooth=False, **kw)
 
-    def _room_bgc_make(self, ct, cb, w, h):
-        """직접 고른 배경 색 한 장 — 단색이면 ct==cb, 아니면 위→아래."""
+    def _room_bg_mode(self):
+        """배경 방식 — none·img·grad. 옛 저장값은 색이 있으면 그라데이션."""
+        m = str(self.us.get("room_bg_mode") or "")
+        if m in ("none", "img", "grad"):
+            return m
+        if self.us.get("room_bgc1") or self.us.get("room_bgc2"):
+            return "grad"
+        return "img"
+
+    def _room_bgc_make(self, ct, cb, ang, w, h):
+        """직접 고른 배경 그라데이션 한 장 — ang(도) 180 = 위→아래.
+
+        단색이면 그대로 칠하고, 아니면 PIL의 세로 그라데이션 판을 돌려서
+        방향을 만든다 (363판을 돌려 가운데 256만 쓰면 모서리가 안 샌다).
+        """
         try:
-            r1, g1, b1 = self._hex(ct)
-            r2, g2, b2 = self._hex(cb)
+            c1, c2 = tuple(self._hex(ct)), tuple(self._hex(cb))
         except Exception:
             return None
-        strip = Image.new("RGB", (1, 128))
-        px = strip.load()
-        for y in range(128):
-            f = y / 127.0
-            px[0, y] = (int(r1 + (r2 - r1) * f),
-                        int(g1 + (g2 - g1) * f),
-                        int(b1 + (b2 - b1) * f))
-        return ImageTk.PhotoImage(strip.resize((w, h), Image.BILINEAR))
+        if c1 == c2:
+            return ImageTk.PhotoImage(Image.new("RGB", (w, h), c1))
+        m = Image.linear_gradient("L").resize((363, 363))
+        m = m.rotate(int(ang) - 180, resample=Image.BILINEAR)
+        m = m.crop((53, 53, 309, 309)).resize((w, h), Image.BILINEAR)
+        return ImageTk.PhotoImage(
+            Image.composite(Image.new("RGB", (w, h), c2),
+                            Image.new("RGB", (w, h), c1), m))
 
     def _room_draw(self):
         cv = self.room_cv
@@ -15588,27 +15601,44 @@ class Mascot:
         self._room_top_px = top
         # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
         # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
+        mode = self._room_bg_mode()
         bgc1 = str(self.us.get("room_bgc1") or "")
         bgc2 = str(self.us.get("room_bgc2") or "")
-        key = (W, H, P["wall"], self._room_deco_ver, top, bgc1, bgc2)
+        ang = int(float(self.us.get("room_bg_ang", 180) or 0))
+        wash = int(float(self.us.get("room_bg_wash", 0) or 0))
+        key = (W, H, P["wall"], self._room_deco_ver, top,
+               mode, bgc1, bgc2, ang, wash)
         if self._room_bg != key:
             self._room_bg = key
             cv.delete("all")
             cv.configure(bg=P["wall"])
             self.room_win.configure(bg=P["wall"])
-            # 직접 고른 배경 색 — 하나만 고르면 단색, 둘 다면 위→아래
-            ct, cb = (bgc1 or bgc2), (bgc2 or bgc1)
-            if ct:
-                self._room_bgc_img = self._safe_str(
-                    self._room_bgc_make, ct, cb, W, max(1, H - top))
-                if self._room_bgc_img is not None:
-                    cv.create_image(0, top, image=self._room_bgc_img,
-                                    anchor="nw", tags="bg")
-            bgim = self._room_deco_img("bg", W, H - top)
-            if bgim is not None:
-                # 골라 둔 배경 그림 — 색(또는 벽지) 위에 그림을 깐다
-                cv.create_image(0, top, image=bgim, anchor="nw", tags="bg")
-            elif not (ct and self._room_bgc_img is not None):
+            drawn = False
+            if mode == "grad":
+                # 직접 고른 그라데이션 — 하나만 고르면 단색
+                ct, cb = (bgc1 or bgc2), (bgc2 or bgc1)
+                if ct:
+                    self._room_bgc_img = self._safe_str(
+                        self._room_bgc_make, ct, cb, ang,
+                        W, max(1, H - top))
+                    if self._room_bgc_img is not None:
+                        cv.create_image(0, top, image=self._room_bgc_img,
+                                        anchor="nw", tags="bg")
+                        drawn = True
+            elif mode == "img":
+                bgim = self._room_deco_img("bg", W, H - top)
+                if bgim is not None:
+                    cv.create_image(0, top, image=bgim, anchor="nw",
+                                    tags="bg")
+                    drawn = True
+            if drawn and wash > 0:
+                # 밝은 오버레이 — 배경만 하얗게 눌러 카드가 도드라지게
+                self._room_wash_img = ImageTk.PhotoImage(Image.new(
+                    "RGBA", (W, max(1, H - top)),
+                    (255, 255, 255, min(255, wash * 255 // 100))))
+                cv.create_image(0, top, image=self._room_wash_img,
+                                anchor="nw", tags="bg")
+            if not drawn:
                 step = max(8, int(26 * k))
                 for yy in range(top, H, step):
                     for xx in range((step // 2) if (yy // step) % 2 else 0,
@@ -17525,137 +17555,222 @@ class Mascot:
             return ""
 
     def _room_deco_win(self):
-        """홈 꾸미기 창 — 배경·방 그림을 고르거나 되돌린다."""
+        """홈 꾸미기 창 — 하얀 카드 세 장 (배경 · 방 칸 · 반응 단추 색).
+
+        배경은 없음·이미지·그라데이션 중 하나를 고른다. 그라데이션은
+        시작·끝 색과 방향을 직접 정하고, 밝은 오버레이로 배경을 연하게
+        눌러 카드가 또렷해진다 (배경은 내 화면에만 적용).
+        """
         cd, u = self.card, self._ui
         win = tk.Toplevel(self.room_win or self.root)
         self._deco_win = win             # 떠 있는 동안 드래그 조절이 켜진다
         win.title("홈 꾸미기")
         win.configure(bg=cd["panel"])
         win.resizable(False, False)
-        tk.Label(win, text="홈 꾸미기", font=self._uf(12, True),
-                 bg=cd["panel"], fg=cd["text"]).pack(pady=(u(16), u(4)))
+        tk.Label(win, text="홈 꾸미기", font=self._uf(13, True),
+                 bg=cd["panel"], fg=cd["text"]).pack(pady=(u(14), u(2)))
         tk.Label(win, text="이 창이 떠 있는 동안 홈에서 그림을 끌면 위치가 움직여요",
-                 font=self._uf(8), bg=cd["panel"], fg=cd["text"]
-                 ).pack(pady=(0, u(2)))
+                 font=self._uf(8), bg=cd["panel"], fg=cd["text"]).pack()
         tk.Label(win, text="배경은 내 화면에만 · 방 칸은 친구들에게도 보여요",
                  font=self._uf(8), bg=cd["panel"], fg=cd["sub"]
                  ).pack(pady=(0, u(8)))
+        line = self._tint(cd["fill"], 0.55)
 
-        def row(label, what):
-            fr = tk.Frame(win, bg=cd["panel"])
-            fr.pack(padx=u(20), pady=u(6), fill="x")
-            tk.Label(fr, text=label, font=self._uf(10, True),
-                     bg=cd["panel"], fg=cd["text"], width=8).pack(side="left")
-            tk.Button(fr, text="그림 고르기", font=self._uf(9),
-                      relief="flat", bg=cd["fill"], fg="#ffffff",
-                      activebackground=cd["fill"], padx=u(10),
-                      command=lambda: self._safe(
-                          "deco_set", self._room_deco_set, what)
-                      ).pack(side="left", padx=u(6))
-            tk.Button(fr, text="기본으로", font=self._uf(9),
-                      relief="flat", bg="#e9e2ea", fg=cd["text"],
-                      activebackground="#e9e2ea", padx=u(10),
-                      command=lambda: self._safe(
-                          "deco_clear", self._room_deco_clear, what)
-                      ).pack(side="left")
-            # 크기·위치 조절 — 놓는 순간 적용된다
-            def slider(label, key, lo, hi, default, res=5):
-                if IS_MAC:
-                    # 맥(Tk9 아쿠아)은 tk.Scale 에서 앱이 통째로 꺼지는
-                    # 제보가 있어(퀸시) +/- 단추로 만든다
-                    fr3 = tk.Frame(win, bg=cd["panel"])
-                    fr3.pack(padx=u(24), anchor="w")
-                    tk.Label(fr3, text=label, font=self._uf(7),
-                             bg=cd["panel"], fg=cd["sub"]).pack(side="left")
-                    val = tk.Label(fr3, font=self._uf(8, True),
-                                   bg=cd["panel"], fg=cd["text"], width=4,
-                                   text=str(int(float(
-                                       self.us.get(key, default)))))
-                    val.pack(side="right")
+        def card_box(title):
+            box = tk.Frame(win, bg="#ffffff", bd=0,
+                           highlightbackground=line, highlightthickness=1)
+            box.pack(padx=u(16), pady=u(5), fill="x")
+            tk.Label(box, text=title, font=self._uf(10, True),
+                     bg="#ffffff", fg=cd["text"]
+                     ).pack(anchor="w", padx=u(12), pady=(u(8), 0))
+            return box
 
-                    def step(d2, k2=key, v2=val, lo2=lo, hi2=hi):
-                        cur = int(float(self.us.get(k2, default)))
-                        cur = max(lo2, min(hi2, cur + d2))
-                        self.us[k2] = cur
-                        v2.config(text=str(cur))
-                        self._save_settings()
-                        self._room_deco_bump()
+        def pill(parent, text, main, cmd, pad=10):
+            return tk.Button(parent, text=text, font=self._uf(9),
+                             relief="flat",
+                             bg=cd["fill"] if main else "#efe9f1",
+                             fg="#ffffff" if main else cd["text"],
+                             activebackground=cd["fill"] if main
+                             else "#efe9f1",
+                             padx=u(pad), command=cmd)
 
-                    for cap2, d2 in (("−", -10), ("+", 10)):
-                        tk.Button(fr3, text=cap2, font=self._uf(9, True),
-                                  relief="flat", bg="#ffffff",
-                                  fg=cd["text"], width=2,
-                                  command=lambda dd=d2: step(dd)
-                                  ).pack(side="right", padx=2)
-                    return
-                sc = tk.Scale(win, from_=lo, to=hi, orient="horizontal",
-                              resolution=res, showvalue=True, length=u(230),
-                              label=label, font=self._uf(7),
-                              bg=cd["panel"], fg=cd["sub"],
-                              highlightthickness=0, troughcolor="#ffffff",
-                              activebackground=cd["fill"])
-                sc.set(int(float(self.us.get(key, default))))
-                sc.pack(padx=u(24))
-
-                def done(_e, k2=key, s2=sc):
-                    self.us[k2] = int(s2.get())
-                    self._save_settings()
-                    self._room_deco_bump()
-                sc.bind("<ButtonRelease-1>", done)
-
-            slider("크기 (%)", "room_%s_zoom" % what, 50, 250, 100)
-            slider("불투명도 (%)", "room_%s_alpha" % what, 10, 100, 100)
-
-        row("배경", "bg")
-        # 배경 색 — 위 색만 고르면 단색, 둘 다 고르면 위아래 그라데이션
-        frc = tk.Frame(win, bg=cd["panel"])
-        frc.pack(padx=u(20), pady=(0, u(6)), fill="x")
-        tk.Label(frc, text="배경 색", font=self._uf(10, True),
-                 bg=cd["panel"], fg=cd["text"], width=8).pack(side="left")
-        bgc_btns = []
-
-        def bgc_apply():
-            self._save_settings()
-            self._room_bg = None     # 배경을 통째로 다시 깐다
+        def refresh_bg():
+            """내 화면 배경만 다시 — 방 칸 재전송(_room_deco_bump)과 다르다."""
+            self._room_bg = None
             self._safe("room_draw", self._room_draw)
 
-        def bgc_btn(cap, key):
-            def go():
-                cur2 = str(self.us.get(key) or "")
-                got = self._pick_color(
-                    cur2 if cur2.startswith("#") else "#f6eef4")
-                if got:
-                    self.us[key] = got
-                    b.config(bg=got, activebackground=got)
-                    bgc_apply()
-            cur = str(self.us.get(key) or "")
-            b = tk.Button(frc, text=cap, font=self._uf(8), relief="flat",
-                          bd=1, bg=cur if cur else "#ffffff", fg=cd["text"],
-                          activebackground=cur if cur else "#ffffff",
-                          padx=u(6), command=go)
-            b.pack(side="left", padx=2)
-            bgc_btns.append(b)
+        def slider(parent, label, key, lo, hi, default, res=5, done=None):
+            fin = done or self._room_deco_bump
+            if IS_MAC:
+                # 맥(Tk9 아쿠아)은 tk.Scale 에서 앱이 통째로 꺼지는
+                # 제보가 있어(퀸시) +/- 단추로 만든다
+                fr3 = tk.Frame(parent, bg="#ffffff")
+                fr3.pack(padx=u(12), pady=(u(2), 0), fill="x")
+                tk.Label(fr3, text=label, font=self._uf(7),
+                         bg="#ffffff", fg=cd["sub"]).pack(side="left")
+                val = tk.Label(fr3, font=self._uf(8, True), bg="#ffffff",
+                               fg=cd["text"], width=4,
+                               text=str(int(float(
+                                   self.us.get(key, default)))))
+                val.pack(side="right")
 
-        bgc_btn("위 색", "room_bgc1")
-        bgc_btn("아래 색", "room_bgc2")
+                def step(d2, k2=key, v2=val, lo2=lo, hi2=hi):
+                    cur = int(float(self.us.get(k2, default)))
+                    cur = max(lo2, min(hi2, cur + d2))
+                    self.us[k2] = cur
+                    v2.config(text=str(cur))
+                    self._save_settings()
+                    fin()
 
-        def bgc_clear():
-            self.us["room_bgc1"] = ""
-            self.us["room_bgc2"] = ""
-            for b2 in bgc_btns:
-                b2.config(bg="#ffffff", activebackground="#ffffff")
-            bgc_apply()
-        tk.Button(frc, text="기본", font=self._uf(8), relief="flat",
-                  bg="#ffffff", fg=cd["sub"], command=bgc_clear
-                  ).pack(side="left", padx=(u(6), 2))
-        tk.Label(frc, text="하나만 = 단색", font=self._uf(7),
-                 bg=cd["panel"], fg=cd["sub"]).pack(side="left", padx=u(4))
-        row("방 칸", "card")
-        # 반응 단추 색 — 견본 몇 개 + 직접 고르기 + 기본
-        fr2 = tk.Frame(win, bg=cd["panel"])
-        fr2.pack(padx=u(20), pady=(u(4), u(6)), fill="x")
-        tk.Label(fr2, text="단추 색", font=self._uf(10, True),
-                 bg=cd["panel"], fg=cd["text"], width=8).pack(side="left")
+                for cap2, d2 in (("−", -res * 2), ("+", res * 2)):
+                    tk.Button(fr3, text=cap2, font=self._uf(9, True),
+                              relief="flat", bg=cd["panel"], fg=cd["text"],
+                              width=2, command=lambda dd=d2: step(dd)
+                              ).pack(side="right", padx=2)
+                return
+            sc = tk.Scale(parent, from_=lo, to=hi, orient="horizontal",
+                          resolution=res, showvalue=True, length=u(230),
+                          label=label, font=self._uf(7), bg="#ffffff",
+                          fg=cd["sub"], highlightthickness=0,
+                          troughcolor=cd["panel"],
+                          activebackground=cd["fill"])
+            sc.set(int(float(self.us.get(key, default))))
+            sc.pack(padx=u(12), anchor="w")
+
+            def _done(_e, k2=key, s2=sc):
+                self.us[k2] = int(s2.get())
+                self._save_settings()
+                fin()
+            sc.bind("<ButtonRelease-1>", _done)
+
+        # ── 배경 카드 — 없음 · 이미지 · 그라데이션 ─────────────────
+        bg_box = card_box("배경")
+        seg_fr = tk.Frame(bg_box, bg="#ffffff")
+        seg_fr.pack(padx=u(12), pady=(u(6), 0), anchor="w")
+        body_fr = tk.Frame(bg_box, bg="#ffffff")
+        body_fr.pack(fill="x", pady=(0, u(8)))
+        seg_btns = {}
+        prev_lbl = [None]
+
+        def grad_preview():
+            pv = prev_lbl[0]
+            if pv is None:
+                return
+            got = self._safe_str(
+                self._room_bgc_make,
+                str(self.us.get("room_bgc1") or
+                    self.us.get("room_bgc2") or "#f6eef4"),
+                str(self.us.get("room_bgc2") or
+                    self.us.get("room_bgc1") or "#f6eef4"),
+                int(float(self.us.get("room_bg_ang", 180) or 0)),
+                u(230), u(30))
+            if got is not None:
+                pv.config(image=got)
+                pv._im = got             # 참조 유지 (안 하면 GC로 사라짐)
+
+        def build_body():
+            for c2 in body_fr.winfo_children():
+                c2.destroy()
+            prev_lbl[0] = None
+            m2 = self._room_bg_mode()
+            if m2 == "img":
+                fr = tk.Frame(body_fr, bg="#ffffff")
+                fr.pack(padx=u(12), pady=(u(6), 0), anchor="w")
+                pill(fr, "그림 고르기", True,
+                     lambda: self._safe("deco_set", self._room_deco_set,
+                                        "bg")).pack(side="left",
+                                                    padx=(0, u(6)))
+                pill(fr, "그림 지우기", False,
+                     lambda: self._safe("deco_clear", self._room_deco_clear,
+                                        "bg")).pack(side="left")
+                slider(body_fr, "크기 (%)", "room_bg_zoom", 50, 250, 100)
+                slider(body_fr, "불투명도 (%)", "room_bg_alpha",
+                       10, 100, 100)
+            elif m2 == "grad":
+                pv = tk.Label(body_fr, bg="#ffffff", bd=0)
+                pv.pack(padx=u(12), pady=(u(6), u(2)), anchor="w")
+                prev_lbl[0] = pv
+
+                def well(cap, key):
+                    fr = tk.Frame(body_fr, bg="#ffffff")
+                    fr.pack(padx=u(12), pady=u(2), anchor="w", fill="x")
+                    tk.Label(fr, text=cap, font=self._uf(8), bg="#ffffff",
+                             fg=cd["sub"], width=8, anchor="w"
+                             ).pack(side="left")
+                    cur = str(self.us.get(key) or "")
+                    b2 = tk.Button(fr, text="    ", relief="flat", bd=1,
+                                   bg=cur if cur.startswith("#")
+                                   else "#ffffff")
+                    hx = tk.Label(fr, text=cur or "(눌러서 고르기)",
+                                  font=self._uf(8), bg="#ffffff",
+                                  fg=cd["text"])
+
+                    def go(k2=key, b3=b2, h3=hx):
+                        cur2 = str(self.us.get(k2) or "")
+                        got = self._pick_color(
+                            cur2 if cur2.startswith("#") else "#f6eef4")
+                        if got:
+                            self.us[k2] = got
+                            self._save_settings()
+                            b3.config(bg=got, activebackground=got)
+                            h3.config(text=got)
+                            grad_preview()
+                            refresh_bg()
+                    b2.config(command=go)
+                    b2.pack(side="left", padx=(0, u(6)), ipadx=u(4))
+                    hx.pack(side="left")
+                well("시작 색상", "room_bgc1")
+                well("끝 색상", "room_bgc2")
+                tk.Label(body_fr, text="하나만 고르면 단색이 돼요",
+                         font=self._uf(7), bg="#ffffff", fg=cd["sub"]
+                         ).pack(padx=u(12), anchor="w")
+                slider(body_fr, "방향 (°)", "room_bg_ang", 0, 360, 180,
+                       res=15, done=lambda: (grad_preview(), refresh_bg()))
+                grad_preview()
+            if m2 != "none":
+                slider(body_fr, "밝은 오버레이 (%)", "room_bg_wash",
+                       0, 100, 0, done=refresh_bg)
+
+        def set_mode(m2):
+            self.us["room_bg_mode"] = m2
+            self._save_settings()
+            for m3, b3 in seg_btns.items():
+                on = m3 == m2
+                b3.config(bg=cd["fill"] if on else "#efe9f1",
+                          fg="#ffffff" if on else cd["text"],
+                          activebackground=cd["fill"] if on else "#efe9f1")
+            build_body()
+            refresh_bg()
+
+        for m2, cap in (("none", "없음"), ("img", "이미지"),
+                        ("grad", "그라데이션")):
+            b = pill(seg_fr, cap, False, lambda mm=m2: set_mode(mm), pad=12)
+            b.pack(side="left", padx=(0, u(6)), ipady=u(2))
+            seg_btns[m2] = b
+        on0 = seg_btns.get(self._room_bg_mode())
+        if on0 is not None:
+            on0.config(bg=cd["fill"], fg="#ffffff",
+                       activebackground=cd["fill"])
+        build_body()
+
+        # ── 방 칸 카드 ──────────────────────────────────────────────
+        rc_box = card_box("방 칸")
+        fr = tk.Frame(rc_box, bg="#ffffff")
+        fr.pack(padx=u(12), pady=(u(6), 0), anchor="w")
+        pill(fr, "그림 고르기", True,
+             lambda: self._safe("deco_set", self._room_deco_set, "card")
+             ).pack(side="left", padx=(0, u(6)))
+        pill(fr, "기본으로", False,
+             lambda: self._safe("deco_clear", self._room_deco_clear, "card")
+             ).pack(side="left")
+        slider(rc_box, "크기 (%)", "room_card_zoom", 50, 250, 100)
+        slider(rc_box, "불투명도 (%)", "room_card_alpha", 10, 100, 100)
+        tk.Frame(rc_box, bg="#ffffff", height=u(6)).pack()
+
+        # ── 반응 단추 색 카드 ───────────────────────────────────────
+        bt_box = card_box("반응 단추 색")
+        fr2 = tk.Frame(bt_box, bg="#ffffff")
+        fr2.pack(padx=u(12), pady=(u(6), u(10)), anchor="w")
 
         def set_btn_color(c2):
             self.us["room_btn_color"] = c2
@@ -17669,19 +17784,20 @@ class Mascot:
                       command=lambda c3=c2: set_btn_color(c3)
                       ).pack(side="left", padx=2)
         tk.Button(fr2, text="직접", font=self._uf(8), relief="flat",
-                  bg="#ffffff", fg=cd["text"],
+                  bg=cd["panel"], fg=cd["text"],
                   command=lambda: set_btn_color(
                       self._pick_color(self.us.get("room_btn_color")
                                        or "#e7e7ea") or
                       self.us.get("room_btn_color") or "")
                   ).pack(side="left", padx=(u(6), 2))
         tk.Button(fr2, text="기본", font=self._uf(8), relief="flat",
-                  bg="#ffffff", fg=cd["sub"],
+                  bg=cd["panel"], fg=cd["sub"],
                   command=lambda: set_btn_color("")
                   ).pack(side="left", padx=2)
+
         tk.Button(win, text="닫기", font=self._uf(9), relief="flat",
                   bg="#ffffff", fg=cd["text"], padx=u(16),
-                  command=win.destroy).pack(pady=(u(10), u(16)))
+                  command=win.destroy).pack(pady=(u(8), u(14)))
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
         self._dialog_keep(win, "deco")
