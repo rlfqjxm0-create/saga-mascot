@@ -4230,6 +4230,11 @@ class Mascot:
         self._room_cal_btns = {}     # 남의 카드 달력 아이콘 자리
         self._room_cal_data = {}     # 남이 공개한 도장 (slot → cal)
         self._room_song_hits = {}    # 노래 말풍선 자리 (slot → (상자, 주소))
+        self._room_song_box = {}     # 말풍선 그대로의 상자 (마퀴용)
+        self._song_hover = None      # 커서가 올라간 노래 말풍선
+        self._song_liked = set()     # 이번 실행에 좋아요 누른 (slot, 주소)
+        self._mq_cache = {}          # 마퀴 글자 띠 (상한 있음)
+        self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
         self._bubble_text_last = None
@@ -13476,6 +13481,8 @@ class Mascot:
         if not self._song_ok(url):
             self._say("유튜브 주소만 걸 수 있어요", 3.5)
             return False
+        if str(self.us.get("room_song") or "") != url:
+            self.us["room_song_likes"] = {}    # 새 노래 — 좋아요도 새로
         self.us["room_song"] = url
         self.us["room_song_title"] = "…"       # 제목 받는 중
         self.us["room_song_day"] = self._my_workday()
@@ -13700,6 +13707,9 @@ class Mascot:
         su, st2 = self._room_song()
         if su:
             out["sg"] = {"u": su, "t": st2}
+            d2 = self.us.get("room_song_likes") or {}
+            if d2.get("u") == su and int(d2.get("n") or 0) > 0:
+                out["sg"]["lk"] = int(d2["n"])
         b64, ch = self._room_card_thumb()
         if ch:
             # 방 칸 꾸미기 — 해시는 늘 싣고, 그림 자체는 시간창으로만.
@@ -13974,7 +13984,8 @@ class Mascot:
                   "cheer": ("응원했어요", "응원", "#ffbe55"),
                   "blanket": ("쓰담쓰담 해 줬어요", "쓰담", "#ff9ec4"),
                   "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
-                  "praise": ("칭찬해 줬어요", "칭찬", "#ffd75e")}
+                  "praise": ("칭찬해 줬어요", "칭찬", "#ffd75e"),
+                  "songlike": ("노래를 좋아해요", "♥노래", "#ff6f8e")}
     # '인사'는 뺐다 — 보내는 길이 없어진 뒤로 아무도 못 쓴다. 아주 오래된
     # 판이 보내더라도 '반응을 보냈어요'로 받아 준다 (_inbox_line).
 
@@ -14278,6 +14289,18 @@ class Mascot:
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say(("%s 응원했어요" % _josa(who)) if who
                       else "누가 응원했어요", 3.5)
+        elif kind == "songlike":
+            # 내 오노추에 좋아요 — 세어서 방에 하트로 보여 준다
+            su, _t2 = self._room_song()
+            if su:
+                d2 = self.us.get("room_song_likes") or {}
+                n2 = (int(d2.get("n") or 0) + 1) if d2.get("u") == su else 1
+                self.us["room_song_likes"] = {"u": su, "n": n2}
+                self._save_settings()
+                self._room_push_now()
+            self.smile_until = max(self.smile_until, now + 3.0)
+            self._say(("%s 내 노래를 좋아해요 ♥" % _josa(who)) if who
+                      else "누가 내 노래를 좋아해요 ♥", 3.5)
         elif kind == "praise":
             # 목표를 다 채운 사람에게 오는 축하 — 웃는 얼굴로 쓰담을 받고,
             # 고깔모자가 얹히고, 폭죽이 터진다.
@@ -14742,6 +14765,8 @@ class Mascot:
         cv.pack(fill="both", expand=True)
         cv.bind("<Button-1>", lambda e: self._safe("room_click",
                                                    self._room_click, e))
+        cv.bind("<Button-3>", lambda e: self._safe("room_rclick",
+                                                   self._room_rclick, e))
         cv.bind("<B1-Motion>", lambda e: self._safe("deco_drag",
                                                     self._deco_drag, e))
         cv.bind("<ButtonRelease-1>",
@@ -14994,6 +15019,17 @@ class Mascot:
             except Exception:
                 self._room_body = []
                 return
+        # 노래 말풍선 마퀴 — 커서를 올리면 긴 제목이 옆으로 천천히 흐른다
+        hov = self._song_hover
+        if hov and hov in self._room_song_box:
+            bx0, by0, bx1, by1, title2, col2 = self._room_song_box[hov]
+            got_mq = self._safe_str(self._song_marquee, hov, title2,
+                                    int(bx1 - bx0), int(by1 - by0),
+                                    col2, now)
+            cv.delete("songmq")
+            if got_mq is not None:
+                cv.create_image(int(bx0), int(by0), image=got_mq,
+                                anchor="nw", tags=("dyn", "songmq"))
         # 노래가 걸린 카드 — 캐릭터 옆에 음표가 둥실거린다
         cv.delete("songfx")
         for item, _d2, slot, base, _s2, _p2 in self._room_body:
@@ -15206,6 +15242,7 @@ class Mascot:
         self._room_body = []
         self._room_cal_btns = {}
         self._room_song_hits = {}
+        self._room_song_box = {}
         self._room_song_slots = set()
         cols = max(1, self._room_cols)
         # 사람이 많아지면 페이지로 나눈다 — 첫 페이지 9명, 화살표로 넘김.
@@ -15533,6 +15570,77 @@ class Mascot:
         self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
                                 x1 + 6 * k, y0 + h + 5 * k)
 
+    def _song_marquee(self, slot, title, w, h, col, now):
+        """호버 중인 노래 말풍선 — 제목이 옆으로 천천히 흐르는 그림 한 장.
+
+        제목이 짧아 다 보이면 None (기존 말풍선 그대로). 글자 띠는 노래마다
+        한 번만 그려 두고, 프레임마다 잘라 붙이기만 한다.
+        """
+        title = "♪ " + str(title or "노래 들으러 가기")
+        S = 3
+        fpx = max(10, int(h * 0.56)) * S
+        key = ("strip", title, fpx)
+        strip = self._mq_cache.get(key)
+        if strip is None:
+            try:
+                from PIL import ImageDraw, ImageFont
+                try:
+                    font = ImageFont.truetype(
+                        os.path.join(self.dir, "fonts",
+                                     "Pretendard-Bold.otf"), fpx)
+                except Exception:
+                    font = ImageFont.load_default()
+                probe = Image.new("RGBA", (4, 4))
+                d0 = ImageDraw.Draw(probe)
+                tw = int(d0.textlength(title, font=font))
+                strip = Image.new("RGBA", (max(1, tw), int(fpx * 1.5)),
+                                  (0, 0, 0, 0))
+                ImageDraw.Draw(strip).text(
+                    (0, int(fpx * 0.12)), title, font=font,
+                    fill=self._shade(col, 0.15))
+            except Exception:
+                strip = False
+            if len(self._mq_cache) > 12:
+                for old4 in list(self._mq_cache)[:6]:
+                    self._mq_cache.pop(old4, None)
+            self._mq_cache[key] = strip
+        if strip is False or strip is None:
+            return None
+        inner = (w - 18) * S
+        if strip.width <= inner:
+            return None                  # 짧으면 흐를 필요가 없다
+        # 말풍선 몸통 (꼬리 없이 — 원래 말풍선 위에 겹쳐 그린다)
+        tkey = ("tpl", w, h, col)
+        tpl = self._mq_cache.get(tkey)
+        if tpl is None:
+            from PIL import ImageDraw
+            tpl = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            ImageDraw.Draw(tpl).rounded_rectangle(
+                [S // 2, S // 2, w * S - 1 - S, h * S - 1 - S],
+                radius=(h * S) // 2, fill="#ffffff",
+                outline=self._tint(col, 0.35), width=S)
+            self._mq_cache[tkey] = tpl
+        gap = 14 * S
+        span = strip.width + gap
+        off = int((now * 22 * S) % span)      # 천천히 (초당 ~22px)
+        im = tpl.copy()
+        win = Image.new("RGBA", (inner, strip.height), (0, 0, 0, 0))
+        # 띠를 off 만큼 민 곳부터 창 폭만큼 이어 붙인다 (끝나면 처음부터)
+        pos = -off
+        while pos < inner:
+            if pos + strip.width > 0:
+                a3 = max(0, -pos)
+                piece = strip.crop((a3, 0,
+                                    min(strip.width, a3 + inner - max(0, pos)),
+                                    strip.height))
+                win.alpha_composite(piece, (max(0, pos), 0))
+            pos += span
+        y2 = (h * S - strip.height) // 2
+        im.alpha_composite(win, (9 * S, max(0, y2)))
+        im = im.resize((w, h), Image.LANCZOS)
+        self._mq_img = ImageTk.PhotoImage(im)
+        return self._mq_img
+
     def _room_song_draw(self, cv, p, kx0, ky0, kx1, ky1, k, col, slot):
         """카드 오른쪽 여백의 노래 말풍선 — 누르면 유튜브로 간다."""
         sg = p["sg"]
@@ -15551,9 +15659,21 @@ class Mascot:
                       outline=edge, width=1, tail=(x0 + 16 * k, 7 * k))
         cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt, font=f,
                        fill=self._shade(col, 0.15), tags="dyn")
+        lk = int(sg.get("lk") or 0)
+        if lk > 0:                       # 좋아요 하트 — 말풍선 오른쪽 위
+            bx = x1 - 4 * k
+            cv.create_oval(bx - 10 * k, y0 - 9 * k, bx + 10 * k, y0 + 5 * k,
+                           fill="#ffffff", outline=self._tint(col, 0.35),
+                           tags="dyn")
+            cv.create_text(bx, y0 - 2 * k,
+                           text="♥%d" % min(lk, 99),
+                           font=self._uf(6, True), fill="#e0525c",
+                           tags="dyn")
         self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
                                        x1 + 3 * k, y0 + h + 3 * k),
                                       str(sg.get("u")))
+        self._room_song_box[slot] = (x0, y0, x1, y0 + h,
+                                     str(sg.get("t") or ""), col)
         self._room_song_slots.add(slot)
 
     def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None):
@@ -17592,6 +17712,17 @@ class Mascot:
         cv = self.room_cv
         if cv is None:
             return
+        was = self._song_hover
+        self._song_hover = None
+        for slot2, (box2, _u2) in list(self._room_song_hits.items()):
+            if box2[0] <= e.x <= box2[2] and box2[1] <= e.y <= box2[3]:
+                self._song_hover = slot2
+                break
+        if was and not self._song_hover:
+            try:
+                cv.delete("songmq")      # 벗어나면 흐르던 제목을 걷는다
+            except Exception:
+                pass
         hit = self._room_inbox_hit
         hot = bool(hit and hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3])
         if not hot and self._inbox_open:
@@ -17648,6 +17779,29 @@ class Mascot:
             webbrowser.open(url)
         except Exception:
             pass
+
+    def _room_rclick(self, e):
+        """우클릭 — 남의 노래 말풍선이면 좋아요를 보낸다."""
+        for slot, (box, url) in list(self._room_song_hits.items()):
+            if not (box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]):
+                continue
+            if slot == self.char:
+                self._room_toast = ("내 노래에는 좋아요를 못 눌러요",
+                                    time.time())
+                self._safe("room_draw", self._room_draw)
+                return
+            key = (slot, url)
+            if key in self._song_liked:
+                self._room_toast = ("이미 좋아요를 눌렀어요", time.time())
+                self._safe("room_draw", self._room_draw)
+                return
+            if self.room_net is not None:
+                self.room_net.send(slot, "songlike")
+                self._song_liked.add(key)
+                self._room_toast = ("노래에 좋아요를 보냈어요 ♥",
+                                    time.time())
+                self._safe("room_draw", self._room_draw)
+            return
 
     def _room_click(self, e):
         if self._deco_editing():
