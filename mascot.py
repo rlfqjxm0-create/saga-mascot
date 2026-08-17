@@ -4237,6 +4237,16 @@ class Mascot:
         self._song_hover = None      # 커서가 올라간 노래 말풍선
         self._song_liked = {}        # (slot, 주소) → 마지막으로 보낸 시각
         self._mq_cache = {}          # 마퀴 글자 띠 (상한 있음)
+        self._pl_open = False        # 모두의 플레이리스트 패널 펼침
+        self._pl_on = False          # 플레이리스트로 재생 중인가
+        self._pl_i = -1              # 지금 트는 곡 번호
+        self._pl_url = ""            # 지금 트는 곡 주소
+        self._pl_skip = 0            # 연속으로 건너뛴 곡 수 (전곡 막힘 방지)
+        self._pl_adv_at = 0.0        # 마지막으로 곡을 넘긴 시각
+        self._pl_hits = []           # 패널 안 누를 수 있는 자리들
+        self._pl_btn = None          # 헤더 ♪ 단추 자리
+        self._pl_panel = None        # 패널 전체 자리
+        self._self_cup_at = 0.0      # 본인 컵케이크를 먹은 시각 (10분에 1번)
         self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
@@ -6934,6 +6944,7 @@ class Mascot:
 
     def _yt_stop(self):
         """재생기를 거둔다. 프로세스째 사라져 메모리가 통째로 돌아온다."""
+        self._pl_on = False
         p = getattr(self, "_yt_proc", None)
         self._yt_forget()
         if p is None or p.poll() is not None:
@@ -6961,6 +6972,7 @@ class Mascot:
 
     def _yt_toggle(self):
         """음악 버튼을 눌렀을 때 — 없으면 띄우고, 있으면 재생/멈춤."""
+        self._pl_on = False          # 개인 노래 조작이 플레이리스트를 이긴다
         url = str(self.us.get("yt_url") or "")
         if not url:
             return self.add_music()
@@ -7035,10 +7047,29 @@ class Mascot:
             err = int(s.get("err") or 0)
             if err and err != self._yt_err:
                 self._yt_err = err
-                self._yt_want = False
-                self._say(self.YT_ERRS.get(err, "이 노래는 못 틀겠어요."), 4.5)
+                if getattr(self, "_pl_on", False):
+                    # 플레이리스트 중 막힌 곡(임베드 금지 등)은 건너뛴다.
+                    # 전부 막혀 있으면 한 바퀴 돌고 멈춘다 (무한 넘김 방지).
+                    self._pl_skip += 1
+                    if self._pl_skip >= max(1, len(self._room_pl_songs())):
+                        self._pl_stop()
+                        self._say("틀 수 있는 노래가 없네요.", 4.0)
+                    else:
+                        self._say("이 노래는 막혀 있어요 — 다음 곡!", 3.0)
+                        self._safe("pl_next", self._pl_play, self._pl_i + 1)
+                else:
+                    self._yt_want = False
+                    self._say(self.YT_ERRS.get(err, "이 노래는 못 틀겠어요."),
+                              4.5)
             elif not err:
                 self._yt_err = 0
+                if s.get("playing"):
+                    self._pl_skip = 0
+                # 곡이 끝나면 다음 곡 — 재생기 자신의 되감기(3초 뒤)보다
+                # 먼저 낚아채야 같은 곡이 다시 돌지 않는다.
+                if getattr(self, "_pl_on", False) and s.get("ended") \
+                        and time.time() - self._pl_adv_at > 2.0:
+                    self._safe("pl_next", self._pl_play, self._pl_i + 1)
                 # 곡이 바뀌면 제목을 말해 준다. 말풍선이 떠 있어도 덮어쓴다 —
                 # 사람이 방금 튼 노래라 그게 지금 가장 하고 싶은 말이다.
                 if s.get("playing") and s.get("title") and s["title"] != was:
@@ -14257,7 +14288,8 @@ class Mascot:
         if mine:
             k = ev.get("k")
             self.smile_until = max(self.smile_until, time.time() + 2.5)
-            self._say({"poke": "콕!", "cheer": "혼자 응원해 봤어요",
+            self._say("내 컵케이크다! 냠" if cup else
+                      {"poke": "콕!", "cheer": "혼자 응원해 봤어요",
                        "blanket": "혼자 쓰담쓰담 했어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
@@ -15284,6 +15316,17 @@ class Mascot:
                 self._rr(cv, gx0, gy - 5 * k,
                          gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
                          gy + 5 * k, 5 * k, fill=gcol, width=0)
+        # 모두의 플레이리스트 — '오늘 다 같이' 왼쪽의 ♪ 동그라미
+        pbx, pbr = W - 234 * k, 14 * k
+        on_pl = bool(getattr(self, "_pl_on", False))
+        mine2 = self._room_tone(self.char)
+        cv.create_oval(pbx - pbr, mid - pbr, pbx + pbr, mid + pbr,
+                       fill=(mine2 if on_pl else "#ffffff"),
+                       outline=P["line"], width=1, tags="dyn")
+        cv.create_text(pbx, mid, text="♪", font=self._uf(12, True),
+                       fill=("#ffffff" if on_pl else P["ink"]), tags="dyn")
+        self._pl_btn = (pbx - pbr - 3 * k, mid - pbr - 3 * k,
+                        pbx + pbr + 3 * k, mid + pbr + 3 * k)
         # 사람들
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
@@ -15354,6 +15397,168 @@ class Mascot:
                            font=self._uf(8), fill=P["sub"], tags="dyn")
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
         self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
+        self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
+
+    def _room_pl_songs(self):
+        """모두의 오노추 목록 — 자리 순서(나 → 접속 → 나머지) 그대로."""
+        out = []
+        for q in self._room_seats():
+            sg = q.get("sg") or {}
+            u = str(sg.get("u") or "")
+            if not self._song_ok(u):
+                continue
+            slot = q.get("slot") or ""
+            out.append({"slot": slot,
+                        "n": str(q.get("n") or "")
+                        or self.ROOM_NAME.get(slot, ""),
+                        "u": u, "t": str(sg.get("t") or "노래"),
+                        "lk": int(sg.get("lk") or 0)})
+        return out
+
+    def _room_pl_draw(self, cv, W, H, P, k):
+        """모두의 플레이리스트 패널 — 홈 창 안에서 펼쳐진다 (지뢰 15:
+        새 창을 만들지 않는다). 맥은 재생기가 없어 목록·링크 열기만."""
+        self._pl_hits = []
+        self._pl_panel = None
+        if not self._pl_open:
+            return
+        songs = self._room_pl_songs()
+        can_play = self._yt_on()
+        rh = 26 * k
+        pw = min(W - 16 * k, 286 * k)
+        px = W - pw - 10 * k
+        py = self.ROOM_TOP * k + 6 * k
+        head = (74 if can_play else 48) * k
+        max_rows = max(1, int((H - py - head - 30 * k) // rh))
+        rows = songs[:max_rows]
+        ph = head + 26 * k + rh * max(1, len(rows))
+        mine = self._room_tone(self.char)
+        self._rr(cv, px + 3 * k, py + 4 * k, px + pw + 3 * k, py + ph + 4 * k,
+                 18 * k, fill=self._tint(mine, 0.62), width=0)
+        self._rr(cv, px, py, px + pw, py + ph, 18 * k, fill="#fffdfe",
+                 outline=self._tint(mine, 0.32), width=2)
+        cv.create_text(px + 18 * k, py + 20 * k, anchor="w",
+                       text="모두의 플레이리스트", font=self._uf(11, True),
+                       fill=self._shade(mine, 0.2), tags="dyn")
+        cv.create_text(px + pw - 18 * k, py + 20 * k, anchor="e",
+                       text="%d곡" % len(songs), font=self._uf(9),
+                       fill=P["sub"], tags="dyn")
+        if can_play:
+            # 재생 조작 줄 — ▶ ■ ▶▶ 세 동그라미 (윈도우만)
+            cy2 = py + 48 * k
+            for i2, (glyph, act) in enumerate(
+                    (("▶", "play"), ("■", "stop"), ("▶▶", "next"))):
+                bx2 = px + 34 * k + i2 * 40 * k
+                r2 = 14 * k
+                cv.create_oval(bx2 - r2, cy2 - r2, bx2 + r2, cy2 + r2,
+                               fill=self._tint(mine, 0.55),
+                               outline=self._tint(mine, 0.25), width=1,
+                               tags="dyn")
+                cv.create_text(bx2, cy2, text=glyph, font=self._uf(8, True),
+                               fill=self._shade(mine, 0.25), tags="dyn")
+                self._pl_hits.append((bx2 - r2, cy2 - r2, bx2 + r2, cy2 + r2,
+                                      (act,)))
+            if self._pl_on and 0 <= self._pl_i < len(songs):
+                now_t = songs[self._pl_i]["t"]
+                lim2 = pw - 170 * k
+                f3 = self._uf(8)
+                while now_t and self._room_tw(cv, now_t, f3) > lim2:
+                    now_t = now_t[:-1]
+                cv.create_text(px + pw - 18 * k, cy2, anchor="e",
+                               text="♪ " + now_t, font=f3,
+                               fill=P["sub"], tags="dyn")
+        yy = py + head + rh / 2
+        if not rows:
+            cv.create_text(px + pw / 2, yy, text="오늘 올라온 노래가 없어요",
+                           font=self._uf(9), fill=P["sub"], tags="dyn")
+        f = self._uf(9)
+        for i2, s2 in enumerate(rows):
+            if can_play and self._pl_on and i2 == self._pl_i:
+                self._rr(cv, px + 8 * k, yy - rh / 2 + 2 * k, px + pw - 8 * k,
+                         yy + rh / 2 - 2 * k, 8 * k,
+                         fill=self._tint(mine, 0.68), width=0)
+            dot = self._room_tone(s2["slot"])
+            cv.create_oval(px + 18 * k, yy - 6 * k, px + 30 * k, yy + 6 * k,
+                           fill=dot, width=0, tags="dyn")
+            tail = ("♥%d" % min(s2["lk"], 99)) if s2["lk"] > 0 else ""
+            line = "%s · %s" % (s2["n"] or "?", s2["t"])
+            lim = pw - (86 if tail else 60) * k
+            while line and self._room_tw(cv, line, f) > lim:
+                line = line[:-1]
+            cv.create_text(px + 38 * k, yy, anchor="w", text=line, font=f,
+                           fill=P["ink"], tags="dyn")
+            if tail:
+                cv.create_text(px + pw - 16 * k, yy, anchor="e", text=tail,
+                               font=self._uf(8, True), fill="#f7a8bc",
+                               tags="dyn")
+            self._pl_hits.append((px + 10 * k, yy - rh / 2, px + pw - 10 * k,
+                                  yy + rh / 2, ("row", i2)))
+            yy += rh
+        foot = ("곡을 누르면 여기서 나와요 · 끝나면 다음 곡"
+                if can_play else "곡을 누르면 유튜브로 열려요")
+        if len(songs) > len(rows):
+            foot += "  (+%d곡)" % (len(songs) - len(rows))
+        cv.create_text(px + 18 * k, py + ph - 15 * k, anchor="w", text=foot,
+                       font=self._uf(8), fill=P["sub"], tags="dyn")
+        self._pl_panel = (px, py, px + pw, py + ph)
+
+    def _pl_play(self, i):
+        """플레이리스트의 i번째 곡을 튼다 (윈도우 전용).
+
+        주소가 이상한 곡은 건너뛴다 — 전부 이상하면 포기한다.
+        """
+        songs = self._room_pl_songs()
+        if not songs:
+            self._room_toast = ("오늘 올라온 노래가 없어요", time.time())
+            return
+        i %= len(songs)
+        if not self._yt_alive():
+            if not self._yt_spawn():
+                self._room_toast = ("음악을 켤 수 없어요", time.time())
+                return
+        for tries in range(len(songs)):
+            j = (i + tries) % len(songs)
+            vid, lst = self._yt_ids(songs[j]["u"])
+            if not (vid or lst):
+                continue
+            self._pl_on = True
+            self._pl_i = j
+            self._pl_url = songs[j]["u"]
+            self._pl_adv_at = time.time()
+            self._yt_err = 0
+            self._yt_want = True
+            self._yt_send(c="vol", v=int(self.us.get("yt_volume", 55)))
+            self._yt_send(c="load", v=vid, list=lst)
+            self._room_toast = ("♪ " + songs[j]["t"][:18], time.time())
+            return
+        self._room_toast = ("틀 수 있는 노래가 없어요", time.time())
+
+    def _pl_stop(self):
+        self._pl_on = False
+        self._yt_want = False
+        self._yt_send(c="pause")
+
+    def _room_pl_act(self, act):
+        """패널 안 클릭 — 줄(곡)·재생·멈춤·다음곡."""
+        kind = act[0]
+        if kind == "row":
+            songs = self._room_pl_songs()
+            i = act[1]
+            if not (0 <= i < len(songs)):
+                return
+            if not self._yt_on():          # 맥·재생기 없음 — 링크로 연다
+                if self._song_ok(songs[i]["u"]):
+                    self._open_url(songs[i]["u"])
+                return
+            self._pl_play(i)
+        elif kind == "play":
+            self._pl_play(self._pl_i if self._pl_i >= 0 else 0)
+        elif kind == "stop":
+            self._pl_stop()
+        elif kind == "next":
+            self._pl_play((self._pl_i + 1) if self._pl_i >= 0 else 0)
+        self._room_key_last = None
+        self._safe("room_draw", self._room_draw)
 
     def _room_inbox_draw(self, cv, W, H, P, k):
         """오늘 받은 반응 — 홈 창 안에서 펼쳐진다.
@@ -16830,7 +17035,9 @@ class Mascot:
                 on = (who is not None
                       and float(who.get("p") or 0) >= 1.0)
             elif kind == "snack" and pick == self.char:
-                on = False               # 간식은 자기 자신에게는 못 준다
+                # 나에게 간식 = 내 컵케이크 (10분에 한 번). 쿨다운 중에는
+                # 단추를 눌러도 토스트로 남은 시간을 알려 준다.
+                on = True
             fill = col if on else self._tint(col, 0.62)
             cv.create_oval(x + 2, by + 2, x + bw + 2, by + bw + 2,
                            fill=P["line"], width=0, tags="dyn")
@@ -16885,7 +17092,24 @@ class Mascot:
         if kind == "poke" and not self._poke_ok():
             return
         if kind == "snack" and to == self.char:
-            self._room_toast = ("간식은 자기한테는 못 줘요", time.time())
+            # 본인 컵케이크 — 10분에 한 번, 내 스페셜 컵케이크를 먹는다
+            now2 = time.time()
+            left = 600.0 - (now2 - getattr(self, "_self_cup_at", 0.0))
+            if left > 0:
+                self._room_toast = ("아직 배불러요 — %d분 뒤에 또 먹을 수 "
+                                    "있어요" % max(1, int((left + 59) // 60)),
+                                    now2)
+                return
+            cup2 = self._cup_name()
+            if not cup2 or self._snack_photo(cup2, 40) is None:
+                self._room_toast = ("내 컵케이크가 아직 없어요", now2)
+                return
+            self._self_cup_at = now2
+            self._room_fx_add(to, "snack", cup2)
+            self._room_flash[to] = now2
+            self._room_note = ("간식", now2)
+            self._safe("room_self", self._room_event,
+                       {"f": self.char, "k": "snack", "x": cup2})
             return
         if kind == "praise":
             who = next((q for q in self.room_people
@@ -17800,6 +18024,13 @@ class Mascot:
                     cv.configure(cursor="")
                 return
         if not hot:
+            pb3 = getattr(self, "_pl_btn", None)
+            hot = bool(pb3 and pb3[0] <= e.x <= pb3[2]
+                       and pb3[1] <= e.y <= pb3[3])
+        if not hot and self._pl_open:
+            hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                      for x0, y0, x1, y1, _a in self._pl_hits)
+        if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _k in self._room_btn_hit)
         if not hot:
@@ -17889,6 +18120,24 @@ class Mascot:
         db = self._room_deco_btn
         if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
             self._safe("room_deco", self._room_deco_win)
+            return
+        pb2 = getattr(self, "_pl_btn", None)
+        if pb2 and pb2[0] <= e.x <= pb2[2] and pb2[1] <= e.y <= pb2[3]:
+            self._pl_open = not self._pl_open
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
+            return
+        if self._pl_open:
+            for x0, y0, x1, y1, act in list(self._pl_hits):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("pl_act", self._room_pl_act, act)
+                    return
+            pp = self._pl_panel
+            if pp and pp[0] <= e.x <= pp[2] and pp[1] <= e.y <= pp[3]:
+                return                # 패널 안의 빈 곳 — 아무 일도 안 한다
+            self._pl_open = False     # 밖을 누르면 닫기만 한다
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
             return
         cb = self._room_cal_btn
         if cb and cb[0] <= e.x <= cb[2] and cb[1] <= e.y <= cb[3]:
