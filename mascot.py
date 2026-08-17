@@ -5595,7 +5595,7 @@ class Mascot:
         if self._press is None:
             return
         px, py, prx, pry = self._press
-        if not self._dragged and abs(e.x_root - prx) + abs(e.y_root - pry) < 4:
+        if not self._dragged and abs(e.x_root - prx) + abs(e.y_root - pry) < 6:
             return
         self._dragged = True
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
@@ -8411,7 +8411,9 @@ class Mascot:
             self.pet_cast = self._pick_pets()
             self.pet_t0 = now if self.pet_cast else 0.0
             if not self.pet_cast:
-                self.next_pet = now + 999999
+                # 배역이 없어도 영영 잠그지 않는다 — 파츠가 나중에 생기거나
+                # (자동 업데이트) 스킨이 바뀌면 다시 나와야 한다.
+                self.next_pet = now + 600
         elif self.pet_t0 and now - self.pet_t0 > total + 0.4:
             self.pet_t0 = 0.0
             self.next_pet = now + random.uniform(240, 600)
@@ -16975,8 +16977,14 @@ class Mascot:
         w, h = int(w), int(h)
         if not cdh or w < 4 or h < 4:
             return None
-        if self._room_peer_hashes().get(slot) != cdh:
-            return None                  # 아직 그림이 안 왔다 — 곧 온다
+        saved = self._room_peer_hashes().get(slot)
+        if saved != cdh:
+            # 새 그림이 아직 안 왔다. 옛 판(그림을 안 싣는 판)이 보낸
+            # 해시면 영영 안 올 수도 있으니, 받아 둔 마지막 그림이라도
+            # 보여 준다 — 빈 칸보다 낫고, 새 그림이 오면 저절로 바뀐다.
+            if not saved:
+                return None
+            cdh = saved
         key = ("peer", slot, w, h, cdh)
         cache = self._room_deco_cache
         if key in cache:
