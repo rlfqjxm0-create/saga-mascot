@@ -8346,11 +8346,13 @@ class Mascot:
                           fill="#fdfdf6", outline="#d8d0bf", width=2)
             c.create_oval(mx - 23, y0 - 17, mx + 23, y0 + 1,
                           fill="#ef9d76", outline="#c96f4e", width=2)
-            for i2 in range(3):
-                sx2 = mx - 12 + i2 * 11
-                c.create_arc(sx2 - 6, y0 - 15, sx2 + 8, y0 - 1, start=40,
-                             extent=120, style="arc",
-                             outline="#f8cfb6", width=2)
+            # 살 결은 사선으로 흐른다. 가로로 누운 호로 그렸더니 빵처럼
+            # 보인다는 제보가 있었다. 가장자리 줄은 짧게 해 살 밖으로
+            # 삐져나가지 않게 한다.
+            for dx2, half in ((-15, 3), (-5, 5), (4, 5), (14, 3)):
+                sx2, cy2 = mx + dx2, y0 - 8
+                c.create_line(sx2 - 4, cy2 + half, sx2 + 4, cy2 - half,
+                              fill="#f8cfb6", width=2, capstyle="round")
         elif deco == "tangerine":
             # 레냥: 귤 한 알 (열매 + 초록 꼭지잎)
             mx = (x0 + x1) / 2
@@ -13152,11 +13154,14 @@ class Mascot:
                                fill="#fdfdf6", outline="#d8d0bf", width=2)
                 cv.create_oval(mx - 27, y - 9, mx + 27, y + 11,
                                fill="#ef9d76", outline="#c96f4e", width=2)
-                for i2 in range(3):
-                    sx2 = mx - 14 + i2 * 13
-                    cv.create_arc(sx2 - 7, y - 7, sx2 + 9, y + 9, start=40,
-                                  extent=120, style="arc",
-                                  outline="#f8cfb6", width=2)
+                # 연어살 무늬는 사선으로 흐른다. 가로로 누운 호로 그렸더니
+                # 바게트처럼 보인다는 제보가 있었다. 가장자리 줄은 짧게 해
+                # 타원 밖으로 삐져나가지 않게 한다.
+                for dx2, half in ((-17, 4), (-6, 7), (5, 7), (16, 4)):
+                    sx2 = mx + dx2
+                    cv.create_line(sx2 - 4, y + half, sx2 + 4, y - half,
+                                   fill="#f8cfb6", width=2,
+                                   capstyle="round")
             elif deco == "tangerine":          # 레냥: 귤 한 알
                 cv.create_oval(mx - 19, y - 8, mx + 19, y + 24,
                                fill="#f5a623", outline="#c97c12", width=2)
