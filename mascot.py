@@ -8351,8 +8351,9 @@ class Mascot:
     ]
     CLICK_TALK = TALK
 
-    def _say(self, text, secs=4.0):
+    def _say(self, text, secs=4.0, big=False):
         self.bubble = (text, time.time() + secs)
+        self._bubble_big = bool(big)   # 반응 알림처럼 크게 보여야 하는 말
 
     def _talk_pool(self, state):
         return self.cfg.get("talk") or self.TALK
@@ -8644,9 +8645,10 @@ class Mascot:
         # 말풍선은 카드와 달리 크기가 고정이 아니라, 글자에 맞춰 상자가 늘어난다.
         # 그래서 글자 크기 설정을 그대로 따라도 겹칠 일이 없다. 다만 창보다
         # 넓어지면 안 되니 그 선에서만 줄인다.
-        font = self._fit(text, 9, self.W - 46)
-        w = max(self._mw(text, font) + 34, 74)
-        h = max(36, self._mh(font) + 20)
+        big = bool(getattr(self, "_bubble_big", False))
+        font = self._fit(text, 11 if big else 9, self.W - 46)
+        w = max(self._mw(text, font) + (42 if big else 34), 74)
+        h = max(44 if big else 36, self._mh(font) + (26 if big else 20))
         cx = self.card_cx
         if time.time() < self.hat_until:      # 고깔모자를 가리지 않게 옆으로
             cx += 42
@@ -14381,16 +14383,16 @@ class Mascot:
         if kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
             self._say(("%s 콕 찔렀어요" % _josa(who)) if who
-                      else "누가 콕 찔렀어요", 3.0)
+                      else "누가 콕 찔렀어요", 3.0, big=True)
         elif kind == "blanket":
             self._say(("%s 쓰담쓰담 해 줬어요" % _josa(who)) if who
-                      else "쓰담쓰담 받았어요", 3.5)
+                      else "쓰담쓰담 받았어요", 3.5, big=True)
             # 쓰다듬는 동안 계속 웃는다 (연출이 끝날 때까지)
             self.smile_until = max(self.smile_until, now + self.CHAR_FX)
         elif kind == "cheer":
             self.smile_until = max(self.smile_until, now + 3.0)
             self._say(("%s 응원했어요" % _josa(who)) if who
-                      else "누가 응원했어요", 3.5)
+                      else "누가 응원했어요", 3.5, big=True)
         elif kind == "songlike":
             # 내 오노추에 좋아요 — '누가 눌렀나'로 세서 한 사람당 하나만.
             # 누르는 쪽은 다시 보내도 되게 풀어 두었으므로 (옛 버전에게
@@ -14415,7 +14417,7 @@ class Mascot:
             if counted:
                 self.smile_until = max(self.smile_until, now + 3.0)
                 self._say(("%s 내 노래를 좋아해요 ♥" % _josa(who)) if who
-                          else "누가 내 노래를 좋아해요 ♥", 3.5)
+                          else "누가 내 노래를 좋아해요 ♥", 3.5, big=True)
         elif kind == "praise":
             # 목표를 다 채운 사람에게 오는 축하 — 웃는 얼굴로 쓰담을 받고,
             # 고깔모자가 얹히고, 폭죽이 터진다.
@@ -14423,14 +14425,15 @@ class Mascot:
             self.hat_until = max(self.hat_until, now + 10.0)
             self._safe("praise_burst", self._burst, 26, 60)
             self._say(("%s 칭찬해 줬어요! 오늘 목표 달성!" % _josa(who))
-                      if who else "칭찬 받았어요! 오늘 목표 달성!", 4.5)
+                      if who else "칭찬 받았어요! 오늘 목표 달성!", 4.5,
+                      big=True)
         elif kind == "snack" and cup:
             self._say(("%s 스페셜 컵케이크를 줬어요!" % _josa(who)) if who
-                      else "스페셜 컵케이크가 왔어요!", 5.0)
+                      else "스페셜 컵케이크가 왔어요!", 5.0, big=True)
             self.smile_until = max(self.smile_until, now + 6.0)
         elif kind == "snack":
             self._say(("%s 간식을 놓고 갔어요" % _josa(who)) if who
-                      else "간식이 놓여 있어요", 3.5)
+                      else "간식이 놓여 있어요", 3.5, big=True)
             self.smile_until = max(self.smile_until, now + 3.0)
         if self.stretch_pending and self.bubble:
             # 알림 문구가 곧 도로 덮으므로, 반응 말풍선을 조금 더 잡아 둔다
