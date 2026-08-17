@@ -13679,7 +13679,7 @@ class Mascot:
                 pv = max(pv, float(row[1]))
             if (not isinstance(row, list) or len(row) < 3 or row[2] != day
                     or t_min > int(row[0]) or pv > float(row[1])):
-                seen[self.char] = [t_min, pv, day]
+                seen[self.char] = [t_min, pv, day, int(time.time())]
                 _save_json(self._room_seen_path(), seen)
         except Exception:
             pass
@@ -13816,9 +13816,26 @@ class Mascot:
         return max(0.0, (now - start) / 60.0)
 
     def _seen_ok(self, row, day):
-        """오늘 기록으로 믿어도 되는 줄인가 — 날짜와 물리 상한을 같이 본다."""
-        return (isinstance(row, list) and len(row) >= 3 and row[2] == day
-                and int(row[0]) <= self._day_min() + 30)
+        """오늘 기록으로 믿어도 되는 줄인가.
+
+        날짜·물리 상한에 더해, 쓴 시각(4번째 값)이 있으면 '그 시각까지
+        흐른 분'과도 견준다 — 06시 직후 굳은 오염 줄은 낮이 되면 현재
+        상한은 통과해 버리므로, 쓴 시각 기준이라야 영구히 가려진다.
+        """
+        if not (isinstance(row, list) and len(row) >= 3 and row[2] == day
+                and int(row[0]) <= self._day_min() + 30):
+            return False
+        if len(row) >= 4:
+            try:
+                ts = float(row[3])
+                t = time.localtime(ts - 6 * 3600)
+                start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                                     6, 0, 0, 0, 0, -1))
+                if int(row[0]) > (ts - start) / 60.0 + 30:
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _room_seen_note(self, now):
         """접속 중인 사람들의 시간·게이지를 적어 둔다.
@@ -13845,9 +13862,16 @@ class Mascot:
                 # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다
                 t2 = max(t2, int(old[0]))
                 p2 = max(p2, float(old[1]))
-            row = [t2, p2, day]
-            if seen.get(slot) != row:
+            row = [t2, p2, day, int(now)]
+            if seen.get(slot, [None])[:3] != row[:3]:
                 seen[slot] = row
+                changed = True
+        # 오염으로 판명난 줄은 지운다 — 안 지우면 낮에 도로 살아난다
+        for slot2 in list(seen):
+            r2 = seen.get(slot2)
+            if (isinstance(r2, list) and len(r2) >= 3 and r2[2] == day
+                    and not self._seen_ok(r2, day)):
+                del seen[slot2]
                 changed = True
         if changed and now - self._room_seen_at > 20.0:
             self._room_seen_at = now
