@@ -4252,6 +4252,7 @@ class Mascot:
         self._pl_panel = None        # 패널 전체 자리
         self._self_cup_at = 0.0      # 본인 컵케이크를 먹은 시각 (10분에 1번)
         self._soft_cache = {}        # 매끈한 원·그림자 그림 (상한 있음)
+        self._room_dxc = {}          # 방 그림의 책상 중심 치우침 (slot,tag)→px
         self._mq_img = None          # 지금 프레임의 마퀴 그림
         self._room_song_slots = set()  # 노래가 걸린 카드 (음표 연출용)
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
@@ -14572,13 +14573,29 @@ class Mascot:
             except Exception:
                 pass
             line = self._room_deskline(slot)
+            # 책상의 실제 가로 중심 — 그림이 좌우로 치우친 캐릭터(연어의
+            # 꼬리 등)는 카드 중앙(=이름표)과 어긋나 보인다. 아랫단(책상)
+            # 중심을 재 두면 그리는 쪽이 그만큼 밀어서 정중앙에 맞춘다.
+            try:
+                line0 = line if (line and 0.2 < line < 0.95) else 0.72
+                strip = im.crop((0, int(h * line0), im.width, h))
+                bb2 = strip.split()[3].getbbox()
+                self._room_dxc[(slot, tag)] = (
+                    round(im.width / 2 - (bb2[0] + bb2[2]) / 2) if bb2 else 0)
+            except Exception:
+                self._room_dxc[(slot, tag)] = 0
             if line and 0.2 < line < 0.95:
                 # 몸은 통짜로 두고, 책상 조각을 그 위에 고정으로 덮는다.
                 # 몸을 잘라 올리면 잘린 자리가 그대로 드러난다 (실제로 겪음).
                 cut = int(h * line)
+                # 몸이 깡총 뛰면(최대 5k) 몸에 두른 흰 테두리가 책상 위로
+                # 드러나 이음새가 흰 픽셀로 끊겨 보인다 — 책상 조각을 위로
+                # 겹쳐 늘려 그 자리를 늘 덮는다.
+                lap = int(8 * self._room_k())
+                cut2 = max(0, cut - lap)
                 pair = (ImageTk.PhotoImage(im),
-                        ImageTk.PhotoImage(im.crop((0, cut, im.width, h))),
-                        h - cut)
+                        ImageTk.PhotoImage(im.crop((0, cut2, im.width, h))),
+                        h - cut2)
             else:
                 pair = (ImageTk.PhotoImage(im), None, 0)
         except Exception:
@@ -14966,6 +14983,11 @@ class Mascot:
         return -5.0 * k * math.sin(math.pi * t / 0.5)
 
     # 시간대 → (하늘색, 글자색, 보조색). 그림은 _room_sky_draw 가 그린다.
+    # '오늘 다 같이' 게이지의 시간대별 테마색 (그라데이션의 바탕색)
+    SKY_BAR = {"아침": "#f2a05a", "낮": "#57b1ef", "저녁": "#ef8562",
+               "밤": "#6d7fd8", "새벽": "#9a86d6"}
+    SKY_EN = {"아침": "morning", "낮": "day", "저녁": "dusk",
+              "밤": "night", "새벽": "dawn"}
     SKY = {"아침": ("#a9ddff", "#33566f", "#6c8ba1"),
            "낮": ("#8fd0ff", "#2f5470", "#6488a0"),
            "저녁": ("#ffb083", "#6d3a2a", "#996a58"),
@@ -14992,6 +15014,31 @@ class Mascot:
                 "밤": ("#1e2648", "#3d4775"),
                 "새벽": ("#4c6aa5", "#8fabd6")}
 
+    def _sky_src_ratio(self):
+        """하늘 그림의 세로/가로 비율 — 타이틀 띠 높이를 그림에 맞출 때.
+
+        파일 크기만 읽으므로 싸다. 그림이 없으면 None.
+        """
+        period = self._sky_period()
+        for name in (".sky_%s.png" % period,
+                     "sky_%s.png" % self.SKY_EN.get(period, "day")):
+            p = os.path.join(self.dir, name)
+            try:
+                mt = os.path.getmtime(p)
+            except OSError:
+                continue
+            key = (p, mt)
+            if getattr(self, "_sky_ratio_key", None) == key:
+                return self._sky_ratio_val
+            try:
+                with Image.open(p) as im0:
+                    self._sky_ratio_key = key
+                    self._sky_ratio_val = im0.height / max(1, im0.width)
+                    return self._sky_ratio_val
+            except Exception:
+                return None
+        return None
+
     def _room_sky_img(self, W, top, period):
         """타이틀 띠의 하늘 그림 — 시간대·크기가 바뀔 때만 다시 만든다.
 
@@ -15001,6 +15048,9 @@ class Mascot:
         # 캐릭터 폴더에 시간대 그림(.sky_아침.png 등)이 있으면 그것을 쓴다.
         # 점파일이라 배포 꾸러미에는 안 실린다 — 한 캐릭터만 시험 적용 가능.
         pic = os.path.join(self.dir, ".sky_%s.png" % period)
+        if not os.path.isfile(pic):   # 배포용 (점파일이 아닌 것만 배포된다)
+            pic = os.path.join(self.dir,
+                               "sky_%s.png" % self.SKY_EN.get(period, "day"))
         try:
             mt = os.path.getmtime(pic)
         except OSError:
@@ -15442,7 +15492,12 @@ class Mascot:
         gap0 = int(16 * k)
         slack = (H - int(126 * k) - base_top - rows0 * int(self.ROOM_CH * k)
                  - 2 * gap0)
-        top = min(base_top + max(0, slack), int(base_top * 1.9))
+        ratio = self._sky_src_ratio()
+        if ratio:                     # 그림 하늘 — 원본 비율 그대로 다 보이게
+            cap = min(int(W * ratio), int(base_top * 3.4))
+        else:
+            cap = int(base_top * 1.9)
+        top = min(base_top + max(0, slack), cap)
         self._room_top_px = top
         # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
         # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
@@ -15515,21 +15570,12 @@ class Mascot:
                            font=self._uf(10, True), fill=P["ink"], tags="dyn")
             gx0, gx1 = W - 204 * k, W - 24 * k
             gy = mid + 9 * k
-            self._rr(cv, gx0, gy - 5 * k, gx1, gy + 5 * k, 5 * k,
-                     fill="#ffffff", outline=P["line"], width=1)
             goal = 24 * 60           # 다 같이 하루 24시간이 목표
             frac = min(1.0, tot / goal)
-            # 채워질수록 색이 익는다 — 주황 → 노랑 → 연두 → (다 차면) 초록
-            if frac >= 1.0:
-                gcol = "#5fc48f"
-            elif frac < 0.5:
-                gcol = self._mix("#ffb37a", "#ffd75e", frac / 0.5)
-            else:
-                gcol = self._mix("#ffd75e", "#8fd06a", (frac - 0.5) / 0.5)
-            if tot > 0:
-                self._rr(cv, gx0, gy - 5 * k,
-                         gx0 + max(10 * k, (gx1 - gx0) * min(1.0, tot / goal)),
-                         gy + 5 * k, 5 * k, fill=gcol, width=0)
+            # 시간대별 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함)
+            gcol = self.SKY_BAR.get(period, "#f2a05a")
+            self._safe("soft_btn", self._soft_gauge, cv, gx0, gy - 5 * k,
+                       gx1, gy + 5 * k, 5 * k, gcol, frac, P["line"])
         # 모두의 플레이리스트 — '오늘 다 같이' 왼쪽의 ♪ 동그라미
         pbx, pbr = W - 234 * k, 14 * k
         on_pl = bool(getattr(self, "_pl_on", False))
@@ -15922,9 +15968,10 @@ class Mascot:
             bob = math.sin(time.time() * 1.7 + hash(slot) % 7) * (1.6 * k)
             if sleeping:
                 bob *= 0.6
-            cx = (kx0 + kx1) / 2
             base = floor + 4 * k
             pose = self._room_pose(p)
+            cx = (kx0 + kx1) / 2 + self._room_dxc.get(
+                (slot, pose), self._room_dxc.get((slot, "seat"), 0))
             item = cv.create_image(cx, base + bob, image=body, anchor="s",
                                    tags="dyn")
             ditem = None
@@ -18211,7 +18258,15 @@ class Mascot:
             # 세로가 모자라도 옆으로 눕지 않는다 — 예전엔 열을 늘려서
             # 사가 맥이 5열 2줄이 됐다. 줄을 줄이고 나머지는 페이지로.
             rows = maxr
-        return cols, rows, cols * cw + pad, top + rows * ch + bot
+        H0 = top + rows * ch + bot
+        ratio = self._sky_src_ratio()
+        if ratio:
+            # 그림 하늘이 있으면 띠가 원본 비율로 다 보이도록 창을 그만큼
+            # 세로로 늘려 연다 (그리는 쪽 cap 과 같은 상한 3.4배)
+            base_t = int(self.ROOM_TOP * k)
+            ideal = min(int((cols * cw + pad) * ratio), int(base_t * 3.4))
+            H0 += max(0, ideal - base_t) + int(26 * k)
+        return cols, rows, cols * cw + pad, min(H0, int(sh * 0.94))
 
     def _room_relayout(self):
         """창 크기가 바뀌면 칸 배치를 다시 잡는다.
