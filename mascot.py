@@ -15661,14 +15661,33 @@ class Mascot:
                        fill=self._shade(col, 0.15), tags="dyn")
         lk = int(sg.get("lk") or 0)
         if lk > 0:                       # 좋아요 하트 — 말풍선 오른쪽 위
+            # 글꼴의 ♥ 글자는 기계마다 높낮이가 달라 배지 안에서 떠 보인다.
+            # 하트를 도형으로 그리고, 하트+숫자 묶음을 재서 정중앙에 놓는다.
+            pink = "#f7a8bc"
+            num = str(min(lk, 99))
+            f2 = self._uf(6, True)
+            nw = self._room_tw(cv, num, f2)
+            hw = 7 * k                   # 하트 폭
+            gap = 1.5 * k
             bx = x1 - 4 * k
-            cv.create_oval(bx - 10 * k, y0 - 9 * k, bx + 10 * k, y0 + 5 * k,
+            cy2 = y0 - 2 * k
+            ow = max(20 * k, (hw + gap + nw) / 2 + 5 * k)
+            cv.create_oval(bx - ow, cy2 - 7 * k, bx + ow, cy2 + 7 * k,
                            fill="#ffffff", outline=self._tint(col, 0.35),
                            tags="dyn")
-            cv.create_text(bx, y0 - 2 * k,
-                           text="♥%d" % min(lk, 99),
-                           font=self._uf(6, True), fill="#e0525c",
-                           tags="dyn")
+            hx = bx - (hw + gap + nw) / 2 + hw / 2   # 하트 중심 x
+            r2 = hw * 0.27               # 봉우리 원 반지름
+            ty = cy2 - hw * 0.18         # 봉우리 원 중심 y
+            for sx in (-1, 1):
+                cv.create_oval(hx + sx * hw * 0.23 - r2, ty - r2,
+                               hx + sx * hw * 0.23 + r2, ty + r2,
+                               fill=pink, width=0, tags="dyn")
+            cv.create_polygon(hx - hw * 0.47, ty + r2 * 0.35,
+                              hx + hw * 0.47, ty + r2 * 0.35,
+                              hx, cy2 + hw * 0.52,
+                              fill=pink, width=0, tags="dyn")
+            cv.create_text(hx + hw / 2 + gap, cy2, text=num, font=f2,
+                           fill=pink, anchor="w", tags="dyn")
         self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
                                        x1 + 3 * k, y0 + h + 3 * k),
                                       str(sg.get("u")))
