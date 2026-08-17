@@ -2013,6 +2013,8 @@ CHARS = [
      "tint": "#c9954a"},
     {"slot": "parts_yeoneo", "repo": "yeoneo-mascot", "name": "연어",
      "tint": "#e08a6a"},
+    {"slot": "parts_renyang", "repo": "renyang-mascot", "name": "레냥",
+     "tint": "#ee9d2b"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -5095,6 +5097,12 @@ class Mascot:
                                     radius=4, fill=(0, 0, 0, 255))
             elif deco == "sushi":                  # 연어: 초밥 실루엣
                 d.ellipse([mx - 23, cy0 - 17, mx + 23, cy0 + 12],
+                          fill=(0, 0, 0, 255))
+            elif deco == "tangerine":              # 레냥: 귤 실루엣
+                d.ellipse([mx - 16, cy0 - 15, mx + 16, cy0 + 13],
+                          fill=(0, 0, 0, 255))
+                d.polygon([(mx, cy0 - 13), (mx + 10, cy0 - 21),
+                           (mx + 16, cy0 - 14), (mx + 6, cy0 - 9)],
                           fill=(0, 0, 0, 255))
             elif deco == "scarf":                  # 퀸시: 목도리 띠 (귀 없음)
                 d.rounded_rectangle([cx0 + 14, cy0 - 15, cx1 - 14, cy0 + 7],
@@ -8197,6 +8205,18 @@ class Mascot:
                 c.create_arc(sx2 - 6, y0 - 15, sx2 + 8, y0 - 1, start=40,
                              extent=120, style="arc",
                              outline="#f8cfb6", width=2)
+        elif deco == "tangerine":
+            # 레냥: 귤 한 알 (열매 + 초록 꼭지잎)
+            mx = (x0 + x1) / 2
+            c.create_oval(mx - 16, y0 - 15, mx + 16, y0 + 13,
+                          fill="#f5a623", outline="#c97c12", width=2)
+            c.create_oval(mx - 9, y0 - 10, mx - 1, y0 - 4,
+                          fill="#fbc96d", width=0)
+            c.create_polygon(mx, y0 - 13, mx + 10, y0 - 21, mx + 16, y0 - 14,
+                             mx + 6, y0 - 9, smooth=True,
+                             fill="#7cb14e", outline="#5b8a35", width=1)
+            c.create_line(mx, y0 - 13, mx + 2, y0 - 17, fill="#5b8a35",
+                          width=2, capstyle="round", tags="dyn")
         elif deco == "rabbit":
             base = self.card.get("bg", "#ffffff")
             inner = self.card.get("track", "#c9d3e6")
@@ -12650,6 +12670,15 @@ class Mascot:
                     cv.create_arc(sx2 - 7, y - 7, sx2 + 9, y + 9, start=40,
                                   extent=120, style="arc",
                                   outline="#f8cfb6", width=2)
+            elif deco == "tangerine":          # 레냥: 귤 한 알
+                cv.create_oval(mx - 19, y - 8, mx + 19, y + 24,
+                               fill="#f5a623", outline="#c97c12", width=2)
+                cv.create_oval(mx - 11, y - 2, mx - 2, y + 5,
+                               fill="#fbc96d", width=0)
+                cv.create_polygon(mx, y - 6, mx + 12, y - 15, mx + 19, y - 7,
+                                  mx + 7, y - 1, smooth=True,
+                                  fill="#7cb14e", outline="#5b8a35",
+                                  width=1)
             elif deco == "frog":               # 프고: 개구리 눈
                 for ex2 in (mx - 24, mx + 24):
                     cv.create_oval(ex2 - 15, y - 8, ex2 + 15, y + 16,
@@ -15519,6 +15548,13 @@ class Mascot:
         for tries in range(len(songs)):
             j = (i + tries) % len(songs)
             vid, lst = self._yt_ids(songs[j]["u"])
+            # 주소에 딸려 온 재생목록은 떼고 영상만 튼다 — list=LL(좋아요
+            # 표시한 영상)·WL(나중에 볼 영상)은 그 사람 계정의 개인 목록이라
+            # 남의 재생기에서 통째로 실패한다 (준사 곡이 안 틀리던 원인).
+            if vid:
+                lst = ""
+            elif lst in ("LL", "WL"):
+                continue
             if not (vid or lst):
                 continue
             self._pl_on = True
@@ -15913,6 +15949,11 @@ class Mascot:
         cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt, font=f,
                        fill=self._shade(col, 0.15), tags="dyn")
         lk = int(sg.get("lk") or 0)
+        # 하트 수는 노래 주인이 세서 되알려 주는 값이라, 주인이 옛 버전이면
+        # 내가 눌러도 영영 안 온다 — 내가 누른 좋아요는 내 화면에서 바로
+        # 하트로 보여 준다 (최소 1). 주인이 세면 그 값이 자연히 덮는다.
+        if (slot, str(sg.get("u"))) in self._song_liked:
+            lk = max(lk, 1)
         if lk > 0:                       # 좋아요 하트 — 말풍선 오른쪽 위
             # 글꼴의 ♥ 글자는 기계마다 높낮이가 달라 배지 안에서 떠 보인다.
             # 하트를 도형으로 그리고, 하트+숫자 묶음을 재서 정중앙에 놓는다.
