@@ -132,6 +132,7 @@ class _MacChromaKey:
     def __init__(self, key_hex):
         self.err = None
         self.filter = None
+        self._srgb = None        # 창 색공간 고정용 (아래 apply_all 참고)
         self._keep = []          # 해제되면 안 되는 ObjC 객체를 붙잡아 둔다
         try:
             self._setup(key_hex)
@@ -268,6 +269,16 @@ class _MacChromaKey:
                 if (b"Menu" in cls or b"Popover" in cls
                         or b"Tooltip" in cls or b"ToolTip" in cls):
                     continue
+                # 창 백킹 색공간을 sRGB로 못 박는다 — 색 큐브가 sRGB라,
+                # 프로필이 다른 화면(신티크)으로 옮기면 키 색이 다른 칸으로
+                # 밀려 안 지워지고 검은 덩어리로 남는다 (사가 제보:
+                # 맥북 화면에선 안 보이는데 신티크로 옮기면 검은 줄).
+                if self._srgb is None:
+                    self._srgb = self._hold(self._msg(
+                        self._cls("NSColorSpace"), "sRGBColorSpace"))
+                if self._srgb:
+                    self._msg(w, "setColorSpace:", self._srgb,
+                              argtypes=(ctypes.c_void_p,))
                 cv = self._msg(w, "contentView")
                 if not cv:
                     continue
