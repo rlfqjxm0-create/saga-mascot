@@ -4263,6 +4263,7 @@ class Mascot:
         self._bubble_born = 0.0      # 지금 말풍선이 뜬 시각 (톡 등장용)
         self._bubble_text_last = None
         self._room_meta = {}         # 캐릭터별 책상 높이
+        self._room_bgc_img = None    # 직접 고른 배경 색 한 장 (참조 유지)
         self._room_bg = None
         self._room_body = []
         self._room_key_last = None
@@ -15541,6 +15542,22 @@ class Mascot:
                 pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
         return cv.create_polygon(pts, smooth=False, **kw)
 
+    def _room_bgc_make(self, ct, cb, w, h):
+        """직접 고른 배경 색 한 장 — 단색이면 ct==cb, 아니면 위→아래."""
+        try:
+            r1, g1, b1 = self._hex(ct)
+            r2, g2, b2 = self._hex(cb)
+        except Exception:
+            return None
+        strip = Image.new("RGB", (1, 128))
+        px = strip.load()
+        for y in range(128):
+            f = y / 127.0
+            px[0, y] = (int(r1 + (r2 - r1) * f),
+                        int(g1 + (g2 - g1) * f),
+                        int(b1 + (b2 - b1) * f))
+        return ImageTk.PhotoImage(strip.resize((w, h), Image.BILINEAR))
+
     def _room_draw(self):
         cv = self.room_cv
         if cv is None or self.room_win is None:
@@ -15571,17 +15588,27 @@ class Mascot:
         self._room_top_px = top
         # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
         # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
-        key = (W, H, P["wall"], self._room_deco_ver, top)
+        bgc1 = str(self.us.get("room_bgc1") or "")
+        bgc2 = str(self.us.get("room_bgc2") or "")
+        key = (W, H, P["wall"], self._room_deco_ver, top, bgc1, bgc2)
         if self._room_bg != key:
             self._room_bg = key
             cv.delete("all")
             cv.configure(bg=P["wall"])
             self.room_win.configure(bg=P["wall"])
+            # 직접 고른 배경 색 — 하나만 고르면 단색, 둘 다면 위→아래
+            ct, cb = (bgc1 or bgc2), (bgc2 or bgc1)
+            if ct:
+                self._room_bgc_img = self._safe_str(
+                    self._room_bgc_make, ct, cb, W, max(1, H - top))
+                if self._room_bgc_img is not None:
+                    cv.create_image(0, top, image=self._room_bgc_img,
+                                    anchor="nw", tags="bg")
             bgim = self._room_deco_img("bg", W, H - top)
             if bgim is not None:
-                # 골라 둔 배경 그림 — 벽지 점 대신 그림을 깐다
+                # 골라 둔 배경 그림 — 색(또는 벽지) 위에 그림을 깐다
                 cv.create_image(0, top, image=bgim, anchor="nw", tags="bg")
-            else:
+            elif not (ct and self._room_bgc_img is not None):
                 step = max(8, int(26 * k))
                 for yy in range(top, H, step):
                     for xx in range((step // 2) if (yy // step) % 2 else 0,
@@ -15940,10 +15967,13 @@ class Mascot:
             if msg:
                 f_msg = self._uf(10, True)
                 bx1 = tr - 4 * k
-                avail = bx1 - (tx + hw2 + tagw + 20 * k)
-                while msg and self._room_tw(cv, msg, f_msg) > avail - 26 * k:
+                # 한마디가 있으면 무조건 보인다 — 자리가 좁으면 최소 폭을
+                # 보장하고(알약을 살짝 덮더라도), 잘린 원문은 호버 마퀴가
+                # 흘려서 보여 준다.
+                avail = max(84 * k, bx1 - (tx + hw2 + tagw + 20 * k))
+                while len(msg) > 1 and                         self._room_tw(cv, msg, f_msg) > avail - 26 * k:
                     msg = msg[:-1]
-                if msg and avail > 70 * k:
+                if msg:
                     mw = self._room_tw(cv, msg, f_msg)
                     bx0 = bx1 - mw - 24 * k
                     self._rr_soft(cv, bx0, cyc - 28 * k, bx1, cyc - 4 * k,
@@ -17577,6 +17607,49 @@ class Mascot:
             slider("불투명도 (%)", "room_%s_alpha" % what, 10, 100, 100)
 
         row("배경", "bg")
+        # 배경 색 — 위 색만 고르면 단색, 둘 다 고르면 위아래 그라데이션
+        frc = tk.Frame(win, bg=cd["panel"])
+        frc.pack(padx=u(20), pady=(0, u(6)), fill="x")
+        tk.Label(frc, text="배경 색", font=self._uf(10, True),
+                 bg=cd["panel"], fg=cd["text"], width=8).pack(side="left")
+        bgc_btns = []
+
+        def bgc_apply():
+            self._save_settings()
+            self._room_bg = None     # 배경을 통째로 다시 깐다
+            self._safe("room_draw", self._room_draw)
+
+        def bgc_btn(cap, key):
+            def go():
+                cur2 = str(self.us.get(key) or "")
+                got = self._pick_color(
+                    cur2 if cur2.startswith("#") else "#f6eef4")
+                if got:
+                    self.us[key] = got
+                    b.config(bg=got, activebackground=got)
+                    bgc_apply()
+            cur = str(self.us.get(key) or "")
+            b = tk.Button(frc, text=cap, font=self._uf(8), relief="flat",
+                          bd=1, bg=cur if cur else "#ffffff", fg=cd["text"],
+                          activebackground=cur if cur else "#ffffff",
+                          padx=u(6), command=go)
+            b.pack(side="left", padx=2)
+            bgc_btns.append(b)
+
+        bgc_btn("위 색", "room_bgc1")
+        bgc_btn("아래 색", "room_bgc2")
+
+        def bgc_clear():
+            self.us["room_bgc1"] = ""
+            self.us["room_bgc2"] = ""
+            for b2 in bgc_btns:
+                b2.config(bg="#ffffff", activebackground="#ffffff")
+            bgc_apply()
+        tk.Button(frc, text="기본", font=self._uf(8), relief="flat",
+                  bg="#ffffff", fg=cd["sub"], command=bgc_clear
+                  ).pack(side="left", padx=(u(6), 2))
+        tk.Label(frc, text="하나만 = 단색", font=self._uf(7),
+                 bg=cd["panel"], fg=cd["sub"]).pack(side="left", padx=u(4))
         row("방 칸", "card")
         # 반응 단추 색 — 견본 몇 개 + 직접 고르기 + 기본
         fr2 = tk.Frame(win, bg=cd["panel"])
