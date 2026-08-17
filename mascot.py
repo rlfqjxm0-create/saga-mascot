@@ -13759,6 +13759,28 @@ class Mascot:
         return (str(self.us.get("room_nick") or "").strip()
                 or str(self.cfg.get("name") or self.char))
 
+    def _my_build(self):
+        """지금 '실행 중인' 판의 배포 번호 — 방 신호에 실어 진단에 쓴다.
+
+        선물본은 런처가 받아 둔 version.json(파츠 폴더의 부모), 소스 실행은
+        캐릭터 폴더의 .version.json. 굳힌 번들 폴백으로 돌 때는 둘 다 없어
+        0이 된다 (그것대로 '내려받기가 안 도는 상태'라는 정보다).
+        """
+        v = getattr(self, "_my_build_v", None)
+        if v is None:
+            v = 0
+            for p in (os.path.join(self.dir, ".version.json"),
+                      os.path.join(os.path.dirname(self.dir),
+                                   "version.json")):
+                try:
+                    with open(p, encoding="utf-8") as fp:
+                        v = int(json.load(fp).get("version") or 0)
+                    break
+                except Exception:
+                    continue
+            self._my_build_v = v
+        return v
+
     def _room_state_now(self):
         """방에 보낼 값. 어떤 프로그램을 쓰는지·창 제목은 절대 안 보낸다."""
         goal = max(0.1, float(self.us.get("goal_hours") or 6.0)) * 3600.0
@@ -13809,6 +13831,7 @@ class Mascot:
                 out["cal"] = self._stamp_pack()
             except Exception:
                 pass
+        out["v"] = self._my_build()      # 실행 중 판 번호 (버전 확인용)
         su, st2 = self._room_song()
         if su:
             out["sg"] = {"u": su, "t": st2}

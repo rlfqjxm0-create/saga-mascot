@@ -1,7 +1,7 @@
 {
- "version": 1786965444,
+ "version": 1786965840,
  "files": {
-  "mascot.py": "a58bb6cc0e42668cc290a3065d198385816d3bd3a556ee4771e48a9acef34551",
+  "mascot.py": "978618971506d2a12dfcbf2c80ed95d8d14e98ab4c6e7252d3643000d8c73637",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -342,11 +342,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "홈 타이틀이 시간대별 그림 하늘로 바뀌고, 창에 꽉 차게 커졌어요",
-  "캐릭터가 머리만 살짝 들썩이며 숨 쉬어요 — 몸과 책상은 그대로",
-  "게이지가 둥근 알약 모양이 되고, 저녁 시간대엔 핑크빛이에요",
-  "받은 반응 말풍선이 커져서 누가 콕 했는지 잘 보여요",
-  "뒷 페이지도 아홉 칸으로 채워지고, 캐릭터가 이름표 정중앙에 앉아요"
- ]
+ "notes": [],
+ "silent": true
 }
