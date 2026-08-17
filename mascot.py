@@ -15255,6 +15255,54 @@ class Mascot:
             self._soft_cache[key] = ph
         cv.create_image(cx, cy + (1 if shadow else 0), image=ph, tags=tags)
 
+    def _halo_text(self, cv, x, y, text, font, fill, halo, anchor="w",
+                   d=1.4, tags="dyn"):
+        """테두리 있는 글자 — 하늘 그림 위에서도 읽히게 8방향 후광을 깐다."""
+        for dx, dy in ((-d, 0), (d, 0), (0, -d), (0, d),
+                       (-d, -d), (d, -d), (-d, d), (d, d)):
+            cv.create_text(x + dx, y + dy, text=text, font=font, fill=halo,
+                           anchor=anchor, tags=tags)
+        cv.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor,
+                       tags=tags)
+
+    def _soft_gauge(self, cv, x0, y0, x1, y1, r, col, tags="dyn"):
+        """게이지 채움 — 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함).
+
+        PIL로 매끈하게 그린다. 채움 폭이 1초마다 바뀌지는 않으므로
+        (분 단위) 캐시가 튀지 않는다 — 폭은 2px 단위로 묶는다.
+        """
+        w = max(2, int(round((x1 - x0) / 2.0)) * 2)
+        h = max(2, int(y1 - y0))
+        key = ("gauge", w, h, col)
+        ph = self._soft_cache.get(key)
+        if ph is None:
+            S = 3
+            lite = self._tint(col, 0.55)
+            dark = self._shade(col, 0.12)
+
+            def hx(c):
+                return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
+
+            c1, c2 = hx(lite), hx(dark)
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            for xx in range(w * S):        # 가로 그라데이션
+                t = xx / max(1, w * S - 1)
+                dr.line([(xx, 0), (xx, h * S)],
+                        fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t)
+                                   for i in range(3)) + (255,))
+            mask = Image.new("L", (w * S, h * S), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [0, 0, w * S - 1, h * S - 1], radius=int(r * S), fill=255)
+            im.putalpha(mask)
+            im = im.resize((w, h), Image.LANCZOS)
+            ph = ImageTk.PhotoImage(im)
+            if len(self._soft_cache) > 200:
+                for k2 in list(self._soft_cache)[:100]:
+                    self._soft_cache.pop(k2, None)
+            self._soft_cache[key] = ph
+        cv.create_image(int(x0), int(y0), image=ph, anchor="nw", tags=tags)
+
     def _card_shadow(self, cv, x0, y0, x1, y1, r, tags="dyn"):
         """카드 밑 부드러운 그림자 — 같은 크기 카드는 한 장을 같이 쓴다."""
         w, h = int(x1 - x0), int(y1 - y0)
@@ -15404,16 +15452,20 @@ class Mascot:
         self._safe("room_sky", self._room_sky_draw, cv, W, top, k, period)
         ink2, sub2 = self.SKY[period][1], self.SKY[period][2]
         self._room_cal_btn = None    # 달력 아이콘은 내 칸에서 그린다
-        cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
-                       font=self._uf(13, True), fill=ink2, tags="dyn")
+        # 그림 하늘 위에서도 읽히게 — 글자색과 반대 밝기의 후광을 두른다
+        _ink_rgb = tuple(int(ink2[i:i + 2], 16) for i in (1, 3, 5))
+        halo2 = ("#ffffff" if (0.299 * _ink_rgb[0] + 0.587 * _ink_rgb[1]
+                               + 0.114 * _ink_rgb[2]) < 140 else "#3a3347")
+        self._halo_text(cv, 28 * k, mid - 9 * k, "HOME",
+                        self._uf(13, True), ink2, halo2)
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
         on = sum(1 for q in people if not q.get("off"))
         # 왜 안 되는지 여기서 바로 보이게. 지금까지는 RoomNet 이 오류를
         # 들고만 있고 아무 데도 안 보여 줘서, 친구 화면에서는 '다들 안 켰네'
         # 로만 보였다 (사가가 방에 못 붙는데도 그 이유를 알 수 없었다).
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
-        cv.create_text(28 * k, mid + 11 * k, anchor="w", text=sub,
-                       font=self._uf(9), fill=sub2, tags="dyn")
+        self._halo_text(cv, 28 * k, mid + 11 * k, sub, self._uf(9), sub2,
+                        halo2, d=1.1)
         # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
         # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
@@ -15915,14 +15967,16 @@ class Mascot:
         by = py0 + 48 * k
         cv.create_text(bx0 - 6 * k, by + 5 * k, anchor="e", text=tlab,
                        font=self._uf(8), fill=P["sub"], tags="dyn")
-        # 바탕은 흰색, 채우는 색은 그 사람 테마색 그대로
+        # 바탕은 흰색, 채움은 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함)
         self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill="#ffffff",
                  outline=self._tint(col, 0.55), width=1)
         pr = max(0.0, min(1.0, float(p.get("p") or 0)))
         if pr > 0.01:
-            self._rr(cv, bx0, by, bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k,
-                     fill=self._room_raw(slot) if not off
-                     else self._tint(self._room_raw(slot), 0.5), width=0)
+            raw = self._room_raw(slot)
+            if off:
+                raw = self._tint(raw, 0.5)
+            self._safe("soft_btn", self._soft_gauge, cv, bx0, by,
+                       bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k, raw)
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
         sg = p.get("sg")
@@ -17193,7 +17247,7 @@ class Mascot:
                 on = True
             fill = col if on else self._tint(col, 0.62)
             self._safe("soft_btn", self._soft_dot, cv, x + bw / 2, by + bw / 2,
-                       bw / 2, fill, outline="#ffffff", width=2, shadow=True)
+                       bw / 2, fill, outline="#ffffff", width=3.5, shadow=True)
             cv.create_text(x + bw / 2, by + bw / 2, text=label,
                            font=self._uf(9, True),
                            fill=P["ink"] if on else P["sub"], tags="dyn")
@@ -17203,7 +17257,7 @@ class Mascot:
         # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
         dx0 = W - 20 * k - bw
         self._safe("soft_btn", self._soft_dot, cv, dx0 + bw / 2, by + bw / 2,
-                   bw / 2, cust or "#f6f0f8", outline="#ffffff", width=2,
+                   bw / 2, cust or "#f6f0f8", outline="#ffffff", width=3.5,
                    shadow=True)
         cv.create_text(dx0 + bw / 2, by + bw / 2, text="꾸미기",
                        font=self._uf(8, True), fill=P["sub"], tags="dyn")
