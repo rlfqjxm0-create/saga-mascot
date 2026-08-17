@@ -15179,11 +15179,14 @@ class Mascot:
         # 사람이 많아지면 페이지로 나눈다 — 첫 페이지 9명, 화살표로 넘김.
         # '모두에게'는 서버가 방 전체에 돌리므로 페이지와 무관하게 다 간다.
         allp = people
-        pages = max(1, -(-len(allp) // self.ROOM_PAGE))
+        # 한 페이지 = 기본 9명. 화면이 짧아 줄이 모자라면 그만큼 줄인다.
+        page_n = max(1, min(self.ROOM_PAGE,
+                            cols * max(1, self._room_rows)))
+        pages = max(1, -(-len(allp) // page_n))
         self._room_page = max(0, min(getattr(self, "_room_page", 0),
                                      pages - 1))
-        people = allp[self._room_page * self.ROOM_PAGE:
-                      (self._room_page + 1) * self.ROOM_PAGE]
+        people = allp[self._room_page * page_n:
+                      (self._room_page + 1) * page_n]
         self._room_pages = pages
         left = max(int(8 * k), (W - cols * cw) // 2)
         # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
@@ -17483,9 +17486,10 @@ class Mascot:
         #  세로가 모자란 작은 화면에서만 아래 폴백이 열을 늘린다.)
         cols = max(1, min(maxc, self.ROOM_COLS, int((W - pad) // cw)))
         rows = max(1, -(-n // cols))              # 올림 나눗셈
-        if rows > maxr:                           # 세로가 모자라면 옆으로
+        if rows > maxr:
+            # 세로가 모자라도 옆으로 눕지 않는다 — 예전엔 열을 늘려서
+            # 사가 맥이 5열 2줄이 됐다. 줄을 줄이고 나머지는 페이지로.
             rows = maxr
-            cols = max(cols, min(maxc, -(-n // rows)))
         return cols, rows, cols * cw + pad, top + rows * ch + bot
 
     def _room_relayout(self):
