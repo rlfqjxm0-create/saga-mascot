@@ -14475,10 +14475,12 @@ class Mascot:
                 got = os.path.join(self._room_art_dir(),
                                    "%s_%s" % (slot, tag))
                 try:
-                    # 받아 둔 그림도 하루가 지나면 다시 받는다 — 앉은 모습을
-                    # 고쳐 배포해도 (연어 왼팔 사건) 옛 그림으로 영영 굳지 않게.
-                    fresh = (os.path.isfile(got) and
-                             time.time() - os.path.getmtime(got) < 86400)
+                    # 켤 때마다 한 번은 새로 받는다 — 앉은 모습을 고쳐
+                    # 배포하면 다음 실행에서 바로 보인다. 깃허브 정적
+                    # 파일이라 부담이 없고, 켠 채로 하루를 넘겨도 갱신한다.
+                    mt2 = os.path.getmtime(got) if os.path.isfile(got) else 0
+                    fresh = (mt2 >= self._born_at
+                             and time.time() - mt2 < 86400)
                 except Exception:
                     fresh = os.path.isfile(got)
                 if not fresh:
