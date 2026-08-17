@@ -13844,6 +13844,24 @@ class Mascot:
             pass
         return True
 
+    def _room_k(self):
+        """방 전용 배율 — 화면이 짧으면 3줄이 들어가게 살짝 줄인다.
+
+        사가 맥은 세로 여유가 2줄뿐이라 카드가 페이지로 밀렸다. 3열 3줄을
+        지키는 쪽이 우선이고, 줄이는 한계는 72%다 (그 밑으론 글자가 못 읽힘).
+        """
+        k = self.ui_k
+        try:
+            sh = self.root.winfo_screenheight()
+            need = (self.ROOM_TOP + 16 + 126 + 3 * self.ROOM_CH) * k
+            if need > 0:
+                fit = (sh * 0.92) / need
+                if fit < 1.0:
+                    k *= max(0.72, fit)
+        except Exception:
+            pass
+        return k
+
     def _room_seen_note(self, now):
         """접속 중인 사람들의 시간·게이지를 적어 둔다.
 
@@ -14383,7 +14401,7 @@ class Mascot:
             return None
         try:
             im = Image.open(p).convert("RGBA")
-            h = int(self.ROOM_FIG * self.ui_k * self.ROOM_SIZE.get(slot, 1.0))
+            h = int(self.ROOM_FIG * self._room_k() * self.ROOM_SIZE.get(slot, 1.0))
             im = im.resize((max(1, int(im.width * h / im.height)), h),
                            Image.LANCZOS)
             line = self._room_deskline(slot)
@@ -14411,7 +14429,7 @@ class Mascot:
         그림 왼쪽 위 기준 픽셀 좌표. 캐릭터마다 머리 위치가 달라 알파로
         잰다 — 맨 윗줄 언저리의 불투명 픽셀 띠가 곧 머리(머리카락)다.
         """
-        h = int(self.ROOM_FIG * self.ui_k * self.ROOM_SIZE.get(slot, 1.0))
+        h = int(self.ROOM_FIG * self._room_k() * self.ROOM_SIZE.get(slot, 1.0))
         key = (slot, tag, h)
         hit = self._room_head_cache.get(key)
         if hit is not None:
@@ -14671,7 +14689,7 @@ class Mascot:
         if not self._room_on():
             self._say("환경설정에서 '같이 작업하는 방'을 켜 주세요", 4.0)
             return
-        k = self.ui_k
+        k = self._room_k()
         cw = int(self.ROOM_CW * k)
         n = max(1, len(self._room_seats()))
         cols, rows, W, H = self._room_fit(
@@ -14815,7 +14833,7 @@ class Mascot:
         if self._sky_key == key and self._sky_img is not None:
             return self._sky_img
         S = 3
-        k = self.ui_k * S
+        k = self._room_k() * S
         w, h = int(W * S), int(top * S)
 
         def hx(c):
@@ -14937,11 +14955,11 @@ class Mascot:
         now = time.time()
         for i, (item, desk_item, slot, base, sleeping, pose) in enumerate(
                 self._room_body):
-            bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self.ui_k)
+            bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self._room_k())
             if sleeping:
                 bob *= 0.6
             else:
-                bob += self._room_hop(slot, now, self.ui_k)
+                bob += self._room_hop(slot, now, self._room_k())
             try:
                 x, y = cv.coords(item)
                 # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
@@ -14971,7 +14989,7 @@ class Mascot:
                 x, _y = cv.coords(item)
             except Exception:
                 continue
-            kk2 = self.ui_k
+            kk2 = self._room_k()
             ph2 = hash(slot) % 5
             for j2, (dx2, sp) in enumerate(((-46, 1.0), (44, 1.35))):
                 yy2 = base - 72 * kk2 - ((now * 14 * sp + ph2 * 9 + j2 * 23)
@@ -14984,7 +15002,7 @@ class Mascot:
         # 다 같이 24시간을 채운 날 — 캐릭터 옆에 반짝이가 돈다
         cv.delete("glit")
         if self._room_goal_done:
-            kk = self.ui_k
+            kk = self._room_k()
             for item, _d, slot, base, _s, _p in self._room_body:
                 try:
                     x, _y = cv.coords(item)
@@ -15083,7 +15101,7 @@ class Mascot:
         if cv is None or self.room_win is None:
             return
         P = self._room_palette()
-        k = self.ui_k
+        k = self._room_k()
         # 창을 늘릴 수 있으므로 실제로 그려진 크기를 본다 (cv["width"] 는
         # 처음 만들 때 준 값에서 안 변한다).
         W = cv.winfo_width() or int(cv["width"])
@@ -16113,12 +16131,14 @@ class Mascot:
             im = Image.open(p).convert("RGBA")
             # 크기·위치 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
             # 화면과 같은 모습이 된다. 빈자리는 흰색(칸 색)으로 받친다.
-            th = max(60, int(180 * self.ROOM_CH / self.ROOM_CW))
-            im = self._deco_fit(im, 180, th, 0, zoom, ox, oy, al)
+            # 320px — 카드 실제 폭과 비슷해야 남의 화면에서 안 흐리다
+            # (서버 상한을 32000으로 올려서 실을 수 있다).
+            th = max(60, int(320 * self.ROOM_CH / self.ROOM_CW))
+            im = self._deco_fit(im, 320, th, 0, zoom, ox, oy, al)
             base = Image.new("RGB", im.size, (255, 255, 255))
             base.paste(im, (0, 0), im)
             b64 = ""
-            for q in (60, 45, 32):       # 20KB 안에 들 때까지 낮춘다
+            for q in (74, 62, 50, 38):   # 20KB 안에 들 때까지 낮춘다
                 buf = _io.BytesIO()
                 base.save(buf, "JPEG", quality=q)
                 b64 = base64.b64encode(buf.getvalue()).decode("ascii")
@@ -16470,6 +16490,34 @@ class Mascot:
                       ).pack(side="left")
             # 크기·위치 조절 — 놓는 순간 적용된다
             def slider(label, key, lo, hi, default, res=5):
+                if IS_MAC:
+                    # 맥(Tk9 아쿠아)은 tk.Scale 에서 앱이 통째로 꺼지는
+                    # 제보가 있어(퀸시) +/- 단추로 만든다
+                    fr3 = tk.Frame(win, bg=cd["panel"])
+                    fr3.pack(padx=u(24), anchor="w")
+                    tk.Label(fr3, text=label, font=self._uf(7),
+                             bg=cd["panel"], fg=cd["sub"]).pack(side="left")
+                    val = tk.Label(fr3, font=self._uf(8, True),
+                                   bg=cd["panel"], fg=cd["text"], width=4,
+                                   text=str(int(float(
+                                       self.us.get(key, default)))))
+                    val.pack(side="right")
+
+                    def step(d2, k2=key, v2=val, lo2=lo, hi2=hi):
+                        cur = int(float(self.us.get(k2, default)))
+                        cur = max(lo2, min(hi2, cur + d2))
+                        self.us[k2] = cur
+                        v2.config(text=str(cur))
+                        self._save_settings()
+                        self._room_deco_bump()
+
+                    for cap2, d2 in (("−", -10), ("+", 10)):
+                        tk.Button(fr3, text=cap2, font=self._uf(9, True),
+                                  relief="flat", bg="#ffffff",
+                                  fg=cd["text"], width=2,
+                                  command=lambda dd=d2: step(dd)
+                                  ).pack(side="right", padx=2)
+                    return
                 sc = tk.Scale(win, from_=lo, to=hi, orient="horizontal",
                               resolution=res, showvalue=True, length=u(230),
                               label=label, font=self._uf(7),
@@ -17471,7 +17519,7 @@ class Mascot:
         걸어 둔다 (Tk 가 그보다 작게 못 줄인다). 화면보다 커지면 안 되므로
         줄 수에 상한을 두고, 그때는 칸을 늘려 가로로 눕힌다.
         """
-        k = self.ui_k
+        k = self._room_k()
         n = min(n, self.ROOM_PAGE)   # 페이지로 나뉘므로 한 페이지가 기준
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         # +16 은 타이틀 띠와 첫 줄 사이의 최소 간격 (그리는 쪽과 같은 값)
