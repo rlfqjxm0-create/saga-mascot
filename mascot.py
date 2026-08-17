@@ -15741,8 +15741,8 @@ class Mascot:
                 return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
                                 outline=outline, width=width, tags=tags,
                                 raw=True)
-            if len(cache) > 60:            # 지뢰 18 — 오래된 절반만
-                for old in list(cache)[:30]:
+            if len(cache) > 240:           # 지뢰 18·42 — 홈 카드가 다
+                for old in list(cache)[:80]:   # 들어가고도 남는 크기로
                     cache.pop(old, None)
             cache[key] = img
         return cv.create_image(int(x0), int(y0), image=img, anchor="nw",
@@ -16219,20 +16219,6 @@ class Mascot:
                           width=1.5)
             cv.create_text(tx, cyc - 16 * k, anchor="w", text=head,
                            font=f_name, fill=ink, tags="dyn")
-            if tagt:
-                # 오노추 음표·받은 하트는 이름 알약 위의 작은 알약으로
-                tw4 = self._room_tw(cv, tagt, f_sub)
-                ty1 = cyc - 30 * k
-                self._rr_soft(cv, tx - 3 * k, ty1 - 16 * k,
-                              tx + tw4 + 9 * k, ty1, 8 * k,
-                              fill="#ffffff",
-                              outline=self._tint(col, 0.5), width=1)
-                cv.create_text(tx + 3 * k, ty1 - 8 * k, anchor="w",
-                               text=tagt, font=f_sub, fill="#f294ac",
-                               tags="dyn")
-                box = (tx - 3 * k, ty1 - 16 * k, tx + tw4 + 9 * k, ty1)
-                self._room_song_hits[slot] = (box, str(sg.get("u")))
-                self._room_song_slots.add(slot)
             # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
             ti = "아직 안 켰어요" if off else str(p.get("ti") or "")[:14]
             cv.create_text(tx, cyc + 1 * k, anchor="w", text=ti,
@@ -16243,7 +16229,12 @@ class Mascot:
             if msg:
                 f_msg = self._uf(10, True)
                 bx0 = tx + hw2 + 16 * k  # 이름 알약 바로 옆에
-                bx1e = tr - 4 * k
+                # 시간 숫자 바로 앞까지 길어질 수 있다 (딱 붙지는 않게)
+                tmin = max(0, int(p.get("t") or 0))
+                tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) \
+                    if tmin >= 60 else ("%dm" % tmin)
+                bx1e = (x1 - 16 * k - self._room_tw(cv, tlab, f_time)
+                        - 10 * k)
                 # 한마디가 있으면 무조건 보인다 — 자리가 좁으면 최소 폭을
                 # 보장하고(알약을 살짝 덮더라도), 잘린 원문은 호버 마퀴가
                 # 흘려서 보여 준다.
@@ -16281,6 +16272,19 @@ class Mascot:
             cv.create_text(x1 - 16 * k, cyc + 12 * k, anchor="e",
                            text="%d%%" % round(pr * 100), font=f_pct,
                            fill=self._shade(P["sub"], 0.28), tags="dyn")
+            if tagt:
+                # 오노추 음표·받은 하트 — 게이지 바 아래 작은 알약
+                tw4 = self._room_tw(cv, tagt, f_sub)
+                ty0 = min(cyc + 21 * k, yy1 - 19 * k)
+                self._rr_soft(cv, tx - 3 * k, ty0, tx + tw4 + 9 * k,
+                              ty0 + 16 * k, 8 * k, fill="#ffffff",
+                              outline=self._tint(col, 0.5), width=1)
+                cv.create_text(tx + 3 * k, ty0 + 8 * k, anchor="w",
+                               text=tagt, font=f_sub, fill="#f294ac",
+                               tags="dyn")
+                box = (tx - 3 * k, ty0, tx + tw4 + 9 * k, ty0 + 16 * k)
+                self._room_song_hits[slot] = (box, str(sg.get("u")))
+                self._room_song_slots.add(slot)
             sleeping = p.get("s") == "sleep"
             if mitem is not None and not off:
                 # 심플모드에서도 숨쉬기·음표·반짝이 돌게 등록한다.
