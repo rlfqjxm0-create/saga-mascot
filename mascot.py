@@ -16145,10 +16145,10 @@ class Mascot:
             im = Image.open(p).convert("RGBA")
             # 크기·위치 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
             # 화면과 같은 모습이 된다. 빈자리는 흰색(칸 색)으로 받친다.
-            # 320px — 카드 실제 폭과 비슷해야 남의 화면에서 안 흐리다
-            # (서버 상한을 32000으로 올려서 실을 수 있다).
-            th = max(60, int(320 * self.ROOM_CH / self.ROOM_CW))
-            im = self._deco_fit(im, 320, th, 0, zoom, ox, oy, al)
+            # 480px — 어떤 배율에서도 카드보다 넓어 내 화면 화질과 같다
+            # (서버 상한 64000 기준. 올리기 전엔 큰 신호가 조용히 버려진다).
+            th = max(60, int(480 * self.ROOM_CH / self.ROOM_CW))
+            im = self._deco_fit(im, 480, th, 0, zoom, ox, oy, al)
             base = Image.new("RGB", im.size, (255, 255, 255))
             base.paste(im, (0, 0), im)
             b64 = ""
@@ -16156,9 +16156,9 @@ class Mascot:
                 buf = _io.BytesIO()
                 base.save(buf, "JPEG", quality=q)
                 b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-                if len(b64) <= 20000:
+                if len(b64) <= 44000:
                     break
-            if len(b64) > 20000:
+            if len(b64) > 44000:
                 return None, ""
             h = hashlib.sha256(b64.encode("ascii")).hexdigest()[:10]
         except Exception:
@@ -16196,7 +16196,7 @@ class Mascot:
             raw = base64.b64decode(str(b64)[:30000])
         except Exception:
             return
-        if not raw or len(raw) > 80000:
+        if not raw or len(raw) > 120000:
             return
         try:
             import io as _io
