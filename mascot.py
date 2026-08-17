@@ -4169,6 +4169,9 @@ class Mascot:
         self._room_deco_cache = {}   # 홈 꾸미기 그림 (상한 있음)
         self._room_deco_ver = 0      # 꾸미기를 바꾸면 올라간다 (배경 다시)
         self._room_deco_btn = None   # 꾸미기 단추 자리
+        self._deco_win = None        # 꾸미기 창 (떠 있으면 드래그 조절)
+        self._deco_drag_st = None    # 드래그 시작점
+        self._deco_dims = {}         # 그림 실제 크기 (드래그 환산용)
         self._cd_mem = None          # 내 방 칸 그림의 작은 사본 (mtime 기억)
         self._cd_push = False        # 다음 신호에 그림을 실어 보낼지
         self._cd_n = 0               # 그림을 이따금만 싣는 셈
@@ -13822,19 +13825,21 @@ class Mascot:
         흐른 분'과도 견준다 — 06시 직후 굳은 오염 줄은 낮이 되면 현재
         상한은 통과해 버리므로, 쓴 시각 기준이라야 영구히 가려진다.
         """
-        if not (isinstance(row, list) and len(row) >= 3 and row[2] == day
+        # 쓴 시각이 없는 옛 형식(3칸)은 통째로 무효 — 06시 사건 때 굳은
+        # 오염 줄을 가려낼 방법이 없어서다 (준사 '유령 2시간' 제보).
+        # 새 형식은 어차피 바로 다시 쌓인다.
+        if not (isinstance(row, list) and len(row) >= 4 and row[2] == day
                 and int(row[0]) <= self._day_min() + 30):
             return False
-        if len(row) >= 4:
-            try:
-                ts = float(row[3])
-                t = time.localtime(ts - 6 * 3600)
-                start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
-                                     6, 0, 0, 0, 0, -1))
-                if int(row[0]) > (ts - start) / 60.0 + 30:
-                    return False
-            except Exception:
-                pass
+        try:
+            ts = float(row[3])
+            t = time.localtime(ts - 6 * 3600)
+            start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
+                                 6, 0, 0, 0, 0, -1))
+            if int(row[0]) > (ts - start) / 60.0 + 30:
+                return False
+        except Exception:
+            pass
         return True
 
     def _room_seen_note(self, now):
@@ -14095,16 +14100,20 @@ class Mascot:
             snd.play()
 
     def _snack_eat(self):
-        """간식을 눌렀을 때 — 첫 입은 베어 물고, 또 누르면 다 먹는다."""
+        """간식을 눌렀을 때 — 두 입 베어 물고, 세 번째에 다 먹는다.
+
+        (예전엔 두 번이었는데 세 입으로 늘렸다 — 소리도 매번 난다.)
+        """
         sn = self._snack_get()
-        if sn and not sn.get("b"):
-            sn["b"] = 1                  # 한 입 — 그림에 이빨 자국이 남는다
+        bites = int((sn or {}).get("b") or 0)
+        if sn and bites < 2:
+            sn["b"] = bites + 1          # 한 입 — 그림에 이빨 자국이 는다
             d = self._inbox_get()
             d["snack"] = sn
             self._inbox_save()
             self.smile_until = max(self.smile_until, time.time() + 2.0)
             self._safe("snack_snd", self._snack_sound, sn.get("k") or "")
-            self._say("냠", 1.6)
+            self._say("냠" if bites == 0 else "냠냠", 1.6)
             return
         kind_name = (sn or {}).get("k") or ""
         self._snack_take()
@@ -14699,6 +14708,10 @@ class Mascot:
         cv.pack(fill="both", expand=True)
         cv.bind("<Button-1>", lambda e: self._safe("room_click",
                                                    self._room_click, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe("deco_drag",
+                                                    self._deco_drag, e))
+        cv.bind("<ButtonRelease-1>",
+                lambda e: self._safe("deco_drop", self._deco_drop, e))
         cv.bind("<Motion>", lambda e: self._safe("room_hover",
                                                  self._room_hover, e))
         cv.bind("<Configure>", lambda e: self._safe("room_size",
@@ -14828,26 +14841,45 @@ class Mascot:
             col = (255, 215, 94) if period != "저녁" else (255, 122, 74)
             for r, a in ((20 * k, 60), (16 * k, 90), (12 * k, 255)):
                 ball(sx, sy, r, col, a)        # 겹친 반투명 원 = 은은한 햇무리
-        if period == "낮":
-            for cx, cy, sc in ((w - 402 * k, h * 0.30, 1.0),
-                               (w - 362 * k, h * 0.52, 0.75)):
+        if period in ("아침", "낮"):
+            # 구름·새는 띠 전체에 성기게 — 가운데에만 몰리면 허전하다
+            for _i in range(5):
+                cx = w * (0.05 + 0.90 * rnd.random())
+                cy = h * (0.18 + 0.44 * rnd.random())
+                sc = 0.55 + 0.55 * rnd.random()
                 for dx, dy, rr_ in ((0, 0, 11), (9, 3, 9), (-9, 3, 8)):
-                    ball(cx + dx * k, cy + dy * k, rr_ * k * sc,
-                         (255, 255, 255), 235)
-            for bx, by in ((w - 448 * k, h * 0.28),
-                           (w - 425 * k, h * 0.44)):
-                for sign in (-1, 1):           # 새 — 갈매기 획
-                    d2.line([(bx, by), (bx + 7 * k * sign,
-                                        by - 5 * k)],
-                            fill=(58, 94, 122, 220), width=max(2, int(k * 1.2)))
+                    ball(cx + dx * k * sc, cy + dy * k * sc, rr_ * k * sc,
+                         (255, 255, 255), 235 if period == "낮" else 200)
+            for _i in range(3):                # 새 — 갈매기 획
+                bx = w * (0.08 + 0.84 * rnd.random())
+                by = h * (0.2 + 0.35 * rnd.random())
+                for sign in (-1, 1):
+                    d2.line([(bx, by), (bx + 7 * k * sign, by - 5 * k)],
+                            fill=(58, 94, 122, 200), width=max(2, int(k * 1.2)))
         if period == "저녁":
-            for i2 in range(3):                # 노을 줄구름
-                yy = h * (0.30 + 0.18 * i2)
-                xx = w - (360 - i2 * 55) * k
-                ww, hh2 = (90 - i2 * 18) * k, 6 * k
+            for i2 in range(5):                # 노을 줄구름 — 전체에
+                yy = h * (0.22 + 0.55 * rnd.random())
+                ww = (46 + 60 * rnd.random()) * k
+                xx = (w - ww) * rnd.random()
+                hh2 = 6 * k
                 d2.rounded_rectangle([xx, yy, xx + ww, yy + hh2],
                                      radius=hh2 / 2,
                                      fill=(255, 226, 186, 130))
+        # 양옆 나무 — 시간대 색으로 (밤에는 어두운 실루엣)
+        tc = {"아침": (104, 152, 92, 215), "낮": (88, 148, 84, 225),
+              "저녁": (110, 86, 96, 205), "밤": (56, 64, 96, 220),
+              "새벽": (76, 88, 120, 205)}[period]
+
+        def tree(cx, sc):
+            d2.rectangle([cx - 2.4 * k * sc, h - 24 * k * sc,
+                          cx + 2.4 * k * sc, h], fill=tc)
+            for dx, dy, r3 in ((0, 30, 13), (-10, 21, 10), (10, 21, 10),
+                               (0, 15, 9)):
+                ball(cx + dx * k * sc, h - dy * k * sc, r3 * k * sc,
+                     tc[:3], tc[3])
+
+        tree(30 * k, 1.0)
+        tree(w - 30 * k, 0.9)
         if period in ("밤", "새벽"):
             faint = period == "새벽"
             star = (238, 234, 200, 120) if faint else (255, 242, 168, 235)
@@ -15981,15 +16013,20 @@ class Mascot:
             return None
         zoom = self._deco_zoom(what)
         ox, oy = self._deco_off(what)
-        key = (what, w, h, mt, zoom, ox, oy)
+        al = self._deco_alpha(what)
+        key = (what, w, h, mt, zoom, ox, oy, al)
         cache = self._room_deco_cache
         if key in cache:
             return cache[key]
         got = None
         try:
             im = Image.open(p).convert("RGBA")
+            kk = max(w / im.width, h / im.height) * max(0.5, min(2.5, zoom))
+            if not hasattr(self, "_deco_dims"):
+                self._deco_dims = {}
+            self._deco_dims[what] = (im.width * kk, im.height * kk, w, h)
             got = ImageTk.PhotoImage(
-                self._deco_fit(im, w, h, r, zoom, ox, oy))
+                self._deco_fit(im, w, h, r, zoom, ox, oy, al))
         except Exception:
             got = None
         if len(cache) > 12:              # 지뢰 18·42 — 오래된 절반만
@@ -15999,7 +16036,7 @@ class Mascot:
         return got
 
     @staticmethod
-    def _deco_fit(im, w, h, r=0, zoom=1.0, ox=0.0, oy=0.0):
+    def _deco_fit(im, w, h, r=0, zoom=1.0, ox=0.0, oy=0.0, alpha=1.0):
         """그림을 (w, h)에 맞춘다. zoom 1 = 꽉 채움, ox·oy(-1~1) = 위치.
 
         키우면 확대해 자르고, 줄이면 빈자리가 생긴다(투명 — 그리는 쪽이
@@ -16024,7 +16061,17 @@ class Mascot:
             ImageDraw.Draw(mask).rounded_rectangle(
                 [0, 0, im.width - 1, im.height - 1], radius=int(r), fill=255)
             im.putalpha(ImageChops.multiply(im.split()[3], mask))
+        if alpha < 0.999:                    # 불투명도 (꾸미기 슬라이더)
+            a2 = im.getchannel("A").point(lambda v: int(v * alpha))
+            im.putalpha(a2)
         return im
+
+    def _deco_alpha(self, what):
+        try:
+            return max(0.1, min(1.0, float(
+                self.us.get("room_%s_alpha" % what, 100)) / 100.0))
+        except Exception:
+            return 1.0
 
     def _deco_off(self, what):
         """꾸미기 그림 위치 설정 (-1 ~ 1, 기본 0·가운데)."""
@@ -16051,8 +16098,9 @@ class Mascot:
             return None, ""
         zoom = self._deco_zoom("card")
         ox, oy = self._deco_off("card")
+        al = self._deco_alpha("card")
         mem = getattr(self, "_cd_mem", None)
-        if mem and mem[0] == (mt, zoom, ox, oy):
+        if mem and mem[0] == (mt, zoom, ox, oy, al):
             return mem[1], mem[2]
         try:
             import base64
@@ -16061,7 +16109,7 @@ class Mascot:
             # 크기·위치 조절까지 구워서 보낸다 — 받는 쪽은 그대로 깔면 내
             # 화면과 같은 모습이 된다. 빈자리는 흰색(칸 색)으로 받친다.
             th = max(60, int(180 * self.ROOM_CH / self.ROOM_CW))
-            im = self._deco_fit(im, 180, th, 0, zoom, ox, oy)
+            im = self._deco_fit(im, 180, th, 0, zoom, ox, oy, al)
             base = Image.new("RGB", im.size, (255, 255, 255))
             base.paste(im, (0, 0), im)
             b64 = ""
@@ -16076,7 +16124,7 @@ class Mascot:
             h = hashlib.sha256(b64.encode("ascii")).hexdigest()[:10]
         except Exception:
             return None, ""
-        self._cd_mem = ((mt, zoom, ox, oy), b64, h)
+        self._cd_mem = ((mt, zoom, ox, oy, al), b64, h)
         return b64, h
 
     def _room_peer_hash_path(self):
@@ -16162,17 +16210,82 @@ class Mascot:
         cache[key] = got
         return got
 
-    def _room_deco_set(self, what):
-        """그림 파일을 골라 꾸미기로 저장한다."""
+    def _pick_image_file(self):
+        """그림 파일 고르기 창 — tkinter.filedialog 없이.
+
+        굳힌 exe 에는 안 쓰던 하위 모듈이 안 들어 있어 (지뢰 21) 준사의
+        '그림 고르기 버튼이 안 눌려요'가 됐다. 윈도우는 comdlg32, 맥은
+        AppKit 으로 직접 열고, 소스 실행이면 filedialog 로 물러난다.
+        """
+        if IS_WIN:
+            try:
+                dlg = ctypes.WinDLL("comdlg32")   # 지뢰 21 — 따로 연다
+                buf = ctypes.create_unicode_buffer(4096)
+
+                class OFN(ctypes.Structure):
+                    _fields_ = [
+                        ("lStructSize", ctypes.c_uint32),
+                        ("hwndOwner", ctypes.c_void_p),
+                        ("hInstance", ctypes.c_void_p),
+                        ("lpstrFilter", ctypes.c_wchar_p),
+                        ("lpstrCustomFilter", ctypes.c_wchar_p),
+                        ("nMaxCustFilter", ctypes.c_uint32),
+                        ("nFilterIndex", ctypes.c_uint32),
+                        ("lpstrFile", ctypes.c_wchar_p),
+                        ("nMaxFile", ctypes.c_uint32),
+                        ("lpstrFileTitle", ctypes.c_wchar_p),
+                        ("nMaxFileTitle", ctypes.c_uint32),
+                        ("lpstrInitialDir", ctypes.c_wchar_p),
+                        ("lpstrTitle", ctypes.c_wchar_p),
+                        ("Flags", ctypes.c_uint32),
+                        ("nFileOffset", ctypes.c_uint16),
+                        ("nFileExtension", ctypes.c_uint16),
+                        ("lpstrDefExt", ctypes.c_wchar_p),
+                        ("lCustData", ctypes.c_void_p),
+                        ("lpfnHook", ctypes.c_void_p),
+                        ("lpTemplateName", ctypes.c_wchar_p),
+                        ("pvReserved", ctypes.c_void_p),
+                        ("dwReserved", ctypes.c_uint32),
+                        ("FlagsEx", ctypes.c_uint32)]
+
+                ofn = OFN()
+                ofn.lStructSize = ctypes.sizeof(OFN)
+                ofn.lpstrFilter = ("그림\0*.png;*.jpg;*.jpeg;*.webp;*.bmp\0"
+                                   "모든 파일\0*.*\0\0")
+                ofn.nFilterIndex = 1
+                ofn.lpstrFile = ctypes.cast(buf, ctypes.c_wchar_p)
+                ofn.nMaxFile = 4096
+                ofn.lpstrTitle = "그림 고르기"
+                ofn.Flags = 0x00081800    # 존재하는 파일만·경로 유효·숨김 무시
+                if dlg.GetOpenFileNameW(ctypes.byref(ofn)):
+                    return buf.value
+                return ""
+            except Exception:
+                pass
+        if IS_MAC:
+            try:
+                from AppKit import NSOpenPanel
+                pan = NSOpenPanel.openPanel()
+                pan.setCanChooseFiles_(True)
+                pan.setCanChooseDirectories_(False)
+                pan.setAllowsMultipleSelection_(False)
+                if pan.runModal():
+                    return str(pan.URLs()[0].path())
+                return ""
+            except Exception:
+                pass
         try:
             from tkinter import filedialog
-            p = filedialog.askopenfilename(
+            return filedialog.askopenfilename(
                 title="그림 고르기",
                 filetypes=[("그림", "*.png *.jpg *.jpeg *.webp *.bmp"),
-                           ("모든 파일", "*.*")])
+                           ("모든 파일", "*.*")]) or ""
         except Exception:
-            self._room_toast = ("그림 고르기를 열 수 없어요", time.time())
-            return
+            return ""
+
+    def _room_deco_set(self, what):
+        """그림 파일을 골라 꾸미기로 저장한다."""
+        p = self._pick_image_file()
         if not p:
             return
         try:
@@ -16204,15 +16317,119 @@ class Mascot:
         self._safe("room_draw", self._room_draw)
         self._safe("room_push", self._room_push_now)
 
+    def _deco_editing(self):
+        """꾸미기 창이 떠 있는 동안만 드래그 위치 조절이 켜진다."""
+        w = getattr(self, "_deco_win", None)
+        try:
+            return w is not None and w.winfo_exists()
+        except Exception:
+            return False
+
+    def _deco_drag(self, e):
+        """꾸미기 창이 열려 있으면 홈에서 그림을 직접 끌어 옮긴다.
+
+        내 칸 위에서 시작한 드래그는 방 칸 그림, 그 밖은 배경 그림.
+        옮길 수 있는 폭(그림과 칸의 크기 차)의 절반을 끝까지로 본다.
+        """
+        if not self._deco_editing():
+            return
+        st = getattr(self, "_deco_drag_st", None)
+        if st is None:
+            what = "bg"
+            for x0, y0, x1, y1, slot, _s in self._room_hit:
+                if (slot == self.char and x0 <= e.x <= x1
+                        and y0 <= e.y <= y1):
+                    what = "card"
+                    break
+            if not self.us.get("room_%s_on" % what):
+                return
+            self._deco_drag_st = st = {
+                "what": what, "x": e.x, "y": e.y,
+                "ox": self._deco_off(what)[0] * 100,
+                "oy": self._deco_off(what)[1] * 100, "at": 0.0}
+            return
+        what = st["what"]
+        dims = getattr(self, "_deco_dims", {}).get(what)
+        if not dims:
+            return
+        iw, ih, aw, ah = dims
+        span_x = max(20.0, abs(aw - iw) / 2.0)
+        span_y = max(20.0, abs(ah - ih) / 2.0)
+        nx = st["ox"] + (e.x - st["x"]) / span_x * 100.0
+        ny = st["oy"] + (e.y - st["y"]) / span_y * 100.0
+        self.us["room_%s_x" % what] = int(max(-100, min(100, nx)))
+        self.us["room_%s_y" % what] = int(max(-100, min(100, ny)))
+        now = time.time()
+        if now - st["at"] > 0.09:            # 너무 잦은 다시 그리기 방지
+            st["at"] = now
+            self._room_deco_cache.clear()
+            self._room_bg = None
+            self._safe("room_draw", self._room_draw)
+
+    def _deco_drop(self, _e):
+        """드래그 끝 — 저장하고 친구들에게도 알린다 (방 칸)."""
+        st = getattr(self, "_deco_drag_st", None)
+        self._deco_drag_st = None
+        if st is None or not self._deco_editing():
+            return
+        self._save_settings()
+        self._room_deco_bump()
+
+    def _pick_color(self, init="#e7e7ea"):
+        """색 고르기 창 — tkinter.colorchooser 없이 (지뢰 21).
+
+        윈도우는 comdlg32 ChooseColorW, 아니면 tkinter 로 물러난다.
+        """
+        if IS_WIN:
+            try:
+                dlg = ctypes.WinDLL("comdlg32")
+
+                class CC(ctypes.Structure):
+                    _fields_ = [
+                        ("lStructSize", ctypes.c_uint32),
+                        ("hwndOwner", ctypes.c_void_p),
+                        ("hInstance", ctypes.c_void_p),
+                        ("rgbResult", ctypes.c_uint32),
+                        ("lpCustColors", ctypes.c_void_p),
+                        ("Flags", ctypes.c_uint32),
+                        ("lCustData", ctypes.c_void_p),
+                        ("lpfnHook", ctypes.c_void_p),
+                        ("lpTemplateName", ctypes.c_wchar_p)]
+
+                cust = (ctypes.c_uint32 * 16)()
+                cc = CC()
+                cc.lStructSize = ctypes.sizeof(CC)
+                r0, g0, b0 = (int(init[i:i + 2], 16) for i in (1, 3, 5))
+                cc.rgbResult = r0 | (g0 << 8) | (b0 << 16)
+                cc.lpCustColors = ctypes.cast(cust, ctypes.c_void_p)
+                cc.Flags = 0x103          # RGBINIT | FULLOPEN | ANYCOLOR
+                if dlg.ChooseColorW(ctypes.byref(cc)):
+                    v = cc.rgbResult
+                    return "#%02x%02x%02x" % (v & 255, (v >> 8) & 255,
+                                              (v >> 16) & 255)
+                return ""
+            except Exception:
+                pass
+        try:
+            from tkinter import colorchooser
+            got = colorchooser.askcolor(init, title="단추 색 고르기")
+            return got[1] or ""
+        except Exception:
+            return ""
+
     def _room_deco_win(self):
         """홈 꾸미기 창 — 배경·방 그림을 고르거나 되돌린다."""
         cd, u = self.card, self._ui
         win = tk.Toplevel(self.room_win or self.root)
+        self._deco_win = win             # 떠 있는 동안 드래그 조절이 켜진다
         win.title("홈 꾸미기")
         win.configure(bg=cd["panel"])
         win.resizable(False, False)
         tk.Label(win, text="홈 꾸미기", font=self._uf(12, True),
                  bg=cd["panel"], fg=cd["text"]).pack(pady=(u(16), u(4)))
+        tk.Label(win, text="이 창이 떠 있는 동안 홈에서 그림을 끌면 위치가 움직여요",
+                 font=self._uf(8), bg=cd["panel"], fg=cd["text"]
+                 ).pack(pady=(0, u(2)))
         tk.Label(win, text="배경은 내 화면에만 · 방 칸은 친구들에게도 보여요",
                  font=self._uf(8), bg=cd["panel"], fg=cd["sub"]
                  ).pack(pady=(0, u(8)))
@@ -16252,11 +16469,38 @@ class Mascot:
                 sc.bind("<ButtonRelease-1>", done)
 
             slider("크기 (%)", "room_%s_zoom" % what, 50, 250, 100)
-            slider("가로 위치", "room_%s_x" % what, -100, 100, 0)
-            slider("세로 위치", "room_%s_y" % what, -100, 100, 0)
+            slider("불투명도 (%)", "room_%s_alpha" % what, 10, 100, 100)
 
         row("배경", "bg")
         row("방 칸", "card")
+        # 반응 단추 색 — 견본 몇 개 + 직접 고르기 + 기본
+        fr2 = tk.Frame(win, bg=cd["panel"])
+        fr2.pack(padx=u(20), pady=(u(4), u(6)), fill="x")
+        tk.Label(fr2, text="단추 색", font=self._uf(10, True),
+                 bg=cd["panel"], fg=cd["text"], width=8).pack(side="left")
+
+        def set_btn_color(c2):
+            self.us["room_btn_color"] = c2
+            self._save_settings()
+            self._safe("room_draw", self._room_draw)
+
+        for c2 in ("#e7e7ea", "#d9d9de", "#ffd3e0", "#cfe2ff",
+                   "#d6ecc9", "#fff1bd", "#e3d8f7"):
+            tk.Button(fr2, text="  ", bg=c2, relief="flat", bd=1,
+                      activebackground=c2,
+                      command=lambda c3=c2: set_btn_color(c3)
+                      ).pack(side="left", padx=2)
+        tk.Button(fr2, text="직접", font=self._uf(8), relief="flat",
+                  bg="#ffffff", fg=cd["text"],
+                  command=lambda: set_btn_color(
+                      self._pick_color(self.us.get("room_btn_color")
+                                       or "#e7e7ea") or
+                      self.us.get("room_btn_color") or "")
+                  ).pack(side="left", padx=(u(6), 2))
+        tk.Button(fr2, text="기본", font=self._uf(8), relief="flat",
+                  bg="#ffffff", fg=cd["sub"],
+                  command=lambda: set_btn_color("")
+                  ).pack(side="left", padx=2)
         tk.Button(win, text="닫기", font=self._uf(9), relief="flat",
                   bg="#ffffff", fg=cd["text"], padx=u(16),
                   command=win.destroy).pack(pady=(u(10), u(16)))
@@ -16310,7 +16554,10 @@ class Mascot:
                                by + bw / 2 + 14 * k, "@all")]
         live = who is not None or pick == "*"
         x = W / 2 - row / 2
+        cust = str(self.us.get("room_btn_color") or "")
         for label, kind, col in self.ROOM_BTN:
+            if cust:                 # 단추 색 직접 고르기 (준사 — 무채색파)
+                col = cust
             on = live
             if kind == "praise":
                 # 칭찬은 목표(게이지 100%)를 채운 사람에게만 켜진다
@@ -16333,7 +16580,8 @@ class Mascot:
         dx0 = W - 20 * k - bw
         cv.create_oval(dx0 + 2, by + 2, dx0 + bw + 2, by + bw + 2,
                        fill=P["line"], width=0, tags="dyn")
-        cv.create_oval(dx0, by, dx0 + bw, by + bw, fill="#f6f0f8",
+        cv.create_oval(dx0, by, dx0 + bw, by + bw,
+                       fill=cust or "#f6f0f8",
                        outline="#ffffff", width=2, tags="dyn")
         cv.create_text(dx0 + bw / 2, by + bw / 2, text="꾸미기",
                        font=self._uf(8, True), fill=P["sub"], tags="dyn")
@@ -16531,14 +16779,18 @@ class Mascot:
             im = Image.open(p2)
             im = im.convert("RGBA")
             if bite:
-                # 이빨 자국 — 알파에서 원 두 개를 빼낸다
+                # 이빨 자국 — 알파에서 원을 빼낸다 (입 수만큼 늘어난다)
                 from PIL import ImageChops, ImageDraw
                 mask = Image.new("L", im.size, 0)
                 dr = ImageDraw.Draw(mask)
                 w, h = im.size
                 r = max(6, int(min(w, h) * 0.20))
-                for mx, my in ((int(w * 0.80), int(h * 0.22)),
-                               (int(w * 0.62), int(h * 0.10))):
+                spots = [(int(w * 0.80), int(h * 0.22)),
+                         (int(w * 0.62), int(h * 0.10))]
+                if int(bite) >= 2:           # 두 입째 — 왼쪽 위도 베어 문다
+                    spots += [(int(w * 0.42), int(h * 0.16)),
+                              (int(w * 0.24), int(h * 0.08))]
+                for mx, my in spots:
                     dr.ellipse([mx - r, my - r, mx + r, my + r], fill=255)
                 im.putalpha(ImageChops.subtract(im.getchannel("A"), mask))
             w, h = im.size
@@ -17315,6 +17567,10 @@ class Mascot:
             pass
 
     def _room_click(self, e):
+        if self._deco_editing():
+            db = self._room_deco_btn
+            if not (db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]):
+                return       # 꾸미기 중 — 클릭·드래그는 위치 조절에 쓴다
         for box, dxn in list(getattr(self, "_room_page_btn", [])):
             if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
                 self._room_page = max(0, min(
