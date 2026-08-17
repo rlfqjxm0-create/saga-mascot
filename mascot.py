@@ -15015,6 +15015,10 @@ class Mascot:
                 x0 = (im0.width - int(W)) // 2
                 y0 = (im0.height - int(top)) // 2
                 im0 = im0.crop((x0, y0, x0 + int(W), y0 + int(top)))
+                # 글자가 놓이는 왼쪽 절반의 밝기 — 글자색을 고르는 기준
+                lums = im0.crop((0, 0, max(1, int(W * 0.45)), int(top)))
+                st2 = lums.resize((16, 8)).convert("L")
+                self._sky_lum = sum(st2.getdata()) / 128.0
                 self._sky_key = key
                 self._sky_img = ImageTk.PhotoImage(im0)
                 return self._sky_img
@@ -15121,6 +15125,9 @@ class Mascot:
                            fill=sample + (255,))
         im = Image.alpha_composite(im.convert("RGBA"), ov)
         im = im.resize((int(W), int(top)), Image.LANCZOS)
+        lums = im.crop((0, 0, max(1, im.width * 45 // 100), im.height))
+        st2 = lums.resize((16, 8)).convert("L")
+        self._sky_lum = sum(st2.getdata()) / 128.0
         self._sky_img = ImageTk.PhotoImage(im)
         self._sky_key = key
         return self._sky_img
@@ -15265,40 +15272,52 @@ class Mascot:
         cv.create_text(x, y, text=text, font=font, fill=fill, anchor=anchor,
                        tags=tags)
 
-    def _soft_gauge(self, cv, x0, y0, x1, y1, r, col, tags="dyn"):
-        """게이지 채움 — 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함).
+    def _soft_gauge(self, cv, x0, y0, x1, y1, r, col, frac, edge,
+                    tags="dyn"):
+        """게이지 한 장 — 바탕·테두리·그라데이션 채움을 같이 굽는다.
 
-        PIL로 매끈하게 그린다. 채움 폭이 1초마다 바뀌지는 않으므로
-        (분 단위) 캐시가 튀지 않는다 — 폭은 2px 단위로 묶는다.
+        채움과 바탕을 따로 그리면 이음매에 흰 틈이 생긴다 (제보).
+        한 그림이면 틈이 있을 수 없다. 채움 비율은 1% 단위로 묶어 캐시.
         """
-        w = max(2, int(round((x1 - x0) / 2.0)) * 2)
+        w = max(4, int(x1 - x0))
         h = max(2, int(y1 - y0))
-        key = ("gauge", w, h, col)
+        fr = max(0.0, min(1.0, frac))
+        fq = int(round(fr * 100))
+        key = ("gauge", w, h, col, edge, fq)
         ph = self._soft_cache.get(key)
         if ph is None:
             S = 3
-            lite = self._tint(col, 0.55)
-            dark = self._shade(col, 0.12)
 
             def hx(c):
                 return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
 
-            c1, c2 = hx(lite), hx(dark)
             im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
             dr = ImageDraw.Draw(im)
-            for xx in range(w * S):        # 가로 그라데이션
-                t = xx / max(1, w * S - 1)
-                dr.line([(xx, 0), (xx, h * S)],
-                        fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t)
-                                   for i in range(3)) + (255,))
-            mask = Image.new("L", (w * S, h * S), 0)
-            ImageDraw.Draw(mask).rounded_rectangle(
-                [0, 0, w * S - 1, h * S - 1], radius=int(r * S), fill=255)
-            im.putalpha(mask)
+            dr.rounded_rectangle([0, 0, w * S - 1, h * S - 1],
+                                 radius=int(r * S), fill="#ffffff",
+                                 outline=edge, width=S)
+            fw = int(w * S * fq / 100)
+            if fw > 2:
+                c1, c2 = hx(self._tint(col, 0.55)), hx(self._shade(col, 0.12))
+                fill = Image.new("RGBA", (fw, h * S), (0, 0, 0, 0))
+                fd = ImageDraw.Draw(fill)
+                for xx in range(fw):       # 왼쪽 연함 → 오른쪽 진함
+                    t = xx / max(1, fw - 1)
+                    fd.line([(xx, 0), (xx, h * S)],
+                            fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t)
+                                       for i in range(3)) + (255,))
+                mask = Image.new("L", (w * S, h * S), 0)
+                ImageDraw.Draw(mask).rounded_rectangle(
+                    [0, 0, w * S - 1, h * S - 1], radius=int(r * S), fill=255)
+                fill_full = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+                fill_full.paste(fill, (0, 0))
+                im.paste(fill_full, (0, 0), Image.composite(
+                    mask, Image.new("L", mask.size, 0),
+                    fill_full.getchannel("A")))
             im = im.resize((w, h), Image.LANCZOS)
             ph = ImageTk.PhotoImage(im)
-            if len(self._soft_cache) > 200:
-                for k2 in list(self._soft_cache)[:100]:
+            if len(self._soft_cache) > 300:
+                for k2 in list(self._soft_cache)[:150]:
                     self._soft_cache.pop(k2, None)
             self._soft_cache[key] = ph
         cv.create_image(int(x0), int(y0), image=ph, anchor="nw", tags=tags)
@@ -15452,20 +15471,22 @@ class Mascot:
         self._safe("room_sky", self._room_sky_draw, cv, W, top, k, period)
         ink2, sub2 = self.SKY[period][1], self.SKY[period][2]
         self._room_cal_btn = None    # 달력 아이콘은 내 칸에서 그린다
-        # 그림 하늘 위에서도 읽히게 — 글자색과 반대 밝기의 후광을 두른다
-        _ink_rgb = tuple(int(ink2[i:i + 2], 16) for i in (1, 3, 5))
-        halo2 = ("#ffffff" if (0.299 * _ink_rgb[0] + 0.587 * _ink_rgb[1]
-                               + 0.114 * _ink_rgb[2]) < 140 else "#3a3347")
-        self._halo_text(cv, 28 * k, mid - 9 * k, "HOME",
-                        self._uf(13, True), ink2, halo2)
+        # 하늘 밝기를 실측해 글자색을 고른다 — 어두운 하늘엔 흰 글자,
+        # 밝은 하늘엔 어두운 글자 (테두리 없이 색으로만)
+        lum = getattr(self, "_sky_lum", None)
+        if lum is not None:
+            ink2 = "#ffffff" if lum < 150 else "#463f56"
+            sub2 = "#efeaf6" if lum < 150 else "#6e6880"
+        cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
+                       font=self._uf(13, True), fill=ink2, tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
         on = sum(1 for q in people if not q.get("off"))
         # 왜 안 되는지 여기서 바로 보이게. 지금까지는 RoomNet 이 오류를
         # 들고만 있고 아무 데도 안 보여 줘서, 친구 화면에서는 '다들 안 켰네'
         # 로만 보였다 (사가가 방에 못 붙는데도 그 이유를 알 수 없었다).
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
-        self._halo_text(cv, 28 * k, mid + 11 * k, sub, self._uf(9), sub2,
-                        halo2, d=1.1)
+        cv.create_text(28 * k, mid + 11 * k, anchor="w", text=sub,
+                       font=self._uf(9), fill=sub2, tags="dyn")
         # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
         # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
@@ -15967,16 +15988,13 @@ class Mascot:
         by = py0 + 48 * k
         cv.create_text(bx0 - 6 * k, by + 5 * k, anchor="e", text=tlab,
                        font=self._uf(8), fill=P["sub"], tags="dyn")
-        # 바탕은 흰색, 채움은 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함)
-        self._rr(cv, bx0, by, bx1, by + 11 * k, 5 * k, fill="#ffffff",
-                 outline=self._tint(col, 0.55), width=1)
+        # 바탕·테두리·그라데이션 채움을 한 장으로 — 틈이 없다
         pr = max(0.0, min(1.0, float(p.get("p") or 0)))
-        if pr > 0.01:
-            raw = self._room_raw(slot)
-            if off:
-                raw = self._tint(raw, 0.5)
-            self._safe("soft_btn", self._soft_gauge, cv, bx0, by,
-                       bx0 + (bx1 - bx0) * pr, by + 11 * k, 5 * k, raw)
+        raw = self._room_raw(slot)
+        if off:
+            raw = self._tint(raw, 0.5)
+        self._safe("soft_btn", self._soft_gauge, cv, bx0, by, bx1,
+                   by + 11 * k, 5 * k, raw, pr, self._tint(col, 0.55))
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
                        text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
         sg = p.get("sg")

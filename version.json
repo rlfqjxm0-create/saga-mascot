@@ -1,7 +1,7 @@
 {
- "version": 1786959400,
+ "version": 1786959900,
  "files": {
-  "mascot.py": "63d2cdf1b567a7e097fb5f3b066269e02a28278e2eacf075f445c56d072cf7d8",
+  "mascot.py": "199d85d77e357e754a2a8f507ebd8baf7d3c20cb9523ed9167faef1b64462e46",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -337,6 +337,10 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "새 주민 '락스'(까만 고양이)가 이사 왔어요 — 홈에서 만나요",
+  "홈 디자인 단장 — 카드 그림자, 부드러운 단추, 커진 타이틀 하늘",
+  "게이지가 각자 테마색 그라데이션으로 바뀌었어요",
+  "하늘 밝기에 따라 홈 글자색이 저절로 바뀌어요"
+ ]
 }
