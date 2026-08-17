@@ -14984,7 +14984,7 @@ class Mascot:
 
     # 시간대 → (하늘색, 글자색, 보조색). 그림은 _room_sky_draw 가 그린다.
     # '오늘 다 같이' 게이지의 시간대별 테마색 (그라데이션의 바탕색)
-    SKY_BAR = {"아침": "#f2a05a", "낮": "#57b1ef", "저녁": "#ef8562",
+    SKY_BAR = {"아침": "#f2a05a", "낮": "#57b1ef", "저녁": "#ee7f9b",
                "밤": "#6d7fd8", "새벽": "#9a86d6"}
     SKY_EN = {"아침": "morning", "낮": "day", "저녁": "dusk",
               "밤": "night", "새벽": "dawn"}
@@ -15203,11 +15203,10 @@ class Mascot:
         now = time.time()
         for i, (item, desk_item, slot, base, sleeping, pose) in enumerate(
                 self._room_body):
+            # 깡총 뛰기는 어색하다는 제보로 뺐다 — 숨쉬기만 잔잔하게
             bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self._room_k())
             if sleeping:
                 bob *= 0.6
-            else:
-                bob += self._room_hop(slot, now, self._room_k())
             try:
                 x, y = cv.coords(item)
                 # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
@@ -15359,14 +15358,14 @@ class Mascot:
                     fd.line([(xx, 0), (xx, h * S)],
                             fill=tuple(int(c1[i] + (c2[i] - c1[i]) * t)
                                        for i in range(3)) + (255,))
-                mask = Image.new("L", (w * S, h * S), 0)
-                ImageDraw.Draw(mask).rounded_rectangle(
-                    [0, 0, w * S - 1, h * S - 1], radius=int(r * S), fill=255)
+                # 채움 자체를 둥근 알약으로 — 끝이 각지지 않는다
+                rr2 = max(1, min(int(r * S), fw // 2, h * S // 2))
+                fmask = Image.new("L", (w * S, h * S), 0)
+                ImageDraw.Draw(fmask).rounded_rectangle(
+                    [0, 0, fw - 1, h * S - 1], radius=rr2, fill=255)
                 fill_full = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
                 fill_full.paste(fill, (0, 0))
-                im.paste(fill_full, (0, 0), Image.composite(
-                    mask, Image.new("L", mask.size, 0),
-                    fill_full.getchannel("A")))
+                im.paste(fill_full, (0, 0), fmask)
             im = im.resize((w, h), Image.LANCZOS)
             ph = ImageTk.PhotoImage(im)
             if len(self._soft_cache) > 300:
