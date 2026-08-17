@@ -5047,7 +5047,9 @@ class Mascot:
         P = SHADOW_PAD
         comp = Image.new("RGBA", (self.W + 2 * P, self.H + 2 * P), (0, 0, 0, 0))
         parts = ["body_open", "scarf", "lashes", "hair", "head", "desk"]
-        if not typing:
+        # 펜이 큰 캐릭터(락스 깃펜)는 그림자를 빼는 쪽이 낫다 — 펜 팔은
+        # 커서를 따라 움직이는데 그림자는 제자리에 있어 어긋나 보인다.
+        if not typing and self.cfg.get("shadow_pen", True):
             parts.append("arm_pen")
         for name in parts:
             if name in self._pil_cache:
@@ -15359,10 +15361,22 @@ class Mascot:
         # 처음 만들 때 준 값에서 안 변한다).
         W = cv.winfo_width() or int(cv["width"])
         H = cv.winfo_height() or int(cv["height"])
-        top = int(self.ROOM_TOP * k)
+        people = self._room_seats()
+        # 타이틀 띠 높이 — 카드 묶음의 위·아래 여백을 똑같이 맞추고, 남는
+        # 세로 공간은 띠가 흡수한다 (하늘 그림이 더 크게 보인다).
+        base_top = int(self.ROOM_TOP * k)
+        cols0 = max(1, self._room_cols)
+        page_n0 = max(1, min(self.ROOM_PAGE,
+                             cols0 * max(1, self._room_rows)))
+        rows0 = max(1, -(-max(1, min(len(people), page_n0)) // cols0))
+        gap0 = int(16 * k)
+        slack = (H - int(126 * k) - base_top - rows0 * int(self.ROOM_CH * k)
+                 - 2 * gap0)
+        top = min(base_top + max(0, slack), int(base_top * 1.9))
+        self._room_top_px = top
         # 안 변하는 것(벽지 점 500여 개)을 매 프레임 다시 그리면 한 프레임이
         # 25ms를 넘는다. 배경은 한 번만 그리고 움직이는 것만 지웠다 그린다.
-        key = (W, H, P["wall"], self._room_deco_ver)
+        key = (W, H, P["wall"], self._room_deco_ver, top)
         if self._room_bg != key:
             self._room_bg = key
             cv.delete("all")
@@ -15389,7 +15403,6 @@ class Mascot:
         period = self._sky_period()
         self._safe("room_sky", self._room_sky_draw, cv, W, top, k, period)
         ink2, sub2 = self.SKY[period][1], self.SKY[period][2]
-        people = self._room_seats()
         self._room_cal_btn = None    # 달력 아이콘은 내 칸에서 그린다
         cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
                        font=self._uf(13, True), fill=ink2, tags="dyn")
@@ -15479,7 +15492,8 @@ class Mascot:
         # 타이틀 띠 바로 밑에 첫 줄이 붙으면 말풍선이 하늘에 닿는다 —
         # 최소 간격을 두고, 남는 공간이 있으면 그 안에서 가운데로.
         gap = int(16 * k)
-        voff = gap + max(0, (H2 - int(126 * k) - top - gap
+        # 위·아래 여백이 똑같도록 남는 공간을 반씩 — 카드 묶음이 정중앙에
+        voff = gap + max(0, (H2 - int(126 * k) - top - 2 * gap
                              - rows_used * chh) // 2)
         self._room_voff = voff
         for i, p in enumerate(people):
@@ -15550,7 +15564,7 @@ class Mascot:
         rh = 26 * k
         pw = min(W - 16 * k, 286 * k)
         px = W - pw - 10 * k
-        py = self.ROOM_TOP * k + 6 * k
+        py = getattr(self, "_room_top_px", self.ROOM_TOP * k) + 6 * k
         head = (74 if can_play else 48) * k
         max_rows = max(1, int((H - py - head - 30 * k) // rh))
         rows = songs[:max_rows]
@@ -15708,7 +15722,8 @@ class Mascot:
         ph = 76 * k + rh * max(1, len(rows))
         card = self._room_inbox_card or (10 * k, 10 * k, 10 * k + pw, 10 * k)
         px = min(max(8 * k, card[0] + 6 * k), W - pw - 8 * k)
-        py = min(max(self.ROOM_TOP * k + 4 * k, card[3] - 44 * k), H - ph - 8 * k)
+        py = min(max(getattr(self, "_room_top_px", self.ROOM_TOP * k) + 4 * k,
+                     card[3] - 44 * k), H - ph - 8 * k)
         # 카드도 희고 목록도 희어서, 테두리를 내 테마색으로 해야 떠 보인다
         mine = self._room_tone(self.char)
         self._rr(cv, px + 3 * k, py + 4 * k, px + pw + 3 * k, py + ph + 4 * k,
