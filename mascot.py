@@ -2015,6 +2015,8 @@ CHARS = [
      "tint": "#e08a6a"},
     {"slot": "parts_renyang", "repo": "renyang-mascot", "name": "레냥",
      "tint": "#ee9d2b"},
+    {"slot": "parts_lax", "repo": "lax-mascot", "name": "락스",
+     "tint": "#48484c"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -6944,6 +6946,7 @@ class Mascot:
 
     def _yt_forget(self):
         """재생기가 사라졌다고 표시만 한다 (프로세스 정리는 _yt_stop)."""
+        self._pl_on = False          # 재생기가 죽었으면 플레이리스트도 끝
         self._yt_proc = None
         self._yt = {}
         self._yt_want = False
@@ -14461,8 +14464,16 @@ class Mascot:
                         "seat_pen.png", "seat_pen2.png", "seat_meta.json"):
                 if os.path.isfile(os.path.join(HERE, slot, tag)):
                     continue                      # 원본이 여기 있다
-                if not os.path.isfile(os.path.join(self._room_art_dir(),
-                                                   "%s_%s" % (slot, tag))):
+                got = os.path.join(self._room_art_dir(),
+                                   "%s_%s" % (slot, tag))
+                try:
+                    # 받아 둔 그림도 하루가 지나면 다시 받는다 — 앉은 모습을
+                    # 고쳐 배포해도 (연어 왼팔 사건) 옛 그림으로 영영 굳지 않게.
+                    fresh = (os.path.isfile(got) and
+                             time.time() - os.path.getmtime(got) < 86400)
+                except Exception:
+                    fresh = os.path.isfile(got)
+                if not fresh:
                     need.append((slot, tag))
         if not need or self._room_art_th is not None:
             return
@@ -14485,6 +14496,10 @@ class Mascot:
                     with open(tmp, "wb") as fp:
                         fp.write(raw)
                     os.replace(tmp, tmp[:-4])
+                    # 새로 받았으면 그리기 캐시도 비워 이번 실행에서 바로
+                    # 새 그림이 보이게 한다 (안 비우면 재시작 전까지 옛 그림)
+                    base = tag.rsplit(".", 1)[0]
+                    self._room_img_cache.pop((slot, base), None)
                 except Exception:
                     self._room_art_bad.add(slot)
             self._room_art_th = None
