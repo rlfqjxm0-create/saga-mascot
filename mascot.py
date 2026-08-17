@@ -4799,6 +4799,8 @@ class Mascot:
             padded.paste(im, (m, 0))
             self.hop[name] = {"pil": padded, "anchor": (anchor_x + m, top),
                               "off": (-m, 0), "cache": {}}
+        self._pen_vec = None
+        self._safe("pen_vec", self._pen_vec_setup)
 
         # 오른팔: 늘리기용. 좌우 반전본은 박수처럼 팔이 몸 안쪽을 향해야 할 때
         # 쓴다 (원본은 바깥으로 휘어 있어 안쪽으로 모으면 어색하다).
@@ -12304,10 +12306,18 @@ class Mascot:
         if e is None:
             return None
         src, (nx, ny), atop, _abot = e
-        nat_len = max(math.hypot(nx, ny), 8.0)
         cur_len = max(math.hypot(dx, dy), 8.0)
-        k = max(0.25, min(3.0, cur_len / nat_len))   # 늘이기 배율 상한선
-        deg = math.degrees(math.atan2(dx, dy) - math.atan2(nx, ny))
+        # 팔은 세로로만 늘린다(굵기는 그대로). 그래서 배율을 길이 비
+        # (cur/nat)로 잡으면 팔이 사선일수록 끝이 목표에 못 미친다 —
+        # 가로 성분(nx)은 안 늘어나기 때문이다. 늘린 뒤 벡터
+        # (nx, ny*k)의 길이가 정확히 cur_len 이 되는 k 를 쓴다.
+        # (연어: nat 벡터가 (-15, 20)이라 손끝이 5px 넘게 떠서 펜이
+        #  팔에서 떨어져 보였다.)
+        ny_a = max(abs(ny), 1.0)
+        inner = cur_len * cur_len - nx * nx
+        k = math.sqrt(inner) / ny_a if inner > 1.0 else 0.25
+        k = max(0.25, min(3.0, k))
+        deg = math.degrees(math.atan2(dx, dy) - math.atan2(nx, ny * k))
         key = (round(k * 25), round(deg), which)
         hit = self._arm_cache.get(key)
         if hit is None:
@@ -12701,11 +12711,22 @@ class Mascot:
             # 어깨가 1~2px 오르내리는 것은 그린 위치만 옮겨 표현한다.
             sx, sy = self.arm_top
             hx_, hy_ = self.arm_bottom[0] + ddx, self.arm_bottom[1] + ddy
-            arm = self._stretched_arm(hx_ - sx, hy_ - sy)
+            # 펜을 팔 각도로 돌리고 손목을 팔 끝에 붙인다 — 안 그러면
+            # 연어처럼 펜 파츠가 길쭉한 캐릭터는 팔 끝에서 펜만 삐죽
+            # 떨어져 나와 보인다. 붙이면 펜 끝이 목표보다 더 나가므로,
+            # 팔 끝(=펜 손목)을 펜 길이만큼 당겨 잡는다.
+            if self.cfg.get("pen_pin"):
+                # 펜을 팔 끝에 붙여 따라다니게 한다 (돌리지는 않는다 —
+                # 돌리면 펜이 누워 이상해 보인다). 팔이 사선인 캐릭터는
+                # 평행이동만으로는 손목이 팔 끝에서 벌어진다.
+                arm = self._stretched_arm(hx_ - sx, hy_ - sy)
+                self._pen_draw = (hx_, hy_ + yo * 0.25, None, True)
+            else:
+                arm = self._stretched_arm(hx_ - sx, hy_ - sy)
+                self._pen_draw = (px + ddx, py + ddy, None)
             if arm is not None:
                 c.create_image(sx - arm[1][0], sy - arm[1][1] + yo * 0.25,
                                image=arm[0], anchor="nw")
-            self._pen_draw = (px + ddx, py + ddy)
             if not self.cfg.get("pen_over_head"):
                 self._draw_pen_hand()
             self._draw_left(now, f)
@@ -12728,6 +12749,22 @@ class Mascot:
                         self._pen_playing = False
 
 
+    def _pen_vec_setup(self):
+        """펜 손목(회전 앵커)에서 펜 끝까지의 벡터 — 팔 끝을 당길 때 쓴다."""
+        try:
+            h = self.hop.get("arm_pen")
+            if h is None:
+                self._pen_vec = None
+                return
+            ax, ay = h["anchor"]
+            m = -h["off"][0]           # 회전 여유 패딩 (off 에 음수로 들어 있다)
+            tipx, tipy = self.cfg.get(
+                "pen_tip", self.layout["arm_pen"]["pen_tip"])
+            s = self.s
+            self._pen_vec = ((tipx * s + m) - ax, tipy * s - ay)
+        except Exception:
+            self._pen_vec = None
+
     def _draw_pen_hand(self):
         """펜 쥔 손. 퀸시처럼 펜이 맨 위 레이어인 캐릭터는 머리를 그린 뒤 호출.
 
@@ -12736,7 +12773,22 @@ class Mascot:
         d = self._pen_draw
         if not d:
             return
-        px, py = d
+        px, py = d[0], d[1]
+        ang = d[2] if len(d) > 2 else None
+        pin = len(d) > 3 and d[3]
+        if pin and "arm_pen" in self.hop:
+            # 손목(회전 앵커 = 파츠 위쪽 중앙)을 팔 끝에 딱 맞춘다
+            ax, ay = self.hop["arm_pen"]["anchor"]
+            self.canvas.create_image(
+                px - ax, py - ay,
+                image=self._rotated_hop("arm_pen", ang or 0), anchor="nw")
+            return
+        if ang is not None and "arm_pen" in self.hop:
+            offx, offy = self.hop["arm_pen"]["off"]
+            self.canvas.create_image(
+                px + offx, py + offy,
+                image=self._rotated_hop("arm_pen", ang), anchor="nw")
+            return
         self._put("arm_pen", px, py)
         self._pen_draw = None
 
