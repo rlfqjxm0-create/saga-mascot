@@ -2468,16 +2468,21 @@ class TodoPanel:
                 s2 = -1 if self.flip else 1
                 base = (r if self.flip else w - r) + dx
                 bin_ = base - tw_ * s2
-                by = dy + h - 2
+                lo, hi = min(base, bin_), max(base, bin_)
                 tipx = base + th_ * 0.7 * s2
                 tipy = dy + h + th_ - 2
-                d.polygon([(bin_ * S, by * S), (tipx * S, tipy * S),
-                           (base * S, by * S)], fill=f)
+                # 몸통 아랫변 테두리 띠(굵기 lw)를 먼저 채움색으로 지운다 —
+                # 세모만 얹으면 이음매에 가로선이 남는다 (제보)
+                d.rectangle([lo * S, (dy + h - 4) * S,
+                             hi * S - 1, (dy + h) * S - 1], fill=f)
+                d.polygon([(bin_ * S, (dy + h - 3) * S),
+                           (tipx * S, tipy * S),
+                           (base * S, (dy + h - 3) * S)], fill=f)
                 if o:
-                    d.line([(bin_ * S, (by + 1) * S), (tipx * S, tipy * S)],
-                           fill=o, width=lw)
-                    d.line([(tipx * S, tipy * S), (base * S, (by + 1) * S)],
-                           fill=o, width=lw)
+                    d.line([(bin_ * S, (dy + h - 1) * S),
+                            (tipx * S, tipy * S)], fill=o, width=lw)
+                    d.line([(tipx * S, tipy * S),
+                            (base * S, (dy + h - 1) * S)], fill=o, width=lw)
 
             body(2, 3, "#e6e2e8", None)          # 그림자
             tail(2, 3, "#e6e2e8", None)
