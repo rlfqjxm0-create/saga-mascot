@@ -15475,8 +15475,10 @@ class Mascot:
         # 밝은 하늘엔 어두운 글자 (테두리 없이 색으로만)
         lum = getattr(self, "_sky_lum", None)
         if lum is not None:
-            ink2 = "#ffffff" if lum < 150 else "#463f56"
-            sub2 = "#efeaf6" if lum < 150 else "#6e6880"
+            # 문턱 170: 실측 — 아침 214·낮 200(어두운 글자) /
+            # 저녁 148·새벽 115·밤 54(흰 글자). 노을도 밝은 글자로.
+            ink2 = "#ffffff" if lum < 170 else "#463f56"
+            sub2 = "#efeaf6" if lum < 170 else "#6e6880"
         cv.create_text(28 * k, mid - 9 * k, anchor="w", text="HOME",
                        font=self._uf(13, True), fill=ink2, tags="dyn")
         live = time.time() - (self.room_net.ok_at if self.room_net else 0)
@@ -15565,6 +15567,9 @@ class Mascot:
         # 타이틀 띠 바로 밑에 첫 줄이 붙으면 말풍선이 하늘에 닿는다 —
         # 최소 간격을 두고, 남는 공간이 있으면 그 안에서 가운데로.
         gap = int(16 * k)
+        # 페이지마다 배치가 같도록 줄 수는 '가득 찬 페이지' 기준으로 —
+        # 2페이지에 몇 명 없어도 1페이지와 같은 자리에 그려진다
+        rows_used = max(1, -(-page_n // cols))
         # 위·아래 여백이 똑같도록 남는 공간을 반씩 — 카드 묶음이 정중앙에
         voff = gap + max(0, (H2 - int(126 * k) - top - 2 * gap
                              - rows_used * chh) // 2)
@@ -15573,15 +15578,34 @@ class Mascot:
             cx0 = left + (i % cols) * cw
             cy0 = top + voff + (i // cols) * chh
             self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
-        # 마지막 줄에 남는 칸도 카드 모양만 그려 둔다. 비워 두면 그 줄만
-        # 휑하게 뚫려 보인다.
+        # 빈 칸도 아홉 칸을 다 채운다 — 흰 판만 두면 허전하니 바닥 띠와
+        # 빈 이름표까지 얹어 "빈 방"처럼 보이게 한다.
         used = len(people)
-        for i in range(used, -(-used // cols) * cols):
+        mut = "#b9a7b4"                       # 중립 모브 (벽지와 어울림)
+        for i in range(used, page_n):
             cx0 = left + (i % cols) * cw
             cy0 = top + voff + (i // cols) * chh
-            self._rr(cv, cx0 + 8 * k, cy0 + 6 * k, cx0 + cw - 8 * k,
-                     cy0 + chh - 16 * k, 18 * k, fill=P["card"],
-                     outline=P["line"], width=1)
+            ex0, ey0 = cx0 + 8 * k, cy0 + 6 * k
+            ex1, ey1 = cx0 + cw - 8 * k, cy0 + chh - 16 * k
+            self._safe("soft_btn", self._card_shadow, cv, ex0, ey0, ex1, ey1,
+                       18 * k)
+            self._rr(cv, ex0, ey0, ex1, ey1, 18 * k, fill=P["card"], width=0)
+            floor_e = ey1 - 74 * k
+            self._rr(cv, ex0, floor_e, ex1, ey1, 18 * k,
+                     fill=self._tint(mut, 0.78), width=0)
+            cv.create_rectangle(ex0, floor_e, ex1, floor_e + 14 * k,
+                                fill=self._tint(mut, 0.78), width=0,
+                                tags="dyn")
+            self._rr(cv, ex0, ey0, ex1, ey1, 18 * k, fill="",
+                     outline=P["line"], width=2)
+            ecx = (ex0 + ex1) / 2
+            self._rr_soft(cv, ecx - 26 * k, floor_e - 12 * k,
+                          ecx + 26 * k, floor_e + 12 * k, 12 * k,
+                          fill="#ffffff", outline=self._tint(mut, 0.4),
+                          width=2)
+            cv.create_text(ecx, floor_e, text="···",
+                           font=self._uf(9, True),
+                           fill=self._tint(mut, 0.15), tags="dyn")
         # 보낼 상대 찾기는 전체 명단으로 — 고른 사람이 다른 페이지에 있어도
         self._room_bar(cv, W, H, P, k, allp)
         # 페이지 화살표 — 카드 그리드 오른쪽·왼쪽 가운데
