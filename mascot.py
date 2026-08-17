@@ -2379,6 +2379,7 @@ class TodoPanel:
         else:
             self.top.attributes("-transparentcolor", bg)
         self.top.config(bg=bg)
+        self._key = bg               # 색상키 — 매끈 말풍선 미리 섞기용
         self.canvas = tk.Canvas(self.top, width=self.W, height=10, bg=bg,
                                 highlightthickness=0)
         self.canvas.pack()
@@ -2430,6 +2431,75 @@ class TodoPanel:
             self.offset = (-(self.W + 4), self.offset[1])
         if self.on_zoom is not None:
             self.on_zoom(self.zoom)
+
+    def _soft_item(self, w, h, r, fill, outline, key):
+        """말풍선 한 칸(그림자+몸통+꼬리)을 PIL 한 장으로 — 계단 제거.
+
+        색상키 창이라 반투명이 못 남는다. 3배로 그려 줄인 뒤 가장자리
+        반투명을 키 색과 미리 섞어 불투명으로 만든다(알파 40 미만은
+        버린다). 실패하면 None — 기존 Tk 다각형 경로로 물러난다.
+        """
+        w, h, r = int(w), int(h), int(r)
+        key2 = tuple(int(str(key)[i:i + 2], 16) for i in (1, 3, 5))
+        ck = (w, h, r, fill, outline, self.flip, self.TAIL_W, self.TAIL_H,
+              key2)
+        cache = getattr(self, "_bub_cache", None)
+        if cache is None:
+            cache = self._bub_cache = {}
+        got = cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            from PIL import ImageDraw
+            S = 3
+            tw_, th_ = self.TAIL_W, self.TAIL_H
+            W2, H2 = w + 3, h + th_ + 4
+            im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            lw = 2 * S
+
+            def body(dx, dy, f, o):
+                d.rounded_rectangle(
+                    [dx * S + lw // 2, dy * S + lw // 2,
+                     (dx + w) * S - 1 - lw // 2, (dy + h) * S - 1 - lw // 2],
+                    radius=r * S, fill=f, outline=o or None, width=lw)
+
+            def tail(dx, dy, f, o):
+                s2 = -1 if self.flip else 1
+                base = (r if self.flip else w - r) + dx
+                bin_ = base - tw_ * s2
+                by = dy + h - 2
+                tipx = base + th_ * 0.7 * s2
+                tipy = dy + h + th_ - 2
+                d.polygon([(bin_ * S, by * S), (tipx * S, tipy * S),
+                           (base * S, by * S)], fill=f)
+                if o:
+                    d.line([(bin_ * S, (by + 1) * S), (tipx * S, tipy * S)],
+                           fill=o, width=lw)
+                    d.line([(tipx * S, tipy * S), (base * S, (by + 1) * S)],
+                           fill=o, width=lw)
+
+            body(2, 3, "#e6e2e8", None)          # 그림자
+            tail(2, 3, "#e6e2e8", None)
+            body(0, 0, fill, outline)
+            tail(0, 0, fill, outline)
+            im = im.resize((W2, H2), Image.LANCZOS)
+            a = im.split()[3]
+            # 키 색이 거의 검정이라 그대로 섞으면 흰 바탕에서 어두운
+            # 얼룩 테가 진다 — 섞는 비율에 하한(55%)을 둬 중간톤으로.
+            a3 = a.point(lambda v: 140 + v * 115 // 255 if v >= 40 else 0)
+            rgb = Image.composite(im.convert("RGB"),
+                                  Image.new("RGB", im.size, key2), a3)
+            a2 = a.point(lambda v: 255 if v >= 40 else 0)
+            got = ImageTk.PhotoImage(Image.merge("RGBA", (*rgb.split(),
+                                                          a2)))
+        except Exception:
+            return None
+        if len(cache) > 40:                      # 지뢰 18 — 오래된 절반만
+            for old in list(cache)[:20]:
+                cache.pop(old, None)
+        cache[ck] = got
+        return got
 
     def _rrect(self, x0, y0, x1, y1, r, **kw):
         """그냥 둥근 사각형 — 꼬리 때문에 모양이 일그러지지 않게 따로 그린다."""
@@ -2573,14 +2643,19 @@ class TodoPanel:
         for i, (item, h) in enumerate(zip(todos, heights)):
             text = todo_text(item)
             r = round(13 * self.k)
-            self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
-                        fill="#e6e2e8", outline="")      # 그림자
-            self._tail(x0 + 2, x1 + 2, y + h, r, "#e6e2e8", dx=0, dy=3)
             tint = (tints[i] if tints and i < len(tints) and tints[i]
                     else None)
-            self._rrect(x0, y, x1, y + h, r, fill="#ffffff",
-                        outline=tint or cd["border"], width=2)
-            self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
+            soft = self._soft_item(x1 - x0, h, r, "#ffffff",
+                                   tint or cd["border"], self._key)
+            if soft is not None:
+                c.create_image(x0, y, image=soft, anchor="nw")
+            else:
+                self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
+                            fill="#e6e2e8", outline="")      # 그림자
+                self._tail(x0 + 2, x1 + 2, y + h, r, "#e6e2e8", dx=0, dy=3)
+                self._rrect(x0, y, x1, y + h, r, fill="#ffffff",
+                            outline=tint or cd["border"], width=2)
+                self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
             mid = y + h / 2
             if lays[i] is not None:           # 꾸밈이 섞인 칸 — 조각을 이어 그린다
                 lines, hs = lays[i]
@@ -4235,6 +4310,7 @@ class Mascot:
         self._stamp_share_hit = None
         self._stamp_pack_at = 0.0    # 공개용 꾸러미 캐시
         self._stamp_pack_v = None
+        self._stamp_brief_ref = None # 도장판에 펼친 브리핑 그림 (참조 유지)
         self._room_cal_btns = {}     # 남의 카드 달력 아이콘 자리
         self._room_cal_data = {}     # 남이 공개한 도장 (slot → cal)
         self._room_song_hits = {}    # 노래 말풍선 자리 (slot → (상자, 주소))
@@ -9994,6 +10070,147 @@ class Mascot:
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win, u(60), u(120))
 
+        # 오늘의 브리핑을 도장판에 남긴다 — 창이 자리 잡은 뒤 한 장 찍는다.
+        # 도장판에서 그 날짜를 누르면 아래로 펼쳐 보여 준다. ImageGrab이
+        # 없는 굳힌 앱(맥 등)에서는 조용히 건너뛴다 — 기록만 안 남는다.
+        day_key = self._my_workday()
+
+        def snap():
+            try:
+                if not win.winfo_exists():
+                    return
+                win.update_idletasks()
+                ww, wh = win.winfo_width(), win.winfo_height()
+                if ww < 50 or wh < 50:
+                    return
+                im = None
+                if IS_WIN:
+                    # 화면을 찍으면 앞을 덮은 다른 창까지 같이 찍힌다
+                    # (지뢰 58) — 창 내용만 그려 받는 PrintWindow 로.
+                    im = self._grab_win_content(win)
+                if im is None:
+                    from PIL import ImageGrab
+                    x = win.winfo_rootx()
+                    y0 = win.winfo_rooty()
+                    im = ImageGrab.grab((x, y0, x + ww, y0 + wh))
+                p = os.path.join(self.state_dir,
+                                 ".brief_%s.png" % day_key)
+                im.save(p + ".tmp", "PNG")
+                os.replace(p + ".tmp", p)          # 지뢰 35 — 원자적 교체
+                olds = sorted(fn for fn in os.listdir(self.state_dir)
+                              if fn.startswith(".brief_")
+                              and fn.endswith(".png"))
+                for fn in olds[:-92]:              # 석 달치만 남긴다
+                    try:
+                        os.remove(os.path.join(self.state_dir, fn))
+                    except Exception:
+                        pass
+            except Exception:
+                self._log_error("brief_snap")
+        win.after(500, snap)
+
+    def _grab_win_content(self, win):
+        """창 '내용'을 그려 받는다 (윈도우 전용, PrintWindow).
+
+        화면 캡처와 달리 다른 창에 가려져 있어도 제 내용만 나온다.
+        64비트 핸들이 잘리므로 restype/argtypes 를 꼭 지정하고 (지뢰 23),
+        공용 ctypes.windll 이 아니라 따로 연 WinDLL 을 쓴다 (지뢰 21).
+        """
+        try:
+            hwnd = int(win.wm_frame(), 16)
+            u32 = ctypes.WinDLL("user32")
+            g32 = ctypes.WinDLL("gdi32")
+            u32.GetWindowDC.restype = ctypes.c_void_p
+            u32.GetWindowDC.argtypes = [ctypes.c_void_p]
+            u32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            u32.PrintWindow.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_uint]
+            g32.CreateCompatibleDC.restype = ctypes.c_void_p
+            g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+            g32.CreateDIBSection.restype = ctypes.c_void_p
+            g32.CreateDIBSection.argtypes = [
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+            g32.SelectObject.restype = ctypes.c_void_p
+            g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            g32.DeleteObject.argtypes = [ctypes.c_void_p]
+            g32.DeleteDC.argtypes = [ctypes.c_void_p]
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
+                            ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+            rc = RECT()
+            u32.GetWindowRect.argtypes = [ctypes.c_void_p,
+                                          ctypes.c_void_p]
+            u32.GetWindowRect(hwnd, ctypes.byref(rc))
+            w, h = rc.r - rc.l, rc.b - rc.t
+            if w < 50 or h < 50:
+                return None
+
+            class BMIH(ctypes.Structure):
+                _fields_ = [("sz", ctypes.c_uint32),
+                            ("w", ctypes.c_int32), ("h", ctypes.c_int32),
+                            ("planes", ctypes.c_uint16),
+                            ("bits", ctypes.c_uint16),
+                            ("comp", ctypes.c_uint32),
+                            ("size", ctypes.c_uint32),
+                            ("xppm", ctypes.c_int32),
+                            ("yppm", ctypes.c_int32),
+                            ("used", ctypes.c_uint32),
+                            ("imp", ctypes.c_uint32)]
+
+            bmi = BMIH()
+            bmi.sz = ctypes.sizeof(BMIH)
+            bmi.w, bmi.h = w, -h                 # 음수 h = 위에서 아래로
+            bmi.planes, bmi.bits = 1, 32
+            wdc = u32.GetWindowDC(hwnd)
+            mdc = g32.CreateCompatibleDC(wdc)
+            bits = ctypes.c_void_p()
+            hbm = g32.CreateDIBSection(mdc, ctypes.byref(bmi), 0,
+                                       ctypes.byref(bits), None, 0)
+            got = None
+            if hbm:
+                old = g32.SelectObject(mdc, hbm)
+                # 2 = PW_RENDERFULLCONTENT (합성 창도 내용이 나온다)
+                ok = u32.PrintWindow(hwnd, mdc, 2)
+                if ok and bits.value:
+                    buf = ctypes.string_at(bits, w * h * 4)
+                    got = Image.frombuffer("RGBA", (w, h), buf, "raw",
+                                           "BGRA", 0, 1).convert("RGB")
+                g32.SelectObject(mdc, old)
+                g32.DeleteObject(hbm)
+            g32.DeleteDC(mdc)
+            u32.ReleaseDC(hwnd, wdc)
+            return got
+        except Exception:
+            return None
+
+    def _brief_img_for(self, key, maxw, maxh):
+        """그날의 브리핑 그림 (작업 종료 때 찍어 둔 것). 없으면 None."""
+        p = os.path.join(self.state_dir, ".brief_%s.png" % key)
+        if not os.path.exists(p):
+            return None
+        cache = getattr(self, "_brief_img_cache", None)
+        if cache is None:
+            cache = self._brief_img_cache = {}
+        ck = (key, int(maxw), int(maxh), int(os.path.getmtime(p)))
+        got = cache.get(ck)
+        if got is None:
+            try:
+                im = Image.open(p).convert("RGB")
+                r = min(maxw / im.width, maxh / im.height, 1.0)
+                im = im.resize((max(1, int(im.width * r)),
+                                max(1, int(im.height * r))), Image.LANCZOS)
+                got = ImageTk.PhotoImage(im)
+            except Exception:
+                return None
+            if len(cache) > 8:                     # 지뢰 18·42 — 큰 그림
+                for old in list(cache)[:4]:
+                    cache.pop(old, None)
+            cache[ck] = got
+        return got
+
     # ── 안 본 업데이트 표시 (빨간 점) ────────────────────────────────
     # 켜짐/꺼짐을 저장하지 않는다. '어디까지 읽었나' 숫자 하나만 두고 점은
     # 볼 때마다 계산한다 — 저장된 상태가 없으니 켜진 채로 굳을 수가 없다.
@@ -15302,7 +15519,7 @@ class Mascot:
                                     int(mb[2] - mb[0]), int(mb[3] - mb[1]),
                                     mb[5], now)
             cv.delete("msgmq")
-            if got_mm is not None:
+            if got_mm:
                 cv.create_image(int(mb[0]), int(mb[1]), image=got_mm,
                                 anchor="nw", tags=("dyn", "msgmq"))
         # 노래가 걸린 카드 — 캐릭터 옆에 음표가 둥실거린다
@@ -15480,7 +15697,8 @@ class Mascot:
         w, h = int(round(x1 - x0)), int(round(y1 - y0))
         if w < 4 or h < 4:
             return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
-                            outline=outline, width=width, tags=tags)
+                            outline=outline, width=width, tags=tags,
+                            raw=True)
         th = int(round(tail[1])) if tail else 0
         tx = int(round(tail[0] - x0)) if tail else 0
         key = (w, h, int(r), fill, outline, int(width), tx, th)
@@ -15496,7 +15714,7 @@ class Mascot:
                 d2.rounded_rectangle(
                     [lw // 2, lw // 2, w * S - 1 - lw // 2,
                      h * S - 1 - lw // 2],
-                    radius=int(r) * S, fill=fill,
+                    radius=int(r) * S, fill=fill or None,
                     outline=outline or None, width=lw)
                 if th:
                     # 꼬리 — 속을 몸통 테두리 '위'까지 파고들게 칠해 아랫선을
@@ -15516,7 +15734,8 @@ class Mascot:
                 img = ImageTk.PhotoImage(im)
             except Exception:
                 return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
-                                outline=outline, width=width, tags=tags)
+                                outline=outline, width=width, tags=tags,
+                                raw=True)
             if len(cache) > 60:            # 지뢰 18 — 오래된 절반만
                 for old in list(cache)[:30]:
                     cache.pop(old, None)
@@ -15531,7 +15750,19 @@ class Mascot:
         (홈 게이지 혹 제보 — 같은 코드만 따로 그려 실측으로 재현했다).
         모서리를 9단계 호로 직접 찍으면 반지름 27px에서도 어긋남이
         0.2px 이 안 돼 눈으로 구분이 안 된다.
+
+        홈 창은 보통 창(색상키 아님)이라 PIL 매끈판을 얹어도 가장자리가
+        안 번진다 — 계단이 안 지게 그쪽으로 위임한다 ('픽셀 깨짐' 제보).
+        색상키 창(캐릭터·말풍선)은 반투명이 키 색과 섞여 테가 지므로
+        여기서는 위임하지 않는다. raw=True 는 물러날 때 재귀를 끊는 표식.
         """
+        raw = kw.pop("raw", False)
+        if (not raw and cv is getattr(self, "room_cv", None)
+                and set(kw) <= {"fill", "outline", "width", "tags"}):
+            try:
+                return self._rr_soft(cv, x0, y0, x1, y1, r, **kw)
+            except Exception:
+                pass
         kw.setdefault("tags", "dyn")
         r = max(1.0, min(r, (x1 - x0) / 2.0, (y1 - y0) / 2.0))
         pts = []
@@ -15620,8 +15851,8 @@ class Mascot:
                 if ct:
                     self._room_bgc_img = self._safe_str(
                         self._room_bgc_make, ct, cb, ang,
-                        W, max(1, H - top))
-                    if self._room_bgc_img is not None:
+                        W, max(1, H - top)) or None
+                    if self._room_bgc_img:
                         cv.create_image(0, top, image=self._room_bgc_img,
                                         anchor="nw", tags="bg")
                         drawn = True
@@ -15647,7 +15878,10 @@ class Mascot:
                                        width=0, tags="bg")
             cv.create_rectangle(0, 0, W, top, fill=P["bar"], width=0,
                                 tags="bg")
-            cv.create_line(0, top, W, top, fill=P["line"], width=2, tags="bg")
+            if not drawn:
+                # 경계선은 점 벽지에서만 — 색·그림 배경 위에는 흰 띠로 보인다
+                cv.create_line(0, top, W, top, fill=P["line"], width=2,
+                               tags="bg")
         else:
             cv.delete("dyn")
         # 위쪽 줄 — 타이틀 띠는 시간대별 하늘이 된다 (방 안은 그대로)
@@ -15991,7 +16225,8 @@ class Mascot:
             # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
             ti = "아직 안 켰어요" if off else str(p.get("ti") or "")[:14]
             cv.create_text(tx, cyc + 1 * k, anchor="w", text=ti,
-                           font=f_sub, fill=P["sub"], tags="dyn")
+                           font=f_sub, fill=self._shade(P["sub"], 0.28),
+                           tags="dyn")
             full_msg = "" if off else str(p.get("m") or "").strip()
             msg = full_msg
             if msg:
@@ -16028,11 +16263,11 @@ class Mascot:
             tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) if tmin >= 60                 else ("%dm" % tmin)
             cv.create_text(x1 - 16 * k, cyc - 8 * k, anchor="e", text=tlab,
                            font=f_time,
-                           fill=P["sub"] if off else self._shade(col, 0.1),
+                           fill=P["sub"] if off else self._shade(col, 0.35),
                            tags="dyn")
             cv.create_text(x1 - 16 * k, cyc + 12 * k, anchor="e",
                            text="%d%%" % round(pr * 100), font=f_pct,
-                           fill=P["sub"], tags="dyn")
+                           fill=self._shade(P["sub"], 0.28), tags="dyn")
             sleeping = p.get("s") == "sleep"
             if mitem is not None and not off:
                 # 심플모드에서도 숨쉬기·음표·반짝이 돌게 등록한다.
@@ -17012,6 +17247,17 @@ class Mascot:
                                 fill="#c96a7d")
             cv.tag_bind(dd, "<Button-1>", del_diary)
             fy += u(100)
+            # ── 그날의 브리핑 (작업 종료 때 찍어 둔 그림) ────────────
+            # _safe_str 은 None 을 "" 로 바꿔 돌려준다 — truthy 검사
+            bim = self._safe_str(self._brief_img_for, key,
+                                 W - u(48), u(430))
+            if bim:
+                bh = bim.height()
+                rr(u(18), fy + u(4), W - u(18), fy + u(16) + bh, u(12),
+                   fill="#ffffff", outline=cd["border"], width=2)
+                cv.create_image(W / 2, fy + u(10), image=bim, anchor="n")
+                self._stamp_brief_ref = bim        # 참조 유지 (GC 방지)
+                fy += u(24) + bh
         # ── 공개 토글 (내 판에서만) ──────────────────────────────────
         self._stamp_share_hit = None
         if other is None:
@@ -17664,7 +17910,7 @@ class Mascot:
                     self.us.get("room_bgc1") or "#f6eef4"),
                 int(float(self.us.get("room_bg_ang", 180) or 0)),
                 u(230), u(30))
-            if got is not None:
+            if got:
                 pv.config(image=got)
                 pv._im = got             # 참조 유지 (안 하면 GC로 사라짐)
 
