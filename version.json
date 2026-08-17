@@ -1,5 +1,5 @@
 {
- "version": 1786965224,
+ "version": 1786965444,
  "files": {
   "mascot.py": "a58bb6cc0e42668cc290a3065d198385816d3bd3a556ee4771e48a9acef34551",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -342,6 +342,11 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "홈 타이틀이 시간대별 그림 하늘로 바뀌고, 창에 꽉 차게 커졌어요",
+  "캐릭터가 머리만 살짝 들썩이며 숨 쉬어요 — 몸과 책상은 그대로",
+  "게이지가 둥근 알약 모양이 되고, 저녁 시간대엔 핑크빛이에요",
+  "받은 반응 말풍선이 커져서 누가 콕 했는지 잘 보여요",
+  "뒷 페이지도 아홉 칸으로 채워지고, 캐릭터가 이름표 정중앙에 앉아요"
+ ]
 }
