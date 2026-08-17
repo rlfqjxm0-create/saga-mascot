@@ -14404,6 +14404,20 @@ class Mascot:
             h = int(self.ROOM_FIG * self._room_k() * self.ROOM_SIZE.get(slot, 1.0))
             im = im.resize((max(1, int(im.width * h / im.height)), h),
                            Image.LANCZOS)
+            # 흰 테두리 — 방 칸에 그림을 깔면 캐릭터가 묻혀서 두른다.
+            # 아래(바닥 색 영역)로는 번지지 않게 맨 밑 두 줄은 지운다.
+            try:
+                from PIL import ImageDraw, ImageFilter
+                a2 = im.split()[3].point(lambda v: 255 if v > 60 else 0)
+                grow = a2.filter(ImageFilter.MaxFilter(5))
+                d3 = ImageDraw.Draw(grow)
+                d3.rectangle([0, im.height - 2, im.width, im.height],
+                             fill=0)
+                white = Image.new("RGBA", im.size, (255, 255, 255, 0))
+                white.putalpha(grow)
+                im = Image.alpha_composite(white, im)
+            except Exception:
+                pass
             line = self._room_deskline(slot)
             if line and 0.2 < line < 0.95:
                 # 몸은 통짜로 두고, 책상 조각을 그 위에 고정으로 덮는다.
@@ -15346,23 +15360,23 @@ class Mascot:
             cimg = (self._room_peer_img(slot, cdh, kx1 - kx0, ky1 - ky0,
                                         18 * k) if cdh else None)
         if cimg is not None:
-            # 골라 둔 방 그림 — 칸 색으로 받치고(줄였을 때 빈자리),
-            # 둥근 모서리로 오려 깔고 테두리를 두른다
+            # 골라 둔 방 그림 — 칸 색으로 받치고(줄였을 때 빈자리) 깐다.
+            # 테두리는 바닥 색까지 그린 뒤 맨 나중에 두른다.
             self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
                      width=0)
             cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
-            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
-                     outline=col if picked else P["line"],
-                     width=3 if picked else 2)
         else:
             self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
-                     outline=col if picked else P["line"],
-                     width=3 if picked else 2)
+                     width=0)
         floor = ky1 - 74 * k
-        self._rr(cv, kx0 + 2, floor, kx1 - 2, ky1 - 2, 16 * k,
+        # 바닥 색은 칸에 꽉 차게 (가장자리 1~2px 틈 제보)
+        self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
                  fill=self._tint(col, 0.72), width=0)
-        cv.create_rectangle(kx0 + 2, floor, kx1 - 2, floor + 14 * k,
+        cv.create_rectangle(kx0, floor, kx1, floor + 14 * k,
                             fill=self._tint(col, 0.72), width=0, tags="dyn")
+        self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
+                 outline=col if picked else P["line"],
+                 width=3 if picked else 2)
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, desk, cut = got
