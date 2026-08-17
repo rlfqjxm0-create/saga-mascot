@@ -344,5 +344,8 @@
  "lv_floor": {
   "secs": 36000,
   "until": "2026-08-24"
- }
+ },
+ "prop_skip": [
+  "prop4"
+ ]
 }

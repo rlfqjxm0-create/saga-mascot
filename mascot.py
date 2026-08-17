@@ -4602,6 +4602,11 @@ class Mascot:
                 hit = []
             if hit:
                 self.prop_dir, src, avail = self.dir, base, hit
+        # config의 prop_skip — 빼 달라고 한 소품은 후보에서 제외
+        # (사가 검은 강아지 귀가 흰 캔버스에서 얼룩처럼 보인 제보)
+        skip = {str(x) for x in (self.cfg.get("prop_skip") or [])}
+        if skip:
+            avail = [a for a in avail if a not in skip]
         if not avail:
             return None
         self._prop_layout = src
