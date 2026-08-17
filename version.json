@@ -1,5 +1,5 @@
 {
- "version": 1786939929,
+ "version": 1786940225,
  "files": {
   "mascot.py": "8570885b9044ce51ac5bfe3f3d52382390ea3d5431464cec59d8b58bc111c213",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -337,6 +337,9 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "방 칸 그림이 이제 진짜로 보여요\n서버가 그림 실은 신호를 조용히 버리고 있었어요. 고쳤으니 내가 꾸민 방 칸이 친구들 화면에도 그대로 나타나요. 홈을 켜 두면 1~2분 안에 보입니다.",
+  "그림·색 고르기 창이 숨지 않아요\n꾸미기에서 그림 고르기를 눌러도 창이 안 뜨는 것처럼 보이던 문제 — 사실은 꾸미기 창 뒤에 숨어 있었어요. 이제 앞으로 뜹니다.",
+  "홈은 언제나 3열이에요\n창을 옆으로 넓혀도 칸이 5열로 눕지 않아요. 맥에서도 윈도우와 같은 모습입니다."
+ ]
 }
