@@ -8223,6 +8223,25 @@ class Mascot:
 
     Z_PIN = 1.0              # 이 간격으로 '내가 아직 맨 앞인가'를 본다
 
+    def _u32_pid(self):
+        """창 주인(프로세스)을 묻는 데 쓸 user32 손잡이 — 따로 연다.
+
+        공용 ctypes.windll 에 argtypes 를 정하면 같은 함수를 쓰는 다른 코드까지
+        그 규격에 묶인다 (지뢰 21). 64비트 핸들이 잘리지 않게 규격은 꼭 정한다
+        (지뢰 23).
+        """
+        got = getattr(self, "_u32p", None)
+        if got is None:
+            try:
+                got = ctypes.WinDLL("user32")
+                got.GetWindowThreadProcessId.argtypes = [
+                    ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+                got.GetWindowThreadProcessId.restype = ctypes.c_ulong
+            except Exception:
+                got = False
+            self._u32p = got
+        return got or None
+
     def _z_pin(self, now):
         """'항상 위'인데도 뒤로 밀렸으면 다시 올린다.
 
@@ -8243,7 +8262,10 @@ class Mascot:
         u = ctypes.windll.user32
         x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
         bx0, by0, bx1, by1 = x, y, x + self.W, y + self.H
-        # 내 창들은 앞에 있어도 괜찮다 (말풍선은 일부러 캐릭터보다 위에 둔다)
+        # 내 창들은 앞에 있어도 괜찮다 (말풍선은 일부러 캐릭터보다 위에 둔다).
+        # 창을 하나하나 챙기면 나중에 만든 창(업데이트 팝업·환경음·메뉴)이
+        # 빠져 '내 팝업을 열 때마다 캐릭터가 그 위로 올라오는' 일이 생긴다
+        # (제보). 그래서 프로세스로 가린다 — 새 창이 생겨도 안 낡는다.
         mine = {self._main_hwnd}
         for holder in (self.shadow, self.todo_panel, self.due_panel, self._fx):
             h = getattr(holder, "hwnd", None)
@@ -8255,11 +8277,26 @@ class Mascot:
                     mine.add(int(top.wm_frame(), 16))
                 except Exception:
                     pass
+        me = os.getpid()
+        u2 = self._u32_pid()
+        pid = ctypes.c_ulong()
+
+        def is_mine(hwnd):
+            if hwnd in mine:
+                return True
+            if u2 is None:
+                return False
+            try:
+                u2.GetWindowThreadProcessId(ctypes.c_void_p(hwnd),
+                                            ctypes.byref(pid))
+                return pid.value == me
+            except Exception:
+                return False
         r = (ctypes.c_long * 4)()
         cur = u.GetTopWindow(0)
         buried = False
         while cur and cur != self._main_hwnd:
-            if cur not in mine and u.IsWindowVisible(cur):
+            if not is_mine(cur) and u.IsWindowVisible(cur):
                 u.GetWindowRect(cur, ctypes.byref(r))
                 if not (r[2] <= bx0 or bx1 <= r[0]
                         or r[3] <= by0 or by1 <= r[1]):
