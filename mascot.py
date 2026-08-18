@@ -1748,21 +1748,26 @@ class MacSlimeSound(_MacSoundPool):
 
 
 class AmbientSound:
-    """환경음(BGM) — 여러 소리를 **동시에** 끝없이 반복해서 튼다.
+    """환경음(BGM) — 여러 소리를 동시에, 끄기 전까지 끝없이.
 
-    빗소리에 천둥을 얹는 식으로 섞어 듣는 것이라, 소리마다 따로 켜고
-    따로 볼륨을 준다. 소리 하나가 재생 장치 하나를 쓴다.
+    파일을 통째로 올리지 않고 **조각으로 흘려보낸다**. 통째로 올려 볼륨을
+    곱하던 때는 3분짜리 하나에 메모리 60MB 와 곱셈 3천만 번이 들어, 켜는
+    순간 화면과 커서가 1.6초 굳었다(실측). 지금은 0.4초짜리 조각 넷을
+    돌려 쓴다 — 파일이 한 시간이어도 메모리는 300KB, 한 번에 곱하는 것도
+    조각 하나치뿐이다.
 
-    반복은 winmm 이 직접 해 준다 — 헤더에 WHDR_BEGINLOOP/ENDLOOP 를 켜고
-    dwLoops 를 크게 주면 드라이버가 알아서 이어 붙인다.
+    볼륨도 이 구조라서 공짜다. **다음 조각부터** 새 볼륨으로 채우면 되니
+    소리가 안 끊기고 되감기지도 않는다. 장치 볼륨(waveOutSetVolume)은
+    쓸 수 없다 — 그건 핸들이 아니라 장치의 볼륨이라, 다른 소리가 재생
+    직전에 최대로 되돌릴 때마다 환경음까지 커진다(실측으로 확인).
 
-    **볼륨은 샘플에 곱한다.** `waveOutSetVolume` 은 핸들이 아니라 장치의
-    볼륨이라(실측), 다른 소리가 재생 직전에 장치 볼륨을 최대로 되돌리면
-    환경음까지 같이 커진다. 파일이 커서 곱하는 데 1~2초가 걸리므로 딴
-    스레드에서 준비하고, 다 되면 그때 갈아 끼운다.
+    채우는 일은 스레드 하나가 모든 소리를 돌며 맡는다. 조각이 다 나가기
+    전에 다음 것을 넣어 두므로 끊기지 않는다.
     """
 
-    LOOP_FLAGS = 0x00000004 | 0x00000008      # WHDR_BEGINLOOP | WHDR_ENDLOOP
+    CHUNK_SEC = 0.4           # 조각 하나의 길이
+    SLOTS = 4                 # 돌려 쓰는 조각 수 (1.6초치 여유)
+    TICK = 0.06               # 채우러 도는 간격
 
     def __init__(self, folder):
         import threading
@@ -1773,66 +1778,102 @@ class AmbientSound:
                       if f.lower().endswith(".wav")]
         if not self.names:
             raise ValueError("환경음 wav 없음")
-        self.voices = {}          # 이름 -> (핸들, 헤더, 버퍼, 볼륨)
-        self.want = {}            # 이름 -> 바라는 볼륨 (준비 중인 것 포함)
-        self._pcm = {}            # 이름 -> 원본 PCM (한 번 읽어 두고 재활용)
-        self._lock = threading.Lock()
         self._wave = wave
         self._threading = threading
+        self._lock = threading.Lock()
+        self.tracks = {}          # 이름 -> 흐르고 있는 소리 한 벌
+        self.want = {}            # 이름 -> 바라는 볼륨
+        self._stop = False
+        self._th = threading.Thread(target=self._loop, daemon=True)
+        self._th.start()
 
-    # ── 준비 ────────────────────────────────────────────────────────────
-    def _read(self, name):
-        """wav 를 읽어 (PCM, 채널, 폭, 주파수). 한 번 읽으면 들고 있는다."""
-        got = self._pcm.get(name)
-        if got is not None:
-            return got
+    # ── 한 소리 열기/닫기 ───────────────────────────────────────────────
+    def _open(self, name, vol):
         path = os.path.join(self.folder, name + ".wav")
-        with self._wave.open(path, "rb") as w:
-            ch, sw, fr = w.getnchannels(), w.getsampwidth(), w.getframerate()
-            pcm = w.readframes(w.getnframes())
-        if sw != 2 or not pcm:
+        wf = self._wave.open(path, "rb")
+        ch, sw, fr = wf.getnchannels(), wf.getsampwidth(), wf.getframerate()
+        if sw != 2:
+            wf.close()
             raise ValueError("환경음은 16bit wav 만 지원")
-        got = (pcm, ch, sw, fr)
-        if len(self._pcm) > 4:            # 원본을 무한정 들고 있지 않는다
-            for old in list(self._pcm)[:2]:
-                self._pcm.pop(old, None)
-        self._pcm[name] = got
-        return got
-
-    def _start(self, name, vol):
-        """샘플에 볼륨을 곱해 재생을 시작한다 (딴 스레드에서 불린다)."""
-        pcm, ch, sw, fr = self._read(name)
-        buf = _scaled_buffer(pcm, max(0.0, min(float(vol), 100.0)) / 100.0, sw)
-        with self._lock:
-            if self.want.get(name) != vol:     # 그새 마음이 바뀌었다
-                return
-            self._stop_locked(name)
-            wfx = _WAVEFORMATEX(1, ch, fr, fr * ch * sw, ch * sw, sw * 8, 0)
-            wm = ctypes.windll.winmm
-            h = ctypes.c_void_p()
-            if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF,
-                              ctypes.byref(wfx), 0, 0, 0):
-                return
+        wfx = _WAVEFORMATEX(1, ch, fr, fr * ch * sw, ch * sw, sw * 8, 0)
+        wm = ctypes.windll.winmm
+        h = ctypes.c_void_p()
+        if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF,
+                          ctypes.byref(wfx), 0, 0, 0):
+            wf.close()
+            raise OSError("소리 장치를 열 수 없음")
+        nframe = max(1024, int(fr * self.CHUNK_SEC))
+        nbytes = nframe * ch * sw
+        slots = []
+        for _ in range(self.SLOTS):
+            buf = ctypes.create_string_buffer(nbytes)
             hdr = _WAVEHDR()
             hdr.lpData = ctypes.cast(buf, ctypes.c_void_p)
-            hdr.dwBufferLength = len(pcm)
-            hdr.dwFlags = self.LOOP_FLAGS
-            hdr.dwLoops = 0xFFFFFFFF
+            hdr.dwBufferLength = nbytes
+            hdr.dwFlags = 0
             wm.waveOutPrepareHeader(h, ctypes.byref(hdr),
                                     ctypes.sizeof(_WAVEHDR))
-            wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
-            self.voices[name] = (h, hdr, buf, float(vol))
+            hdr.dwFlags |= 0x00000001          # WHDR_DONE — 처음엔 다 비었다
+            slots.append([hdr, buf, False])    # [헤더, 버퍼, 나가 있는가]
+        return {"h": h, "wf": wf, "slots": slots, "nframe": nframe,
+                "vol": float(vol), "ch": ch, "sw": sw, "fr": fr,
+                "played": 0}
 
-    def _spawn(self, name, vol):
-        self._threading.Thread(target=self._safe_start, args=(name, vol),
-                               daemon=True).start()
-
-    def _safe_start(self, name, vol):
+    def _close_track(self, tr):
+        wm = ctypes.windll.winmm
         try:
-            self._start(name, vol)
+            wm.waveOutReset(tr["h"])
+            for hdr, _buf, _out in tr["slots"]:
+                wm.waveOutUnprepareHeader(tr["h"], ctypes.byref(hdr),
+                                          ctypes.sizeof(_WAVEHDR))
+            wm.waveOutClose(tr["h"])
         except Exception:
-            with self._lock:
-                self.want.pop(name, None)
+            pass
+        try:
+            tr["wf"].close()
+        except Exception:
+            pass
+
+    # ── 채우기 ──────────────────────────────────────────────────────────
+    def _fill(self, tr):
+        """빈 조각을 다음 소리로 채워 다시 내보낸다 (끝나면 처음으로)."""
+        wm = ctypes.windll.winmm
+        g = max(0.0, min(tr["vol"], 100.0)) / 100.0
+        step = tr["nframe"]
+        for slot in tr["slots"]:
+            hdr, buf, out = slot
+            if out and not (hdr.dwFlags & 0x00000001):    # 아직 나가 있다
+                continue
+            data = tr["wf"].readframes(step)
+            if len(data) < hdr.dwBufferLength:
+                tr["wf"].rewind()                          # 끝 → 처음으로
+                data += tr["wf"].readframes(
+                    step - len(data) // (tr["ch"] * tr["sw"]))
+            if not data:
+                return
+            n = len(data)
+            ctypes.memmove(buf, data, n)
+            if g < 0.999:
+                arr = (ctypes.c_int16 * (n // 2)).from_buffer(buf)
+                for i in range(n // 2):
+                    arr[i] = int(arr[i] * g)
+            hdr.dwBufferLength = n
+            hdr.dwFlags &= ~0x00000001                     # DONE 을 지운다
+            wm.waveOutWrite(tr["h"], ctypes.byref(hdr),
+                            ctypes.sizeof(_WAVEHDR))
+            slot[2] = True
+            tr["played"] += n
+
+    def _loop(self):
+        import time as _t
+        while not self._stop:
+            try:
+                with self._lock:
+                    for name in list(self.tracks):
+                        self._fill(self.tracks[name])
+            except Exception:
+                pass
+            _t.sleep(self.TICK)
 
     # ── 바깥에서 쓰는 것들 ──────────────────────────────────────────────
     def has(self, name):
@@ -1842,58 +1883,54 @@ class AmbientSound:
         return str(name) in self.want
 
     def on_names(self):
-        """켠 것들 — 아직 준비 중이어도 '켠 것'으로 본다."""
         return sorted(self.want)
 
+    def played_bytes(self, name):
+        """지금까지 내보낸 바이트 (검사에서 '진짜 흐르는가'를 볼 때)."""
+        tr = self.tracks.get(str(name or ""))
+        return int(tr["played"]) if tr else -1
+
     def set(self, name, on, vol=35):
-        """켜거나 끈다. 이미 그 상태면 볼륨만 맞춘다."""
+        """켜거나 끈다. 켜져 있으면 볼륨만 바꾼다 (안 끊긴다)."""
         name = str(name or "")
         if name not in self.names:
             return
-        if not on:
-            self.stop(name)
-            return
         vol = max(0.0, min(float(vol), 100.0))
-        if vol <= 0:
+        if not on or vol <= 0:
             self.stop(name)
             return
-        got = self.voices.get(name)
-        if got is not None and abs(got[3] - vol) < 0.01:
-            return                       # 이미 그 볼륨으로 돌고 있다
-        self.want[name] = vol
-        self._spawn(name, vol)
+        with self._lock:
+            self.want[name] = vol
+            tr = self.tracks.get(name)
+            if tr is not None:
+                tr["vol"] = vol            # 다음 조각부터 새 볼륨
+                return
+            try:
+                tr = self._open(name, vol)
+            except Exception:
+                self.want.pop(name, None)
+                return
+            self.tracks[name] = tr
+            self._fill(tr)                 # 첫 조각은 그 자리에서 채운다
 
     def vol(self, name, vol):
-        """볼륨만 바꾼다 (샘플을 다시 곱해야 하므로 딴 스레드에서)."""
         self.set(name, True, vol)
-
-    def _stop_locked(self, name):
-        got = self.voices.pop(str(name or ""), None)
-        if got is None:
-            return
-        h, hdr = got[0], got[1]
-        wm = ctypes.windll.winmm
-        try:
-            wm.waveOutReset(h)
-            wm.waveOutUnprepareHeader(h, ctypes.byref(hdr),
-                                      ctypes.sizeof(_WAVEHDR))
-            wm.waveOutClose(h)
-        except Exception:
-            pass
 
     def stop(self, name):
         name = str(name or "")
         with self._lock:
             self.want.pop(name, None)
-            self._stop_locked(name)
+            tr = self.tracks.pop(name, None)
+        if tr is not None:
+            self._close_track(tr)
 
     def stop_all(self):
-        for name in list(self.want) + list(self.voices):
+        for name in list(self.want) + list(self.tracks):
             self.stop(name)
 
     def close(self):
+        self._stop = True
         self.stop_all()
-        self._pcm.clear()
 
 
 class MacAmbientSound:
