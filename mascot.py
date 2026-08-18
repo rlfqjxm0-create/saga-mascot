@@ -13167,6 +13167,9 @@ class Mascot:
             cv.create_text(W / 2, u(210),
                            text="시간이 되면 알려 주고 같이 몸을 펴요",
                            font=self._uf(8), fill=cd["sub"])
+            # 스티커는 여기까지의 그림 위, **단추 아래** (단추를 가리면
+            # 누를 수가 없다 — 홈과 같은 규칙)
+            self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
             # 단추 셋
             by0, by1 = u(232), u(272)
             bw = (W - pad * 2 - u(16)) / 3.0
@@ -13210,8 +13213,6 @@ class Mascot:
                            fill="#ffffff" if on_stk else cd["sub"])
             self._pomo_stk_btn = (bx - br - u(3), u(26) - br - u(3),
                                   bx + br + u(3), u(26) + br + u(3))
-            # 스티커는 맨 위에 — 안내 글자에 가리면 안 된다
-            self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
 
         def on_click(e):
             if self._safe("stk_press", self._stk_press, "pomo", e.x, e.y):
@@ -18486,11 +18487,14 @@ class Mascot:
         pbx, pbr = W - 234 * k, 14 * k
         on_pl = bool(getattr(self, "_pl_on", False))
         mine2 = self._room_tone(self.char)
+        # 'ui' 표가 붙은 것은 스티커 위로 올라간다 (아래 _stk_draw 뒤)
         self._safe("soft_btn", self._soft_dot, cv, pbx, mid, pbr,
                    mine2 if on_pl else "#ffffff",
-                   outline=P["line"], width=1, shadow=True)
+                   outline=P["line"], width=1, shadow=True,
+                   tags=("dyn", "ui"))
         cv.create_text(pbx, mid, text="♪", font=self._uf(12, True),
-                       fill=("#ffffff" if on_pl else P["ink"]), tags="dyn")
+                       fill=("#ffffff" if on_pl else P["ink"]),
+                       tags=("dyn", "ui"))
         self._pl_btn = (pbx - pbr - 3 * k, mid - pbr - 3 * k,
                         pbx + pbr + 3 * k, mid + pbr + 3 * k)
         # 사람들
@@ -18521,8 +18525,9 @@ class Mascot:
             self._room_page_btn = []
             self._safe("room_simple", self._room_simple_draw,
                        cv, W, H, P, k, allp, top)
-            self._room_bar(cv, W, H, P, k, allp)
             self._safe("stk_room", self._stk_draw, cv, "room", W, H)
+            self._safe("stk_z", cv.tag_raise, "ui")
+            self._room_bar(cv, W, H, P, k, allp)
             self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
             self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
             return
@@ -18573,6 +18578,12 @@ class Mascot:
             cv.create_text(ecx, floor_e, text="···",
                            font=self._uf(9, True),
                            fill=self._tint(mut, 0.15), tags="dyn")
+        # 스티커는 카드·타이틀바 위, **아이콘 아래**. 칸이나 하늘은 가려도
+        # 되지만 누를 것을 가리면 안 된다 (제보). 아래 단추 줄은 뒤에
+        # 그려서 자연히 위에 오고, 먼저 그려진 아이콘('ui' 표)은 여기서
+        # 통째로 올린다.
+        self._safe("stk_room", self._stk_draw, cv, "room", W, H)
+        self._safe("stk_z", cv.tag_raise, "ui")
         # 보낼 상대 찾기는 전체 명단으로 — 고른 사람이 다른 페이지에 있어도
         self._room_bar(cv, W, H, P, k, allp)
         # 페이지 화살표 — 카드 그리드 오른쪽·왼쪽 가운데
@@ -18596,9 +18607,6 @@ class Mascot:
             cv.create_text(W / 2, H - 16 * k,
                            text="%d / %d" % (self._room_page + 1, pages),
                            font=self._uf(8), fill=P["sub"], tags="dyn")
-        # 스티커는 카드 위에, 목록·플레이리스트 아래에 — 목록을 가리면
-        # 읽을 수가 없다.
-        self._safe("stk_room", self._stk_draw, cv, "room", W, H)
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
         self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
         self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
@@ -19518,6 +19526,8 @@ class Mascot:
                                      str(sg.get("t") or ""), col)
         self._room_song_slots.add(slot)
 
+    CAL_TAGS = ("dyn", "ui")     # 아이콘은 스티커 위로 (제보)
+
     def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None):
         """내 칸 왼쪽 위의 달력 아이콘 — 하트 배지와 짝, 테마색으로.
 
@@ -19528,15 +19538,17 @@ class Mascot:
         cy = ky0 + 7 * k + r
         x0, y0, x1, y1 = cx - r, cy - r, cx + r, cy + r
         line = self._shade(col, 0.12)
+        tg = self.CAL_TAGS
         self._rr(cv, x0, y0, x1, y1, 4 * k, fill="#ffffff",
-                 outline=line, width=2)
-        self._rr(cv, x0, y0, x1, y0 + 7 * k, 4 * k, fill=col, width=0)
+                 outline=line, width=2, tags=tg)
+        self._rr(cv, x0, y0, x1, y0 + 7 * k, 4 * k, fill=col, width=0,
+                 tags=tg)
         cv.create_rectangle(x0, y0 + 4 * k, x1, y0 + 7 * k,
-                            fill=col, width=0, tags="dyn")
+                            fill=col, width=0, tags=tg)
         for gx in (cx - 4.5 * k, cx + 4.5 * k):   # 고리 두 개
             cv.create_line(gx, y0 - 2.5 * k, gx, y0 + 2.5 * k, fill=line,
                            width=max(1, int(1.7 * k)), capstyle="round",
-                           tags="dyn")
+                           tags=tg)
         for row in range(2):                      # 날짜 점
             for col_ in range(3):
                 dx = (col_ - 1) * 5 * k
@@ -19544,7 +19556,7 @@ class Mascot:
                 self._oval(cv, cx + dx - k, y0 + dy - k,
                                cx + dx + k, y0 + dy + k,
                                fill=self._tint(col, 0.35), width=0,
-                               tags="dyn")
+                               tags=tg)
         box = (x0 - 5 * k, y0 - 5 * k, x1 + 5 * k, y1 + 5 * k)
         if slot is None:
             self._room_cal_btn = box
@@ -21209,7 +21221,11 @@ class Mascot:
             return
         self._stk_toast("클립보드에 그림이 없어요 (그림 파일로 넣어 주세요)")
 
-    STK_TOL = 28          # 배경 지우기 기본 너그러움 (0~90)
+    # 배경 지우기가 '어디까지 같은 색으로 볼지' (0~90). 누른 색과 얼마나
+    # 다른 색까지 함께 지울지를 정한다 — 작으면 딱 그 색만, 크면 비슷한
+    # 색조까지. 화면에는 '지우는 범위'로 보여 준다 ('너그러움'이 무슨
+    # 뜻인지 모르겠다는 제보).
+    STK_TOL = 28
 
     def _stk_src_path(self, meta):
         """손대기 전 원본 — 배경을 지워도 되돌릴 수 있게 따로 둔다."""
@@ -21496,7 +21512,7 @@ class Mascot:
 
         fr5 = tk.Frame(win, bg=cd["panel"])
         fr5.pack(pady=(u(6), 0))
-        tk.Label(fr5, text="너그러움", font=self._uf(8), bg=cd["panel"],
+        tk.Label(fr5, text="지우는 범위", font=self._uf(8), bg=cd["panel"],
                  fg=cd["sub"]).pack(side="left", padx=(0, u(4)))
         # 맥(Tk9 아쿠아)에서 tk.Scale 이 앱을 꺼뜨린 적이 있어 +/- 단추로
         tk.Button(fr5, text="−", font=self._uf(9, True), relief="flat",
@@ -21508,6 +21524,10 @@ class Mascot:
         tk.Button(fr5, text="+", font=self._uf(9, True), relief="flat",
                   bg="#efe9f1", fg=cd["text"], width=2,
                   command=lambda: step_tol(6)).pack(side="left")
+
+        tk.Label(win, text="숫자가 클수록 비슷한 색까지 함께 지워요",
+                 font=self._uf(7), bg=cd["panel"], fg=cd["sub"]
+                 ).pack(pady=(u(2), 0))
 
         fr3 = tk.Frame(win, bg=cd["panel"])
         fr3.pack(pady=(u(10), 0))
