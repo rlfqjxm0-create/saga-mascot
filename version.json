@@ -1,5 +1,5 @@
 {
- "version": 1787044218,
+ "version": 1787044600,
  "files": {
   "mascot.py": "17fea6f8bc7603009cfc2f3a674c7a0fcd7d582df24532650f4cb4e0ed65cbdb",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -395,5 +395,11 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": []
+ "notes": [
+  "환경음이 생겼어요 — 우클릭 > BGM > 환경음",
+  "빗소리·굵은 빗소리·모닥불·캠프파이어·장작 타는 소리·먼 모닥불·말발굽 일곱 가지",
+  "여러 개를 같이 틀 수 있고, 소리 크기도 각각 정할 수 있어요",
+  "틀어 두면 타이머 위에 작은 표시가 뜨고, 그걸 누르면 고르는 창이 열려요",
+  "듣고 싶은 환경음이 있으면 추천해 주세요! 넣어 드릴게요"
+ ]
 }
