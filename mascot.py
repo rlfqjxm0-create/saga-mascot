@@ -21600,8 +21600,11 @@ class Mascot:
         to = self._room_pick
         if not to:
             return
-        # 연타 제한은 **모든 반응**에 걸린다 (한 사람 기준)
-        if not self._send_ok(kind, to):
+        # 연타 제한은 **모든 반응**에 걸린다 (한 사람 기준). 다만 나에게
+        # 보내는 것(내 컵케이크)은 서버를 안 거치고 제 규칙(10분)이 따로
+        # 있으므로 뺀다 — 안 그러면 10분을 기다려도 30초 제한에 막힌다
+        # (검사가 잡았다).
+        if to != self.char and not self._send_ok(kind, to):
             return
         if kind == "snack" and to == self.char:
             # 본인 컵케이크 — 10분에 한 번, 내 스페셜 컵케이크를 먹는다
