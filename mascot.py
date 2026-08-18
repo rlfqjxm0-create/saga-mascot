@@ -15970,6 +15970,11 @@ class Mascot:
     ROOM_NAME = dict((c["slot"], c["name"]) for c in CHARS)
     ROOM_SIZE = dict((c["slot"], c["size"]) for c in CHARS if c.get("size"))
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 84
+    # 칸 아래에 잡아 두는 자리 (보낼 사람 안내 + 반응 단추 줄).
+    # 126 이던 것을 113 으로 — 세로를 최대로 줄였을 때 위 여백 40px 에
+    # 아래가 59px 로 더 넓었다 (실측, k=1.5). 그 차이 19px 이 여기서
+    # 왔다. 네 곳에 흩어져 있던 숫자를 한 곳으로 모은다.
+    ROOM_BOT = 113
     ROOM_FIG = 112               # 방에서 캐릭터를 그리는 높이(px)
 
     def _room_on(self):
@@ -17490,7 +17495,8 @@ class Mascot:
         win.title("같이 작업 중")
         win.resizable(True, True)
         win.minsize(int(self.ROOM_CW * k) + int(20 * k),
-                    int((self.ROOM_TOP + 126) * k) + int(self.ROOM_CH * k))
+                    int((self.ROOM_TOP + self.ROOM_BOT) * k)
+                    + int(self.ROOM_CH * k))
         win.configure(bg=self._room_palette()["wall"])
         try:
             win.iconphoto(False, self.tray_img) if getattr(
@@ -18220,6 +18226,31 @@ class Mascot:
                 im.paste(stamp, (xx, yy), stamp)
         return ImageTk.PhotoImage(im)
 
+    def _moon_img(self, px):
+        """작은 초승달 — 말풍선 앞에 붙이는 그림 (이모지 글자 대신).
+
+        네 배로 그려 줄여서 가장자리가 매끈하다. 크기별로 캐시한다.
+        """
+        px = max(8, int(px))
+        got = self._soft_cache.get(("moon", px))
+        if got is not None:
+            return got
+        S = 4
+        n = px * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        d.ellipse([0, 0, n - 1, n - 1], fill=(250, 204, 76, 255))
+        # 오른쪽 위를 투명으로 파내 초승달로 (알파를 그대로 덮어쓴다)
+        off = n * 0.34
+        d.ellipse([off, -n * 0.10, off + n, n * 0.90], fill=(0, 0, 0, 0))
+        im = im.resize((px, px), Image.LANCZOS)
+        got = ImageTk.PhotoImage(im)
+        if len(self._soft_cache) > 300:          # 상한 (지뢰 18)
+            for k2 in list(self._soft_cache)[:150]:
+                self._soft_cache.pop(k2, None)
+        self._soft_cache[("moon", px)] = got
+        return got
+
     def _room_bgc_make(self, ct, cb, ang, w, h):
         """직접 고른 배경 그라데이션 한 장 — ang(도) 180 = 위→아래.
 
@@ -18258,7 +18289,8 @@ class Mascot:
                              cols0 * max(1, self._room_rows)))
         rows0 = max(1, -(-max(1, min(len(people), page_n0)) // cols0))
         gap0 = int(16 * k)
-        slack = (H - int(126 * k) - base_top - rows0 * int(self.ROOM_CH * k)
+        slack = (H - int(self.ROOM_BOT * k) - base_top
+                 - rows0 * int(self.ROOM_CH * k)
                  - 2 * gap0)
         ratio = self._sky_src_ratio()
         if ratio:                     # 그림 하늘 — 원본 비율 그대로 다 보이게
@@ -18449,7 +18481,7 @@ class Mascot:
         # 2페이지에 몇 명 없어도 1페이지와 같은 자리에 그려진다
         rows_used = max(1, -(-page_n // cols))
         # 위·아래 여백이 똑같도록 남는 공간을 반씩 — 카드 묶음이 정중앙에
-        voff = gap + max(0, (H2 - int(126 * k) - top - 2 * gap
+        voff = gap + max(0, (H2 - int(self.ROOM_BOT * k) - top - 2 * gap
                              - rows_used * chh) // 2)
         self._room_voff = voff
         for i, p in enumerate(people):
@@ -18616,7 +18648,7 @@ class Mascot:
         gap = int(12 * k)
         pad = int(16 * k)
         cols = 2 if W >= 620 * k and n > 6 else 1
-        area_h = H - int(126 * k) - top - 2 * gap
+        area_h = H - int(self.ROOM_BOT * k) - top - 2 * gap
         rows = -(-n // cols)
         ch2 = min(int(92 * k), max(int(58 * k),
                                    (area_h - (rows - 1) * gap)
@@ -18680,12 +18712,15 @@ class Mascot:
                           width=1.5)
             cv.create_text(tx, cyc - 16 * k, anchor="w", text=head,
                            font=f_name, fill=ink, tags="dyn")
-            # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
-            ti = "아직 안 켰어요" if off else str(p.get("ti") or "")[:14]
+            # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로.
+            # 안 켰어도 칭호를 그대로 둔다 — '안 켰어요'는 말풍선이 맡는다
+            # (카드 모드와 같은 규칙).
+            ti = str(p.get("ti") or "")[:14]
             cv.create_text(tx, cyc + 1 * k, anchor="w", text=ti,
                            font=f_ttl, fill=self._shade(P["sub"], 0.28),
                            tags="dyn")
-            full_msg = "" if off else str(p.get("m") or "").strip()
+            full_msg = (self.ROOM_OFF_MSG if off
+                        else str(p.get("m") or "").strip())
             msg = full_msg
             if msg:
                 f_msg = self._uf(10, True)
@@ -18704,14 +18739,22 @@ class Mascot:
                     msg = msg[:-1]
                 if msg:
                     mw = self._room_tw(cv, msg, f_msg)
+                    moon = (self._safe_str(self._moon_img, 12 * k)
+                            if off else None)
+                    iw = (moon.width() + 4 * k) if moon else 0
                     bx1 = min(max(bx1e, bx0 + 40 * k),
-                              bx0 + mw + 24 * k)
+                              bx0 + mw + iw + 24 * k)
                     self._rr_soft(cv, bx0, cyc - 28 * k, bx1, cyc - 4 * k,
                                   12 * k, fill="#ffffff",
                                   outline=self._tint(col, 0.35), width=1.5,
                                   tail=(bx0 + 16 * k, 6 * k))
-                    cv.create_text((bx0 + bx1) / 2 + 2 * k, cyc - 16 * k,
-                                   text=msg, font=f_msg,
+                    mid2 = (bx0 + bx1) / 2 + 2 * k
+                    if moon:
+                        cv.create_image(mid2 - (mw + iw) / 2, cyc - 16 * k,
+                                        image=moon, anchor="w",
+                                        tags=("dyn", "moon"))
+                    cv.create_text(mid2 - (mw + iw) / 2 + iw, cyc - 16 * k,
+                                   text=msg, font=f_msg, anchor="w",
                                    fill=self._shade(col, 0.15), tags="dyn")
                     # 잘렸으면 호버 마퀴가 원문을 흘려 보여 준다
                     self._room_msg_boxes[slot] = (bx0, cyc - 28 * k,
@@ -19147,7 +19190,11 @@ class Mascot:
             cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
                            font=self._uf(12), fill=P["sub"], tags="dyn")
         fl = self._room_flash.get(slot, 0)
-        msg = "" if off else str(p.get("m") or "").strip()
+        # 안 켠 사람은 오늘 한 줄 대신 '아직 안 켰어요' 를 띄운다.
+        # 달 글자(☾)는 기본 다면(BMP)이라 어느 글꼴에나 있다 — 이모지
+        # 그림문자는 Tk 캔버스에서 네모로 나오는 컴퓨터가 있다.
+        msg = (self.ROOM_OFF_MSG if off
+               else str(p.get("m") or "").strip())
         cx2 = (kx0 + kx1) / 2
         if fl > time.time() - 1.6:
             note = (self._room_note[0]
@@ -19176,18 +19223,27 @@ class Mascot:
             tw3 = self._room_tw(cv, line, f3)
             ny = ky0 + 19 * k
             edge = self._tint(col, 0.35)
-            self._rr_soft(cv, bub - tw3 / 2 - 14 * k, ny - 15 * k,
-                          bub + tw3 / 2 + 14 * k, ny + 15 * k, 14 * k,
+            # 안 켠 사람은 글자 앞에 초승달 그림을 붙인다
+            moon = self._safe_str(self._moon_img, 13 * k) if off else None
+            iw = (moon.width() + 5 * k) if moon else 0
+            half = (tw3 + iw) / 2
+            self._rr_soft(cv, bub - half - 14 * k, ny - 15 * k,
+                          bub + half + 14 * k, ny + 15 * k, 14 * k,
                           fill="#ffffff", outline=edge, width=2,
                           tail=(cx2, 9 * k))
-            cv.create_text(bub, ny, text=line, font=f3,
-                           fill=self._shade(col, 0.25), tags="dyn")
+            if moon:
+                cv.create_image(bub - half, ny, image=moon, anchor="w",
+                                tags=("dyn", "moon"))
+            cv.create_text(bub - half + iw, ny, text=line, font=f3,
+                           anchor="w", fill=self._shade(col, 0.25),
+                           tags="dyn")
             if slot == self.char:      # 표가 피해 갈 자리 (꼬리까지)
-                self._room_msg_box = (bub - tw3 / 2 - 14 * k, ny - 15 * k,
-                                      bub + tw3 / 2 + 14 * k, ny + 24 * k)
-        lab = (str(p.get("n") or "")[:12] if off
-               else "Lv.%d  %s" % (int(p.get("lv") or 1),
-                                   str(p.get("n") or "")[:12]))
+                self._room_msg_box = (bub - half - 14 * k, ny - 15 * k,
+                                      bub + half + 14 * k, ny + 24 * k)
+        # 안 켰어도 레벨을 보여 준다 — 명단에 마지막으로 본 값이 실려
+        # 온다(꺼진 사람의 작업 시간이 합계에 남는 것과 같은 이유).
+        lab = "Lv.%d  %s" % (int(p.get("lv") or 1),
+                             str(p.get("n") or "")[:12])
         f = self._uf(10, True)
         tw = self._room_tw(cv, lab, f)
         px0 = (kx0 + kx1) / 2 - tw / 2 - 12 * k
@@ -19202,9 +19258,9 @@ class Mascot:
                        px0 + tw + 24 * k, py0, kx1, k, col)
         # 이 자리는 칭호와 접속 여부를 알려 준다. 오늘 한 줄은 캐릭터
         # 위쪽 빈자리에 말풍선으로 따로 띄운다.
+        # 칭호는 안 켰어도 그대로 — '안 켰어요'는 머리 위 말풍선으로 옮겼다
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
-                       text="아직 안 켰어요" if off
-                       else str(p.get("ti") or "")[:14],
+                       text=str(p.get("ti") or "")[:14],
                        font=self._uf(8, True), fill=P["sub"], tags="dyn")
         # 게이지 왼쪽에 오늘 몇 시간째인지 (3h 13m 꼴, 1시간 전에는 분만)
         tmin = max(0, int(p.get("t") or 0))
@@ -21762,6 +21818,10 @@ class Mascot:
 
     ROOM_FX = 1.5            # 연출이 보이는 시간(초)
     ROOM_PAGE = 9            # 홈 한 페이지에 보이는 사람 수
+    # 안 켠 사람의 말풍선. 달은 **글자가 아니라 그림**이다 — Tk 캔버스는
+    # 이모지를 글자색 단색 윤곽으로 그려서, 🌙 를 넣으면 얽은 자국까지
+    # 선으로 그려진 덩어리가 된다 (여덟 가지 달 글자를 다 찍어 봤다).
+    ROOM_OFF_MSG = "아직 안 켰어요"
 
     CHAR_FX = 2.2            # 캐릭터 창 연출이 보이는 시간(초)
 
@@ -22506,7 +22566,7 @@ class Mascot:
         n = min(n, self.ROOM_PAGE)   # 페이지로 나뉘므로 한 페이지가 기준
         cw, ch = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         # +16 은 타이틀 띠와 첫 줄 사이의 최소 간격 (그리는 쪽과 같은 값)
-        top, bot = int((self.ROOM_TOP + 16) * k), int(126 * k)
+        top, bot = int((self.ROOM_TOP + 16) * k), int(self.ROOM_BOT * k)
         pad = int(20 * k) + int(44 * k) * 2   # 양옆 페이지 화살표 자리 포함
         sh = self.root.winfo_screenheight()
         sw = self.root.winfo_screenwidth()
