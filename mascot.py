@@ -11644,6 +11644,14 @@ class Mascot:
         dot, status = self._status_of(state, sleeping)
         t = int(self._shown_secs())
         label = f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}"
+        # 뽀모도로가 도는 동안에는 이 두 칸만 그것으로 바꾼다.
+        # 레벨·칭호·게이지는 그대로다 — 하루치를 보는 값이라 건드리면 안 된다.
+        if self._pomo_running():
+            po = self._pomo()
+            left = int(self._pomo_left(po))
+            dot, status = self.POMO_DOT.get(po["phase"], DOT_ON), \
+                self.POMO_NAME.get(po["phase"], "집중")
+            label = "%d:%02d" % (left // 60, left % 60)
         g = self._card_geom()
         x0, y0, x1, y1 = g["x0"], g["y0"], g["x1"], g["y1"]
         pad = 14
@@ -12385,6 +12393,8 @@ class Mascot:
     # ── 뽀모도로 타이머 ───────────────────────────────────────────────
     # 널리 쓰는 규칙 그대로 — 25분 집중, 5분 쉬고, 네 번째 뒤에는 15분.
     POMO_FOCUS, POMO_SHORT, POMO_LONG, POMO_ROUNDS = 25, 5, 15, 4
+    POMO_NAME = {"focus": "집중", "short": "쉬는 중", "long": "긴 휴식"}
+    POMO_DOT = {"focus": DOT_ON, "short": "#2a9d8a", "long": "#2a9d8a"}
     POMO_LINES = {
         "focus": "집중 시간이에요! 같이 해요",
         "short": "%d분 집중 끝! 잠깐 쉬어요",
@@ -12465,9 +12475,18 @@ class Mascot:
             line = self.POMO_LINES["back"]
         st["phase"] = nxt
         st["left"] = 0.0
-        st["end"] = time.time() + self._pomo_len(nxt)
-        st["on"] = True
+        # 휴식까지 마치면 한 바퀴가 끝난 것이다 — 거기서 멈춘다. 카드도
+        # 원래 표시로 돌아오고, 더 하려면 다시 시작하면 된다.
+        done = (ph != "focus" and say)
+        if done:
+            st["on"] = False
+            st["end"] = 0.0
+        else:
+            st["end"] = time.time() + self._pomo_len(nxt)
+            st["on"] = True
         self._pomo_save(st)
+        if done:
+            self._safe("card", self._relayout_card)
         if say:
             self._safe("pomo_say", self._pomo_alarm, line, nxt)
         self._pomo_redraw()
