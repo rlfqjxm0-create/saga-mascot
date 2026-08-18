@@ -14612,7 +14612,12 @@ class Mascot:
             # 캐릭터마다 제 데코를 쓴다 — 판다귀가 아닌 캐릭터에 검은 귀가
             # 얹혀 있었다 (햄북이 제보). 타이머 카드의 _draw_deco 와 맞춘다.
             mx = (hx0 + hx1) / 2
-            if deco == "burger":               # 햄북이: 미니 햄버거
+            # 여기서부터가 **두 번째** 조건문이다. 위에서 이미 그린 것들도
+            # 그냥 두면 이 갈래의 else 에 걸려 기본 검은 귀가 덧그려진다 —
+            # 패왕의 여우 귀 위에 판다 귀가 얹혀 있던 것이 이것이었다.
+            if deco in ("fox", "mouse", "scarf"):
+                pass                           # 위에서 그렸다
+            elif deco == "burger":             # 햄북이: 미니 햄버거
                 cv.create_arc(mx - 26, y - 12, mx + 26, y + 26, start=0,
                               extent=180, style="pieslice",
                               fill="#ecbf6b", outline="#a8763e", width=2)
