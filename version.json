@@ -1,7 +1,7 @@
 {
- "version": 1787069344,
+ "version": 1787080891,
  "files": {
-  "mascot.py": "054062f88828a2d67b1ee69a61c3af750ec390fdcfd4acae511c8f8b97f27f98",
+  "mascot.py": "8efca0b1487326768ca3ed8b8c34ea51f7ec6e7fa382df00d37dc7a5e068ce10",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -208,6 +208,7 @@
   "parts_saga/sounds/pen/clip_5.wav": "52237409b942b76ba313bd20bb8b3222b40a8a87fd33f941c7fd2485b8aa35c8",
   "parts_saga/sounds/pen/clip_6.wav": "ffdb7c929f56e1f27bca1322413e3355497e013248727ccbe940965686b6144e",
   "parts_saga/sounds/poke/poke.wav": "5b4691361a56af9c93ba9ea7429715d60941784d82afcfc715a07b733b4ff213",
+  "parts_saga/sounds/pomo/start.wav": "86557d3d8ac5f43db53f3927797f02414e7d9d5b4cc56eba409d459c1c32037d",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/alt.wav": "31983a24e5a0190043efcee356d5ad0ecf1d120c761b2dcfc38bac5737cfae77",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/back.wav": "8531c65d5c8ae0d39ae927e95c67c9793152ac5a621804c583d017aed3f7008d",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/caps.wav": "9dcb05127433771017532e0a541d5638da3af030c638d8e0b3c20b309d0e9459",
@@ -391,13 +392,17 @@
   "parts_saga/sounds/tealios-v2_Akira/shift.wav": "96ba5efe7c5b612c480d8f1193eeb8fc7a006208badac0a36c0858423b19c9ec",
   "parts_saga/sounds/tealios-v2_Akira/space.wav": "b47b8e94ff0882a8793322ea6275d6447d9bc7f8de2a88791c9631d1164426ba",
   "parts_saga/sounds/tealios-v2_Akira/tab.wav": "0718e9c5b1311b80d3337617d28667297eee897fa56d3d5a1174b94071fbcbf6",
+  "parts_saga/sounds/ui/click.wav": "89270c206a00c81b4d91a752c334b227ecca6e555ba85fc566682f7e186cae4f",
   "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
  "notes": [
-  "홈에 뜨는 차례에는 규칙이 있어요 — ① 내 캐릭터가 언제나 맨 앞, ② 그다음은 오늘 목표 게이지를 많이 채운 순서, ③ 아직 안 켠 사람은 맨 뒤예요",
-  "홈은 한 쪽에 아홉 명씩 보여 줘요. 그래서 오늘 많이 한 사람이 첫 쪽에 모이고, 열 명이 넘으면 오른쪽 화살표로 다음 쪽을 볼 수 있어요",
-  "게이지가 같으면 늘 같은 차례로 서요. 자리가 계속 뒤바뀌면 눈이 어지러워서 그렇게 해 두었어요"
+  "홈과 뽀모도로 창에 스티커를 붙일 수 있어요. 홈은 아래 '꾸미기' → '스티커 붙이기·정리', 뽀모도로는 오른쪽 위 꽃 단추로 열어요",
+  "스티커는 그림 파일·붙여넣기·글자 세 가지로 넣어요. 끌어서 옮기고, 오른쪽 아래 손잡이로 크기, 위 손잡이로 회전, ×로 지웁니다 (휠을 굴려도 커져요)",
+  "스티커 배경 지우기가 있어요 — '배경 지우기'를 켜고 지울 색을 누르면 이어진 부분이 투명해져요. 마음에 안 들면 '되돌리기'",
+  "뽀모도로가 도는 동안 타이머 카드 오른쪽 위에 작은 시계가 떠요. 누르면 뽀모도로 창이 바로 열립니다",
+  "뽀모도로 창에 '오늘 끝낸 세트'가 나와요 (새벽 6시에 다시 셉니다). 시작할 때와 한 사이클을 마칠 때 알림음도 울려요",
+  "누를 때마다 '똑' 하는 소리가 나요 — 메뉴·단추·할 일 말풍선·도장판, 캐릭터를 눌러 말풍선을 볼 때와 창을 옮길 때까지"
  ]
 }

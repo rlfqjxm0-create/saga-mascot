@@ -22,6 +22,7 @@ config.json 주요 키: scale, screen_quad, blink, trail_color, pen_tip,
 import base64 as _b64
 import ctypes
 import hashlib
+import io
 import json
 import math
 import os
@@ -1534,9 +1535,17 @@ class PokeSound:
     (waveOutSetVolume은 드라이버가 무시할 수 있다) 재생 때는 고르기만 한다.
     """
 
-    def __init__(self, folder, volume=40):
+    def __init__(self, folder, volume=40, only=None):
+        """only 를 주면 그 파일 하나만 읽는다.
+
+        한 폴더에 뜻이 다른 소리가 같이 있을 때 쓴다 — 뽀모도로의
+        시작음·종료음을 한 묶음에 넣으면 랜덤으로 골라 나와서, 집중이
+        시작될 때 종료음이 날 수 있다.
+        """
         import wave
         names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
+        if only:
+            names = [f for f in names if f == only]
         if not names:
             raise ValueError("클릭 소리 wav 없음")
         # 폴더에 여럿이면 다 읽어 두고 번갈아 낸다 (홈 반응 소리가 둘이다).
@@ -2653,13 +2662,18 @@ class TodoPanel:
     def __init__(self, master, card, bg, on_done, on_move, on_edit=None,
                  offset=None, flip=False, on_flip=None, ui_k=1.0,
                  zoom=100, on_zoom=None, on_delete=None,
-                 spots=None, on_spot=None, looks=None, on_look=None):
+                 spots=None, on_spot=None, looks=None, on_look=None,
+                 on_tick=None, on_menu=None):
         # 화면 배율 반영 — 비율은 그대로 두고 통째로 키운다. 배율이 큰 화면에서
         # 폭·글자를 안 키우면 물리적으로 너무 작게 보인다. 다만 얼마나 커야
         # 편한지는 사람마다 달라서, 우클릭 메뉴에서 다시 조절할 수 있게 했다.
         self.ui_k = max(1.0, min(3.0, float(ui_k)))
         self.zoom = self._near_zoom(zoom)
         self.on_zoom = on_zoom
+        # 말풍선을 누를 때 나는 '똑' — 마스코트가 넘겨 준다 (없으면 조용)
+        self.on_tick = on_tick
+        self.on_menu = on_menu       # 메뉴 항목에 소리를 붙여 주는 콜백
+        self.menu_open = False       # 메뉴가 떠 있는 동안은 안 올린다
         self._scale()
         self.card = card
         self.on_done = on_done
@@ -2771,7 +2785,7 @@ class TodoPanel:
             return got
         try:
             from PIL import ImageDraw
-            S = 3
+            S = 4
             tw_, th_ = self.TAIL_W, self.TAIL_H
             W2, H2 = w + 3, h + th_ + 4
             im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
@@ -3048,6 +3062,12 @@ class TodoPanel:
         return todo_text(item)[:60]
 
     def _press(self, e):
+        # 칸 위를 눌렀을 때만 (빈 곳을 눌러 닫는 것에는 안 낸다)
+        if self.on_tick is not None and self._at(e.x, e.y) is not None:
+            try:
+                self.on_tick()
+            except Exception:
+                pass
         self._pressed = (e.x, e.y, e.x_root, e.y_root)
         self._moved = False
         self._spot_drag = None
@@ -3119,6 +3139,11 @@ class TodoPanel:
         idx = self._at(e.x, e.y)
         if idx is None:
             return
+        if self.on_tick is not None:
+            try:
+                self.on_tick()
+            except Exception:
+                pass
         m = tk.Menu(self.top, tearoff=0,
                     font=(UI_FONT, self.MENU_FS))
         if self.on_edit is not None:
@@ -3153,10 +3178,45 @@ class TodoPanel:
         m.add_cascade(label="전체 설정", menu=sub2)
         self._menu_ref2 = (sub2, sub3)
         self._menu_ref = (m, sub)       # 파이썬이 메뉴를 먼저 치우지 않게
+        if self.on_menu is not None:    # 항목마다 '똑' (본 메뉴와 같은 손맛)
+            try:
+                self.on_menu(m)
+            except Exception:
+                pass
+        self._popup(m, e.x_root, e.y_root)
+
+    def _popup(self, m, x, y):
+        """메뉴를 **말풍선 앞에** 띄운다.
+
+        패널이 '항상 위'라 그냥 띄우면 메뉴가 그 뒤로 깔린다 (제보).
+        캐릭터 본체가 쓰는 수법과 같다 (지뢰 15) — 떠 있는 동안만 패널의
+        항상 위를 내리고, 그동안 주기적으로 다시 올리는 것도 쉰다.
+        """
+        self.menu_open = True           # 그리기 루프가 이걸 보고 안 올린다
         try:
-            m.tk_popup(e.x_root, e.y_root)
+            self.top.attributes("-topmost", False)
+        except Exception:
+            pass
+        try:
+            m.tk_popup(int(x), int(y))
         finally:
             m.grab_release()
+
+        def back(tries=0):
+            # 메뉴가 아직 떠 있으면 기다린다 (하위 메뉴까지 닫힐 때까지)
+            try:
+                if m.winfo_ismapped() and tries < 100:
+                    self.top.after(200, lambda: back(tries + 1))
+                    return
+                self.menu_open = False
+                self.top.attributes("-topmost", True)
+                self.raise_above()
+            except Exception:
+                self.menu_open = False
+        try:
+            self.top.after(200, back)
+        except Exception:
+            self.menu_open = False
 
     def _key_at(self, idx):
         keys = getattr(self, "_spot_keys", [])
@@ -3734,6 +3794,19 @@ def _josa_bat(word):
     return (False, False)
 
 
+def _josa_wordish(ch):
+    """낱말의 끝으로 볼 글자인가 (한글 음절·영문·숫자).
+
+    re 를 안 쓴다 — mascot.py 에 없는 모듈을 새로 부르면 굳힌 선물본에
+    안 들어가 켜지지도 않는다 (지뢰 21).
+    """
+    if not ch:
+        return False
+    if ch.isdigit() or ("a" <= ch.lower() <= "z"):
+        return True
+    return "가" <= ch <= "힣"
+
+
 def _josa(word, kind="이/가"):
     """이름에 조사를 붙여 돌려준다. 빈 이름이면 그대로 둔다.
 
@@ -3742,10 +3815,19 @@ def _josa(word, kind="이/가"):
     word = "" if word is None else str(word)
     if not word.strip():
         return word
+    word = word.strip()
     withb, nob = _JOSA_PAIR.get(kind, ("이", "가"))
     bat, rieul = _josa_bat(word)
     if rieul and kind == "으로/로":            # '서울로' — ㄹ 뒤에는 '로'
         bat = False
+    # 사람이 직접 정한 별명은 ♥·!·~·이모지로 끝나는 일이 많다. 그 뒤에
+    # 조사를 그냥 붙이면 '도로롱♥이 콕 찔렀어요'처럼 꾸밈 글자와 조사가
+    # 엉겨 어색하다 (제보). 받침 판정은 꾸밈을 건너뛰어 맞게 하고 있으니,
+    # **붙는 자리**만 옮긴다 — 이름과 조사 사이에 '님'을 넣으면 어떤
+    # 별명에도 자연스럽다. 이름이 글자·숫자로 끝나는 흔한 경우는 그대로.
+    if not _josa_wordish(word[-1:]):
+        n_with, _n_no = _JOSA_PAIR.get(kind, ("이", "가"))
+        return word + " 님" + n_with       # '님'은 받침이 있다
     return word + (withb if bat else nob)
 
 
@@ -4324,7 +4406,9 @@ class Mascot:
                                         spots=self._todo_spots(),
                                         on_spot=self._todo_spot_moved,
                                         looks=self.us.get("todo_looks"),
-                                        on_look=self._todo_look_saved)
+                                        on_look=self._todo_look_saved,
+                                        on_tick=self._ui_click,
+                                        on_menu=self._menu_snd)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
 
         # ── 마감 목록 (config의 "deadline_on") ───────────────────────────
@@ -4336,7 +4420,8 @@ class Mascot:
                 self.due_pos or (self.W + 4, 0),   # 기본은 캐릭터 오른쪽
                 self.due_flip, self._due_flipped, self.ui_k, self.due_zoom,
                 self._due_zoomed,
-                on_delete=self._due_delete)
+                on_delete=self._due_delete, on_tick=self._ui_click,
+                on_menu=self._menu_snd)
             self.due_panel._moved_by_user = bool(self.due_pos)
             self.root.after(280, self._due_refresh)
 
@@ -4569,6 +4654,10 @@ class Mascot:
         menu.add_separator()
         menu.add_command(label="종료", command=self.close)
         self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
+        # 메뉴 항목을 고를 때도 '똑' — 항목이 스무 개가 넘어 하나하나
+        # 고치지 않고, 다 만든 뒤에 한 번 감싼다. Tcl 이름으로 원래
+        # 명령을 그대로 부르므로 하위 메뉴까지 같은 방법이 통한다.
+        self._safe("menu_tick", self._menu_tick_wrap, menu)
         # grab_release를 안 하면 메뉴를 닫은 뒤에도 마우스를 붙잡고 있어
         # 다음 클릭이 엉뚱하게 먹힌다
         def _pop(e):
@@ -4608,6 +4697,9 @@ class Mascot:
         self.pensnd = None
         self.pokesnd = None
         self.roomsnd = None          # 홈에서 남이 눌러 줬을 때 (평소와 다른 소리)
+        self.uisnd = None            # 조작할 때 나는 '똑' (메뉴·단추)
+        self._ui_snd_at = 0.0        # 마지막으로 낸 시각 (연타 방지)
+        self.pomosnd = None         # 뽀모도로 시작음·종료음 {"start":…, "end":…}
         self.sparksnd = None         # 스페셜 컵케이크의 '샤라랑'
         self.snacksnd = None         # 간식을 먹을 때 (오물오물)
         self._pen_playing = False
@@ -4698,16 +4790,18 @@ class Mascot:
 
         # ── 타이머 상태 ───────────────────────────────────────────────────
         self.work_secs = 0.0
+        self._dfloor = None         # 오늘치 바닥 (잠깐 들고 있는 값)
         self._t_last = time.time()
         self._t_save = 0.0
         self._fg_checked = 0.0
         self._fg_work = False
         self.state_path = os.path.join(self.state_dir, ".timer_state.json")
         if self.timer_on:
-            if self.ws_path is None:
-                self._timer_load()
-            else:
-                self._lv_load()      # 연동 중이면 레벨만 (기록은 에이전트 몫)
+            # 연동 중이어도 **획·키·클릭·거리와 기준점은 불러와야 한다.**
+            # 에이전트 몫은 누적 시간(seconds)뿐이다. 예전에는 레벨만
+            # 불러와서, 껐다 켤 때마다 브리핑의 획·키·클릭이 0으로
+            # 돌아갔다 (지뢰 69의 짝 — 저장은 고쳤는데 불러오기가 빠졌다).
+            self._timer_load(secs=(self.ws_path is None))
         self._lv_seen = self._level()
         # 혼자 재는 캐릭터는 지금 누적을 기준으로 잡아 둔다 — 안 그러면 켤
         # 때마다 첫 프레임 몫을 한 번씩 흘린다. 연동 중이면 첫 틱에 에이전트
@@ -4842,6 +4936,23 @@ class Mascot:
         self._room_bgc_img = None    # 직접 고른 배경 색 한 장 (참조 유지)
         self._room_wash_img = None   # 밝은 오버레이 한 장 (참조 유지)
         self._room_bg = None
+        self._room_dots = None     # 점 벽지 한 장
+        # 창 스티커 — 홈·뽀모도로 창 안에 붙인다 (바탕화면 스티커와 별개)
+        self._stk_mem = None       # 읽어 둔 목록
+        self._stk_cache = {}       # (id, 폭, 각도) → 그린 판
+        self._stk_srcs = {}        # id → 원본 PIL (몇 장만)
+        self._stk_edit = None      # 'room' / 'pomo' — 정리 중인 창
+        self._stk_pick = None      # 고른 스티커 id
+        # 자리 목록은 **창별로** 나눠 든다 — 홈과 뽀모도로가 같이 떠
+        # 있으면 나중에 그린 창이 앞 창의 목록을 덮어써서, 홈에서
+        # 누른 자리가 뽀모도로 스티커로 잡힌다.
+        self._stk_hit = {}         # 창 → [(x0,y0,x1,y1,id)]
+        self._stk_grip = {}        # 창 → [(x,y,r,무엇)] 손잡이
+        self._stk_wh = {}          # 창 → 그릴 때의 (폭, 높이)
+        self._stk_drag = None      # 잡고 있는 것
+        self._stk_winref = None    # 스티커 정리 창
+        self._stk_wipe = False     # 배경 지우기 모드
+        self._stk_tol = self.STK_TOL
         self._room_body = []
         self._room_key_last = None
         self._room_fx = []           # 지금 보이는 연출
@@ -5472,9 +5583,9 @@ class Mascot:
         y += self.oy + yo
         c = self.canvas
         cx, cy = x + r * 0.15, y + r * 0.85
-        c.create_oval(cx - r, cy - r, cx + r, cy + r,
+        self._oval(c, cx - r, cy - r, cx + r, cy + r,
                       fill="#dfeeff", outline="#8dbfe4", width=2)
-        c.create_oval(cx - r * 0.55, cy - r * 0.6, cx - r * 0.05, cy - r * 0.1,
+        self._oval(c, cx - r * 0.55, cy - r * 0.6, cx - r * 0.05, cy - r * 0.1,
                       fill="#ffffff", outline="")
 
     def _build_pet_mask(self, pil_cache):
@@ -5992,6 +6103,31 @@ class Mascot:
                     room_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.roomsnd = None
+        # 조작 소리 — 메뉴를 열거나 단추를 누를 때 '똑'. 이미 제 소리가
+        # 있는 곳(콕·간식·홈 반응·펜)에는 안 넣는다. 겹치면 시끄럽다.
+        ui_dir = os.path.join(self.dir, "sounds", "ui")
+        if os.path.isdir(ui_dir):
+            try:
+                self.uisnd = PokeSound(
+                    ui_dir, volume=float(self.us.get("ui_volume", 30)))
+            except Exception:
+                self.uisnd = None
+        # 뽀모도로 알림 — 시작음과 종료음을 **따로** 들고 있는다. 한
+        # 묶음에 넣으면 랜덤으로 골라 나와서, 집중이 시작될 때 종료음이
+        # 날 수 있다. 폴더가 없으면 None (그때는 홈 소리로 물러난다).
+        pomo_dir = os.path.join(self.dir, "sounds", "pomo")
+        if os.path.isdir(pomo_dir):
+            vol = float(self.us.get("poke_volume", 40))
+            got = {}
+            for nm in ("start", "end"):
+                one = os.path.join(pomo_dir, nm + ".wav")
+                if not os.path.isfile(one):
+                    continue
+                try:
+                    got[nm] = PokeSound(pomo_dir, volume=vol, only=nm + ".wav")
+                except Exception:
+                    pass
+            self.pomosnd = got or None
         # '샤라랑' — 스페셜 컵케이크를 받을 때만 나는 반짝임 소리
         sp_dir = os.path.join(self.dir, "sounds", "special")
         if os.path.isdir(sp_dir):
@@ -6200,6 +6336,9 @@ class Mascot:
         px, py, prx, pry = self._press
         if not self._dragged and abs(e.x_root - prx) + abs(e.y_root - pry) < 6:
             return
+        if not self._dragged:
+            # 옮기기 시작하는 순간에 한 번만 (끄는 내내 내면 웅웅거린다)
+            self._safe("ui_click", self._ui_click)
         self._dragged = True
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
@@ -6230,11 +6369,13 @@ class Mascot:
                 self._press = None
                 return
             if dot and (px - dot[0]) ** 2 + (py - dot[1]) ** 2 <= dot[2] ** 2:
+                self._safe("ui_click", self._ui_click)
                 self.open_update_news()
                 self._press = None
                 return
             # 말풍선 속 단추 — 머리 위에 있어 '콕 찌르기'와 자리가 겹치므로
             # 그보다 먼저 본다
+            pb = getattr(self, "_pomo_badge", None)
             bb = getattr(self, "_bubble_btn", None)
             act = getattr(self, "_bubble_act", None)
             if (bb and act and bb[0] <= px <= bb[2] and bb[1] <= py <= bb[3]):
@@ -6252,10 +6393,17 @@ class Mascot:
                 return
             # 음악 버튼·환경음 알약이 카드 윗변에 걸쳐 있으므로 카드보다 먼저
             if (ab and ab[0] <= px <= ab[2] and ab[1] <= py <= ab[3]):
+                self._safe("ui_click", self._ui_click)
                 self._safe("amb_win", self._amb_toggle_win)
             elif mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
+                self._safe("ui_click", self._ui_click)
                 self._safe("music", self._yt_toggle)
+            elif pb and (px - pb[0]) ** 2 + (py - pb[1]) ** 2 <= (pb[2] + 3) ** 2:
+                # 뽀모도로가 도는 동안만 뜨는 시계 배지 — 창을 연다
+                self._safe("ui_click", self._ui_click)
+                self._safe("pomo_win", self._pomo_win)
             elif self.has_clock and on_card:
+                self._safe("ui_click", self._ui_click)
                 self._toggle_clock()
             elif self.cfg.get("slime") and not on_card and self._on_desk(px, py):
                 # 책상을 누르면 슬라임을 꺼냈다 치웠다 한다. 슬라임 위를
@@ -6264,6 +6412,9 @@ class Mascot:
                            self._slime_close if self.slime is not None
                            else self._slime_open)
             elif self.can_talk and not on_card and py > self.oy:
+                # 콕 소리와 함께 '똑'도 낸다 (요청). _ui_click 은 아주 짧고
+                # 작아서 콕 위에 얇게 얹히기만 한다.
+                self._safe("ui_click", self._ui_click)
                 self._on_poke()                        # 캐릭터를 콕 찌름
         self._press = None
 
@@ -6438,6 +6589,7 @@ class Mascot:
         Shift+엔터로 줄을 바꾼다 (말풍선에도 그대로 나온다).
         edit에 번호를 주면 그 할 일을 고치는 창이 된다(엔터 한 번으로 끝).
         """
+        self._safe("ui_click", self._ui_click)
         if getattr(self, "_todo_win", None) is not None \
                 and self._todo_win.winfo_exists():
             self._todo_win.destroy()        # 수정 창을 새로 열 수 있게 닫는다
@@ -6769,8 +6921,21 @@ class Mascot:
             # 거두는 이름이 클래스마다 다르다 — PenSound 는 stop(),
             # 나머지는 close(). 있는 쪽을 부른다.
             for _nm in ("pensnd", "pokesnd", "roomsnd", "sparksnd",
-                        "snacksnd", "snd", "_slime_snd"):
+                        "snacksnd", "snd", "_slime_snd", "pomosnd",
+                        "uisnd"):
                 _s = getattr(self, _nm, None)
+                if isinstance(_s, dict):        # 뽀모도로처럼 여럿을 든 것
+                    for _one in list(_s.values()):
+                        for _fn2 in ("close", "stop"):
+                            _f2 = getattr(_one, _fn2, None)
+                            if callable(_f2):
+                                try:
+                                    _f2()
+                                except Exception:
+                                    pass
+                                break
+                    setattr(self, _nm, None)
+                    continue
                 if _s is None:
                     continue
                 for _fn in ("close", "stop"):
@@ -6822,12 +6987,19 @@ class Mascot:
             self.root.destroy()
 
     # ── 타이머 ───────────────────────────────────────────────────────────
-    def _timer_load(self):
+    def _timer_load(self, secs=True):
+        """저장해 둔 타이머 상태를 되살린다.
+
+        secs=False 면 누적 시간만 안 가져온다 — 연동 중에는 그 값이
+        에이전트 몫이라, 파일에서 읽어도 첫 틱에 덮어써진다. 나머지
+        (획·키·클릭·거리·기준점·칭찬 여부)는 캐릭터만 세므로 꼭 읽어야 한다.
+        """
         # 자동 초기화 없음 — 우클릭 '타이머 초기화'로만 리셋 (확정 방침)
         try:
             with open(self.state_path, encoding="utf-8") as fp:
                 st = json.load(fp)
-            self.work_secs = float(st.get("seconds", 0))
+            if secs:
+                self.work_secs = float(st.get("seconds", 0))
             self.zero_at = float(st.get("zero_at", 0) or 0)
             self.day_key = str(st.get("day_key", "") or "")
             self.day_base = float(st.get("day_base", 0) or 0)
@@ -7160,6 +7332,7 @@ class Mascot:
 
     def add_due(self, edit=None):
         """마감 입력 창 — 이름과 날짜. 엔터로 저장, Esc로 닫기."""
+        self._safe("ui_click", self._ui_click)
         if getattr(self, "_due_win", None) is not None                 and self._due_win.winfo_exists():
             self._due_win.destroy()
         cd, u = self.card, self._ui
@@ -7890,9 +8063,9 @@ class Mascot:
         bx = (g["x0"] + g["x1"]) / 2
         by = g["y0"] - 24            # 카드 윗변에서 10px 띄운다 (붙으면 답답하다)
         r = 14.0
-        c.create_oval(bx - r + 1.5, by - r + 2, bx + r + 1.5, by + r + 2,
+        self._oval(c, bx - r + 1.5, by - r + 2, bx + r + 1.5, by + r + 2,
                       fill="#e3e6ee", outline="")            # 옅은 그림자
-        c.create_oval(bx - r, by - r, bx + r, by + r,
+        self._oval(c, bx - r, by - r, bx + r, by + r,
                       fill=cd["bg"], outline=cd["border"], width=2)
         ink = cd["fill"]
         if self._yt_busy():                       # 켜는 중 — 도는 호
@@ -7923,9 +8096,9 @@ class Mascot:
         if self.us.get("yt_url") and self._yt_on():
             cx -= 34.0                    # 노래 버튼 왼쪽으로 비켜 준다
         by = g["y0"] - 24
-        c.create_oval(cx - r + 1.5, by - r + 2, cx + r + 1.5, by + r + 2,
+        self._oval(c, cx - r + 1.5, by - r + 2, cx + r + 1.5, by + r + 2,
                       fill="#e3e6ee", outline="")            # 옅은 그림자
-        c.create_oval(cx - r, by - r, cx + r, by + r,
+        self._oval(c, cx - r, by - r, cx + r, by + r,
                       fill=cd["bg"], outline=cd["border"], width=2)
         ink = cd["fill"]
         # 나뭇잎 — 위아래가 뾰족하고 배가 부른 렌즈 모양. 살짝 기울여
@@ -7964,9 +8137,9 @@ class Mascot:
         cy = max(g["y0"] + 6, r + 3)
         c = self.canvas
         # 어떤 카드 색 위에서도 보이도록 흰 테를 한 겹 두른다
-        c.create_oval(cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2,
+        self._oval(c, cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2,
                       fill="#ffffff", outline="")
-        c.create_oval(cx - r, cy - r, cx + r, cy + r,
+        self._oval(c, cx - r, cy - r, cx + r, cy + r,
                       fill="#e5484d", outline="")
         self._dot_btn = (cx, cy, r + 7)
 
@@ -8208,6 +8381,34 @@ class Mascot:
         l, t, r, b = self._screen_box()
         return max(400, b - t)
 
+    def _btn_snd(self, win, depth=0):
+        """이 창 안의 모든 tk.Button 에 '똑' 소리를 붙인다.
+
+        창마다 손으로 넣으면 반드시 빠뜨린다. 만들어진 위젯 나무를 훑어
+        Tcl 명령 이름을 붙잡고 그 앞에 소리만 끼워 넣는다 —
+        우클릭 메뉴에 쓰는 _menu_tick_wrap 과 같은 수법이다.
+        """
+        if win is None or depth > 6:
+            return
+        try:
+            kids = win.winfo_children()
+        except Exception:
+            return
+        for w in kids:
+            try:
+                if isinstance(w, tk.Button) and not getattr(
+                        w, "_ena_snd", False):
+                    old = w.cget("command")
+                    if old:
+                        def fire(_c=old, _w=w):
+                            self._safe("ui_click", self._ui_click)
+                            _w.tk.call(_c)
+                        w.config(command=fire)
+                        w._ena_snd = True
+            except Exception:
+                pass
+            self._btn_snd(w, depth + 1)
+
     def _dialog_keep(self, win, name):
         """따로 뜨는 입력 창 공통 — 앞에 붙들어 두고, 닫은 자리를 기억한다.
 
@@ -8221,6 +8422,7 @@ class Mascot:
                 prefs = json.load(fp)
         except Exception:
             prefs = {}
+        self._safe("btn_snd", self._btn_snd, win)   # 창 안 단추에 '똑'
         pos = (prefs.get("dlg") or {}).get(name)
         if pos:
             try:
@@ -8680,10 +8882,46 @@ class Mascot:
 
         누적 자체(work_secs)는 그대로 두고 기준점만 옮긴다. 기존 타이머가
         보내 주는 값을 덮어쓰면 다음 갱신에 바로 되돌아오기 때문이다.
+
+        바탕이 되는 '오늘'은 _today_secs 다 — 그래야 홈에 보이는 값과
+        카드가 같은 숫자를 말한다 (예전에는 카드만 연동 시계를 그대로
+        따라가서, 에이전트가 다시 켜지면 홈은 2시간 13분인데 카드는
+        1시간 42분이 됐다 — 제보).
         """
-        if self.work_secs < self.zero_at:     # 작업일이 넘어가 누적이 줄었다
-            self.zero_at = 0.0
-        return max(0.0, self.work_secs - self.zero_at)
+        today = self._today_secs()
+        off = max(0.0, self.zero_at - self.day_base)
+        if off > today:            # 누적이 줄었다 — 기준점을 놓는다
+            self.zero_at = self.day_base
+            off = 0.0
+        return max(0.0, today - off)
+
+    def _day_floor(self):
+        """오늘 이미 알고 있는 작업 시간의 바닥 (초).
+
+        연동 시계(에이전트)는 그쪽이 다시 켜지면 0부터 세므로, 그 값만
+        믿으면 오늘 일한 시간이 뒤로 간다. 이미 남겨 둔 두 곳을 바닥으로
+        쓴다 — 홈에 보낸 '오늘 최고치'(.room_seen)와 하루 기록(.history).
+        파일을 매 프레임 읽지 않게 30초만 들고 있는다.
+        """
+        now = time.time()
+        got = getattr(self, "_dfloor", None)
+        if got is not None and now - got[0] < 30.0 and got[1] == self.day_key:
+            return got[2]
+        sec = 0.0
+        day = self._my_workday()
+        try:
+            row = (self._room_seen_get() or {}).get(self.char)
+            if self._seen_ok(row, day):
+                sec = max(sec, float(row[0]) * 60.0)
+        except Exception:
+            pass
+        try:
+            h = (self._hist_load() or {}).get(day) or {}
+            sec = max(sec, float(h.get("work") or 0))
+        except Exception:
+            pass
+        self._dfloor = (now, self.day_key, sec)
+        return sec
 
     def _today_secs(self):
         """오늘(작업일) 일한 시간.
@@ -8691,10 +8929,19 @@ class Mascot:
         카드에 보이는 값(_shown_secs)은 '작업 종료 뒤로 다시 센 만큼'이라
         여러 번 끝내면 줄어든다. 기록과 브리핑은 하루 단위여야 하므로
         작업일이 시작될 때의 누적을 빼서 따로 낸다.
+
+        그리고 **뒤로 가지 않는다** — 이미 알고 있는 오늘치(_day_floor)를
+        바닥으로 쓴다. 다만 그 바닥도 '06시 이후 흐른 시간'을 넘을 수는
+        없다 (지뢰 60 — 넘으면 어제 누적이 오늘로 새는 것이다).
         """
         if self.work_secs < self.day_base:   # 연동 쪽이 초기화됐다
             self.day_base = 0.0
-        return max(0.0, self.work_secs - self.day_base)
+        now = max(0.0, self.work_secs - self.day_base)
+        try:
+            cap = self._day_min() * 60.0 + 300.0
+            return max(now, min(self._day_floor(), cap))
+        except Exception:
+            return now
 
     def _day_roll(self, now):
         """작업일이 바뀌면 지난 하루를 기록에 옮겨 담고 0부터 다시 센다.
@@ -8764,6 +9011,59 @@ class Mascot:
                              0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
             prev = h
 
+    def _menu_snd(self, menu):
+        """말풍선 우클릭 메뉴에도 항목마다 '똑' — 본 메뉴와 같은 손맛."""
+        self._safe("menu_tick", self._menu_tick_wrap, menu)
+
+    def _menu_tick_wrap(self, menu, depth=0):
+        """메뉴 항목을 고를 때 조작 소리가 나게 감싼다 (하위 메뉴까지).
+
+        entrycget("command") 는 Tcl 쪽 명령 **이름**을 준다. 그 이름을
+        그대로 부르면 원래 하던 일이 그대로 돌아가므로, 앞에 소리만
+        끼워 넣으면 된다. 감싼 표시를 남겨 두 번 감싸지 않는다.
+        """
+        if depth > 3:
+            return
+        try:
+            end = menu.index("end")
+        except Exception:
+            return
+        if end is None:
+            return
+        for i in range(int(end) + 1):
+            try:
+                kind = menu.type(i)
+            except Exception:
+                continue
+            if kind == "cascade":
+                try:
+                    sub = menu.nametowidget(menu.entrycget(i, "menu"))
+                except Exception:
+                    sub = None
+                if sub is not None:
+                    self._menu_tick_wrap(sub, depth + 1)
+                continue
+            if kind not in ("command", "checkbutton", "radiobutton"):
+                continue
+            try:
+                old_cmd = str(menu.entrycget(i, "command") or "")
+            except Exception:
+                continue
+            if not old_cmd or old_cmd.startswith("ena_tick"):
+                continue
+
+            def wrapped(_c=old_cmd):
+                self._safe("ui_click", self._ui_click)
+                try:
+                    self.root.tk.call(_c)
+                except Exception:
+                    pass
+
+            try:
+                menu.entryconfigure(i, command=wrapped)
+            except Exception:
+                pass
+
     def _menu_popup(self, x, y):
         """우클릭 메뉴 — 캐릭터('항상 위')에 안 가리게 띄운다.
 
@@ -8771,6 +9071,7 @@ class Mascot:
         깔렸다 (지뢰 15). 메뉴가 떠 있는 동안만 캐릭터의 항상 위를 내려
         두고, 닫히면 되돌린다.
         """
+        self._safe("ui_click", self._ui_click)      # 메뉴 열리는 '똑'
         was = bool(self.us.get("topmost", True))
         if was:
             try:
@@ -9073,7 +9374,7 @@ class Mascot:
         col = self.card.get("fill", "#f0a8c0")
         for j, (back, r) in enumerate(((0.0, 4), (0.018, 3), (0.040, 2))):
             px, py = self._rect_point(x0, y0, x1, y1, e - back)
-            c.create_oval(px - r, py - r, px + r, py + r,
+            self._oval(c, px - r, py - r, px + r, py + r,
                           fill=col if j else "#ffffff",
                           outline=col, width=1)
 
@@ -9083,9 +9384,9 @@ class Mascot:
         deco = self.card["deco"]
         if deco == "panda":
             for ex in (x0 + 26, x1 - 26):
-                c.create_oval(ex - 12, y0 - 17, ex + 12, y0 + 7,
+                self._oval(c, ex - 12, y0 - 17, ex + 12, y0 + 7,
                               fill="#2b2b2b", outline="")
-                c.create_oval(ex - 6, y0 - 11, ex + 6, y0 + 1,
+                self._oval(c, ex - 6, y0 - 11, ex + 6, y0 + 1,
                               fill="#4a4a4a", outline="")
         elif deco == "cat":
             # 색은 그 캐릭터의 테마색에서 뽑는다. 분홍으로 박아 두면 붉은
@@ -9115,16 +9416,16 @@ class Mascot:
         elif deco == "mouse":
             # 생쥐 귀 — 크고 동그란 귀. 안쪽에 옅은 원을 겹친다.
             for ex in (x0 + 24, x1 - 24):
-                c.create_oval(ex - 15, y0 - 20, ex + 15, y0 + 10,
+                self._oval(c, ex - 15, y0 - 20, ex + 15, y0 + 10,
                               fill="#9a9a9a", outline="#6f6f6f", width=2)
-                c.create_oval(ex - 8, y0 - 13, ex + 8, y0 + 3,
+                self._oval(c, ex - 8, y0 - 13, ex + 8, y0 + 3,
                               fill="#e8c4c4", outline="")
         elif deco == "dog":
             # 접힌 검은 강아지 귀 — 카드 위 모서리에서 바깥으로 늘어짐
             for sign, ex in ((-1, x0 + 18), (1, x1 - 18)):
-                c.create_oval(ex - 15, y0 - 15, ex + 9, y0 + 28,
+                self._oval(c, ex - 15, y0 - 15, ex + 9, y0 + 28,
                               fill="#2b2b2b", outline="")
-                c.create_oval(ex - 9, y0 - 7, ex + 3, y0 + 14,
+                self._oval(c, ex - 9, y0 - 7, ex + 3, y0 + 14,
                               fill="#4a4a4a", outline="")
         elif deco == "frog":
             # 프고: 개구리 눈 두 개가 카드 위로 빼꼼 — 몸(페페)이 파랑이라
@@ -9132,13 +9433,13 @@ class Mascot:
             green, line = "#69a63c", "#49781f"
             mx = (x0 + x1) / 2
             for ex in (mx - 26, mx + 26):
-                c.create_oval(ex - 17, y0 - 16, ex + 17, y0 + 10,
+                self._oval(c, ex - 17, y0 - 16, ex + 17, y0 + 10,
                               fill=green, outline=line, width=2)
-                c.create_oval(ex - 11, y0 - 11, ex + 11, y0 + 6,
+                self._oval(c, ex - 11, y0 - 11, ex + 11, y0 + 6,
                               fill="#ffffff", outline=line, width=2)
-                c.create_oval(ex - 4, y0 - 5, ex + 4, y0 + 3,
+                self._oval(c, ex - 4, y0 - 5, ex + 4, y0 + 3,
                               fill="#20261c", outline="")
-                c.create_oval(ex - 1, y0 - 4, ex + 3, y0 - 1,
+                self._oval(c, ex - 1, y0 - 4, ex + 3, y0 - 1,
                               fill="#ffffff", outline="")
         elif deco == "burger":
             # 햄북이: 카드 위 한가운데 미니 햄버거 (번·양상추·패티)
@@ -9148,21 +9449,21 @@ class Mascot:
                          extent=180, style="pieslice", fill=bun,
                          outline=line, width=2)
             for dx2 in (-10, 0, 10):               # 참깨
-                c.create_oval(mx + dx2 - 2, y0 - 12 + abs(dx2) // 5,
+                self._oval(c, mx + dx2 - 2, y0 - 12 + abs(dx2) // 5,
                               mx + dx2 + 2, y0 - 9 + abs(dx2) // 5,
                               fill="#fdf3d9", outline="")
             for i2 in range(6):                    # 양상추 물결
                 lx = mx - 20 + i2 * 8
-                c.create_oval(lx - 4, y0 - 4, lx + 4, y0 + 4,
+                self._oval(c, lx - 4, y0 - 4, lx + 4, y0 + 4,
                               fill="#7cb956", outline="#578a35")
             c.create_rectangle(mx - 19, y0 + 1, mx + 19, y0 + 6,
                                fill="#8a5a34", outline="#6d4426")
         elif deco == "sushi":
             # 연어: 카드 위 한가운데 연어 초밥 (밥 + 연어 살 + 살 결)
             mx = (x0 + x1) / 2
-            c.create_oval(mx - 20, y0 - 8, mx + 20, y0 + 12,
+            self._oval(c, mx - 20, y0 - 8, mx + 20, y0 + 12,
                           fill="#fdfdf6", outline="#d8d0bf", width=2)
-            c.create_oval(mx - 23, y0 - 17, mx + 23, y0 + 1,
+            self._oval(c, mx - 23, y0 - 17, mx + 23, y0 + 1,
                           fill="#ef9d76", outline="#c96f4e", width=2)
             # 살 결은 사선으로 흐른다. 가로로 누운 호로 그렸더니 빵처럼
             # 보인다는 제보가 있었다. 가장자리 줄은 짧게 해 살 밖으로
@@ -9174,9 +9475,9 @@ class Mascot:
         elif deco == "tangerine":
             # 레냥: 귤 한 알 (열매 + 초록 꼭지잎)
             mx = (x0 + x1) / 2
-            c.create_oval(mx - 16, y0 - 15, mx + 16, y0 + 13,
+            self._oval(c, mx - 16, y0 - 15, mx + 16, y0 + 13,
                           fill="#f5a623", outline="#c97c12", width=2)
-            c.create_oval(mx - 9, y0 - 10, mx - 1, y0 - 4,
+            self._oval(c, mx - 9, y0 - 10, mx - 1, y0 - 4,
                           fill="#fbc96d", width=0)
             c.create_polygon(mx, y0 - 13, mx + 10, y0 - 21, mx + 16, y0 - 14,
                              mx + 6, y0 - 9, smooth=True,
@@ -9202,7 +9503,7 @@ class Mascot:
                 c.create_line(sx, y0 - 13, sx - 7, y0 + 5, fill=silver, width=3)
         elif deco == "rose":
             for ex in (x0 + 26, x1 - 26):
-                c.create_oval(ex - 12, y0 - 17, ex + 12, y0 + 7,
+                self._oval(c, ex - 12, y0 - 17, ex + 12, y0 + 7,
                               fill="#f5bdd2", outline="#d687ab", width=2)
                 c.create_arc(ex - 8, y0 - 13, ex + 8, y0 + 3, start=300,
                              extent=270, style="arc", outline="#d687ab", width=2)
@@ -9217,7 +9518,7 @@ class Mascot:
             for sign in (-1, 1):                    # 아래로 늘어진 끈
                 c.create_line(mx + 2 * sign, y0 + 3, mx + 7 * sign, y0 + 13,
                               fill=line, width=3)
-            c.create_oval(mx - 5, y0 - 6, mx + 5, y0 + 4,
+            self._oval(c, mx - 5, y0 - 6, mx + 5, y0 + 4,
                           fill="#ffd9e8", outline=line, width=2)   # 가운데 매듭
         elif deco == "sprout":
             # 기뽀: 카드 위 한가운데 작은 새싹
@@ -9257,7 +9558,7 @@ class Mascot:
         am_col = cd.get("arc_am", "#f4c9dd")     # 오전 = 연한 분홍
         pm_col = cd.get("arc_pm", "#e493bd")     # 오후 = 진한 분홍
         # 바탕
-        c.create_oval(cx - R, cy - R, cx + R, cy + R,
+        self._oval(c, cx - R, cy - R, cx + R, cy + R,
                       fill=cd["bg"], outline=cd["border"], width=2)
         # 작업한 분 = 방사형 선 (12시간 다이얼 위치)
         Rf = R - 3
@@ -9293,7 +9594,7 @@ class Mascot:
         hand(hh / 12, R * 0.46, 3, cd["text"])
         hand(mm / 60, R * 0.66, 2, cd["text"])
         hand(lt.tm_sec / 60, R * 0.76, 1, cd["fill"])
-        c.create_oval(cx - 2.5, cy - 2.5, cx + 2.5, cy + 2.5, fill=cd["fill"], outline="")
+        self._oval(c, cx - 2.5, cy - 2.5, cx + 2.5, cy + 2.5, fill=cd["fill"], outline="")
 
     # ── 귀여운 이벤트: 말풍선 · 혼잣말 · 클릭 반응 · 반려동물 · 축하 ──────
     PET_RISE, PET_HOLD, PET_FALL = 0.5, 6.0, 0.5
@@ -9571,7 +9872,7 @@ class Mascot:
             return
         c.create_polygon(hx - 19, top + 30, hx, top - 6, hx + 19, top + 30,
                          fill="#ffb3c9", outline="#e07a9c", width=2)
-        c.create_oval(hx - 6, top - 16, hx + 6, top - 4,
+        self._oval(c, hx - 6, top - 16, hx + 6, top - 4,
                       fill="#fff0a8", outline="#e0b84a", width=2)
 
     def _draw_particles(self):
@@ -10177,8 +10478,8 @@ class Mascot:
             p = ((now * speed) + k * 0.5) % 1.0
             r = 11 + 32 * p
             w = max(1, round(4.0 * (1.0 - p)))
-            c.create_oval(cx - r, cy - r, cx + r, cy + r, outline=col, width=w)
-        c.create_oval(cx - 5, cy - 5, cx + 5, cy + 5, fill=col, outline="")
+            self._oval(c, cx - r, cy - r, cx + r, cy + r, outline=col, width=w)
+        self._oval(c, cx - 5, cy - 5, cx + 5, cy + 5, fill=col, outline="")
 
     def _gest_schedule(self, now):
         """스스로 나오는 몸짓 — 리듬 타기와 기지개."""
@@ -10530,7 +10831,11 @@ class Mascot:
             self._log_error("brief_data")
         self._safe("history", self._hist_add)
         if self.cfg.get("reset_on_end"):  # 시간을 0으로 되돌린다
-            self.zero_at = self.work_secs
+            # 기준점은 **'오늘' 눈금으로** 잡는다. 연동 시계(work_secs)로
+            # 잡으면, 에이전트가 다시 켜져 그 값이 줄어든 뒤에는 오늘치에서
+            # 옛 기준점을 빼게 되어 카드가 엉뚱한 숫자가 된다.
+            self.zero_at = self.day_base + self._today_secs()
+            self._dfloor = None            # 바닥을 다시 읽게
             self._timer_save()
         self._reset_records()                   # 작업 종료 = 이번 '오늘'의 끝
         self._say("수고하셨습니다!", 5.0)
@@ -10719,7 +11024,7 @@ class Mascot:
         rr(ex - u(1), ey + u(10), ex + u(29), ey + u(23), u(6),
            fill=cd["bg"], outline=W_INK, width=max(1, u(2)))
         for dx in (u(8), u(20)):
-            cv.create_oval(ex + dx - u(2), ey + u(15), ex + dx + u(2), ey + u(19),
+            self._oval(cv, ex + dx - u(2), ey + u(15), ex + dx + u(2), ey + u(19),
                            fill=W_INK, outline="")
         tx = PAD + u(40)
         cv.create_text(tx, y + u(9), anchor="w", text="오늘도 수고했어요",
@@ -10738,7 +11043,7 @@ class Mascot:
         # 부채꼴로 칠한다. 오전은 옅게, 오후는 진하게 — 색으로만 가른다.
         R = u(62)
         ccx, ccy = PAD + u(16) + R, y + u(89)
-        cv.create_oval(ccx - R, ccy - R, ccx + R, ccy + R,
+        self._oval(cv, ccx - R, ccy - R, ccx + R, ccy + R,
                        fill=cd["bg"], outline=LINE, width=max(1, u(2)))
         r_face = R - u(5)
 
@@ -10781,15 +11086,15 @@ class Mascot:
             cv.create_line(ccx, ccy, ccx + math.cos(a) * R * ln,
                            ccy - math.sin(a) * R * ln,
                            fill=col, width=max(2, wd), capstyle="round")
-        cv.create_oval(ccx - u(4), ccy - u(4), ccx + u(4), ccy + u(4),
+        self._oval(cv, ccx - u(4), ccy - u(4), ccx + u(4), ccy + u(4),
                        fill=TXT, outline="")
-        cv.create_oval(ccx - u(1), ccy - u(1), ccx + u(1), ccy + u(1),
+        self._oval(cv, ccx - u(1), ccy - u(1), ccx + u(1), ccy + u(1),
                        fill=cd["bg"], outline="")
         lx = ccx - u(30)
-        cv.create_oval(lx, y + u(160), lx + u(7), y + u(167), fill=AM_INK, outline="")
+        self._oval(cv, lx, y + u(160), lx + u(7), y + u(167), fill=AM_INK, outline="")
         cv.create_text(lx + u(11), y + u(163), anchor="w", text="오전",
                        font=f(7), fill=SUB)
-        cv.create_oval(lx + u(36), y + u(160), lx + u(43), y + u(167),
+        self._oval(cv, lx + u(36), y + u(160), lx + u(43), y + u(167),
                        fill=PM_INK, outline="")
         cv.create_text(lx + u(47), y + u(163), anchor="w", text="오후",
                        font=f(7), fill=SUB)
@@ -10846,7 +11151,7 @@ class Mascot:
             cx += wdt
         lgx = bx0
         for name, v, fil, ink in segs:
-            cv.create_oval(lgx, y + u(72), lgx + u(7), y + u(79), fill=ink, outline="")
+            self._oval(cv, lgx, y + u(72), lgx + u(7), y + u(79), fill=ink, outline="")
             txt = "%s %s" % (name, hm(v))
             cv.create_text(lgx + u(11), y + u(75), anchor="w", text=txt,
                            font=f(8), fill=TXT)
@@ -11511,7 +11816,7 @@ class Mascot:
                     on = (i > 0) if sign < 0 else (i < len(pages) - 1)
                     cy = y + head_h / 2
                     rad = u(13)
-                    cv.create_oval(cx - rad, cy - rad, cx + rad, cy + rad,
+                    self._oval(cv, cx - rad, cy - rad, cx + rad, cy + rad,
                                    fill=cd["bg"] if on else "",
                                    outline=cd["fill"] if on else cd["line"],
                                    width=2 if on else 1)
@@ -11560,7 +11865,7 @@ class Mascot:
                     ly += GAP_TB
                     continue
                 if kind == "title":
-                    cv.create_oval(PAD + u(16), ly + u(9), PAD + u(22),
+                    self._oval(cv, PAD + u(16), ly + u(9), PAD + u(22),
                                    ly + u(15), fill=cd["fill"], outline="")
                 if kind in ("title", "title2"):
                     cv.create_text(PAD + u(32), ly + u(12), anchor="w",
@@ -11765,6 +12070,28 @@ class Mascot:
 
     LV_PAD = 4                   # 칭호 알약과 카드 윗변 사이 여백
 
+    def _draw_pomo_badge(self, bx, by, br, now):
+        """뽀모도로가 도는 동안만 뜨는 작은 시계 — 카드 오른쪽 위.
+
+        색상키 창이라 반투명을 못 쓴다 (지뢰 65) — 불투명한 동그라미에
+        바늘 두 개를 긋는다. 바늘은 남은 시간에 따라 돈다.
+        """
+        c, cd = self.canvas, self.card
+        col = self._shade(cd["fill"], 0.15)
+        self._oval(c, bx - br, by - br, bx + br, by + br,
+                   fill="#ffffff", outline=col, width=2)
+        # 분침 — 이번 구간이 얼마나 남았나 (한 바퀴 = 그 구간 전체)
+        st = self._pomo()
+        full = max(1.0, self._pomo_len(st["phase"]) * 60.0)
+        frac = max(0.0, min(1.0, 1.0 - self._pomo_left(st) / full))
+        a = math.radians(-90 + 360 * frac)
+        c.create_line(bx, by, bx + math.cos(a) * br * 0.72,
+                      by + math.sin(a) * br * 0.72, fill=col, width=2)
+        # 시침 — 천천히 도는 짧은 바늘 (시계처럼 보이게)
+        a2 = math.radians(-90 + 30 * (now % 12))
+        c.create_line(bx, by, bx + math.cos(a2) * br * 0.42,
+                      by + math.sin(a2) * br * 0.42, fill=col, width=2)
+
     def _draw_lv_row(self, x0, x1, cy, band):
         """카드 맨 윗줄 — 'Lv.42  선 긋는 사람'.
 
@@ -11855,7 +12182,15 @@ class Mascot:
         def status_dot(px, py):
             pulse = 1.5 + math.sin(now * 4) * 1.5 if active else 0
             r = 5 + pulse * 0.5
-            c.create_oval(px - r, py - r, px + r, py + r, fill=dot, outline="")
+            self._oval(c, px - r, py - r, px + r, py + r, fill=dot, outline="")
+
+        # 뽀모도로가 도는 동안 카드 오른쪽 위에 작은 시계 — 누르면 창이 열린다.
+        # 레벨 줄은 가운데 정렬이라 이 자리는 비어 있다.
+        self._pomo_badge = None
+        if self._pomo_running():
+            bx, by, br = x1 - 13, g["y0"] + 13, 9
+            self._safe("pomo_badge", self._draw_pomo_badge, bx, by, br, now)
+            self._pomo_badge = (bx, by, br)
 
         if self.has_clock and self.clock_open:
             # 세로 카드: 상태(위) → 시계(가운데) → 시간(아래) — 모두 정중앙 정렬
@@ -12154,7 +12489,9 @@ class Mascot:
             if now - self._panel_z > 0.5:
                 self._panel_z = now
                 for _p in (self.todo_panel, self.due_panel):
-                    if _p is not None:
+                    # 우클릭 메뉴가 떠 있는 동안은 건드리지 않는다 —
+                    # 안 그러면 앞에 뜬 메뉴를 0.5초 안에 도로 덮는다 (제보)
+                    if _p is not None and not getattr(_p, "menu_open", False):
                         _p.raise_above()
             if self.due_panel is not None:
                 self._safe("due", self._due_tick)
@@ -12608,6 +12945,45 @@ class Mascot:
                            "round": int(st["round"])}
         self._safe("pomo_save", self._save_settings)
 
+    UI_SND_GAP = 0.07        # 이보다 촘촘히 나면 겹쳐서 웅웅거린다
+
+    def _ui_click(self):
+        """조작 소리 '똑' — 메뉴·단추처럼 제 소리가 없는 곳에서 부른다.
+
+        너무 촘촘하면 안 낸다(연타·드래그). 소리 파일이 없는 캐릭터에서는
+        아무 일도 안 한다.
+        """
+        snd = getattr(self, "uisnd", None)
+        if snd is None:
+            return
+        now = time.time()
+        if now - getattr(self, "_ui_snd_at", 0.0) < self.UI_SND_GAP:
+            return
+        self._ui_snd_at = now
+        self._safe("ui_snd", snd.play)
+
+    def _pomo_sets(self):
+        """오늘 끝낸 세트 수.
+
+        하루는 시계가 아니라 **작업일**(새벽 6시)로 나눈다 — 밤새 돌린
+        것이 자정에 0으로 돌아가면 '오늘 몇 세트 했나'가 안 맞는다.
+        """
+        d = self.us.get("pomo_sets")
+        if not isinstance(d, dict):
+            return 0
+        if str(d.get("day") or "") != self._my_workday():
+            return 0                       # 날이 바뀌었다
+        try:
+            return max(0, int(d.get("n") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _pomo_set_done(self):
+        """한 세트를 끝냈다 — 오늘 몫으로 하나 센다."""
+        self.us["pomo_sets"] = {"day": self._my_workday(),
+                                "n": self._pomo_sets() + 1}
+        self._safe("pomo_sets_save", self._save_settings)
+
     def _pomo_len(self, phase):
         return {"focus": self.POMO_FOCUS, "short": self.POMO_SHORT,
                 "long": self.POMO_LONG}.get(phase, self.POMO_FOCUS) * 60
@@ -12669,6 +13045,7 @@ class Mascot:
             st["end"] = 0.0
             st["round"] = 0            # 다음 사이클은 처음부터
             line = self.POMO_LINES["done"]
+            self._safe("pomo_sets", self._pomo_set_done)
         else:
             st["end"] = time.time() + self._pomo_len(nxt)
             st["on"] = True
@@ -12705,8 +13082,15 @@ class Mascot:
             self._safe("pomo_burst", self._burst, 10, 26)
         else:
             self._gest_start("nod", force=True)
-        if self.roomsnd is not None:
-            self._safe("pomo_snd", self.roomsnd.play)
+        # 구간이 바뀔 때는 시작음, 한 사이클을 마쳤을 때는 종료음.
+        # 뽀모도로 소리가 없는 캐릭터는 홈 반응 소리로 물러난다.
+        got = self.pomosnd if isinstance(self.pomosnd, dict) else None
+        snd = (got.get("end" if done else "start") or
+               got.get("start") or got.get("end")) if got else None
+        if snd is None:
+            snd = self.roomsnd
+        if snd is not None:
+            self._safe("pomo_snd", snd.play)
 
     def _pomo_tick(self, now):
         """구간이 끝났는지 본다 (프레임마다 — 값 비교뿐이라 싸다)."""
@@ -12728,7 +13112,7 @@ class Mascot:
             got.lift()
             return
         cd, u = self.card, self._ui
-        W, H = u(300), u(330)
+        W, H = u(300), u(372)      # 아래 '오늘 끝낸 세트' 칸만큼 더 높게
         win = tk.Toplevel(self.root)
         self._pomo_winref = win
         win.title("뽀모도로")
@@ -12771,7 +13155,7 @@ class Mascot:
             for i in range(self.POMO_ROUNDS):
                 cx = W / 2 + (i - (self.POMO_ROUNDS - 1) / 2.0) * u(20)
                 r = u(5)
-                cv.create_oval(cx - r, u(152) - r, cx + r, u(152) + r,
+                self._oval(cv, cx - r, u(152) - r, cx + r, u(152) + r,
                                fill=cd["fill"] if i < done else "#ffffff",
                                outline=line, width=1)
             cv.create_text(W / 2, u(192),
@@ -12800,13 +13184,45 @@ class Mascot:
                                font=self._uf(9, True if main else False),
                                fill="#ffffff" if main else cd["text"])
                 self._pomo_hits.append((x0, by0, x1, by1, act))
-            cv.create_text(W / 2, H - u(16),
+            # 오늘 끝낸 세트 — 하루는 새벽 6시로 나뉜다
+            sets = self._pomo_sets()
+            sy0, sy1 = H - u(58), H - u(30)
+            self._rr_soft(cv, pad, sy0, W - pad, sy1, u(13),
+                          fill="#ffffff", outline=line, width=1)
+            cv.create_text(pad + u(14), (sy0 + sy1) / 2, anchor="w",
+                           text="오늘 끝낸 세트", font=self._uf(9),
+                           fill=cd["sub"])
+            cv.create_text(W - pad - u(14), (sy0 + sy1) / 2, anchor="e",
+                           text=("%d번" % sets) if sets else "아직 없어요",
+                           font=self._uf(10, True),
+                           fill=cd["text"] if sets else cd["sub"])
+            cv.create_text(W / 2, H - u(14),
                            text="창을 닫아도 계속 돌아가요",
                            font=self._uf(8), fill=cd["sub"])
+            # 꾸미기(스티커) — 오른쪽 위 작은 동그라미
+            bx, br = W - u(24), u(13)
+            on_stk = (self._stk_edit == "pomo")
+            self._safe("soft_btn", self._soft_dot, cv, bx, u(26), br,
+                       cd["fill"] if on_stk else "#ffffff",
+                       outline=line, width=1, shadow=True)
+            cv.create_text(bx, u(26), text="✿", font=self._uf(10, True),
+                           fill="#ffffff" if on_stk else cd["sub"])
+            self._pomo_stk_btn = (bx - br - u(3), u(26) - br - u(3),
+                                  bx + br + u(3), u(26) + br + u(3))
+            # 스티커는 맨 위에 — 안내 글자에 가리면 안 된다
+            self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
 
         def on_click(e):
+            if self._safe("stk_press", self._stk_press, "pomo", e.x, e.y):
+                return                 # 스티커를 정리하는 중
+            sb = getattr(self, "_pomo_stk_btn", None)
+            if sb and sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]:
+                self._safe("ui_click", self._ui_click)
+                self._safe("stk_win", self._stk_win, "pomo")
+                return
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
                     if act == "toggle":
                         self._pomo_toggle()
                     elif act == "skip":
@@ -12824,6 +13240,12 @@ class Mascot:
         draw()
         self._pomo_draw = draw
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe(
+            "stk_move", self._stk_move, "pomo", e.x, e.y))
+        cv.bind("<ButtonRelease-1>", lambda _e: self._safe(
+            "stk_drop", self._stk_drop, "pomo"))
+        cv.bind("<MouseWheel>", lambda e: self._safe(
+            "stk_wheel", self._stk_wheel, "pomo", e.delta))
         win.bind("<Escape>", lambda _e: win.destroy())
         self._pomo_after = win.after(500, beat)
 
@@ -12989,7 +13411,7 @@ class Mascot:
                               width=1, tags="row")
                 # 동그란 체크 — 켜면 테마색으로 찬다
                 cx, cy, r = pad + u(18), y0 + u(19), u(9)
-                cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                self._oval(cv, cx - r, cy - r, cx + r, cy + r,
                                fill=cd["fill"] if on else "#ffffff",
                                outline=cd["fill"] if on else line, width=2)
                 if on:
@@ -13017,7 +13439,7 @@ class Mascot:
                                   fill=cd["fill"] if on else line,
                                   outline="", width=0, tags="row")
                 kr = u(8)
-                cv.create_oval(fx - kr, gy - kr, fx + kr, gy + kr,
+                self._oval(cv, fx - kr, gy - kr, fx + kr, gy + kr,
                                fill="#ffffff",
                                outline=cd["fill"] if on else line, width=2)
             # 아래 단추 둘
@@ -13051,6 +13473,9 @@ class Mascot:
             return int(round((5 + f * 95) / 5.0)) * 5
 
         def on_press(e):
+            # 창 안 어디를 눌러도 '똑' — 슬라이더를 끄는 동안에는
+            # _ui_click 의 간격 제한이 알아서 막아 준다
+            self._safe("ui_click", self._ui_click)
             if in_box(getattr(self, "_amb_btn_close", None), e.x, e.y):
                 win.destroy()
                 return
@@ -13480,7 +13905,7 @@ class Mascot:
         ys = [p[1] for p in ring]
         # 바닥 그림자 — 슬라임보다 먼저. 지금 실루엣을 따라가되 아래쪽에만
         # 깔리게 눌러 그린다 (덩어리 크기로 고정하면 늘였을 때 따로 논다).
-        c.create_oval(min(xs) + 2, cy + (max(ys) - cy) * 0.45,
+        self._oval(c, min(xs) + 2, cy + (max(ys) - cy) * 0.45,
                       max(xs) - 2, cy + (max(ys) - cy) * 1.02,
                       fill=self._shade(mat, 0.13), outline="")
         flat = [v for p in ring for v in p]
@@ -13510,7 +13935,7 @@ class Mascot:
         for a, rr, wx, wy in ((3.95, 0.58, 0.20, 0.11), (4.42, 0.50, 0.07, 0.04)):
             hx, hy = self._slime_pt(sl, a + wob, rr)
             hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
-            c.create_oval(hx - rr0 * wx, hy - rr0 * wy,
+            self._oval(c, hx - rr0 * wx, hy - rr0 * wy,
                           hx + rr0 * wx, hy + rr0 * wy,
                           fill=hi, outline="")
 
@@ -13577,7 +14002,7 @@ class Mascot:
         # 윤기 — 왼쪽 위 한 점 (짙은 껍질이라 밝게)
         hx, hy = self._slime_pt(sl, 3.95, 0.55)
         hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
-        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.10,
+        self._oval(c, hx - r0 * 0.20, hy - r0 * 0.10,
                       hx + r0 * 0.20, hy + r0 * 0.10,
                       fill=self._tint(self.WAX_SKIN, 0.42), outline="")
 
@@ -13605,13 +14030,13 @@ class Mascot:
         # 카라멜 윤기 — 왼쪽 위에 밝은 한 점
         hx, hy = self._slime_pt(sl, 3.90, 0.55)
         hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
-        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.09,
+        self._oval(c, hx - r0 * 0.20, hy - r0 * 0.09,
                       hx + r0 * 0.20, hy + r0 * 0.09,
                       fill=self._tint(self.PUD_TOP, 0.45), outline="")
         # 몸통 윤기 — 카라멜 아래 크림 부분
         bx, by = self._slime_pt(sl, 2.90, 0.62)
         bx, by = cx + (bx - cx) * k, cy + (by - cy) * k
-        c.create_oval(bx - r0 * 0.13, by - r0 * 0.09,
+        self._oval(c, bx - r0 * 0.13, by - r0 * 0.09,
                       bx + r0 * 0.13, by + r0 * 0.09,
                       fill=self._mix("#ffffff", col, 0.25), outline="")
 
@@ -13632,14 +14057,14 @@ class Mascot:
         # 아래쪽 그늘 — 둥근 열매의 두께감
         bx, by = self._slime_pt(sl, 1.571, 0.55)
         bx, by = cx + (bx - cx) * k, cy + (by - cy) * k
-        c.create_oval(bx - r0 * 0.62, by - r0 * 0.30,
+        self._oval(c, bx - r0 * 0.62, by - r0 * 0.30,
                       bx + r0 * 0.62, by + r0 * 0.26,
                       fill=deep, outline="")
         # 윤기 — 왼쪽 위, 짙은 껍질이라 밝게 한 점만
         hx, hy = self._slime_pt(sl, 3.95, 0.55)
         hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
         hi = self._mix("#ffffff", col, 0.30)
-        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.11,
+        self._oval(c, hx - r0 * 0.20, hy - r0 * 0.11,
                       hx + r0 * 0.20, hy + r0 * 0.11,
                       fill=hi, outline="")
         # 꼭지 — 열매 '위 가장자리'에 얹힌다. rr 을 1.0 으로 잡아야 위쪽
@@ -13657,11 +14082,11 @@ class Mascot:
             a = math.pi + math.tau * (i + 0.5) / 5.0
             lx = tx + math.cos(a) * lr * 1.15
             ly = ty + math.sin(a) * lr * 0.62
-            c.create_oval(lx - lr * 0.56, ly - lr * 0.40,
+            self._oval(c, lx - lr * 0.56, ly - lr * 0.40,
                           lx + lr * 0.56, ly + lr * 0.40,
                           fill=leaf, outline=edge, width=1)
         # 가운데 잎 — 잎들이 만나는 자리를 메운다
-        c.create_oval(tx - lr * 0.46, ty - lr * 0.34,
+        self._oval(c, tx - lr * 0.46, ty - lr * 0.34,
                       tx + lr * 0.46, ty + lr * 0.34,
                       fill=leaf, outline=edge, width=1)
         # 줄기 — 가운데서 위로 짧게 (잎보다 위에 그려 안 묻히게)
@@ -13693,9 +14118,9 @@ class Mascot:
             r0 = sl["r"] * sz * k
             if r0 < 1.2:
                 continue
-            c.create_oval(hx - r0, hy - r0 * 0.82, hx + r0, hy + r0 * 0.82,
+            self._oval(c, hx - r0, hy - r0 * 0.82, hx + r0, hy + r0 * 0.82,
                           fill=deep, outline="")
-            c.create_oval(hx - r0 * 0.62, hy - r0 * 0.10,
+            self._oval(c, hx - r0 * 0.62, hy - r0 * 0.10,
                           hx + r0 * 0.62, hy + r0 * 0.62,
                           fill=lip, outline="")
 
@@ -13987,7 +14412,7 @@ class Mascot:
                                   width=2, smooth=True)
                 elif st:
                     px, py = st[0]
-                    c.create_oval(px - 1, py - 1, px + 1, py + 1,
+                    self._oval(c, px - 1, py - 1, px + 1, py + 1,
                                   fill=self.cfg.get("trail_color", "#8fd0ff"),
                                   outline="")
         else:
@@ -14617,10 +15042,10 @@ class Mascot:
                         ex + 9 * sign, y + 1, fill=inner, outline="")
             elif deco == "mouse":               # 성실이: 생쥐 귀
                 for ex in (hx0 + 30, hx1 - 30):
-                    cv.create_oval(ex - 15, y - 18, ex + 15, y + 12,
+                    self._oval(cv, ex - 15, y - 18, ex + 15, y + 12,
                                            fill="#9a9a9a", outline="#6f6f6f",
                                            width=2)
-                    cv.create_oval(ex - 8, y - 11, ex + 8, y + 5,
+                    self._oval(cv, ex - 8, y - 11, ex + 8, y + 5,
                                            fill="#e8c4c4", outline="")
             elif deco == "scarf":               # 퀸시: 귀 대신 목도리 띠
                 rrect(hx0 + 20, y - 6, hx1 - 20, y + 22, 10,
@@ -14649,19 +15074,19 @@ class Mascot:
                               extent=180, style="pieslice",
                               fill="#ecbf6b", outline="#a8763e", width=2)
                 for dx2 in (-11, 0, 11):
-                    cv.create_oval(mx + dx2 - 2, y - 4 + abs(dx2) // 5,
+                    self._oval(cv, mx + dx2 - 2, y - 4 + abs(dx2) // 5,
                                    mx + dx2 + 2, y - 1 + abs(dx2) // 5,
                                    fill="#fdf3d9", outline="")
                 for i2 in range(6):
                     lx = mx - 22 + i2 * 9
-                    cv.create_oval(lx - 4, y + 3, lx + 4, y + 11,
+                    self._oval(cv, lx - 4, y + 3, lx + 4, y + 11,
                                    fill="#7cb956", outline="#578a35")
                 cv.create_rectangle(mx - 21, y + 8, mx + 21, y + 14,
                                     fill="#8a5a34", outline="#6d4426")
             elif deco == "sushi":              # 연어: 연어 초밥
-                cv.create_oval(mx - 24, y + 2, mx + 24, y + 24,
+                self._oval(cv, mx - 24, y + 2, mx + 24, y + 24,
                                fill="#fdfdf6", outline="#d8d0bf", width=2)
-                cv.create_oval(mx - 27, y - 9, mx + 27, y + 11,
+                self._oval(cv, mx - 27, y - 9, mx + 27, y + 11,
                                fill="#ef9d76", outline="#c96f4e", width=2)
                 # 연어살 무늬는 사선으로 흐른다. 가로로 누운 호로 그렸더니
                 # 바게트처럼 보인다는 제보가 있었다. 가장자리 줄은 짧게 해
@@ -14672,9 +15097,9 @@ class Mascot:
                                    fill="#f8cfb6", width=2,
                                    capstyle="round")
             elif deco == "tangerine":          # 레냥: 귤 한 알
-                cv.create_oval(mx - 19, y - 8, mx + 19, y + 24,
+                self._oval(cv, mx - 19, y - 8, mx + 19, y + 24,
                                fill="#f5a623", outline="#c97c12", width=2)
-                cv.create_oval(mx - 11, y - 2, mx - 2, y + 5,
+                self._oval(cv, mx - 11, y - 2, mx - 2, y + 5,
                                fill="#fbc96d", width=0)
                 cv.create_polygon(mx, y - 6, mx + 12, y - 15, mx + 19, y - 7,
                                   mx + 7, y - 1, smooth=True,
@@ -14682,11 +15107,11 @@ class Mascot:
                                   width=1)
             elif deco == "frog":               # 프고: 개구리 눈
                 for ex2 in (mx - 24, mx + 24):
-                    cv.create_oval(ex2 - 15, y - 8, ex2 + 15, y + 16,
+                    self._oval(cv, ex2 - 15, y - 8, ex2 + 15, y + 16,
                                    fill="#69a63c", outline="#49781f", width=2)
-                    cv.create_oval(ex2 - 9, y - 4, ex2 + 9, y + 12,
+                    self._oval(cv, ex2 - 9, y - 4, ex2 + 9, y + 12,
                                    fill="#ffffff", outline="#49781f", width=2)
-                    cv.create_oval(ex2 - 3, y + 1, ex2 + 3, y + 8,
+                    self._oval(cv, ex2 - 3, y + 1, ex2 + 3, y + 8,
                                    fill="#20261c", outline="")
             elif deco == "sprout":             # 기뽀: 새싹
                 cv.create_line(mx, y + 18, mx, y - 2, fill="#4c8a3f", width=3)
@@ -14703,13 +15128,13 @@ class Mascot:
                                       mx + 15 * sign, y + 11, smooth=True,
                                       fill="#f9b6d2", outline="#e07aa8",
                                       width=2)
-                cv.create_oval(mx - 5, y, mx + 5, y + 10, fill="#f9b6d2",
+                self._oval(cv, mx - 5, y, mx + 5, y + 10, fill="#f9b6d2",
                                outline="#e07aa8", width=2)
             elif deco == "dog":                # 개: 늘어진 강아지 귀
                 for ex2 in (hx0 + 30, hx1 - 30):
-                    cv.create_oval(ex2 - 14, y - 8, ex2 + 10, y + 30,
+                    self._oval(cv, ex2 - 14, y - 8, ex2 + 10, y + 30,
                                    fill="#2b2b2b", outline="")
-                    cv.create_oval(ex2 - 8, y, ex2 + 2, y + 18,
+                    self._oval(cv, ex2 - 8, y, ex2 + 2, y + 18,
                                    fill="#4a4a4a", outline="")
             else:
                 ec = {"cat": "#f5bdd2", "rose": "#f5bdd2"}.get(deco, "#2b2b2b")
@@ -14720,7 +15145,7 @@ class Mascot:
                                           fill=ec, outline=cd["border"],
                                           width=2)
                     else:
-                        cv.create_oval(ex - 13, y - 8, ex + 13, y + 18,
+                        self._oval(cv, ex - 13, y - 8, ex + 13, y + 18,
                                        fill=ec, outline="")
             rrect(hx0, y + 10, hx1, y + 62, 18, fill=SOFT,
                   outline=cd["border"], width=2)
@@ -14730,7 +15155,7 @@ class Mascot:
 
         def group(y, title, rows):
             """제목 + 흰 카드 안에 행들을 균등 배치."""
-            cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
+            self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
             cv.create_text(PAD + 18, y, anchor="w", text=title,
                            font=(FONT, FS(9), "bold"), fill=cd["fill"])
@@ -14792,7 +15217,7 @@ class Mascot:
             rrect(x0, y - 11, x1, y + 11, 11,
                   fill=cd["fill"] if on else "#e2e0e6", outline="")
             kx = x1 - 12 if on else x0 + 12
-            cv.create_oval(kx - 8.5, y - 8.5, kx + 8.5, y + 8.5,
+            self._oval(cv, kx - 8.5, y - 8.5, kx + 8.5, y + 8.5,
                            fill="#ffffff", outline="")
 
             def flip(k=key):
@@ -14803,7 +15228,7 @@ class Mascot:
             label(y, text)
             val = float(st.get(key, lo))
             for sign, cx in ((1, RX - 13), (-1, RX - 99)):
-                cv.create_oval(cx - 13, y - 13, cx + 13, y + 13,
+                self._oval(cv, cx - 13, y - 13, cx + 13, y + 13,
                                fill=SOFT, outline=cd["border"], width=1)
                 cv.create_line(cx - 5, y, cx + 5, y, width=2,
                                capstyle="round", fill=cd["text"])
@@ -14828,7 +15253,7 @@ class Mascot:
                 cv.create_line(sx0, y, sx0 + (sx1 - sx0) * frac, y, width=6,
                                capstyle="round", fill=cd["fill"])
             kx = sx0 + (sx1 - sx0) * frac
-            cv.create_oval(kx - 9, y - 9, kx + 9, y + 9, fill="#ffffff",
+            self._oval(cv, kx - 9, y - 9, kx + 9, y + 9, fill="#ffffff",
                            outline=cd["fill"], width=2)
             cv.create_text(RX, y, anchor="e", text=f"{val:g}",
                            font=(FONT, FS(9), "bold"), fill=cd["text"])
@@ -15129,7 +15554,7 @@ class Mascot:
                     lambda ry: toggle(ry, "잠금 (클릭 통과)", "stickers_lock"),
                 ])
 
-            cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
+            self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
             cv.create_text(PAD + 18, y, anchor="w", text="작업 프로그램",
                            font=(FONT, FS(9), "bold"), fill=cd["fill"])
@@ -15178,7 +15603,7 @@ class Mascot:
 
 
             if fb_on:
-                cv.create_oval(PAD + 3, y - 4, PAD + 11, y + 4,
+                self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
                                fill=cd["fill"], outline="")
                 cv.create_text(PAD + 18, y, anchor="w",
                                text="건의 사항 · 버그 보내기",
@@ -15251,6 +15676,7 @@ class Mascot:
         def on_bar_click(e):
             for x0, y0, x1, y1, fn in bar_hits:
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
                     fn()
                     return
 
@@ -16359,6 +16785,10 @@ class Mascot:
         # 반응 받지 않기 — 남이 보낸 것은 조용히 버린다 (내가 나에게
         # 보낸 것은 그대로). 신호 번호는 이미 소비돼, 토글을 다시 켜도
         # 꺼져 있던 동안 것이 쏟아지지 않고 새 반응부터 받는다.
+        # 같은 사람이 같은 것을 연달아 보내면 흘린다 (받는 쪽 방패)
+        if (ev.get("f") != self.char
+                and not self._recv_ok(ev.get("f"), ev.get("k"))):
+            return
         if self.us.get("room_mute") and ev.get("f") != self.char:
             return
         who = ""
@@ -16389,10 +16819,13 @@ class Mascot:
         else:
             for p in self.room_people:
                 if p.get("slot") == ev.get("f"):
-                    who = str(p.get("n") or "")
+                    # 이름은 남의 컴퓨터에서 온 글자다 — 앞뒤 여백이 붙어
+                    # 오면 '  콕 찔렀어요' 처럼 조사가 붙을 자리가 비고,
+                    # 받침 판정도 여백을 보고 틀린다.
+                    who = str(p.get("n") or "").strip()
                     break
             # 홈이 닫혀 있으면 명단이 2분까지 묵는다. 이름이 없으면 표로 채운다.
-            who = who or self.ROOM_NAME.get(ev.get("f") or "", "")
+            who = who or self.ROOM_NAME.get(ev.get("f") or "", "").strip()
         kind = ev.get("k")
         now = time.time()
         self._safe("inbox_add", self._inbox_add, ev.get("f"), who, kind)
@@ -16596,6 +17029,82 @@ class Mascot:
         self._room_meta_h[slot] = v
         return v
 
+    def _room_floor_img(self, w, h, r, band_h, color):
+        """카드 바닥 띠 한 장 — 칸의 둥근 모양을 그대로 따라 오려 낸다.
+
+        띠를 따로 둥근 사각형으로 그리면 그 가장자리가 흰 바탕 위에서
+        부드럽게 사라져 칸 좌우에 흰 테가 남는다 (제보). 칸 전체 모양을
+        만든 뒤 **아래 band_h 만큼만 잘라** 쓰면 띠의 좌우 끝이 곧 칸의
+        끝이라 틈이 없다.
+        """
+        w, h, band_h = int(w), int(h), int(band_h)
+        key = ("floor", w, h, int(r), band_h, color)
+        ph = self._soft_cache.get(key)
+        if ph is not None:
+            return ph
+        S = 4
+        full = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        ImageDraw.Draw(full).rounded_rectangle(
+            [0, 0, w * S - 1, h * S - 1], radius=int(r) * S, fill=color)
+        band = full.crop((0, (h - band_h) * S, w * S, h * S))
+        band = band.resize((w, band_h), Image.LANCZOS)
+        ph = ImageTk.PhotoImage(band)
+        if len(self._soft_cache) > 300:          # 상한 (지뢰 18)
+            for k2 in list(self._soft_cache)[:150]:
+                self._soft_cache.pop(k2, None)
+        self._soft_cache[key] = ph
+        return ph
+
+    def _room_card_bg(self, w, h, r, floor_h, top, floor):
+        """카드 바탕 한 장 — 위는 흰색, 아래 floor_h 는 테마색.
+
+        예전에는 흰 둥근 사각형을 깔고 그 위에 바닥 색 둥근 사각형을 얹었다.
+        둘 다 가장자리를 부드럽게 그리므로, 겹치는 자리에서 아래 흰색이
+        1~2px 비쳐 **칸 좌우에 흰 테가 남았다** (제보). 한 장으로 그리면
+        틈이 있을 수 없다 (게이지와 같은 이야기 — 지뢰 65).
+        """
+        w, h = int(w), int(h)
+        key = ("cardbg", w, h, int(r), int(floor_h), top, floor)
+        ph = self._soft_cache.get(key)
+        if ph is not None:
+            return ph
+        S = 4
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.rounded_rectangle([0, 0, w * S - 1, h * S - 1],
+                             radius=int(r) * S, fill=top)
+        # 바닥 색 — 같은 둥근 모양으로 잘라 넣어 좌우가 칸에 꽉 찬다
+        fl = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        ImageDraw.Draw(fl).rectangle(
+            [0, (h - int(floor_h)) * S, w * S - 1, h * S - 1], fill=floor)
+        mask = Image.new("L", (w * S, h * S), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, w * S - 1, h * S - 1], radius=int(r) * S, fill=255)
+        im.paste(fl, (0, 0), Image.composite(
+            fl.getchannel("A"), Image.new("L", mask.size, 0), mask))
+        im = im.resize((w, h), Image.LANCZOS)
+        ph = ImageTk.PhotoImage(im)
+        if len(self._soft_cache) > 300:          # 상한 (지뢰 18)
+            for k2 in list(self._soft_cache)[:150]:
+                self._soft_cache.pop(k2, None)
+        self._soft_cache[key] = ph
+        return ph
+
+    ROOM_PAD = 6      # 흰 테두리가 잘리지 않게 두는 좌우 여백 (두 배 판 기준)
+
+    @staticmethod
+    def _room_padx(im, pad):
+        """좌우에만 투명 여백을 붙인다 (높이는 그대로).
+
+        위아래로도 붙이면 머리선·책상선이 높이 비율이라 전부 어긋난다.
+        """
+        pad = int(pad)
+        if pad <= 0:
+            return im
+        out = Image.new("RGBA", (im.width + pad * 2, im.height), (0, 0, 0, 0))
+        out.paste(im, (pad, 0))
+        return out
+
     def _room_img(self, slot, tag):
         """방에 그릴 그림 — (몸, 책상) 두 조각. 아직 없으면 None.
 
@@ -16615,22 +17124,34 @@ class Mascot:
         try:
             im = Image.open(p).convert("RGBA")
             h = int(self.ROOM_FIG * self._room_k() * self.ROOM_SIZE.get(slot, 1.0))
-            im = im.resize((max(1, int(im.width * h / im.height)), h),
-                           Image.LANCZOS)
             # 흰 테두리 — 방 칸에 그림을 깔면 캐릭터가 묻혀서 두른다.
-            # 아래(바닥 색 영역)로는 번지지 않게 맨 밑 두 줄은 지운다.
+            # **두 배 크기에서 만들고 내려온다.** 최종 크기에서 알파를
+            # 이분화하고 5픽셀 부풀리면 테두리 가장자리가 계단처럼 딱딱해
+            # 보인다(제보 — '픽셀이 깨지듯'). 두 배에서 만들어 LANCZOS 로
+            # 줄이면 같은 두께인데 가장자리가 매끈하다.
+            # 아래(바닥 색 영역)로는 번지지 않게 맨 밑 몇 줄은 지운다.
+            big_h = max(1, h * 2)
+            im = im.resize((max(1, int(im.width * big_h / im.height)), big_h),
+                           Image.LANCZOS)
+            # seat.png 는 알파에 딱 맞게 잘려 있어 **캐릭터가 그림의 좌우
+            # 끝에 닿아 있다**(실측: 열일곱 캐릭터 전부 왼쪽 끝, 다섯은
+            # 오른쪽도). 그대로 부풀리면 테두리가 그림 밖으로 나가는 만큼
+            # 잘려 '옆구리만 흰 선이 없는' 모습이 된다 (제보).
+            im = self._room_padx(im, self.ROOM_PAD)
             try:
                 from PIL import ImageDraw, ImageFilter
                 a2 = im.split()[3].point(lambda v: 255 if v > 60 else 0)
-                grow = a2.filter(ImageFilter.MaxFilter(5))
+                grow = a2.filter(ImageFilter.MaxFilter(9))
                 d3 = ImageDraw.Draw(grow)
-                d3.rectangle([0, im.height - 2, im.width, im.height],
+                d3.rectangle([0, im.height - 4, im.width, im.height],
                              fill=0)
                 white = Image.new("RGBA", im.size, (255, 255, 255, 0))
                 white.putalpha(grow)
                 im = Image.alpha_composite(white, im)
             except Exception:
                 pass
+            im = im.resize((max(1, int(im.width * h / im.height)), h),
+                           Image.LANCZOS)
             line = self._room_deskline(slot)
             # 책상의 실제 가로 중심 — 그림이 좌우로 치우친 캐릭터(연어의
             # 꼬리 등)는 카드 중앙(=이름표)과 어긋나 보인다. 아랫단(책상)
@@ -16648,9 +17169,17 @@ class Mascot:
                 # 머리/몸 분리 — 전신은 고정하고 머리 조각만 숨쉬게 한다.
                 # 머리 조각은 목 아래로 살짝 겹쳐 잘라, 위로 떠도 틈이 없다.
                 lap = int(4 * self._room_k())
-                hcut = min(h, int(h * hline) + lap)
+                cut0 = int(h * hline)
+                hcut = min(h, cut0 + lap)
+                # 전신 조각에서 **머리 자리를 지운다.** 안 지우면 제자리에
+                # 있는 머리(와 그 흰 테두리)가 그대로 남아, 위로 들썩이는
+                # 머리와 어긋나 보인다 (제보 — '흰 테두리가 고정돼 있다').
+                # 머리 조각이 목 아래로 lap 만큼 겹쳐 내려오므로 이음매는
+                # 안 보인다 (숨쉬기 폭 1.6k < lap 4k).
+                rest = im.copy()
+                rest.paste((0, 0, 0, 0), (0, 0, im.width, cut0))
                 pair = (ImageTk.PhotoImage(im.crop((0, 0, im.width, hcut))),
-                        ImageTk.PhotoImage(im), h, "head")
+                        ImageTk.PhotoImage(rest), h, "head")
             elif line and 0.2 < line < 0.95:
                 # 옛 배포본(머리선 없음) — 몸이 숨쉬고 책상 조각이 위에 덮는다.
                 cut = int(h * line)
@@ -16690,6 +17219,9 @@ class Mascot:
             im = Image.open(p).convert("RGBA")
             im = im.resize((max(1, int(im.width * h / im.height)), h),
                            Image.LANCZOS)
+            # _room_img 와 **같은 만큼** 여백을 둔다. 여기서 잰 좌표는 그
+            # 그림의 왼쪽 위 기준이라, 폭이 다르면 왕관이 옆으로 밀린다.
+            im = self._room_padx(im, self.ROOM_PAD // 2)
             a = im.split()[3]
             bb = a.getbbox()
             if not bb:
@@ -17150,7 +17682,7 @@ class Mascot:
                 return self._sky_img
             except Exception:
                 pass                       # 못 읽으면 그리는 하늘로 물러난다
-        S = 3
+        S = 4
         k = self._room_k() * S
         w, h = int(W * S), int(top * S)
 
@@ -17369,6 +17901,79 @@ class Mascot:
                         fill="#ffeeb8", outline="#f5deA0",
                         width=1, tags=("dyn", "glit"))
 
+    def _oval(self, cv, x0, y0, x1, y1, fill="", outline="", width=0,
+              tags="dyn"):
+        """원·타원을 매끈하게 — Tk 의 create_oval 대신 쓴다.
+
+        Tk 는 도형을 부드럽게 안 그려서 가장자리가 계단처럼 깨져 보인다
+        (제보). PIL 로 네 배 크기에 그려 줄인 그림을 얹는다.
+
+        창에 따라 마무리가 다르다.
+          · 홈·뽀모도로 같은 **보통 창**은 반투명을 그대로 둔다.
+          · 캐릭터 창은 **색상키 투명**이라 반투명이 못 남는다. 남겨 두면
+            키 색과 섞여 어두운 테가 진다 — 그래서 가장자리 반투명을
+            미리 키 색과 섞어 불투명으로 만든다 (지뢰 65와 같은 처리).
+        실패하면 Tk 원으로 물러난다 — 안 보이는 것보다 계단이 낫다.
+        """
+        # 캐릭터 창은 **색상키 투명**이라 반투명을 남길 수 없다. 부드러운
+        # 가장자리를 만들 방법이 원리상 없고(지뢰 65·31), 그림으로 바꾸면
+        # 색·좌표를 읽는 코드와 검사가 통째로 어긋난다. 그래서 그 창은
+        # Tk 원 그대로 둔다 — 대신 그 창에서 눈에 띄는 계단은 흰 테두리와
+        # 카드 몸통에서 잡았다(둘 다 PIL 로 네 배에서 만들어 줄인다).
+        if cv is getattr(self, "canvas", None):
+            return cv.create_oval(x0, y0, x1, y1, fill=fill or "",
+                                  outline=outline or "", width=width,
+                                  tags=tags)
+        try:
+            w = max(1, int(round(x1 - x0)))
+            h = max(1, int(round(y1 - y0)))
+            keyed = False
+            key = ("oval", w, h, str(fill), str(outline),
+                   int(width * 10), keyed)
+            ph = self._soft_cache.get(key)
+            if ph is None:
+                S = 4
+                im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+                lw = max(1, int(round(width * S))) if outline else 0
+                ImageDraw.Draw(im).ellipse(
+                    [lw // 2, lw // 2, w * S - 1 - lw // 2,
+                     h * S - 1 - lw // 2],
+                    fill=(fill or None), outline=(outline or None),
+                    width=lw)
+                im = im.resize((w, h), Image.LANCZOS)
+                if keyed:
+                    im = self._flatten_key(im)
+                ph = ImageTk.PhotoImage(im)
+                if len(self._soft_cache) > 300:      # 상한 (지뢰 18)
+                    for k2 in list(self._soft_cache)[:150]:
+                        self._soft_cache.pop(k2, None)
+                self._soft_cache[key] = ph
+            # 참조는 캐시가 들고 있다 (Tk 는 그림 참조가 끊기면 안 그린다)
+            return cv.create_image(int(round(x0)), int(round(y0)), image=ph,
+                                   anchor="nw", tags=tags)
+        except Exception:
+            # **자기를 다시 부르면 안 된다** — PIL 이 계속 실패하는 창에서는
+            # 무한 재귀가 된다. Tk 원으로 곧장 물러난다 (계단이 지더라도
+            # 안 보이는 것보다 낫다).
+            return cv.create_oval(x0, y0, x1, y1, fill=fill or "",
+                                  outline=outline or "", width=width,
+                                  tags=tags)
+
+    def _flatten_key(self, im):
+        """가장자리 반투명을 색상키와 미리 섞어 불투명하게.
+
+        섞는 비율에 하한을 둔다(55%) — 그냥 섞으면 흰 바탕에서 어두운
+        얼룩 테가 진다. 아주 옅은 픽셀(알파 40 미만)은 버린다 (지뢰 65).
+        """
+        # 색상키 창에는 **반투명을 남길 수 없다.** 남기면 키 색과 섞여
+        # 어두운 테가 진다 (지뢰 65·31). 그래서 절반(128)을 기준으로
+        # 켜고 끈다 — Tk 원과 같은 '딱 떨어지는' 가장자리지만, 네 배
+        # 크기에서 표본을 떠 줄였으므로 곡선의 계단이 훨씬 고르다.
+        a = im.getchannel("A").point(lambda v: 255 if v >= 128 else 0)
+        out = im.copy()
+        out.putalpha(a)
+        return out
+
     def _soft_dot(self, cv, cx, cy, r, fill, outline="", width=0,
                   shadow=False, tags="dyn"):
         """매끈한 원 — PIL 3배 렌더 (Tk 원은 계단이 진다).
@@ -17380,7 +17985,7 @@ class Mascot:
         key = ("dot", d, fill, outline, int(width * 10), shadow)
         ph = self._soft_cache.get(key)
         if ph is None:
-            S = 3
+            S = 4
             pad = S * (3 if shadow else 1)
             side = d * S + pad * 2
             im = Image.new("RGBA", (side, side + (2 * S if shadow else 0)),
@@ -17426,7 +18031,7 @@ class Mascot:
         key = ("gauge", w, h, col, edge, fq)
         ph = self._soft_cache.get(key)
         if ph is None:
-            S = 3
+            S = 4
 
             def hx(c):
                 return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
@@ -17507,7 +18112,7 @@ class Mascot:
         if img is None:
             try:
                 from PIL import ImageDraw
-                S = 3
+                S = 4
                 lw = max(1, int(width)) * S
                 im = Image.new("RGBA", (w * S, (h + th) * S), (0, 0, 0, 0))
                 d2 = ImageDraw.Draw(im)
@@ -17582,6 +18187,38 @@ class Mascot:
         if self.us.get("room_bgc1") or self.us.get("room_bgc2"):
             return "grad"
         return "img"
+
+    def _room_dots_img(self, w, h, step, color, top):
+        """점 벽지 한 장 — 점을 하나씩 캔버스에 얹지 않는다.
+
+        점이 1100개가 넘는데 그것을 따로따로 얹으면, 숨쉬기로 카드 하나가
+        1px 움직일 때마다 Tk 가 그 자리에 걸친 항목을 전부 다시 칠한다.
+        실측으로 한 프레임이 30ms → 68ms 가 됐다(매끈한 원으로 바꾼 뒤에는
+        더 심해진다 — 원 하나가 그림 한 장이 되므로). 한 장으로 구우면
+        항목이 하나가 되고, 가장자리도 점마다 똑같이 매끈하다.
+
+        점 하나를 여덟 배로 그려 줄인 도장을 만들어 찍는다 — 큰 판을
+        통째로 여덟 배로 그리면 메모리를 수십 MB 씩 쓴다.
+
+        줄일 때는 **넓이 평균(BOX)** 을 쓴다. LANCZOS 는 4px 짜리로
+        줄이면 되울림이 생겨 점이 '::' 처럼 네 조각으로 갈라진다
+        (찍어서 확인했다). 봉우리가 없는 도형은 넓이 평균이 정답이다.
+        """
+        w, h, step = max(1, int(w)), max(1, int(h)), max(4, int(step))
+        S = 8
+        # 예전 Tk 원(create_oval(x, y, x+3, y+3))과 같은 4px 자리를 채운다.
+        # 3px 로 그리면 눈에 띄게 작아져 벽지가 성겨 보인다 (찍어서 비교).
+        stamp = Image.new("RGBA", (4 * S, 4 * S), (0, 0, 0, 0))
+        ImageDraw.Draw(stamp).ellipse([0, 0, 4 * S - 1, 4 * S - 1],
+                                      fill=color)
+        stamp = stamp.resize((4, 4), Image.BOX)
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        p0 = (int(top) // step) % 2          # 예전 배치 그대로 (지그재그)
+        for n, yy in enumerate(range(0, h, step)):
+            x0 = (step // 2) if (n + p0) % 2 else 0
+            for xx in range(x0, w, step):
+                im.paste(stamp, (xx, yy), stamp)
+        return ImageTk.PhotoImage(im)
 
     def _room_bgc_make(self, ct, cb, ang, w, h):
         """직접 고른 배경 그라데이션 한 장 — ang(도) 180 = 위→아래.
@@ -17671,11 +18308,20 @@ class Mascot:
                                 anchor="nw", tags="bg")
             if not drawn:
                 step = max(8, int(26 * k))
-                for yy in range(top, H, step):
-                    for xx in range((step // 2) if (yy // step) % 2 else 0,
-                                    W, step):
-                        cv.create_oval(xx, yy, xx + 3, yy + 3, fill=P["dot"],
-                                       width=0, tags="bg")
+                # 한 장으로 굽는다 — 점을 따로 얹으면 항목이 1100개가 넘어
+                # 숨쉬기 한 번에 화면을 다시 칠하는 값이 두 배가 된다.
+                self._room_dots = self._safe_str(
+                    self._room_dots_img, W, max(1, H - top), step,
+                    P["dot"], top) or None
+                if self._room_dots:
+                    cv.create_image(0, top, image=self._room_dots,
+                                    anchor="nw", tags="bg")
+                else:                       # 만들기 실패 — 예전 방식으로
+                    for yy in range(top, H, step):
+                        for xx in range((step // 2) if (yy // step) % 2 else 0,
+                                        W, step):
+                            self._oval(cv, xx, yy, xx + 3, yy + 3,
+                                       fill=P["dot"], width=0, tags="bg")
             cv.create_rectangle(0, 0, W, top, fill=P["bar"], width=0,
                                 tags="bg")
             if not drawn:
@@ -17787,6 +18433,7 @@ class Mascot:
             self._safe("room_simple", self._room_simple_draw,
                        cv, W, H, P, k, allp, top)
             self._room_bar(cv, W, H, P, k, allp)
+            self._safe("stk_room", self._stk_draw, cv, "room", W, H)
             self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
             self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
             return
@@ -17860,6 +18507,9 @@ class Mascot:
             cv.create_text(W / 2, H - 16 * k,
                            text="%d / %d" % (self._room_page + 1, pages),
                            font=self._uf(8), fill=P["sub"], tags="dyn")
+        # 스티커는 카드 위에, 목록·플레이리스트 아래에 — 목록을 가리면
+        # 읽을 수가 없다.
+        self._safe("stk_room", self._stk_draw, cv, "room", W, H)
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
         self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
         self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
@@ -17996,9 +18646,12 @@ class Mascot:
             bg = self._room_cap_bg(slot, col, cw2, ch2, ch2 / 2)
             if bg is not None:   # 왼쪽 테마색 → 오른쪽 방 이미지 그라데이션
                 cv.create_image(x0, yy0, image=bg, anchor="nw", tags="dyn")
-            self._rr(cv, x0, yy0, x1, yy1, ch2 / 2, fill="",
-                     outline=col if picked else P["line"],
-                     width=3 if picked else 2)
+            # 평소에는 테두리를 안 두른다 (일반 모드와 같게 — 선이 칸
+            # 그림보다 안쪽에 그려져 그림이 삐져나온 것처럼 보였다).
+            # 고른 칸만 굵게 둘러 어느 것을 골랐는지 알 수 있게 한다.
+            if picked:
+                self._rr(cv, x0, yy0, x1, yy1, ch2 / 2, fill="",
+                         outline=col, width=3)
             # 왼쪽 동그란 바탕 + 작은 캐릭터
             self._safe("soft_btn", self._soft_dot, cv, x0 + ch2 / 2 + 2 * k,
                        cyc, ch2 / 2 - 5 * k, "#ffffff",
@@ -18146,7 +18799,11 @@ class Mascot:
         pw = min(W - 16 * k, 286 * k)
         px = W - pw - 10 * k
         py = getattr(self, "_room_top_px", self.ROOM_TOP * k) + 6 * k
-        head = (74 if can_play else 48) * k
+        # 재생 중인 곡 제목은 **제 줄에** 둔다. 예전에는 볼륨 막대와 같은
+        # 자리(오른쪽 끝·같은 높이)에 그려서 글자와 막대가 겹쳐 보였다(제보).
+        playing = bool(can_play and self._pl_on
+                       and 0 <= self._pl_i < len(songs))
+        head = (94 if playing else (74 if can_play else 48)) * k
         max_rows = max(1, int((H - py - head - 30 * k) // rh))
         rows = songs[:max_rows]
         ph = head + 26 * k + rh * max(1, len(rows))
@@ -18196,15 +18853,16 @@ class Mascot:
             self._pl_hits.append((vx0 - 6 * k, cy2 - 11 * k,
                                   vx1 + 6 * k, cy2 + 11 * k,
                                   ("vol", vx0, vx1)))
-            if self._pl_on and 0 <= self._pl_i < len(songs):
+            if playing:
+                # 조작 줄 **아래** 한 줄 — 볼륨 막대와 안 겹치게
                 now_t = songs[self._pl_i]["t"]
-                lim2 = pw - 250 * k
+                lim2 = pw - 46 * k
                 f3 = self._uf(8)
                 while now_t and self._room_tw(cv, now_t, f3) > lim2:
                     now_t = now_t[:-1]
-                cv.create_text(px + pw - 18 * k, cy2, anchor="e",
+                cv.create_text(px + 18 * k, py + 76 * k, anchor="w",
                                text="♪ " + now_t, font=f3,
-                               fill=P["sub"], tags="dyn")
+                               fill=self._shade(mine, 0.15), tags="dyn")
         yy = py + head + rh / 2
         if not rows:
             cv.create_text(px + pw / 2, yy, text="오늘 올라온 노래가 없어요",
@@ -18390,7 +19048,9 @@ class Mascot:
         self._room_inbox_panel = (px, py, px + pw, py + ph)
 
     def _room_wheel(self, e):
-        """목록이 펼쳐져 있을 때만 굴린다."""
+        """목록이 펼쳐져 있을 때만 굴린다 (스티커를 고른 중이면 크기 조절)."""
+        if self._safe("stk_wheel", self._stk_wheel, "room", e.delta):
+            return
         if not self._inbox_open:
             return
         self._inbox_scroll = max(0, self._inbox_scroll
@@ -18421,21 +19081,23 @@ class Mascot:
         # 카드 밑 부드러운 그림자 — 아기자기하게 떠 보이게
         self._safe("soft_btn", self._card_shadow, cv, kx0, ky0, kx1, ky1,
                    18 * k)
-        if cimg is not None:
-            # 골라 둔 방 그림 — 칸 색으로 받치고(줄였을 때 빈자리) 깐다.
-            # 테두리는 바닥 색까지 그린 뒤 맨 나중에 두른다.
-            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
-                     width=0)
-            cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
-        else:
-            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"],
-                     width=0)
         floor = ky1 - 74 * k
-        # 바닥 색은 칸에 꽉 차게 (가장자리 1~2px 틈 제보)
-        self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
-                 fill=self._tint(col, 0.72), width=0)
-        cv.create_rectangle(kx0, floor, kx1, floor + 14 * k,
-                            fill=self._tint(col, 0.72), width=0, tags="dyn")
+        # 차례가 중요하다 — 흰 바탕 → 꾸미기 그림 → 바닥 띠.
+        # 바닥을 바탕과 한 장으로 묶었다가 꾸미기 그림에 덮여 반투명처럼
+        # 보인 적이 있다 (제보). 바닥은 늘 맨 위에 있어야 한다.
+        self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"], width=0)
+        if cimg is not None:
+            # 골라 둔 방 그림 — 바탕 위에 깐다 (테두리는 맨 나중에)
+            cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
+        # 바닥 띠는 **칸 모양으로 오려 낸 한 장**이라 좌우에 흰 테가 없다
+        flimg = self._safe_str(self._room_floor_img, kx1 - kx0, ky1 - ky0,
+                               18 * k, ky1 - floor, self._tint(col, 0.72))
+        if flimg:
+            cv.create_image(int(kx0), int(floor), image=flimg, anchor="nw",
+                            tags="dyn")
+        else:                     # 만들기 실패 — 예전 방식으로 물러난다
+            self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
+                     fill=self._tint(col, 0.72), width=0)
         # 평소에는 테두리를 안 두른다 — 얇은 선이 칸 그림보다 안쪽에 그려져
         # 그림이 선 밖으로 삐져나온 것처럼 보였다 (제보). 고른 칸만 굵게
         # 둘러 어느 것을 골랐는지 알 수 있게 한다.
@@ -18479,7 +19141,7 @@ class Mascot:
                 self._room_body.append((item, ditem, slot, reg, sleeping,
                                         pose))
         else:
-            cv.create_oval((kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
+            self._oval(cv, (kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
                            (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,
                            fill=self._tint(col, 0.5), width=0, tags="dyn")
             cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
@@ -18602,7 +19264,7 @@ class Mascot:
         cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt,
                        font=f, fill="#ff6f9f", tags="dyn")
         if self._inbox_unread():
-            cv.create_oval(x1 - 5 * k, y0 - 4 * k, x1 + 4 * k, y0 + 5 * k,
+            self._oval(cv, x1 - 5 * k, y0 - 4 * k, x1 + 4 * k, y0 + 5 * k,
                            fill="#ff4d6d", outline="#ffffff", width=2,
                            tags="dyn")
         self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
@@ -18620,7 +19282,7 @@ class Mascot:
         한 번만 그려 두고, 프레임마다 잘라 붙이기만 한다.
         """
         title = str(title or "")
-        S = 3
+        S = 4
         fpx = max(10, int(h * 0.56)) * S
         key = ("strip", title, fpx)
         strip = self._mq_cache.get(key)
@@ -18727,7 +19389,7 @@ class Mascot:
             r2 = hw * 0.27               # 봉우리 원 반지름
             ty = cy2 - hw * 0.18         # 봉우리 원 중심 y
             for sx in (-1, 1):
-                cv.create_oval(hx + sx * hw * 0.23 - r2, ty - r2,
+                self._oval(cv, hx + sx * hw * 0.23 - r2, ty - r2,
                                hx + sx * hw * 0.23 + r2, ty + r2,
                                fill=pink, width=0, tags="dyn")
             cv.create_polygon(hx - hw * 0.47, ty + r2 * 0.35,
@@ -18766,7 +19428,7 @@ class Mascot:
             for col_ in range(3):
                 dx = (col_ - 1) * 5 * k
                 dy = 10.5 * k + row * 4.5 * k
-                cv.create_oval(cx + dx - k, y0 + dy - k,
+                self._oval(cv, cx + dx - k, y0 + dy - k,
                                cx + dx + k, y0 + dy + k,
                                fill=self._tint(col, 0.35), width=0,
                                tags="dyn")
@@ -18934,14 +19596,14 @@ class Mascot:
             cv.create_line(cx, cy + r * 0.8, cx, cy - r * 0.2,
                            fill="#5c8a2c", width=2, capstyle="round")
             for sign in (-1, 1):
-                cv.create_oval(cx + (0.15 * sign - 0.55 * (sign > 0)) * r * 2,
+                self._oval(cv, cx + (0.15 * sign - 0.55 * (sign > 0)) * r * 2,
                                cy - r * 0.7,
                                cx + (0.15 * sign + 0.55 * (sign < 0)) * r * 2,
                                cy + r * 0.1,
                                fill="#8fc34a", width=0)
             return
         if kind == "bud":
-            cv.create_oval(cx - r * 0.55, cy - r * 0.8, cx + r * 0.55,
+            self._oval(cv, cx - r * 0.55, cy - r * 0.8, cx + r * 0.55,
                            cy + r * 0.3, fill="#f6a8c8", outline="#e07aa8",
                            width=1)
             cv.create_line(cx, cy + r * 0.3, cx, cy + r * 0.9,
@@ -18953,9 +19615,9 @@ class Mascot:
         for i in range(5):
             a = math.radians(i * 72 - 90)
             px_, py_ = cx + math.cos(a) * r * 0.55, cy + math.sin(a) * r * 0.55
-            cv.create_oval(px_ - r * 0.42, py_ - r * 0.42, px_ + r * 0.42,
+            self._oval(cv, px_ - r * 0.42, py_ - r * 0.42, px_ + r * 0.42,
                            py_ + r * 0.42, fill=petal, outline=edge, width=1)
-        cv.create_oval(cx - r * 0.3, cy - r * 0.3, cx + r * 0.3, cy + r * 0.3,
+        self._oval(cv, cx - r * 0.3, cy - r * 0.3, cx + r * 0.3, cy + r * 0.3,
                        fill="#fff2b8" if kind == "flower" else "#ff9e5c",
                        outline=edge, width=1)
 
@@ -19044,7 +19706,7 @@ class Mascot:
                 cv.create_text(x1 - u(7), y0_ + u(8), text="✓",
                                font=self._uf(8, True), fill="#e0525c")
             if other is None and diary.get(key):   # 일기 있는 날 — 연필 점
-                cv.create_oval(x1 - u(10), y1_ - u(10), x1 - u(4),
+                self._oval(cv, x1 - u(10), y1_ - u(10), x1 - u(4),
                                y1_ - u(4), fill=cd.get("fill", "#f0a8c0"),
                                width=0)
             self._stamp_hit.append((x0, y0_, x1, y1_, dd))
@@ -19160,6 +19822,7 @@ class Mascot:
     def _stamp_click(self, e):
         sh = self._stamp_share_hit
         if sh and sh[0] <= e.x <= sh[2] and sh[1] <= e.y <= sh[3]:
+            self._safe("ui_click", self._ui_click)
             self.us["stamp_share"] = not bool(self.us.get("stamp_share"))
             self._save_settings()
             self._stamp_pack_at = 0.0    # 다음 신호에 바로 실리게
@@ -19167,12 +19830,14 @@ class Mascot:
             return
         for x0, y0, x1, y1, d in getattr(self, "_stamp_nav", []):
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._safe("ui_click", self._ui_click)
                 self._stamp_off += d
                 self._stamp_pick = None
                 self._safe("stamp_draw", self._stamp_draw)
                 return
         for x0, y0, x1, y1, dd in getattr(self, "_stamp_hit", []):
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._safe("ui_click", self._ui_click)
                 self._stamp_pick = None if self._stamp_pick == dd else dd
                 self._safe("stamp_draw", self._stamp_draw)
                 return
@@ -19209,6 +19874,16 @@ class Mascot:
                 ("칭찬", "praise", "#ffe9a0"))
 
     ROOM_TOAST = 2.0         # '보냈어요' 알림이 떠 있는 시간(초)
+
+    def _room_hit_send(self, e):
+        """그 자리가 '보내는 단추'인가 (제 소리가 따로 나는 곳)."""
+        try:
+            for x0, y0, x1, y1, kind in getattr(self, "_room_btn_hit", []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    return kind != "@all"     # '모두에게'는 고르기만 한다
+        except Exception:
+            pass
+        return False
 
     def _room_toast_say(self, to, kind):
         """무엇을 누구에게 보냈는지 잠깐 알린다 (보내는 쪽 소리도 여기서).
@@ -19298,9 +19973,15 @@ class Mascot:
         im = base
         if r:
             from PIL import ImageChops, ImageDraw
-            mask = Image.new("L", im.size, 0)
+            # PIL 의 rounded_rectangle 은 가장자리를 안 부드럽게 한다 —
+            # 그대로 쓰면 카드 바깥면이 계단처럼 깨져 보인다(제보).
+            # 세 배로 그려 LANCZOS 로 줄이면 매끈해진다 (_rr_soft 와 같은 결).
+            S = 4
+            mask = Image.new("L", (im.width * S, im.height * S), 0)
             ImageDraw.Draw(mask).rounded_rectangle(
-                [0, 0, im.width - 1, im.height - 1], radius=int(r), fill=255)
+                [0, 0, im.width * S - 1, im.height * S - 1],
+                radius=int(r) * S, fill=255)
+            mask = mask.resize(im.size, Image.LANCZOS)
             im.putalpha(ImageChops.multiply(im.split()[3], mask))
         if alpha < 0.999:                    # 불투명도 (꾸미기 슬라이더)
             a2 = im.getchannel("A").point(lambda v: int(v * alpha))
@@ -19587,6 +20268,8 @@ class Mascot:
         내 칸 위에서 시작한 드래그는 방 칸 그림, 그 밖은 배경 그림.
         옮길 수 있는 폭(그림과 칸의 크기 차)의 절반을 끝까지로 본다.
         """
+        if self._safe("stk_move", self._stk_move, "room", e.x, e.y):
+            return                     # 스티커를 끌고 있다
         act = getattr(self, "_pl_drag", None)
         if act is not None:            # 플레이리스트 소리 크기 조절 중
             self._pl_set_vol(act[1], act[2], e.x)
@@ -19630,6 +20313,8 @@ class Mascot:
 
     def _deco_drop(self, _e):
         """드래그 끝 — 저장하고 친구들에게도 알린다 (방 칸)."""
+        if self._safe("stk_drop", self._stk_drop, "room"):
+            return                     # 스티커를 놓았다
         self._pl_drag = None           # 볼륨 막대를 놓았다
         st = getattr(self, "_deco_drag_st", None)
         self._deco_drag_st = None
@@ -19637,6 +20322,366 @@ class Mascot:
             return
         self._save_settings()
         self._room_deco_bump()
+
+    # ── 창 스티커 (홈·뽀모도로 창 안) ─────────────────────────────────
+    # 기존 '바탕화면 스티커'(stickers/ 꾸러미)는 UpdateLayeredWindow 를 쓰는
+    # 윈도우 전용이고, 맥에는 그 꾸러미가 아예 안 실려 간다(make_manifest 의
+    # WIN_EXTRA). 이쪽은 창 캔버스에 그림을 얹을 뿐이라 맥에서도 그대로 되고,
+    # mascot.py 안에 있으니 자동 업데이트로 전달된다.
+    STK_MAX = 20          # 한 창에 붙일 수 있는 장수
+    STK_SRC_PX = 512      # 원본을 이 크기 이하로 줄여 저장한다
+    STK_CACHE = 40        # 그린 판 캐시 상한 (지뢰 18·42)
+    STK_MIN_W = 0.04      # 창 폭 대비 최소·최대 폭
+    STK_MAX_W = 0.90
+    STK_GRIP = 9.0        # 손잡이 반지름 (배율 전)
+
+    def _stk_file(self):
+        return os.path.join(self.state_dir, ".win_stickers.json")
+
+    def _stk_dir(self):
+        return os.path.join(self.state_dir, ".stk")
+
+    def _stk_all(self):
+        """{"room": [...], "pomo": [...]} — 한 번 읽고 들고 있는다.
+
+        자리·크기는 **창 크기 대비 비율**로 담는다. 홈 창은 사람 수와 화면에
+        따라 크기가 달라지므로 픽셀로 담으면 창이 커질 때 스티커가 구석에
+        몰린다.
+        """
+        got = getattr(self, "_stk_mem", None)
+        if got is not None:
+            return got
+        d = {"room": [], "pomo": []}
+        try:
+            with open(self._stk_file(), encoding="utf-8") as fp:
+                raw = json.load(fp)
+            for k in ("room", "pomo"):
+                v = raw.get(k)
+                if isinstance(v, list):
+                    d[k] = [m for m in v
+                            if isinstance(m, dict) and m.get("f")
+                            ][:self.STK_MAX]
+        except Exception:
+            pass
+        self._stk_mem = d
+        return d
+
+    def _stk_list(self, where):
+        return self._stk_all()["pomo" if where == "pomo" else "room"]
+
+    def _stk_save(self):
+        try:
+            _save_json(self._stk_file(), self._stk_all())   # 지뢰 35
+        except Exception:
+            self._log_error("stk_save")
+
+    def _stk_toast(self, msg):
+        """알림 — 홈이 떠 있으면 홈 쪽에, 아니면 캐릭터 말풍선으로."""
+        if self.room_win is not None and self._stk_edit != "pomo":
+            self._room_toast = (msg, time.time())
+        else:
+            self._safe("stk_say", self._say, msg, 3.0)
+
+    def _stk_redraw(self, where):
+        if where == "pomo":
+            self._pomo_redraw()
+        else:
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
+
+    # ── 그림 ──────────────────────────────────────────────────────────
+    def _stk_src(self, meta):
+        """원본 PIL 그림 — 몇 장만 들고 있는다 (한 장 512px = 1MB)."""
+        sid = str(meta.get("id") or "")
+        hold = self._stk_srcs
+        got = hold.get(sid)
+        if got is None:
+            try:
+                got = Image.open(os.path.join(
+                    self._stk_dir(), str(meta.get("f")))).convert("RGBA")
+            except Exception:
+                return None
+            if len(hold) > 6:                  # 오래된 절반만 (지뢰 18)
+                for old in list(hold)[:3]:
+                    hold.pop(old, None)
+            hold[sid] = got
+        return got
+
+    def _stk_photo(self, meta, wpx):
+        """스티커 한 장 — 폭 wpx 픽셀, 각도 반영. 캐시."""
+        ang = int(meta.get("a") or 0) % 360
+        wpx = max(8, int(wpx))
+        key = (str(meta.get("id") or ""), wpx, ang)
+        cache = self._stk_cache
+        got = cache.get(key)
+        if got is not None:
+            return got
+        src = self._stk_src(meta)
+        if src is None:
+            return None
+        try:
+            h = max(1, int(round(wpx * src.height / float(src.width))))
+            im = src.resize((wpx, h), Image.LANCZOS)
+            if ang:
+                # expand=True — 돌리면 모서리가 잘리지 않게 판이 커진다
+                im = im.rotate(-ang, expand=True, resample=Image.BICUBIC)
+            got = ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+        if len(cache) > self.STK_CACHE:        # 오래된 절반만 (지뢰 18·42)
+            for old in list(cache)[:self.STK_CACHE // 2]:
+                cache.pop(old, None)
+        cache[key] = got
+        return got
+
+    def _stk_wpx(self, meta, W):
+        return int(max(self.STK_MIN_W,
+                       min(self.STK_MAX_W,
+                           float(meta.get("w") or 0.22))) * max(1, W))
+
+    def _stk_draw(self, cv, where, W, H, tags="dyn"):
+        """창 안 스티커를 얹는다. 정리 중이면 고른 것에 손잡이도.
+
+        **매 프레임 자리 목록을 새로 만든다** — 그리는 쪽과 누르는 쪽이
+        같은 좌표를 봐야 한다. 나중에 그린 것이 위이므로 누를 때는 뒤에서
+        부터 찾는다.
+        """
+        hits, grips = [], []
+        self._stk_hit[where] = hits
+        self._stk_grip[where] = grips
+        self._stk_wh[where] = (max(1, int(W)), max(1, int(H)))
+        lst = self._stk_list(where)
+        if not lst:
+            return
+        edit = (self._stk_edit == where)
+        k = max(0.7, min(2.0, float(W) / 900.0)) if where == "room" else 1.0
+        for meta in lst:
+            ph = self._stk_photo(meta, self._stk_wpx(meta, W))
+            if ph is None:
+                continue
+            try:
+                cx = float(meta.get("x", 0.5)) * W
+                cy = float(meta.get("y", 0.5)) * H
+            except Exception:
+                cx, cy = W / 2.0, H / 2.0
+            cv.create_image(int(cx), int(cy), image=ph, anchor="center",
+                            tags=tags)
+            hw, hh = ph.width() / 2.0, ph.height() / 2.0
+            hits.append((cx - hw, cy - hh, cx + hw, cy + hh,
+                         str(meta.get("id") or "")))
+            if edit and str(meta.get("id") or "") == self._stk_pick:
+                self._stk_marks(cv, where, cx, cy, hw, hh, k, tags)
+
+    def _stk_marks(self, cv, where, cx, cy, hw, hh, k, tags):
+        """고른 스티커의 테두리와 손잡이 셋 (크기·회전·삭제)."""
+        r = self.STK_GRIP * k
+        cv.create_rectangle(cx - hw, cy - hh, cx + hw, cy + hh,
+                            outline="#8892b5", width=2, dash=(4, 3),
+                            tags=tags)
+        turn = (cx, cy - hh - 18 * k)
+        cv.create_line(cx, cy - hh, turn[0], turn[1], fill="#8892b5",
+                       width=2, tags=tags)
+        for (gx, gy), col, cap, kind in (
+                ((cx + hw, cy + hh), "#8892b5", "⤢", "size"),
+                (turn, "#f0a0be", "↻", "turn"),
+                ((cx - hw, cy - hh), "#dc6262", "×", "del")):
+            self._safe("soft_btn", self._soft_dot, cv, gx, gy, r, col,
+                       outline="#ffffff", width=2, tags=tags)
+            cv.create_text(gx, gy, text=cap, font=self._uf(8, True),
+                           fill="#ffffff", tags=tags)
+            self._stk_grip.setdefault(where, []).append(
+                (gx, gy, r + 5 * k, kind))
+
+    # ── 넣기·지우기 ───────────────────────────────────────────────────
+    def _stk_add_img(self, where, im):
+        """PIL 그림 하나를 그 창의 스티커로 넣는다. 넣은 id 를 돌려준다."""
+        lst = self._stk_list(where)
+        if len(lst) >= self.STK_MAX:
+            self._stk_toast("스티커는 %d장까지 붙일 수 있어요" % self.STK_MAX)
+            return None
+        try:
+            im = im.convert("RGBA")
+            if max(im.size) > self.STK_SRC_PX:
+                kk = self.STK_SRC_PX / float(max(im.size))
+                im = im.resize((max(1, int(im.width * kk)),
+                                max(1, int(im.height * kk))), Image.LANCZOS)
+            os.makedirs(self._stk_dir(), exist_ok=True)
+            sid = "s%d" % int(time.time() * 1000)
+            path = os.path.join(self._stk_dir(), sid + ".png")
+            im.save(path + ".tmp", "PNG")      # 지뢰 35 — 갈아 끼운다
+            os.replace(path + ".tmp", path)
+        except Exception:
+            self._stk_toast("그림을 넣지 못했어요")
+            return None
+        n = len(lst)
+        lst.append({"id": sid, "f": sid + ".png",
+                    "x": 0.5 + ((n % 5) - 2) * 0.07,
+                    "y": 0.45 + ((n % 5) - 2) * 0.07,
+                    "w": 0.22, "a": 0})
+        self._stk_pick = sid
+        self._stk_edit = where
+        self._stk_save()
+        self._stk_redraw(where)
+        return sid
+
+    def _stk_remove(self, where, sid):
+        lst = self._stk_list(where)
+        got = [m for m in lst if str(m.get("id") or "") == str(sid)]
+        if not got:
+            return
+        lst[:] = [m for m in lst if str(m.get("id") or "") != str(sid)]
+        self._stk_srcs.pop(str(sid), None)
+        for key in [k2 for k2 in self._stk_cache if k2[0] == str(sid)]:
+            self._stk_cache.pop(key, None)
+        if self._stk_pick == str(sid):
+            self._stk_pick = None
+        self._stk_save()
+        self._stk_gc()
+        self._stk_redraw(where)
+
+    def _stk_clear(self, where):
+        for meta in list(self._stk_list(where)):
+            self._stk_remove(where, meta.get("id"))
+
+    def _stk_gc(self):
+        """아무도 안 쓰는 그림 파일 정리."""
+        keep = set()
+        for lst in self._stk_all().values():
+            for m in lst:
+                fn2 = str(m.get("f") or "")
+                keep.add(fn2)
+                keep.add(fn2.replace(".png", ".src.png"))   # 떠 둔 원본
+        try:
+            for name in os.listdir(self._stk_dir()):
+                if name not in keep:
+                    os.remove(os.path.join(self._stk_dir(), name))
+        except Exception:
+            pass
+
+    # ── 조작 (홈·뽀모도로가 같이 쓴다) ────────────────────────────────
+    def _stk_at(self, where, x, y):
+        """그 자리의 스티커 id — 나중에 그린 것이 위이므로 뒤에서부터."""
+        for x0, y0, x1, y1, sid in reversed(self._stk_hit.get(where) or []):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return sid
+        return None
+
+    def _stk_grip_at(self, where, x, y):
+        for gx, gy, r, kind in (self._stk_grip.get(where) or []):
+            if (x - gx) ** 2 + (y - gy) ** 2 <= r * r:
+                return kind
+        return None
+
+    def _stk_meta(self, where, sid):
+        for m in self._stk_list(where):
+            if str(m.get("id") or "") == str(sid):
+                return m
+        return None
+
+    def _stk_press(self, where, x, y):
+        """눌렀다 — 내가 처리했으면 True (그러면 원래 동작은 건너뛴다).
+
+        창 크기는 **그릴 때 쓴 값**을 그대로 쓴다 (_stk_wh). 누를 때 다시
+        재면 그리는 시점과 어긋나 자리가 밀린다.
+        """
+        if self._stk_edit != where:
+            return False
+        W, H = self._stk_wh.get(where) or (1, 1)
+        if self._stk_wipe:
+            # 배경 지우기 중 — 누른 스티커를 고르고 그 자리를 지운다
+            sid2 = self._stk_at(where, x, y)
+            if sid2 is None:
+                return False
+            if sid2 != self._stk_pick:
+                self._stk_pick = sid2
+                self._stk_redraw(where)
+            self._safe("stk_erase", self._stk_erase, where, x, y)
+            return True
+        kind = self._stk_grip_at(where, x, y)
+        if kind == "del":
+            self._safe("ui_click", self._ui_click)
+            self._stk_remove(where, self._stk_pick)
+            return True
+        meta = self._stk_meta(where, self._stk_pick) if kind else None
+        if kind and meta is not None:
+            cx, cy = float(meta.get("x", .5)) * W, float(meta.get("y", .5)) * H
+            self._stk_drag = {
+                "kind": kind, "id": self._stk_pick, "x": x, "y": y,
+                "w": float(meta.get("w") or 0.22),
+                "a": float(meta.get("a") or 0),
+                "r0": max(1.0, math.hypot(x - cx, y - cy)),
+                "a0": math.degrees(math.atan2(y - cy, x - cx)),
+                "at": 0.0}
+            return True
+        sid = self._stk_at(where, x, y)
+        if sid is None:
+            if self._stk_pick is not None:     # 빈 곳을 누르면 고름 해제
+                self._stk_pick = None
+                self._stk_redraw(where)
+            return False
+        meta = self._stk_meta(where, sid)
+        if meta is None:
+            return False
+        self._stk_pick = sid
+        self._stk_drag = {"kind": "move", "id": sid, "x": x, "y": y,
+                          "cx": float(meta.get("x", .5)),
+                          "cy": float(meta.get("y", .5)), "at": 0.0}
+        self._stk_redraw(where)
+        return True
+
+    def _stk_move(self, where, x, y):
+        """끄는 중 — 내가 처리했으면 True."""
+        st = self._stk_drag
+        if st is None or self._stk_edit != where:
+            return False
+        meta = self._stk_meta(where, st["id"])
+        if meta is None:
+            self._stk_drag = None
+            return False
+        W, H = self._stk_wh.get(where) or (1, 1)
+        if st["kind"] == "move":
+            meta["x"] = max(0.02, min(0.98,
+                                      st["cx"] + (x - st["x"]) / float(W)))
+            meta["y"] = max(0.02, min(0.98,
+                                      st["cy"] + (y - st["y"]) / float(H)))
+        elif st["kind"] == "size":
+            cx, cy = float(meta.get("x", .5)) * W, float(meta.get("y", .5)) * H
+            r = math.hypot(x - cx, y - cy)
+            meta["w"] = max(self.STK_MIN_W,
+                            min(self.STK_MAX_W, st["w"] * r / st["r0"]))
+        else:                                  # turn
+            cx, cy = float(meta.get("x", .5)) * W, float(meta.get("y", .5)) * H
+            a = math.degrees(math.atan2(y - cy, x - cx))
+            meta["a"] = round((st["a"] + (a - st["a0"])) % 360)
+        now = time.time()
+        if now - st["at"] > 0.03:              # 너무 잦은 다시 그리기 방지
+            st["at"] = now
+            self._stk_redraw(where)
+        return True
+
+    def _stk_drop(self, where):
+        """놓았다 — 저장한다."""
+        if self._stk_drag is None:
+            return False
+        self._stk_drag = None
+        self._stk_save()
+        self._stk_redraw(where)
+        return True
+
+    def _stk_wheel(self, where, delta):
+        """휠로 크기 — 고른 스티커가 있을 때만. 처리했으면 True."""
+        if self._stk_edit != where or not self._stk_pick:
+            return False
+        meta = self._stk_meta(where, self._stk_pick)
+        if meta is None:
+            return False
+        step = 1.1 if delta > 0 else 1 / 1.1
+        meta["w"] = max(self.STK_MIN_W,
+                        min(self.STK_MAX_W,
+                            float(meta.get("w") or 0.22) * step))
+        self._stk_save()
+        self._stk_redraw(where)
+        return True
 
     def _pick_color(self, init="#e7e7ea"):
         """색 고르기 창 — tkinter.colorchooser 없이 (지뢰 21).
@@ -19968,12 +21013,411 @@ class Mascot:
                   command=lambda: set_btn_color("")
                   ).pack(side="left", padx=2)
 
+        # ── 스티커 카드 ─────────────────────────────────────────────
+        st_box = card_box("스티커")
+        tk.Label(st_box, text="그림을 붙여서 홈을 꾸며요 (내 화면에만 보여요)",
+                 font=self._uf(8), bg="#ffffff", fg=cd["sub"]
+                 ).pack(anchor="w", padx=u(12), pady=(u(2), 0))
+        fr4 = tk.Frame(st_box, bg="#ffffff")
+        fr4.pack(padx=u(12), pady=(u(6), u(10)), anchor="w")
+        pill(fr4, "스티커 붙이기·정리", True,
+             lambda: self._safe("stk_win", self._stk_win, "room")
+             ).pack(side="left")
+
         tk.Button(win, text="닫기", font=self._uf(9), relief="flat",
                   bg="#ffffff", fg=cd["text"], padx=u(16),
                   command=win.destroy).pack(pady=(u(8), u(14)))
         win.bind("<Escape>", lambda _e: win.destroy())
         self._place_near(win)
         self._dialog_keep(win, "deco")
+
+    def _stk_text_img(self, text, col=None):
+        """글자 스티커 한 장 — 흰 테두리를 두른 글자.
+
+        배경 그림이나 어두운 카드 위에 놓여도 읽히게 여덟 방향으로 흰
+        테두리를 두른다. 글꼴은 캐릭터 폴더의 프리텐다드, 없으면 기본.
+        """
+        text = (text or "").strip()[:40]
+        if not text:
+            return None
+        S = 3
+        fpx = 56 * S
+        try:
+            font = ImageFont.truetype(
+                os.path.join(self.dir, "fonts", "Pretendard-Bold.otf"), fpx)
+        except Exception:
+            font = ImageFont.load_default()
+        d0 = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+        try:
+            tw = int(d0.textlength(text, font=font))
+        except Exception:
+            tw = fpx * len(text)
+        off = max(2, int(fpx * 0.07))
+        pad = off * 2 + int(fpx * 0.18)
+        im = Image.new("RGBA", (max(8, tw + pad * 2), int(fpx * 1.45) + pad),
+                       (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        col = col or self.card["fill"]
+        for dx in (-off, 0, off):
+            for dy in (-off, 0, off):
+                if dx or dy:
+                    d.text((pad + dx, pad * 0.4 + dy), text, font=font,
+                           fill="#ffffff")
+        d.text((pad, pad * 0.4), text, font=font, fill=col)
+        return im.resize((max(1, im.width // S), max(1, im.height // S)),
+                         Image.LANCZOS)
+
+    def _stk_paste(self, where):
+        """클립보드 그림 붙여넣기.
+
+        PIL 의 ImageGrab 은 굳힌 번들에 없을 수도 있어 (지뢰 21) try 로
+        감싼다. 못 쓰면 그렇다고 말해 주고 파일로 넣게 안내한다 — 이것은
+        내 컴퓨터 안의 편의 기능이라, 주고받는 형식이 갈리는 지뢰 46 과는
+        다르다.
+        """
+        data = None
+        if IS_MAC:
+            data = self._stk_paste_mac()
+        if data is None:
+            try:
+                from PIL import ImageGrab
+                data = ImageGrab.grabclipboard()
+            except Exception:
+                data = None
+        if isinstance(data, Image.Image):
+            self._stk_add_img(where, data)
+            return
+        if isinstance(data, list) and data:
+            for q in data:
+                try:
+                    self._stk_add_img(where, Image.open(q))
+                except Exception:
+                    pass
+            return
+        self._stk_toast("클립보드에 그림이 없어요 (그림 파일로 넣어 주세요)")
+
+    STK_TOL = 28          # 배경 지우기 기본 너그러움 (0~90)
+
+    def _stk_src_path(self, meta):
+        """손대기 전 원본 — 배경을 지워도 되돌릴 수 있게 따로 둔다."""
+        return os.path.join(self._stk_dir(),
+                            str(meta.get("f") or "").replace(".png", ".src.png"))
+
+    @staticmethod
+    def _stk_flood(im, x, y, tol):
+        """(x, y) 와 색이 비슷한 **이어진** 영역을 투명하게. 바뀌면 True.
+
+        ImageChops 를 쓰지 않는다 — stickers 꾸러미가 spec 에 데이터로만
+        실려 있어 그 안의 import 는 번들 분석에 안 잡힌다(지뢰 21).
+        표식 색으로 칠한 뒤 세 채널이 모두 그 값인 자리를 Image.composite
+        로 접어 구한다.
+        """
+        if im.getpixel((x, y))[3] == 0:
+            return False
+        rgb = im.convert("RGB")
+        # 그림에 없는 표식 색을 고른다 — 있으면 엉뚱한 자리까지 지워진다
+        seen = set()
+        try:
+            for _n, col in (rgb.getcolors(1 << 20) or []):
+                seen.add(col)
+        except Exception:
+            seen = set()
+        key = None
+        for cand in ((1, 2, 3), (2, 3, 1), (3, 1, 2), (4, 5, 6), (7, 8, 9)):
+            if cand not in seen:
+                key = cand
+                break
+        if key is None:
+            return False
+        ImageDraw.floodfill(rgb, (int(x), int(y)), key,
+                            thresh=int(max(0, min(90, tol)) * 7.65))
+        black = Image.new("L", rgb.size, 0)
+        mask = None
+        for band, want in zip(rgb.split(), key):
+            m = band.point(lambda v, w=want: 255 if v == w else 0)
+            mask = m if mask is None else Image.composite(m, black, mask)
+        if mask is None or mask.getbbox() is None:
+            return False
+        im.putalpha(Image.composite(black, im.getchannel("A"), mask))
+        return True
+
+    def _stk_local_xy(self, meta, x, y, W, H):
+        """창 좌표 → 그 스티커 원본 그림의 픽셀 좌표 (없으면 None).
+
+        보이는 판은 '원본을 wpx 로 줄이고 -a 도 돌린 것'이다. 거꾸로 풀어
+        원본 자리를 찾는다. 각도가 있으면 되돌려 돌리는 것을 잊지 말 것 —
+        안 그러면 돌려 놓은 스티커에서 엉뚱한 자리가 지워진다.
+        """
+        src = self._stk_src(meta)
+        if src is None:
+            return None
+        wpx = self._stk_wpx(meta, W)
+        hpx = max(1, int(round(wpx * src.height / float(src.width))))
+        cx = float(meta.get("x", 0.5)) * W
+        cy = float(meta.get("y", 0.5)) * H
+        dx, dy = float(x) - cx, float(y) - cy
+        ang = math.radians(float(meta.get("a") or 0))
+        # 보이는 판은 rotate(-a) 다. 그 반대로 돌려야 원본 자리가 나온다 —
+        # 부호를 뒤집으면 90도에서 정반대 칸이 지워진다 (검사로 확인).
+        ca, sa = math.cos(ang), math.sin(ang)
+        ux = ca * dx + sa * dy
+        uy = -sa * dx + ca * dy
+        sx = int(round((ux + wpx / 2.0) * src.width / float(wpx)))
+        sy = int(round((uy + hpx / 2.0) * src.height / float(hpx)))
+        if not (0 <= sx < src.width and 0 <= sy < src.height):
+            return None
+        return sx, sy
+
+    def _stk_erase(self, where, x, y):
+        """배경 지우기 — 고른 스티커의 그 자리 색과 이어진 곳을 투명하게."""
+        meta = self._stk_meta(where, self._stk_pick)
+        if meta is None:
+            return False
+        got = self._stk_local_xy(meta, x, y, *(self._stk_wh.get(where)
+                                               or (1, 1)))
+        if got is None:
+            self._stk_toast("스티커 안을 눌러 주세요")
+            return False
+        src = self._stk_src(meta)
+        if src is None:
+            return False
+        path = os.path.join(self._stk_dir(), str(meta.get("f")))
+        keep = self._stk_src_path(meta)
+        if not os.path.isfile(keep):       # 처음 지울 때 원본을 떠 둔다
+            try:
+                src.save(keep + ".tmp", "PNG")
+                os.replace(keep + ".tmp", keep)
+            except Exception:
+                pass
+        im = src.copy()
+        if not self._stk_flood(im, got[0], got[1], self._stk_tol):
+            self._stk_toast("그 자리는 이미 비어 있어요")
+            return False
+        try:
+            im.save(path + ".tmp", "PNG")
+            os.replace(path + ".tmp", path)
+        except Exception:
+            self._stk_toast("저장하지 못했어요")
+            return False
+        self._stk_forget(str(meta.get("id") or ""))
+        self._stk_redraw(where)
+        return True
+
+    def _stk_undo_erase(self, where):
+        """배경 지우기를 되돌린다 — 떠 둔 원본으로."""
+        meta = self._stk_meta(where, self._stk_pick)
+        if meta is None:
+            self._stk_toast("스티커를 먼저 골라 주세요")
+            return
+        keep = self._stk_src_path(meta)
+        if not os.path.isfile(keep):
+            self._stk_toast("되돌릴 것이 없어요")
+            return
+        try:
+            path = os.path.join(self._stk_dir(), str(meta.get("f")))
+            with open(keep, "rb") as fp:
+                raw = fp.read()
+            with open(path + ".tmp", "wb") as fp:
+                fp.write(raw)
+            os.replace(path + ".tmp", path)
+            os.remove(keep)
+        except Exception:
+            self._stk_toast("되돌리지 못했어요")
+            return
+        self._stk_forget(str(meta.get("id") or ""))
+        self._stk_redraw(where)
+
+    def _stk_forget(self, sid):
+        """그 스티커의 원본·그린 판 캐시를 버린다 (그림이 바뀌었을 때)."""
+        self._stk_srcs.pop(str(sid), None)
+        for key in [k2 for k2 in self._stk_cache if k2[0] == str(sid)]:
+            self._stk_cache.pop(key, None)
+
+    def _stk_paste_mac(self):
+        """맥 클립보드의 그림 — AppKit 으로 직접 꺼낸다.
+
+        PIL 의 ImageGrab 은 굳힌 맥 앱에 안 들어 있을 수 있다 (지뢰 21).
+        AppKit 은 맥 번들에 pyobjc 로 들어 있고 허용 목록에도 있다.
+        붙임쪽에서 PNG(없으면 TIFF) 바이트를 받아 PIL 로 연다.
+        """
+        try:
+            from AppKit import NSPasteboard
+            pb = NSPasteboard.generalPasteboard()
+            for want in ("public.png", "public.tiff"):
+                raw = pb.dataForType_(want)
+                if raw is None:
+                    continue
+                buf = io.BytesIO(bytes(raw))
+                return Image.open(buf).convert("RGBA")
+        except Exception:
+            return None
+        return None
+
+    def _stk_win(self, where):
+        """스티커 정리 창 — 떠 있는 동안 그 창의 스티커를 만질 수 있다.
+
+        맥에서도 되어야 해서 tk.Scale·filedialog·colorchooser 를 안 쓴다
+        (지뢰 21·46·57). 그림 고르기는 _pick_image_file 이 윈도우는
+        comdlg32, 맥은 AppKit 으로 연다.
+        """
+        got = getattr(self, "_stk_winref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        cd, u = self.card, self._ui
+        # 부모를 줘야 '항상 위' 창들 뒤에 숨지 않는다 (지뢰 15 파생)
+        parent = (self.room_win if where == "room"
+                  else getattr(self, "_pomo_winref", None)) or self.root
+        try:
+            if parent is not None and not parent.winfo_exists():
+                parent = self.root
+        except Exception:
+            parent = self.root
+        win = tk.Toplevel(parent)
+        self._stk_winref = win
+        self._stk_edit = where
+        self._stk_pick = None
+        win.title("스티커")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        tk.Label(win, text="스티커", font=self._uf(13, True),
+                 bg=cd["panel"], fg=cd["text"]).pack(pady=(u(14), u(2)))
+        tk.Label(win, text=("홈 화면에 붙어요" if where == "room"
+                            else "뽀모도로 창에 붙어요"),
+                 font=self._uf(8), bg=cd["panel"], fg=cd["sub"]).pack()
+        tk.Label(win, text="끌어서 옮기고 · 모서리로 크기 · 위 손잡이로 회전",
+                 font=self._uf(8), bg=cd["panel"], fg=cd["text"]
+                 ).pack(pady=(u(6), 0))
+        tk.Label(win, text="× 를 누르면 지워요 · 휠을 굴려도 커져요",
+                 font=self._uf(8), bg=cd["panel"], fg=cd["text"]
+                 ).pack(pady=(0, u(8)))
+
+        def pill2(parent2, text, main, cmd):
+            return tk.Button(parent2, text=text, font=self._uf(9),
+                             relief="flat",
+                             bg=cd["fill"] if main else "#efe9f1",
+                             fg="#ffffff" if main else cd["text"],
+                             activebackground=cd["fill"] if main
+                             else "#efe9f1",
+                             padx=u(10), command=cmd)
+
+        cnt = tk.Label(win, font=self._uf(9), bg=cd["panel"], fg=cd["text"])
+        cnt.pack(pady=(0, u(6)))
+
+        def refresh():
+            try:
+                if not cnt.winfo_exists():
+                    return
+            except Exception:
+                return
+            n = len(self._stk_list(where))
+            cnt.config(text=("%d장 붙어 있어요" % n) if n
+                       else "아직 없어요 — 그림을 넣어 보세요")
+
+        def add_file():
+            q = self._pick_image_file()
+            if not q:
+                return
+            try:
+                self._stk_add_img(where, Image.open(q))
+            except Exception:
+                self._stk_toast("그림을 읽지 못했어요")
+            refresh()
+
+        def add_text():
+            t = ent.get()
+            if not t.strip():
+                return
+            im = self._stk_text_img(t)
+            if im is None:
+                return
+            self._stk_add_img(where, im)
+            ent.delete(0, "end")
+            refresh()
+
+        fr = tk.Frame(win, bg=cd["panel"])
+        fr.pack(padx=u(16))
+        pill2(fr, "그림 넣기", True, add_file).pack(side="left", padx=(0, u(6)))
+        pill2(fr, "붙여넣기", False,
+              lambda: (self._safe("stk_paste", self._stk_paste, where),
+                       refresh())).pack(side="left")
+
+        fr2 = tk.Frame(win, bg=cd["panel"])
+        fr2.pack(padx=u(16), pady=(u(8), 0))
+        ent = tk.Entry(fr2, font=self._uf(9), width=14, relief="flat",
+                       bg="#ffffff", fg=cd["text"],
+                       highlightthickness=1, highlightbackground=cd["line"])
+        ent.pack(side="left", ipady=u(3), padx=(0, u(6)))
+        ent.bind("<Return>", lambda _e: add_text())
+        pill2(fr2, "글자 넣기", False, add_text).pack(side="left")
+
+        # ── 배경 지우기 ───────────────────────────────────────────
+        wipe_btn = [None]
+
+        def wipe_txt():
+            return ("배경 지우기 끄기" if self._stk_wipe
+                    else "배경 지우기")
+
+        def toggle_wipe():
+            self._stk_wipe = not self._stk_wipe
+            if wipe_btn[0] is not None:
+                wipe_btn[0].config(text=wipe_txt())
+            self._stk_toast("지울 색을 눌러 주세요" if self._stk_wipe
+                            else "배경 지우기를 껐어요")
+
+        def step_tol(d2):
+            self._stk_tol = max(4, min(80, self._stk_tol + d2))
+            tolv.config(text=str(self._stk_tol))
+
+        fr4 = tk.Frame(win, bg=cd["panel"])
+        fr4.pack(pady=(u(10), 0))
+        wipe_btn[0] = pill2(fr4, wipe_txt(), False, toggle_wipe)
+        wipe_btn[0].pack(side="left", padx=(0, u(6)))
+        pill2(fr4, "되돌리기", False,
+              lambda: self._safe("stk_undo", self._stk_undo_erase, where)
+              ).pack(side="left")
+
+        fr5 = tk.Frame(win, bg=cd["panel"])
+        fr5.pack(pady=(u(6), 0))
+        tk.Label(fr5, text="너그러움", font=self._uf(8), bg=cd["panel"],
+                 fg=cd["sub"]).pack(side="left", padx=(0, u(4)))
+        # 맥(Tk9 아쿠아)에서 tk.Scale 이 앱을 꺼뜨린 적이 있어 +/- 단추로
+        tk.Button(fr5, text="−", font=self._uf(9, True), relief="flat",
+                  bg="#efe9f1", fg=cd["text"], width=2,
+                  command=lambda: step_tol(-6)).pack(side="left")
+        tolv = tk.Label(fr5, text=str(self._stk_tol), font=self._uf(9, True),
+                        bg=cd["panel"], fg=cd["text"], width=3)
+        tolv.pack(side="left")
+        tk.Button(fr5, text="+", font=self._uf(9, True), relief="flat",
+                  bg="#efe9f1", fg=cd["text"], width=2,
+                  command=lambda: step_tol(6)).pack(side="left")
+
+        fr3 = tk.Frame(win, bg=cd["panel"])
+        fr3.pack(pady=(u(10), 0))
+        pill2(fr3, "전부 지우기", False,
+              lambda: (self._safe("stk_clear", self._stk_clear, where),
+                       refresh())).pack(side="left", padx=(0, u(6)))
+        pill2(fr3, "다 했어요", False, win.destroy).pack(side="left")
+        tk.Frame(win, bg=cd["panel"], height=u(12)).pack()
+        refresh()
+
+        def gone(_e=None):
+            if getattr(self, "_stk_winref", None) is win:
+                self._stk_winref = None
+            self._stk_edit = None
+            self._stk_pick = None
+            self._stk_drag = None
+            self._stk_wipe = False
+            self._safe("stk_redraw", self._stk_redraw, where)
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._place_near(win)
+        self._dialog_keep(win, "stk")
+        self._stk_redraw(where)
 
     def _room_bar(self, cv, W, H, P, k, people):
         """아래 단추 줄 — 고른 상대에게만 간다.
@@ -20066,22 +21510,85 @@ class Mascot:
 
     POKE_BURST = 5           # 10초 안에 이 횟수째부터 막는다
     POKE_WINDOW = 10.0
+    # 반응마다 '몇 초 안에 몇 번까지'. 콕·응원·쓰담은 가볍게 주고받는
+    # 것이라 10초에 다섯 번, 간식·칭찬은 상대 화면에 물건이 놓이고
+    # 오래 남아서 더 뜸하게 둔다.
+    SEND_LIMIT = {"poke": (5, 10.0), "cheer": (5, 10.0),
+                  "blanket": (5, 10.0), "snack": (3, 30.0),
+                  "praise": (3, 30.0)}
+    SEND_ALL = (10, 10.0)    # 한 사람에게 종류를 바꿔 가며 쏟아붓는 것도 막는다
 
-    def _poke_ok(self):
-        """콕 연타 제한 — 10초 안에 다섯 번째부터는 안 보낸다.
+    def _send_ok(self, kind, to=None):
+        """반응 연타 제한 — 넘치면 안 보내고 그 자리에서 말해 준다.
+
+        **한 사람 기준**이다. 사가에게 연달아 보내면 사가에게는 막히지만
+        기뽀로 옮기면 보낼 수 있다 — 성가시게 하는 것만 막고 여러 사람을
+        챙기는 것은 안 막는다.
 
         보내는 길이 둘(아래 단추·캐릭터 직접 누르기)이라 여기 한 곳에서
         센다. 서버에도 방 전체 제한(10초에 40개)이 있지만, 그건 넘치면
         조용히 버려서 보낸 사람이 모른다 — 여기서 미리 막고 말해 준다.
+
+        종류마다 따로 세고, 그 사람에게 보낸 것 전부도 따로 센다. 안 그러면
+        콕·응원·쓰담을 번갈아 눌러 순식간에 열 몇 개를 보낼 수 있다.
         """
         now = time.time()
-        self._poke_times = [t for t in self._poke_times
-                            if now - t < self.POKE_WINDOW]
-        if len(self._poke_times) >= self.POKE_BURST - 1:
-            self._room_toast = ("콕은 잠깐 쉬었다가 눌러 주세요", now)
+        who = str(to if to is not None else (self._room_pick or ""))
+        times = getattr(self, "_send_times", None)
+        if not isinstance(times, dict):
+            times = self._send_times = {}
+        if len(times) > 200:               # 상한 (지뢰 18)
+            for k2 in list(times)[:100]:
+                times.pop(k2, None)
+        n, win = self.SEND_LIMIT.get(kind, (5, 10.0))
+        key = (who, kind)
+        keep = [t for t in times.get(key, []) if now - t < win]
+        times[key] = keep
+        label = dict((b, a) for a, b, _c in self.ROOM_BTN).get(kind, "반응")
+        if len(keep) >= n - 1:
+            self._room_toast = ("%s 잠깐 쉬었다가 눌러 주세요"
+                                % _josa(label, "은/는"), now)
             self._safe("room_draw", self._room_draw)
             return False
-        self._poke_times.append(now)
+        # 그 사람에게 보낸 것 전부 — 오래된 것은 버리고 센다
+        an, aw = self.SEND_ALL
+        akey = (who, "*")
+        allt = [t for t in times.get(akey, []) if now - t < aw]
+        times[akey] = allt
+        if len(allt) >= an - 1:
+            self._room_toast = ("조금 천천히 보내 주세요", now)
+            self._safe("room_draw", self._room_draw)
+            return False
+        keep.append(now)
+        allt.append(now)
+        return True
+
+    def _poke_ok(self, to=None):
+        """예전 이름 — 콕만 보던 시절의 자리."""
+        return self._send_ok("poke", to)
+
+    def _recv_ok(self, frm, kind):
+        """받는 쪽 방패 — 같은 사람이 같은 것을 연달아 보내면 흘린다.
+
+        연타 제한은 보내는 쪽에 있는데, 친구 프로그램이 아직 안 고쳐졌으면
+        그대로 쏟아져 들어온다 (자동 업데이트가 닿기 전까지). 그래서 받는
+        쪽에서도 같은 창·같은 횟수로 막는다. **사람별로** 세므로 여러
+        친구가 동시에 챙겨 주는 것은 그대로 다 받는다.
+        """
+        now = time.time()
+        got = getattr(self, "_recv_times", None)
+        if not isinstance(got, dict):
+            got = self._recv_times = {}
+        if len(got) > 200:                       # 상한 (지뢰 18)
+            for k2 in list(got)[:100]:
+                got.pop(k2, None)
+        n, win = self.SEND_LIMIT.get(kind, (5, 10.0))
+        key = (str(frm or ""), str(kind or ""))
+        keep = [t for t in got.get(key, []) if now - t < win]
+        got[key] = keep
+        if len(keep) >= n - 1:
+            return False
+        keep.append(now)
         return True
 
     def _room_send(self, kind):
@@ -20093,7 +21600,8 @@ class Mascot:
         to = self._room_pick
         if not to:
             return
-        if kind == "poke" and not self._poke_ok():
+        # 연타 제한은 **모든 반응**에 걸린다 (한 사람 기준)
+        if not self._send_ok(kind, to):
             return
         if kind == "snack" and to == self.char:
             # 본인 컵케이크 — 10분에 한 번, 내 스페셜 컵케이크를 먹는다
@@ -20417,12 +21925,12 @@ class Mascot:
             if 0 < q2 < 1:
                 e2 = 1.0 - (1.0 - q2) ** 2
                 r2 = (20 + 96 * e2) * k
-                c.create_oval(cx - r2, cy - r2, cx + r2, cy + r2,
+                self._oval(c, cx - r2, cy - r2, cx + r2, cy + r2,
                               outline=self.POKE_RING[2], width=1)
             if 0 < q < 1:
                 e = 1.0 - (1.0 - q) ** 2           # 톡 튀어나가 천천히 멎는다
                 r = (20 + 96 * e) * k
-                c.create_oval(cx - r, cy - r, cx + r, cy + r,
+                self._oval(c, cx - r, cy - r, cx + r, cy + r,
                               outline=self.POKE_RING[i],
                               width=max(2, int(6 * k * (1 - q))))
         q = p * 1.55                               # 물결을 따라 튀는 점 여섯
@@ -20437,7 +21945,7 @@ class Mascot:
                 if i % 2:
                     self._fx_spark(c, dx, dy, sz * 1.7, col)
                 else:
-                    c.create_oval(dx - sz, dy - sz, dx + sz, dy + sz,
+                    self._oval(c, dx - sz, dy - sz, dx + sz, dy + sz,
                                   fill=col, width=0)
         if p < 0.42:                               # 눌린 자리에서 반짝
             q = p / 0.42
@@ -20541,11 +22049,11 @@ class Mascot:
     def _draw_hand(c, x, y, r):
         """토닥이는 손 — 손바닥과 손가락 넷. 글꼴을 안 써서 맥에서도 같다."""
         skin, line = "#ffe7d2", "#d9a882"
-        c.create_oval(x - r, y - r * 0.72, x + r, y + r * 0.86,
+        self._oval(c, x - r, y - r * 0.72, x + r, y + r * 0.86,
                       fill=skin, outline=line, width=2)
         for i in range(4):
             fx = x - r * 0.62 + i * (r * 0.42)
-            c.create_oval(fx - r * 0.21, y + r * 0.38,
+            self._oval(c, fx - r * 0.21, y + r * 0.38,
                           fx + r * 0.21, y + r * 1.06,
                           fill=skin, outline=line, width=2)
         # 손목 (위로 살짝)
@@ -20604,7 +22112,7 @@ class Mascot:
         # 접시 위에 놓인 것처럼 — 그림 밑선을 케이크 밑선에 맞춘다
         bot = y + r * 1.16
         pw = img.width() * 0.52
-        c.create_oval(cx - pw, bot - r * 0.32, cx + pw, bot + r * 0.34,
+        self._oval(c, cx - pw, bot - r * 0.32, cx + pw, bot + r * 0.34,
                       fill="#ffffff", outline="#c6bfce", width=2)
         c.create_image(cx, bot + r * 0.1, image=img, anchor="s")
         # 누를 수 있는 자리 (조금 넉넉하게 — 작은 간식도 누르기 쉽게)
@@ -20614,7 +22122,7 @@ class Mascot:
 
     def _mini_cake(self, c, cx, cy, r):
         """접시에 놓인 조각 케이크 — 크림 위에 딸기 하나."""
-        c.create_oval(cx - r * 1.5, cy + r * 0.5, cx + r * 1.5, cy + r * 1.16,
+        self._oval(c, cx - r * 1.5, cy + r * 0.5, cx + r * 1.5, cy + r * 1.16,
                       fill="#ffffff", outline="#c6bfce", width=2)
         c.create_rectangle(cx - r, cy - r * 0.15, cx + r, cy + r * 0.75,
                            fill="#f6d9a8", outline="#c99a55", width=2)
@@ -20623,7 +22131,7 @@ class Mascot:
         c.create_arc(cx - r, cy - r * 0.85, cx + r, cy + r * 0.45,
                      start=0, extent=180, fill="#fff4f7",
                      outline="#f0c6d4", width=2)
-        c.create_oval(cx - r * 0.28, cy - r * 1.15, cx + r * 0.28,
+        self._oval(c, cx - r * 0.28, cy - r * 1.15, cx + r * 0.28,
                       cy - r * 0.55, fill="#ff7a9a", outline="#d94f74",
                       width=2)
         c.create_line(cx, cy - r * 1.15, cx, cy - r * 1.4,
@@ -20657,7 +22165,7 @@ class Mascot:
                     q = p * 1.7 - i * 0.18
                     if 0 < q < 1:
                         r = (12 + 44 * q) * k
-                        cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                        self._oval(cv, cx - r, cy - r, cx + r, cy + r,
                                        outline=self._mix(col, soft, q),
                                        width=max(1, int(2.4 * k)), tags="fx")
             elif kind == "cheer":
@@ -21172,6 +22680,14 @@ class Mascot:
             return
 
     def _room_click(self, e):
+        # 스티커를 정리하는 중이면 그쪽이 먼저다 (아니면 카드가 골라진다)
+        if self._safe("stk_press", self._stk_press, "room", e.x, e.y):
+            return
+        # 조작 소리 '똑' — 콕·응원처럼 **제 소리가 있는 것은 뺀다.**
+        # 아래 단추(_room_btn_hit)로 보낼 때는 홈 반응 소리가 나므로,
+        # 그 자리는 건너뛰고 나머지(쪽 넘김·고르기·꾸미기·목록)에만 낸다.
+        if not self._room_hit_send(e):
+            self._safe("ui_click", self._ui_click)
         if self._deco_editing():
             db = self._room_deco_btn
             if not (db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]):
