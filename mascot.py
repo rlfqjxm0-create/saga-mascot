@@ -4831,6 +4831,7 @@ class Mascot:
         self.room_win = None         # 방 창
         self.room_cv = None
         self.room_people = []        # 방에 있는 사람들
+        self._room_who = None        # 마지막으로 본 레벨·칭호
         self._room_job = None        # 방 창 다시 그리기 예약
         self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
         self._room_hit = []          # 방 창에서 누를 수 있는 자리
@@ -16359,6 +16360,9 @@ class Mascot:
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
+            # 켜 있을 때 본 레벨·칭호를 담아 둔다 — 꺼진 뒤에도 그대로
+            # 보여 주려면 어딘가에 남아 있어야 한다
+            self._safe("room_who", self._room_who_note, people)
             # 방 창이 떠 있으면 안 켠 사람 그림도 받아 둔다. 안 그러면
             # 그 자리가 회색 동그라미로만 남는다 (친구 쪽 제보).
             self._room_want_art(
@@ -16369,6 +16373,59 @@ class Mascot:
 
     def _room_seen_path(self):
         return os.path.join(self.state_dir, ".room_seen.json")
+
+    def _room_who_path(self):
+        return os.path.join(self.state_dir, ".room_who.json")
+
+    def _room_who_get(self):
+        """마지막으로 본 남들의 레벨·칭호 — 안 켠 자리에 계속 보여 준다.
+
+        오늘치(_room_seen)와 **따로** 둔다. 레벨은 날짜와 무관한 값이라
+        06시에 무효가 되는 곳에 담으면 하루만 지나도 Lv.1 로 돌아간다.
+        """
+        got = getattr(self, "_room_who", None)
+        if got is None:
+            try:
+                with open(self._room_who_path(), encoding="utf-8") as fp:
+                    got = json.load(fp)
+            except Exception:
+                got = {}
+            if not isinstance(got, dict):
+                got = {}
+            self._room_who = got
+        return got
+
+    def _room_who_note(self, people):
+        """명단에서 본 레벨·칭호를 담아 둔다 (바뀐 것이 있을 때만 저장).
+
+        매번 쓰면 5초마다 디스크를 두드린다 — 값이 달라졌을 때만 쓴다.
+        """
+        who = self._room_who_get()
+        dirty = False
+        for q in people or []:
+            slot = str(q.get("slot") or "")
+            if not slot or q.get("off"):
+                continue
+            lv = int(q.get("lv") or 0)
+            if lv <= 0:
+                continue
+            ti = str(q.get("ti") or "")[:14]
+            nm = str(q.get("n") or "")[:14]
+            cur = who.get(slot)
+            if (not isinstance(cur, dict) or int(cur.get("lv") or 0) != lv
+                    or str(cur.get("ti") or "") != ti
+                    or str(cur.get("n") or "") != nm):
+                who[slot] = {"lv": lv, "ti": ti, "n": nm}
+                dirty = True
+        if len(who) > 60:                  # 상한 (지뢰 18)
+            for old in list(who)[:30]:
+                who.pop(old, None)
+            dirty = True
+        if dirty:
+            try:
+                _save_json(self._room_who_path(), who)   # 지뢰 35
+            except Exception:
+                pass
 
     def _room_seen_get(self):
         """오늘 마지막으로 본 남들의 (시간, 게이지). 껐다 켜도 남는다."""
@@ -21755,6 +21812,14 @@ class Mascot:
                 p2 = max(p0, float(row[1]))
             if t2 != q.get("t") or p2 != q.get("p"):
                 q = dict(q, t=t2, p=p2)
+            if q.get("off") and int(q.get("lv") or 0) <= 1:
+                # 서버가 꺼진 사람을 레벨 없이 줄 때가 있다 — 마지막으로
+                # 본 값으로 메운다 (Lv.1 로 고정돼 보이던 제보)
+                w2 = self._room_who_get().get(q.get("slot") or "")
+                if isinstance(w2, dict) and int(w2.get("lv") or 0) > 1:
+                    q = dict(q, lv=int(w2["lv"]),
+                             ti=(str(q.get("ti") or "")
+                                 or str(w2.get("ti") or "")))
             rest.append(q)
         rest.sort(key=lambda q: (order.get(q.get("slot") or "", 99),
                                  q.get("slot") or ""))
@@ -21784,8 +21849,15 @@ class Mascot:
                 st, sp = min(int(row[0]), int(cap)), float(row[1])
                 if int(row[0]) > cap:      # 06시 직후엔 어제 값이 남아 있다
                     sp = sp * (cap / max(int(row[0]), 1))
-            seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
-                          "lv": 1, "ti": "", "t": st, "s": "off", "p": sp,
+            # 레벨·칭호는 마지막으로 본 값을 그대로 (없으면 Lv.1)
+            w = self._room_who_get().get(slot)
+            w = w if isinstance(w, dict) else {}
+            seats.append({"slot": slot,
+                          "n": (str(w.get("n") or "")
+                                or self.ROOM_NAME.get(slot, "")),
+                          "lv": max(1, int(w.get("lv") or 1)),
+                          "ti": str(w.get("ti") or ""),
+                          "t": st, "s": "off", "p": sp,
                           "a": "", "off": True})
         # 차례: 나 → 게이지를 많이 채운 순 → 안 켠 사람. 페이지로 나뉘므로
         # 차례가 곧 몇 쪽에 실리는지를 정한다 — 오늘 많이 한 사람이 앞에.
