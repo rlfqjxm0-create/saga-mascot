@@ -2309,7 +2309,7 @@ CHARS = [
     {"slot": "parts_myeoljong", "repo": "myeoljong-mascot", "name": "멸종",
      "tint": "#ba2028"},
     {"slot": "parts_peugo", "repo": "peugo-mascot", "name": "프고",
-     "tint": "#4f9d3f", "size": 0.84},   # 초록 (수트 파랑은 그림이 맡는다)
+     "tint": "#5da33e", "size": 0.84},   # 초록 (수트 파랑은 그림이 맡는다)
     {"slot": "parts_hambugi", "repo": "hambugi-mascot", "name": "햄북이",
      "tint": "#c9954a"},
     {"slot": "parts_yeoneo", "repo": "yeoneo-mascot", "name": "연어",
@@ -8736,6 +8736,33 @@ class Mascot:
             fn = getattr(lay, "set_topmost", None)
             if fn is not None:
                 self._safe("layer_z", fn, on)
+        # 내린 뒤 **차례를 못박는다.** 세 창의 항상 위를 잇달아 내리면
+        # 어느 것이 먼저 보통 층에 들어가느냐에 따라 그림자가 캐릭터보다
+        # 앞에 설 때가 있다 (실측: 열 번에 한 번쯤 캐릭터 18 / 그림자 17).
+        # 그러면 우클릭할 때마다 그림자가 번쩍인다.
+        self._safe("layer_order", self._layers_behind)
+
+    def _layers_behind(self):
+        """그림자·파티클을 캐릭터 바로 뒤에 다시 끼운다 (윈도우만)."""
+        if not IS_WIN:
+            return
+        main = getattr(self, "_main_hwnd", None)
+        if not main:
+            return
+        u32 = ctypes.WinDLL("user32")      # 공용 windll 을 안 건드린다 (지뢰 21)
+        u32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_uint]
+        prev = main
+        for lay in (getattr(self, "shadow", None), getattr(self, "_fx", None)):
+            h = getattr(lay, "hwnd", None)
+            if not h:
+                continue
+            # SetWindowPos 의 둘째 인자는 '이 창 뒤에 놓아라' 다 (지뢰 23)
+            u32.SetWindowPos(ctypes.c_void_p(h), ctypes.c_void_p(prev),
+                             0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+            prev = h
 
     def _menu_popup(self, x, y):
         """우클릭 메뉴 — 캐릭터('항상 위')에 안 가리게 띄운다.
@@ -17691,10 +17718,19 @@ class Mascot:
         self._room_goal_done = tot >= self.ROOM_GOAL_MIN
         nums = self._safe_str(self._room_numbers, on, live)
         if nums:
+            # 진단 줄은 이상할수록 길어진다 — 판 폭에 맞을 때까지 글자를
+            # 줄인다. 안 그러면 창 오른쪽 밖으로 삐져나간다 (실측).
+            fnum = self._uf(8)
+            avail = 196 * k
+            for size in range(8, 4, -1):
+                fnum = self._uf(size)
+                if self._room_tw(cv, nums, fnum) <= avail:
+                    break
             self._rr(cv, W - 216 * k, mid - 14 * k, W - 12 * k, mid + 14 * k,
                      12 * k, fill="#ffffff", outline=P["line"], width=1)
             cv.create_text(W - 114 * k, mid, anchor="center", text=nums,
-                           font=self._uf(8), fill=P["sub"], tags="dyn")
+                           font=fnum, fill=P["sub"], tags="dyn",
+                           width=int(avail))
         else:
             # 흰 라운드 판 — 하늘이 어두운 시간대에도 시간이 또렷하게
             self._rr(cv, W - 216 * k, mid - 25 * k, W - 12 * k, mid + 22 * k,
@@ -17939,8 +17975,11 @@ class Mascot:
         y0 = top + gap + max(0, (area_h - rows * ch2 - (rows - 1) * gap) // 2)
         f_name = self._uf(10, True)
         f_sub = self._uf(8)
+        # 칭호·시간·퍼센트는 굵게 — 작은 글씨라 얇으면 카드 안에서 묻힌다.
+        # f_sub 는 오노추 알약에도 쓰이므로 칭호용을 따로 둔다.
+        f_ttl = self._uf(8, True)
         f_time = self._uf(10, True)
-        f_pct = self._uf(8)
+        f_pct = self._uf(8, True)
         for i, p in enumerate(people):
             slot = p.get("slot") or ""
             off = bool(p.get("off"))
@@ -17991,7 +18030,7 @@ class Mascot:
             # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로
             ti = "아직 안 켰어요" if off else str(p.get("ti") or "")[:14]
             cv.create_text(tx, cyc + 1 * k, anchor="w", text=ti,
-                           font=f_sub, fill=self._shade(P["sub"], 0.28),
+                           font=f_ttl, fill=self._shade(P["sub"], 0.28),
                            tags="dyn")
             full_msg = "" if off else str(p.get("m") or "").strip()
             msg = full_msg
@@ -18397,9 +18436,12 @@ class Mascot:
                  fill=self._tint(col, 0.72), width=0)
         cv.create_rectangle(kx0, floor, kx1, floor + 14 * k,
                             fill=self._tint(col, 0.72), width=0, tags="dyn")
-        self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
-                 outline=col if picked else P["line"],
-                 width=3 if picked else 2)
+        # 평소에는 테두리를 안 두른다 — 얇은 선이 칸 그림보다 안쪽에 그려져
+        # 그림이 선 밖으로 삐져나온 것처럼 보였다 (제보). 고른 칸만 굵게
+        # 둘러 어느 것을 골랐는지 알 수 있게 한다.
+        if picked:
+            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
+                     outline=col, width=3)
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, over, cut, mode = got
@@ -18501,7 +18543,7 @@ class Mascot:
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
                        text="아직 안 켰어요" if off
                        else str(p.get("ti") or "")[:14],
-                       font=self._uf(8), fill=P["sub"], tags="dyn")
+                       font=self._uf(8, True), fill=P["sub"], tags="dyn")
         # 게이지 왼쪽에 오늘 몇 시간째인지 (3h 13m 꼴, 1시간 전에는 분만)
         tmin = max(0, int(p.get("t") or 0))
         tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) if tmin >= 60 \
@@ -18509,7 +18551,7 @@ class Mascot:
         bx0, bx1 = kx0 + 60 * k, kx1 - 42 * k
         by = py0 + 48 * k
         cv.create_text(bx0 - 6 * k, by + 5 * k, anchor="e", text=tlab,
-                       font=self._uf(8), fill=P["sub"], tags="dyn")
+                       font=self._uf(8, True), fill=P["sub"], tags="dyn")
         # 바탕·테두리·그라데이션 채움을 한 장으로 — 틈이 없다
         pr = max(0.0, min(1.0, float(p.get("p") or 0)))
         raw = self._room_raw(slot)
@@ -18518,7 +18560,8 @@ class Mascot:
         self._safe("soft_btn", self._soft_gauge, cv, bx0, by, bx1,
                    by + 11 * k, 5 * k, raw, pr, self._tint(col, 0.55))
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
-                       text="%d%%" % (pr * 100), font=self._uf(8), fill=P["sub"], tags="dyn")
+                       text="%d%%" % (pr * 100), font=self._uf(8, True),
+                       fill=P["sub"], tags="dyn")
         sg = p.get("sg")
         if isinstance(sg, dict) and self._song_ok(sg.get("u")):
             self._safe("room_song", self._room_song_draw,
@@ -20159,6 +20202,11 @@ class Mascot:
         for slot in self.ROOM_ALL:
             if slot in here:
                 continue
+            # '내 캐릭터를 안 보이게'를 켰으면 여기서도 빼야 한다. 위에서
+            # 내 자리만 안 넣고 이 줄에서 다시 넣는 바람에, 설정을 켜도
+            # '아직 안 켠 사람'으로 그대로 보였다.
+            if slot == self.char and self.us.get("room_hide_me"):
+                continue
             # 예전에는 내 캐릭터와 같은 그림의 선물본 자리를 '겹친다'고
             # 뺐는데, 그 자리에 진짜 친구가 들어오면서 내 화면에서만 그
             # 사람이 사라졌다 (도로롱 제보). 같은 그림이어도 다 보여 준다.
@@ -20172,7 +20220,17 @@ class Mascot:
             seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
                           "lv": 1, "ti": "", "t": st, "s": "off", "p": sp,
                           "a": "", "off": True})
-        return seats
+        # 차례: 나 → 게이지를 많이 채운 순 → 안 켠 사람. 페이지로 나뉘므로
+        # 차례가 곧 몇 쪽에 실리는지를 정한다 — 오늘 많이 한 사람이 앞에.
+        # (같으면 정해진 차례로 — 매번 자리가 뒤바뀌면 눈이 어지럽다.)
+        mine = [q for q in seats if (q.get("slot") or "") == self.char]
+        rest2 = [q for q in seats if (q.get("slot") or "") != self.char]
+        rest2.sort(key=lambda q: (1 if q.get("off") else 0,
+                                  -float(q.get("p") or 0),
+                                  -int(q.get("t") or 0),
+                                  order.get(q.get("slot") or "", 99),
+                                  q.get("slot") or ""))
+        return mine + rest2
 
     def _room_pose(self, p):
         """그 사람이 지금 뭘 하고 있는지에 맞는 그림을 고른다.
@@ -20259,6 +20317,11 @@ class Mascot:
             r = float(long_px) / max(1, max(w, h))
             im = im.resize((max(1, round(w * r)), max(1, round(h * r))),
                            Image.LANCZOS)
+            # 색상키 창에 반투명 가장자리를 그대로 얹으면 키 색과 섞여
+            # 어두운 테가 진다 (지뢰 31·65와 같은 뿌리). 파츠와 똑같이
+            # 이분화해서 올린다 — 줄인 **뒤에** 해야 새로 생긴 반투명
+            # 픽셀까지 잡힌다.
+            im = self._hard(im)
             got = ImageTk.PhotoImage(im)
         except Exception:
             return None

@@ -1,7 +1,7 @@
 {
- "version": 1787062763,
+ "version": 1787068718,
  "files": {
-  "mascot.py": "9b7494968468b28a8cab54f4454d59b17e85610f86f62696656b0f8ddc87d339",
+  "mascot.py": "054062f88828a2d67b1ee69a61c3af750ec390fdcfd4acae511c8f8b97f27f98",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -395,6 +395,12 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "홈 칸의 얇은 테두리를 없앴어요. 그림이 테두리 밖으로 삐져나와 보이던 것이 사라집니다",
+  "홈에 뜨는 차례가 바뀌었어요 — 내 캐릭터가 맨 앞, 그다음은 오늘 게이지를 많이 채운 순, 안 켠 사람은 뒤로",
+  "홈의 칭호·시간·퍼센트 글씨를 굵게 했어요",
+  "쓰담쓰담을 받을 때 손이 안 보이던 캐릭터들(햄북이·연어·레냥·락스·패왕·성실이)에 손 그림을 넣었어요",
+  "우클릭할 때 그림자가 잠깐 앞으로 번쩍이던 것을 고쳤어요",
+  "환경음 파일을 가볍게 만들어(한 사람당 162MB → 33MB) 업데이트가 훨씬 빨라졌어요"
+ ]
 }
