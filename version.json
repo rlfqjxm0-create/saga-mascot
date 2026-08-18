@@ -1,7 +1,7 @@
 {
- "version": 1787003135,
+ "version": 1787044218,
  "files": {
-  "mascot.py": "5f7fb01680ce670ed421cf1b8e414b5b261d902cf2135010bf35636238f00579",
+  "mascot.py": "17fea6f8bc7603009cfc2f3a674c7a0fcd7d582df24532650f4cb4e0ed65cbdb",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -85,6 +85,13 @@
   "parts_saga/snacks_special/cup_peugo.png": "5ad6757e542d673da015468543ad5040563e5e091594917ce1bd20c25ebfb617",
   "parts_saga/snacks_special/cup_quincy.png": "2fcf891de8701e334443e08bc548062dc7ab7def89980b4af67a8f046ed2088b",
   "parts_saga/snacks_special/cup_saga.png": "192d17b286eba531876a0cba17345d3783736767d0cd6d51e88b91584e2b3583",
+  "parts_saga/sounds/ambient/굵은 빗소리.wav": "85d50c10f93fa4af6d7a348bbe5703464217f5e9637b6ddb9c5fd5f2e1076798",
+  "parts_saga/sounds/ambient/말발굽.wav": "4ae202fd074927da4994a421e488012cff57b87e00b036d5e9eccf0e830b93c9",
+  "parts_saga/sounds/ambient/먼 모닥불.wav": "fb36768291296948e9c02e35f82f2f90267cbffd884241406126fca8326208b5",
+  "parts_saga/sounds/ambient/모닥불.wav": "9a24a37fc9ebf218df0440829a823735c21d33bcfc8365c62285b4e24a97b7c4",
+  "parts_saga/sounds/ambient/빗소리.wav": "e39973ef65c9dde99013d6ec8c885e954683423eef146a7137094d5a26500dc9",
+  "parts_saga/sounds/ambient/장작 타는 소리.wav": "f3a43bbf2ca65b4343b2c636dad8879575920440697cecf7961821ac35c2e2bd",
+  "parts_saga/sounds/ambient/캠프파이어.wav": "7aa110e1f1954bb3e91a5cabd158b2dce3bea11caec69093b7cef082e6efd01b",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/key1.wav": "34ca127f328b29dfee7e5d777636cad708371d6bdadcfc3d05d988c1555fa97e",
@@ -388,6 +395,5 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": []
 }

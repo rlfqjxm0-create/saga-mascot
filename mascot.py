@@ -1747,9 +1747,229 @@ class MacSlimeSound(_MacSoundPool):
         self._all_stop()
 
 
+class AmbientSound:
+    """환경음(BGM) — 여러 소리를 **동시에** 끝없이 반복해서 튼다.
+
+    빗소리에 천둥을 얹는 식으로 섞어 듣는 것이라, 소리마다 따로 켜고
+    따로 볼륨을 준다. 소리 하나가 재생 장치 하나를 쓴다.
+
+    반복은 winmm 이 직접 해 준다 — 헤더에 WHDR_BEGINLOOP/ENDLOOP 를 켜고
+    dwLoops 를 크게 주면 드라이버가 알아서 이어 붙인다. 파이썬이 끝나는
+    때를 지켜보다 다시 써 넣을 필요가 없어 프레임을 한 톨도 안 쓴다.
+
+    볼륨은 장치마다 `waveOutSetVolume` 으로 준다. 넣고 되읽어 확인해 보고,
+    드라이버가 무시하면 — 이 프로젝트가 다른 소리에서 이미 겪은 일이다 —
+    샘플에 직접 곱해 다시 연다. 섞어 듣는 기능이라 이쪽이 중요하다:
+    버퍼를 다시 만들면 그 소리만 처음으로 되돌아가 박자가 어긋난다.
+    """
+
+    LOOP_FLAGS = 0x00000004 | 0x00000008      # WHDR_BEGINLOOP | WHDR_ENDLOOP
+
+    def __init__(self, folder):
+        import wave                            # (이미 쓰는 표준 모듈)
+        self.folder = folder
+        self.names = [os.path.splitext(f)[0]
+                      for f in sorted(os.listdir(folder))
+                      if f.lower().endswith(".wav")]
+        if not self.names:
+            raise ValueError("환경음 wav 없음")
+        self.voices = {}          # 이름 -> (핸들, 헤더, 버퍼, 볼륨)
+        self._drv_vol = None      # 드라이버 볼륨이 통하는가
+        self._wave = wave
+
+    # ── 볼륨 ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _vol_val(vol):
+        lvl = int(max(0.0, min(float(vol) / 100.0, 1.0)) * 0xFFFF)
+        return (lvl << 16) | lvl               # 좌우 같은 값
+
+    def _try_drv_vol(self, h, vol):
+        """드라이버 볼륨을 넣고 되읽어 확인한다. 못 믿으면 False."""
+        wm = ctypes.windll.winmm
+        val = self._vol_val(vol)
+        if wm.waveOutSetVolume(h, val):
+            return False
+        got = ctypes.c_uint32()
+        if wm.waveOutGetVolume(h, ctypes.byref(got)):
+            return False
+        return got.value == val
+
+    # ── 재생 ────────────────────────────────────────────────────────────
+    def _open(self, name, vol, scale):
+        path = os.path.join(self.folder, name + ".wav")
+        with self._wave.open(path, "rb") as w:
+            ch, sw, fr = w.getnchannels(), w.getsampwidth(), w.getframerate()
+            pcm = w.readframes(w.getnframes())
+        if sw != 2 or not pcm:
+            raise ValueError("환경음은 16bit wav 만 지원")
+        g = (float(vol) / 100.0) if scale else 1.0
+        buf = _scaled_buffer(pcm, g, sw)
+        wfx = _WAVEFORMATEX(1, ch, fr, fr * ch * sw, ch * sw, sw * 8, 0)
+        wm = ctypes.windll.winmm
+        h = ctypes.c_void_p()
+        if wm.waveOutOpen(ctypes.byref(h), 0xFFFFFFFF,
+                          ctypes.byref(wfx), 0, 0, 0):
+            raise OSError("소리 장치를 열 수 없음")
+        if scale:
+            wm.waveOutSetVolume(h, 0xFFFFFFFF)     # 볼륨은 샘플에 이미 반영
+        elif not self._try_drv_vol(h, vol):
+            wm.waveOutClose(h)
+            return None                            # 부르는 쪽이 다시 시도
+        hdr = _WAVEHDR()
+        hdr.lpData = ctypes.cast(buf, ctypes.c_void_p)
+        hdr.dwBufferLength = len(pcm)
+        hdr.dwFlags = self.LOOP_FLAGS
+        hdr.dwLoops = 0xFFFFFFFF
+        wm.waveOutPrepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        wm.waveOutWrite(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+        return h, hdr, buf
+
+    def has(self, name):
+        return str(name) in self.names
+
+    def is_on(self, name):
+        return str(name) in self.voices
+
+    def on_names(self):
+        return sorted(self.voices)
+
+    def set(self, name, on, vol=35):
+        """켜거나 끈다. 이미 그 상태면 볼륨만 맞춘다."""
+        name = str(name or "")
+        if name not in self.names:
+            return
+        if not on:
+            self.stop(name)
+            return
+        if name in self.voices:
+            self.vol(name, vol)
+            return
+        if float(vol) <= 0:
+            return                       # 무음으로 돌릴 이유가 없다
+        got = None
+        if self._drv_vol is not False:
+            got = self._open(name, vol, False)     # 드라이버 볼륨으로 먼저
+            self._drv_vol = got is not None
+        if got is None:
+            got = self._open(name, vol, True)      # 안 통하면 샘플에 곱해서
+        self.voices[name] = got + (float(vol),)
+
+    def vol(self, name, vol):
+        name = str(name or "")
+        got = self.voices.get(name)
+        vol = max(0.0, min(float(vol), 100.0))
+        if got is None:
+            return
+        if vol <= 0:
+            self.stop(name)
+            return
+        if abs(got[3] - vol) < 0.01:
+            return
+        if self._drv_vol:
+            ctypes.windll.winmm.waveOutSetVolume(got[0], self._vol_val(vol))
+            self.voices[name] = got[:3] + (vol,)
+            return
+        self.stop(name)                  # 다시 열어야 반영된다
+        self.set(name, True, vol)
+
+    def stop(self, name):
+        got = self.voices.pop(str(name or ""), None)
+        if got is None:
+            return
+        h, hdr = got[0], got[1]
+        wm = ctypes.windll.winmm
+        try:
+            wm.waveOutReset(h)
+            wm.waveOutUnprepareHeader(h, ctypes.byref(hdr),
+                                      ctypes.sizeof(_WAVEHDR))
+            wm.waveOutClose(h)
+        except Exception:
+            pass
+
+    def stop_all(self):
+        for name in list(self.voices):
+            self.stop(name)
+
+    def close(self):
+        self.stop_all()
+
+
+class MacAmbientSound:
+    """맥용 환경음 — NSSound 에 반복 재생을 맡긴다 (같은 인터페이스)."""
+
+    def __init__(self, folder):
+        from AppKit import NSSound            # noqa: F401  (있는지 확인만)
+        self.folder = folder
+        self.names = [os.path.splitext(f)[0]
+                      for f in sorted(os.listdir(folder))
+                      if f.lower().endswith(".wav")]
+        if not self.names:
+            raise ValueError("환경음 wav 없음")
+        self.voices = {}
+
+    def has(self, name):
+        return str(name) in self.names
+
+    def is_on(self, name):
+        return str(name) in self.voices
+
+    def on_names(self):
+        return sorted(self.voices)
+
+    def set(self, name, on, vol=35):
+        name = str(name or "")
+        if name not in self.names:
+            return
+        if not on:
+            self.stop(name)
+            return
+        if name in self.voices:
+            self.vol(name, vol)
+            return
+        if float(vol) <= 0:
+            return
+        from AppKit import NSSound
+        path = os.path.join(self.folder, name + ".wav")
+        snd = NSSound.alloc().initWithContentsOfFile_byReference_(path, True)
+        if snd is None:
+            return
+        snd.setLoops_(True)
+        snd.setVolume_(max(0.0, min(float(vol), 100.0)) / 100.0)
+        snd.play()
+        self.voices[name] = snd
+
+    def vol(self, name, vol):
+        snd = self.voices.get(str(name or ""))
+        if snd is None:
+            return
+        if float(vol) <= 0:
+            self.stop(name)
+            return
+        try:
+            snd.setVolume_(max(0.0, min(float(vol), 100.0)) / 100.0)
+        except Exception:
+            pass
+
+    def stop(self, name):
+        snd = self.voices.pop(str(name or ""), None)
+        if snd is not None:
+            try:
+                snd.stop()
+            except Exception:
+                pass
+
+    def stop_all(self):
+        for name in list(self.voices):
+            self.stop(name)
+
+    def close(self):
+        self.stop_all()
+
+
 if IS_MAC:                        # 맥에서는 같은 이름으로 맥 구현을 쓴다
     SoundPack, PenSound, PokeSound = MacSoundPack, MacPenSound, MacPokeSound
     SlimeSound = MacSlimeSound
+    AmbientSound = MacAmbientSound
 
 
 if IS_WIN:
@@ -4027,6 +4247,8 @@ class Mascot:
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # 메뉴에 BGM 을 붙일지 여기서 갈리므로 재생기를 먼저 준비한다
+        self._safe("amb_init", self._amb_init)
         menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
         # 작업 종료는 카드에서 뺐으므로 여기가 유일한 통로다. 맨 위에 두고
         # 색과 굵기로 다른 항목과 구분한다 — 하루를 끝내는, 되돌릴 수 없는
@@ -4044,8 +4266,20 @@ class Mascot:
             menu.add_command(label="할 일 추가", command=self.add_todo)
         if self.cfg.get("deadline_on"):
             menu.add_command(label="마감 추가", command=self.add_due)
-        if self._yt_on():
-            menu.add_command(label="유튜브 노래", command=self.add_music)
+        if self._yt_on() or self._amb is not None:
+            # BGM 하나로 모은다 — 유튜브 노래와 환경음이 같은 자리에 있어야
+            # '무엇을 틀까'를 한 곳에서 고르게 된다.
+            bgm = tk.Menu(menu, tearoff=0, font=self._uf(9))
+            if self._yt_on():
+                bgm.add_command(label="유튜브 노래", command=self.add_music)
+            if self._amb is not None:
+                # 여러 개를 겹쳐 틀고 각자 볼륨을 주는 기능이라 메뉴로는
+                # 담기지 않는다 — 창을 따로 연다.
+                bgm.add_command(label="환경음",
+                                command=lambda: self._safe("amb_win",
+                                                           self._amb_win))
+            menu.add_cascade(label="BGM", menu=bgm)
+            self._bgm_menu = bgm
         if self.cfg.get("slime"):
             # 꺼내기/치우기와 종류 고르기를 '슬라임' 하나로 모은다.
             # 켬/끔은 체크 표시로, 종류는 라디오로 지금 상태가 보이게.
@@ -4077,7 +4311,8 @@ class Mascot:
                 sub.config(postcommand=lambda: self._safe(
                     "slime_seen_menu", self._slime_menu_seen))
             self._slime_menu = sub
-        if self.todo_on or self.cfg.get("deadline_on") or self._yt_on():
+        if (self.todo_on or self.cfg.get("deadline_on") or self._yt_on()
+                or self._amb is not None):
             menu.add_separator()
         if ROOM_URL and ROOM_KEY:
             # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
@@ -4137,6 +4372,7 @@ class Mascot:
         self._yt_err = 0             # 마지막으로 알린 오류 (같은 말 반복 방지)
         self._yt_idle = 0.0          # 멈춘 채로 지낸 시각
         self._yt_btn = None          # 버튼 자리 (x, y, 반지름)
+        self._amb_btn = None         # 환경음 알약 자리 (x0,y0,x1,y1)
         self._yt_note = None         # 지금 떠 있는 음악 음표 (하나만 띄운다)
         self._yt_note_at = 0.0       # 다음 음표를 띄울 시각
         self._yt_note_side = 1       # 다음은 반대쪽 — 처음 뒤집혀 왼쪽부터
@@ -4259,6 +4495,8 @@ class Mascot:
         self.slime = None            # 꺼내 놓은 슬라임 (없으면 None)
         self._slime_grab = None      # 지금 잡고 있는 자리 (없으면 None)
         self._slime_snd = None       # 만질 때 나는 소리
+        self._amb = None             # 환경음(BGM) 재생기 — 소리가 있는 캐릭터만
+        self._amb_boot = True        # 첫 프레임에 지난번 환경음을 이어 튼다
         self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
         self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
         self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
@@ -5549,6 +5787,7 @@ class Mascot:
                                              volume=max(0.0, min(vol, 100.0)))
             except Exception:
                 self._slime_snd = None
+        self._safe("amb_init", self._amb_init)
 
     # ── 입력 콜백 ─────────────────────────────────────────────────────────
     def _on_key(self, key):
@@ -5733,6 +5972,7 @@ class Mascot:
             g = self._card_geom()
             on_card = (g["x0"] <= px <= g["x1"] and g["y0"] - 17 <= py <= g["y1"])
             mb = getattr(self, "_yt_btn", None)
+            ab = getattr(self, "_amb_btn", None)
             dot = getattr(self, "_dot_btn", None)
             box = self._snack_box
             sn = self._snack_get()
@@ -5749,8 +5989,10 @@ class Mascot:
                 self.open_update_news()
                 self._press = None
                 return
-            # 음악 버튼이 카드 윗변에 걸쳐 있으므로 카드보다 먼저 본다
-            if mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
+            # 음악 버튼·환경음 알약이 카드 윗변에 걸쳐 있으므로 카드보다 먼저
+            if (ab and ab[0] <= px <= ab[2] and ab[1] <= py <= ab[3]):
+                self._safe("amb_win", self._amb_win)
+            elif mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
                 self._safe("music", self._yt_toggle)
             elif self.has_clock and on_card:
                 self._toggle_clock()
@@ -6215,6 +6457,12 @@ class Mascot:
                 # 연동 중이어도 저장한다 — 시간은 에이전트가 주지만
                 # 획·클릭·되돌리기·거리는 캐릭터만 세기 때문이다.
                 self._timer_save()
+            if self._amb is not None:
+                try:
+                    self._amb.close()      # 환경음은 창과 함께 끈다
+                except Exception:
+                    pass
+                self._amb = None
             if self._kb is not None:
                 self._kb.stop()
             if self._ms is not None:
@@ -6961,10 +7209,30 @@ class Mascot:
         return got
 
     def _yt_bar(self):
-        """음악 버튼이 카드 위에 요구하는 여백. 노래를 넣기 전에는 0."""
+        """카드 위 줄(음악·환경음)이 요구하는 여백. 아무것도 없으면 0.
+
+        환경음 알약과 노래 버튼은 같은 줄에 나란히 놓으므로 여백은 한 번만
+        잡는다 — 둘 중 하나라도 있으면 그 줄이 선다.
+        """
+        if self._amb_on_any():
+            return YT_BAR
         if not (self.timer_on and self.us.get("yt_url")):
             return 0
         return YT_BAR if self._yt_on() else 0
+
+    def _amb_on_any(self):
+        """환경음이 하나라도 돌고 있는가 (카드 위 알약을 띄울지).
+
+        카드 높이를 재는 길에 불려서 재생기를 만들기도 전에 들어온다 —
+        아직 없으면 없는 것으로 본다 (지뢰 13).
+        """
+        amb = getattr(self, "_amb", None)
+        if amb is None or not getattr(self, "timer_on", False):
+            return False
+        try:
+            return bool(amb.on_names())
+        except Exception:
+            return False
 
     @staticmethod
     def _yt_ids(url):
@@ -7286,6 +7554,40 @@ class Mascot:
             c.create_polygon(bx - 4.5, by - 6.5, bx - 4.5, by + 6.5,
                              bx + 7.0, by, fill=ink, outline="")
         self._yt_btn = (bx, by, r)
+
+    def _draw_amb_btn(self):
+        """카드 위 환경음 알약 — 도는 동안만 보인다. 누르면 고르는 창.
+
+        노래 버튼이 카드 한가운데를 쓰므로, 있으면 그 왼쪽에 붙인다.
+        """
+        self._amb_btn = None
+        if not self._amb_on_any():
+            return
+        c, cd = self.canvas, self.card
+        g = self._card_geom()
+        n = len(self._amb.on_names())
+        w, h = 44.0, 22.0
+        cx = (g["x0"] + g["x1"]) / 2
+        if self.us.get("yt_url") and self._yt_on():
+            cx -= 34.0                    # 노래 버튼 왼쪽으로 비켜 준다
+        by = g["y0"] - 24
+        x0, x1 = cx - w / 2, cx + w / 2
+        y0, y1 = by - h / 2, by + h / 2
+        self._rr(c, x0 + 1.5, y0 + 2, x1 + 1.5, y1 + 2, h / 2,
+                 fill="#e3e6ee", outline="", width=0)        # 옅은 그림자
+        self._rr(c, x0, y0, x1, y1, h / 2, fill=cd["bg"],
+                 outline=cd["border"], width=2)
+        ink = cd["fill"]
+        # 물결 셋 — 소리가 퍼지는 모양
+        wx = x0 + 13.0
+        for i, (dx, sc) in enumerate(((0.0, 0.5), (5.0, 0.75), (10.0, 1.0))):
+            rr = 6.0 * sc
+            c.create_arc(wx + dx - rr, by - rr, wx + dx + rr, by + rr,
+                         start=-55, extent=110, style="arc",
+                         outline=ink, width=2)
+        c.create_text(x1 - 9, by + 0.5, text=str(n), anchor="center",
+                      font=self._cf(9, True), fill=ink)
+        self._amb_btn = (x0, y0, x1, y1)
 
     def _draw_update_dot(self):
         """안 본 업데이트가 있으면 카드 오른쪽 위에 작은 빨간 점.
@@ -10146,6 +10448,15 @@ class Mascot:
                     # 화면을 찍으면 앞을 덮은 다른 창까지 같이 찍힌다
                     # (지뢰 58) — 창 내용만 그려 받는 PrintWindow 로.
                     im = self._grab_win_content(win)
+                    if im is not None:
+                        # PrintWindow 는 창틀과 제목줄까지 준다. 도장판에
+                        # 그대로 넣으면 '창을 찍은 사진'처럼 보여 안 예쁘다
+                        # (제보). 내용만 남기고 잘라 낸다 — 좌우 테두리
+                        # 두께로 위쪽(제목줄+테두리)을 되짚는다.
+                        bw = (im.width - ww) // 2
+                        top = im.height - wh - bw
+                        if 0 <= bw and 0 <= top and im.width >= ww + bw:
+                            im = im.crop((bw, top, bw + ww, top + wh))
                 if im is None:
                     from PIL import ImageGrab
                     x = win.winfo_rootx()
@@ -10153,7 +10464,7 @@ class Mascot:
                     im = ImageGrab.grab((x, y0, x + ww, y0 + wh))
                 p = os.path.join(self.state_dir,
                                  ".brief_%s.png" % day_key)
-                im.save(p + ".tmp", "PNG")
+                im.save(p + ".tmp", "PNG", optimize=True)
                 os.replace(p + ".tmp", p)          # 지뢰 35 — 원자적 교체
                 olds = sorted(fn for fn in os.listdir(self.state_dir)
                               if fn.startswith(".brief_")
@@ -11214,6 +11525,11 @@ class Mascot:
 
     def _tick_body(self):
         now = time.time()
+        if self._amb_boot:
+            # 지난번 환경음은 창이 다 뜬 뒤에 튼다. __init__ 에서 하면
+            # 소리 장치를 여는 동안 캐릭터가 늦게 나타난다.
+            self._amb_boot = False
+            self._safe("amb_boot", self._amb_restore)
         if self._macin is not None:
             self._safe("mac_input", self._poll_mac_input)
         if self.key_events != self._seen_keys:
@@ -11601,6 +11917,11 @@ class Mascot:
                     ytop - mh * 0.75, yfront - 2),
             "born": now, "touch": now,
         }
+        if look.get("label") == "waxball":
+            # 갓 꺼낸 왁뿌볼에도 잔금이 조금 있다. 만질수록 는다.
+            self._wax_rnd = random.Random(int(now))
+            self.slime["cracks"] = [
+                self._wax_new_crack(self._wax_rnd) for _ in range(7)]
         if look.get("label") == "cheese":
             # 구멍은 꺼낼 때 한 번만 정한다. 매 프레임 새로 뽑으면 깜빡인다.
             rnd = random.Random(int(now))
@@ -11691,6 +12012,254 @@ class Mascot:
             self._slime_grab = None
             self._slime_hand = None
             self._safe("slime_swap", self._slime_open)
+
+    # ── 환경음 (BGM) ──────────────────────────────────────────────────
+    AMB_DEFAULT_VOL = 35
+
+    def _amb_init(self):
+        """환경음 재생기를 준비한다 — 폴더에 wav 가 있는 캐릭터만.
+
+        config 를 따로 켜지 않아도 되게 두었다: 소리를 넣어 주면 그때부터
+        메뉴에 뜬다. 메뉴는 켤 때 한 번만 만들어지므로 **메뉴를 만들기 전에**
+        불러야 한다 — 소리 초기화(_init_sound)만 믿었다가 메뉴에 환경음이
+        통째로 안 붙었다(검사가 잡았다).
+        """
+        if self._amb is not None:
+            return
+        amb_dir = os.path.join(self.dir, "sounds", "ambient")
+        if not os.path.isdir(amb_dir):
+            return
+        try:
+            self._amb = AmbientSound(amb_dir)
+        except Exception:
+            self._amb = None
+
+    def _amb_mix(self):
+        """켜 둔 환경음과 각자 볼륨 {이름: 0~100}.
+
+        하나만 고르던 옛 설정(amb_kind/amb_volume)도 읽어 그대로 옮긴다.
+        """
+        d = self.us.get("amb_mix")
+        out = {}
+        if isinstance(d, dict):
+            for k, v in d.items():
+                try:
+                    out[str(k)] = max(0, min(int(v), 100))
+                except Exception:
+                    pass
+        elif self.us.get("amb_kind"):
+            out[str(self.us["amb_kind"])] = int(
+                self.us.get("amb_volume", self.AMB_DEFAULT_VOL))
+        return out
+
+    def _amb_save_mix(self, mix):
+        self.us["amb_mix"] = {k: int(v) for k, v in mix.items() if int(v) > 0}
+        self.us.pop("amb_kind", None)          # 옛 형식은 옮기고 지운다
+        self.us.pop("amb_volume", None)
+        self._safe("amb_save", self._save_settings)
+
+    def _amb_apply(self, mix=None):
+        """설정대로 켜고 끈다 (켠 것만 소리가 난다)."""
+        if self._amb is None:
+            return
+        want = self._amb_mix() if mix is None else mix
+        for name in list(self._amb.on_names()):
+            if name not in want:
+                self._amb.stop(name)
+        for name, vol in want.items():
+            self._amb.set(name, True, vol)
+
+    def _amb_toggle(self, name, on, vol=None):
+        """한 종류를 켜거나 끈다. 나머지는 그대로 둔다."""
+        if self._amb is None:
+            return
+        mix = self._amb_mix()
+        if on:
+            mix[name] = int(vol if vol is not None
+                            else mix.get(name, self.AMB_DEFAULT_VOL))
+        else:
+            mix.pop(name, None)
+        self._amb_save_mix(mix)
+        self._safe("amb_apply", self._amb_apply, mix)
+
+    def _amb_setvol(self, name, vol):
+        """켜져 있는 것의 볼륨만 바꾼다 (소리가 안 끊긴다)."""
+        if self._amb is None:
+            return
+        mix = self._amb_mix()
+        if name not in mix:
+            return
+        mix[name] = max(0, min(int(vol), 100))
+        self._amb_save_mix(mix)
+        self._safe("amb_vol", self._amb.vol, name, mix[name])
+
+    def _amb_restore(self):
+        """켤 때 지난번에 듣던 환경음을 그대로 이어서 튼다."""
+        if self._amb is None:
+            return
+        self._amb_apply()
+
+    def _amb_win(self):
+        """환경음 고르는 창 — 여러 개를 겹쳐 틀고 각자 볼륨을 준다.
+
+        위젯을 얹지 않고 캔버스에 직접 그린다. tk.Frame·tk.Scale 은
+        모서리가 각져서, 둥근 카드로 된 다른 창과 나란히 두면 튄다.
+        """
+        got = getattr(self, "_amb_winref", None)
+        if got is not None and got.winfo_exists():
+            got.lift()
+            return
+        if self._amb is None:
+            return
+        cd, u = self.card, self._ui
+        names = list(self._amb.names)
+        W = u(330)
+        RH = u(60)                       # 한 줄 높이
+        TOP = u(74)                       # 제목 몫
+        BOT = u(58)                       # 아래 단추 몫
+        H = TOP + RH * len(names) + BOT
+        win = tk.Toplevel(self.root)
+        self._amb_winref = win
+        win.title("환경음")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.55)
+        pad = u(14)
+        sx0, sx1 = pad + u(16), W - pad - u(16)   # 슬라이더 양 끝
+
+        def row_y(i):
+            return TOP + RH * i
+
+        def val_of(name):
+            return self._amb_mix().get(name, self.AMB_DEFAULT_VOL)
+
+        def draw():
+            cv.delete("all")
+            cv.create_text(W / 2, u(24), text="환경음",
+                           font=self._uf(13, True), fill=cd["text"])
+            cv.create_text(W / 2, u(46), text="여러 개를 같이 틀 수 있어요",
+                           font=self._uf(8), fill=cd["sub"])
+            mix = self._amb_mix()
+            for i, name in enumerate(names):
+                y0 = row_y(i)
+                y1 = y0 + RH - u(6)
+                on = name in mix
+                bg = self._tint(cd["fill"], 0.82) if on else "#ffffff"
+                self._rr_soft(cv, pad, y0, W - pad, y1, u(14), fill=bg,
+                              outline=cd["fill"] if on else line,
+                              width=1, tags="row")
+                # 동그란 체크 — 켜면 테마색으로 찬다
+                cx, cy, r = pad + u(18), y0 + u(19), u(9)
+                cv.create_oval(cx - r, cy - r, cx + r, cy + r,
+                               fill=cd["fill"] if on else "#ffffff",
+                               outline=cd["fill"] if on else line, width=2)
+                if on:
+                    cv.create_line(cx - u(4), cy, cx - u(1), cy + u(4),
+                                   cx + u(5), cy - u(5),
+                                   fill="#ffffff", width=2,
+                                   capstyle="round", joinstyle="round")
+                cv.create_text(pad + u(34), cy, anchor="w", text=name,
+                               font=self._uf(11, True),
+                               fill=cd["text"] if on else cd["sub"])
+                cv.create_text(W - pad - u(14), cy, anchor="e",
+                               text=str(mix.get(name, val_of(name))),
+                               font=self._uf(10, True),
+                               fill=cd["text"] if on else cd["sub"])
+                # 슬라이더 — 홈통·채움·손잡이를 직접 그린다
+                gy = y0 + u(41)
+                gh = u(5)
+                self._rr_soft(cv, sx0, gy - gh, sx1, gy + gh, gh,
+                              fill="#ffffff" if on else cd["panel"],
+                              outline="", width=0, tags="row")
+                v = max(5, min(100, val_of(name)))
+                fx = sx0 + (sx1 - sx0) * (v - 5) / 95.0
+                if fx > sx0 + gh:
+                    self._rr_soft(cv, sx0, gy - gh, fx, gy + gh, gh,
+                                  fill=cd["fill"] if on else line,
+                                  outline="", width=0, tags="row")
+                kr = u(8)
+                cv.create_oval(fx - kr, gy - kr, fx + kr, gy + kr,
+                               fill="#ffffff",
+                               outline=cd["fill"] if on else line, width=2)
+            # 아래 단추 둘
+            by0 = H - BOT + u(8)
+            by1 = H - u(14)
+            self._amb_btn_off = (pad, by0, pad + u(84), by1)
+            self._rr_soft(cv, pad, by0, pad + u(84), by1, u(13),
+                          fill="#f2edf4", outline=line, width=1)
+            cv.create_text((pad + pad + u(84)) / 2, (by0 + by1) / 2,
+                           text="모두 끄기", font=self._uf(9),
+                           fill=cd["text"])
+            self._amb_btn_close = (W - pad - u(84), by0, W - pad, by1)
+            self._rr_soft(cv, W - pad - u(84), by0, W - pad, by1, u(13),
+                          fill=cd["fill"], outline="", width=0)
+            cv.create_text(W - pad - u(42), (by0 + by1) / 2, text="닫기",
+                           font=self._uf(9, True), fill="#ffffff")
+
+        def hit_row(y):
+            for i in range(len(names)):
+                if row_y(i) <= y < row_y(i) + RH:
+                    return i
+            return None
+
+        def in_box(box, x, y):
+            return box and box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+        drag = {"i": None}
+
+        def val_at(x):
+            f = (x - sx0) / max(1.0, float(sx1 - sx0))
+            return int(round((5 + f * 95) / 5.0)) * 5
+
+        def on_press(e):
+            if in_box(getattr(self, "_amb_btn_close", None), e.x, e.y):
+                win.destroy()
+                return
+            if in_box(getattr(self, "_amb_btn_off", None), e.x, e.y):
+                for nm in list(self._amb_mix()):
+                    self._amb_toggle(nm, False)
+                draw()
+                return
+            i = hit_row(e.y)
+            if i is None:
+                return
+            name = names[i]
+            y0 = row_y(i)
+            if e.y >= y0 + u(32):            # 슬라이더 줄
+                drag["i"] = i
+                v = max(5, min(100, val_at(e.x)))
+                if name not in self._amb_mix():
+                    self._amb_toggle(name, True, v)
+                else:
+                    self._amb_setvol(name, v)
+                draw()
+                return
+            self._amb_toggle(name, name not in self._amb_mix())
+            draw()
+
+        def on_drag(e):
+            i = drag["i"]
+            if i is None:
+                return
+            name = names[i]
+            v = max(5, min(100, val_at(e.x)))
+            if self._amb_mix().get(name) != v:
+                self._amb_setvol(name, v)
+                draw()
+
+        def on_up(_e):
+            drag["i"] = None
+
+        draw()
+        self._amb_draw = draw             # 밖에서도 다시 그릴 수 있게
+        cv.bind("<Button-1>", lambda e: self._safe("amb_click", on_press, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe("amb_drag", on_drag, e))
+        cv.bind("<ButtonRelease-1>", on_up)
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     def _slime_close(self):
         if self.slime is None:
@@ -11792,6 +12361,8 @@ class Mascot:
             sl["vx"][j] += ddx / d * dent * w
             sl["vy"][j] += ddy / d * dent * w
         self._slime_sound("press", random.uniform(0.94, 1.08))
+        # 왁뿌볼은 누를 때마다 금이 하나씩 는다 (다른 종류는 아무 일 없음)
+        self._safe("wax_crack", self._wax_crack_add, 1)
         self.smile_until = max(self.smile_until, now + 0.9)
         return True
 
@@ -12094,6 +12665,9 @@ class Mascot:
         if look.get("label") == "pudding":
             self._draw_pudding(col, ring, cx, cy, k)
             return
+        if look.get("label") == "waxball":
+            self._draw_waxball(col, ring, cx, cy, k)
+            return
         # 윤기 — 왼쪽 위에 두 점. 덩어리 안의 점이라 늘이면 같이 딸려 간다.
         wob = math.sin(now * 2.3) * 0.05
         hi = self._mix("#ffffff", col, 0.16)      # 거의 흰색이라야 윤기로 보인다
@@ -12104,6 +12678,73 @@ class Mascot:
             c.create_oval(hx - rr0 * wx, hy - rr0 * wy,
                           hx + rr0 * wx, hy + rr0 * wy,
                           fill=hi, outline="")
+
+    WAX_SKIN = "#3f2c22"             # 굳은 왁스 껍질 (짙은 갈색)
+    WAX_CRACK = "#a9c236"            # 갈라진 틈으로 비치는 속 (연두)
+    WAX_CRACK_MAX = 26               # 금은 이만큼까지만 는다
+
+    @staticmethod
+    def _wax_new_crack(rnd):
+        """금 하나 — 덩어리 '안'의 각도·반지름 점 서너 개를 잇는 지그재그."""
+        a = rnd.uniform(0, math.tau)
+        r = rnd.uniform(0.12, 0.88)
+        pts = [(a, r)]
+        for _ in range(rnd.randint(2, 4)):
+            a += rnd.uniform(-0.55, 0.55)
+            r = max(0.05, min(1.0, r + rnd.uniform(-0.34, 0.34)))
+            pts.append((a, r))
+        return pts
+
+    def _wax_crack_add(self, n=1):
+        """만질 때마다 금이 는다 — 부수는 재미가 눈에도 보이게."""
+        sl = self.slime
+        if sl is None or self._slime_look().get("label") != "waxball":
+            return
+        cr = sl.setdefault("cracks", [])
+        if len(cr) >= self.WAX_CRACK_MAX:
+            return
+        rnd = getattr(self, "_wax_rnd", None)
+        if rnd is None:
+            rnd = self._wax_rnd = random.Random()
+        for _ in range(n):
+            if len(cr) >= self.WAX_CRACK_MAX:
+                break
+            cr.append(self._wax_new_crack(rnd))
+
+    def _draw_waxball(self, col, ring, cx, cy, k):
+        """왁뿌볼 — 두껍게 굳은 왁스 껍질과 갈라진 금.
+
+        금은 덩어리 안의 점으로 잡는다(_slime_pt) — 그래야 누르거나 늘였을
+        때 껍질을 따라 같이 일그러진다. 만질수록 늘어난다(_wax_crack_add).
+        """
+        c = self.canvas
+        sl = self.slime
+        r0 = sl["r"] * k
+        # 겉면 — 짙은 왁스. 위쪽에 옅은 띠를 넣어 두께감을 준다.
+        n = len(ring)
+        top = [i for i in range(n) if sl["ry"][i] < 0]
+        if len(top) > 2:
+            band = [ring[i] for i in top]
+            band += [(px, cy + (py - cy) * 0.55) for px, py in reversed(band)]
+            c.create_polygon(*[v for p in band for v in p],
+                             fill=self._tint(self.WAX_SKIN, 0.14), outline="",
+                             smooth=True, splinesteps=4)
+        # 금 — 갈라진 틈으로 속(연두)이 비친다
+        lw = max(1.2, r0 * 0.042)
+        for pts in sl.get("cracks", ()):
+            xy = []
+            for a, rr in pts:
+                px, py = self._slime_pt(sl, a, rr)
+                xy += [cx + (px - cx) * k, cy + (py - cy) * k]
+            if len(xy) >= 4:
+                c.create_line(*xy, fill=self.WAX_CRACK, width=lw,
+                              capstyle="round", joinstyle="round")
+        # 윤기 — 왼쪽 위 한 점 (짙은 껍질이라 밝게)
+        hx, hy = self._slime_pt(sl, 3.95, 0.55)
+        hx, hy = cx + (hx - cx) * k, cy + (hy - cy) * k
+        c.create_oval(hx - r0 * 0.20, hy - r0 * 0.10,
+                      hx + r0 * 0.20, hy + r0 * 0.10,
+                      fill=self._tint(self.WAX_SKIN, 0.42), outline="")
 
     PUD_TOP = "#a55a17"              # 카라멜 (윗면)
     PUD_DRIP = "#8d4711"             # 흘러내린 카라멜 (조금 진하게)
@@ -12273,9 +12914,13 @@ class Mascot:
                           fill=ink, font=tiny, anchor="center")
 
     def _pt_fit(self, text, max_w, bold=False):
-        """그 폭에 들어가는 가장 큰 Arial 글꼴. 6px 밑으로 가면 None."""
+        """그 폭에 들어가는 가장 큰 글꼴. 6px 밑으로 가면 None.
+
+        간식 포장지의 영문 라벨도 다른 곳과 같은 글꼴을 쓴다 — 여기만
+        Arial 이었다.
+        """
         for n in range(14, 4, -1):
-            f = ("Arial", n, "bold") if bold else ("Arial", n)
+            f = (UI_FONT, n, "bold") if bold else (UI_FONT, n)
             if self._mw(text, f) <= max_w:
                 return f
         return None
@@ -12448,6 +13093,7 @@ class Mascot:
             # 남으면, 버튼이 안 보이는데도 그 자리를 누르면 음악이 켜진다.
             self._yt_btn = None
             self._safe("music_btn", self._draw_music_btn)
+            self._safe("amb_btn", self._draw_amb_btn)
             # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
             # 남으면 점이 안 보이는데도 그 자리를 누르면 창이 뜬다
             self._dot_btn = None
@@ -15202,6 +15848,9 @@ class Mascot:
     # 왕관 (가로, 세로) 보정 (hw 배수) — 생김새 때문에 표준 위치가 안 맞는
     # 캐릭터. 개구리는 눈이 정수리에 있고, 도로롱은 옆머리 장미 뭉치 때문에
     # 머리 중심이 오른쪽으로 잡힌다.
+    # 다 같이 채우는 하루 목표 (분). 사람이 늘면 여기를 올린다.
+    ROOM_GOAL_MIN = 40 * 60
+
     CROWN_FIT = {"parts_peugo": (0.0, -0.25),
                  "parts_dororong": (-0.22, -0.10),
                  "parts_dororong_gift": (-0.22, -0.10)}
@@ -15249,7 +15898,11 @@ class Mascot:
         hat = self._room_hat_img(hw * 0.72)
         if hat is not None:            # 왕관 — 정수리에 눌러 쓴 느낌으로
             dx, dy = self.CROWN_FIT.get(slot, (0.0, 0.0))
-            cv.create_image(px + dx * hw, py + (0.42 + dy) * hw, image=hat,
+            # 0.42 → 0.30 : 얼굴 쪽으로 내려와 눈을 덮는 캐릭터가 있었다.
+            # anchor="s" 라 이 값이 곧 '왕관 아래끝이 머리 위에서 얼마나
+            # 내려오는가'다. 0 으로 두면 정수리보다 위로 떠 버리므로,
+            # 머리에 얹힌 채로 조금만 올린다.
+            cv.create_image(px + dx * hw, py + (0.30 + dy) * hw, image=hat,
                             anchor="s", tags="dyn")
         # 고깔(기울인 모자)·구슬 화관을 거쳐 왕관으로 정착 (사용자 요청)
 
@@ -16177,8 +16830,9 @@ class Mascot:
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
         # 꺼진 사람도 오늘 본 마지막 값이 실려 있어 합계가 안 깎인다
         tot = sum(int(q.get("t") or 0) for q in people)
-        # 다 같이 24시간을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다
-        self._room_goal_done = tot >= 24 * 60
+        # 다 같이 이만큼을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다.
+        # 사람이 늘어난 만큼 목표도 올린다 (24 → 40시간).
+        self._room_goal_done = tot >= self.ROOM_GOAL_MIN
         nums = self._safe_str(self._room_numbers, on, live)
         if nums:
             self._rr(cv, W - 216 * k, mid - 14 * k, W - 12 * k, mid + 14 * k,
@@ -16195,7 +16849,7 @@ class Mascot:
                            font=self._uf(10, True), fill=P["ink"], tags="dyn")
             gx0, gx1 = W - 204 * k, W - 24 * k
             gy = mid + 9 * k
-            goal = 24 * 60           # 다 같이 하루 24시간이 목표
+            goal = self.ROOM_GOAL_MIN     # 다 같이 채우는 목표
             frac = min(1.0, tot / goal)
             # 시간대별 테마색 그라데이션 (왼쪽 연함 → 오른쪽 진함)
             gcol = self.SKY_BAR.get(period, "#f2a05a")
@@ -18105,12 +18759,42 @@ class Mascot:
         line = self._tint(cd["fill"], 0.55)
 
         def card_box(title):
-            box = tk.Frame(win, bg="#ffffff", bd=0,
-                           highlightbackground=line, highlightthickness=1)
-            box.pack(padx=u(16), pady=u(5), fill="x")
+            """둥근 흰 카드 한 장. 모서리는 캔버스로 그리고 그 위에 얹는다.
+
+            tk.Frame 은 모서리가 각져서 다른 창과 안 어울린다 (제보).
+            테두리만 캔버스로 그리고, 내용은 그 위의 Frame 에 담는다 —
+            얹는 위젯의 부모를 캔버스로 두는 것이 규칙이다 (지뢰 22).
+            """
+            wrap = tk.Canvas(win, bg=cd["panel"], highlightthickness=0,
+                             bd=0, height=u(10))
+            wrap.pack(padx=u(16), pady=u(5), fill="x")
+            box = tk.Frame(wrap, bg="#ffffff", bd=0)
             tk.Label(box, text=title, font=self._uf(10, True),
                      bg="#ffffff", fg=cd["text"]
                      ).pack(anchor="w", padx=u(12), pady=(u(8), 0))
+
+            def _fit(_e=None, wrap=wrap, box=box):
+                # 내용 크기가 정해진 뒤에 그 크기로 카드를 그린다
+                w2 = wrap.winfo_width()
+                h2 = box.winfo_reqheight() + u(8)
+                if w2 < 10:
+                    return
+                wrap.config(height=h2)
+                wrap.delete("bgcard")
+                self._rr_soft(wrap, 1, 1, w2 - 1, h2 - 1, u(14),
+                              fill="#ffffff", outline=line, width=1,
+                              tags="bgcard")
+                wrap.tag_lower("bgcard")
+                if not getattr(box, "_placed", False):
+                    wrap.create_window(u(2), u(4), window=box, anchor="nw",
+                                       width=w2 - u(4))
+                    box._placed = True
+                else:
+                    for it in wrap.find_withtag("all"):
+                        if wrap.type(it) == "window":
+                            wrap.itemconfigure(it, width=w2 - u(4))
+            wrap.bind("<Configure>", _fit)
+            box.bind("<Configure>", _fit)
             return box
 
         def pill(parent, text, main, cmd, pad=10):
@@ -18535,17 +19219,26 @@ class Mascot:
         seen = self._room_seen_get()
         day = self._my_workday()
         rest = []
+        # 06시 경계 — '오늘 일한 분'은 06시 이후 흐른 분을 넘을 수 없다
+        # (지뢰 60). 저장할 때만 누르고 그리는 쪽에서 안 눌러서, 아침에
+        # 남의 카드가 어제 누적을 그대로 달고 있었다.
+        cap = self._day_min() + 5
         for q in self.room_people:
             if (q.get("slot") or "") == self.char:
                 continue
+            t0, p0 = int(q.get("t") or 0), float(q.get("p") or 0)
+            if t0 > cap:            # 그쪽이 아직 하루를 안 넘겼다
+                p0 = p0 * (cap / max(t0, 1))
+                t0 = int(cap)
             row = seen.get(q.get("slot") or "")
+            t2, p2 = t0, p0
             if self._seen_ok(row, day):
                 # 접속 중인 사람도 오늘 최고치 아래로는 안 보여 준다 —
                 # 옛 판이 재시작해 0을 보내와도 게이지가 안 꺼진다
-                t2 = max(int(q.get("t") or 0), int(row[0]))
-                p2 = max(float(q.get("p") or 0), float(row[1]))
-                if t2 != q.get("t") or p2 != q.get("p"):
-                    q = dict(q, t=t2, p=p2)
+                t2 = min(max(t0, int(row[0])), max(cap, t0))
+                p2 = max(p0, float(row[1]))
+            if t2 != q.get("t") or p2 != q.get("p"):
+                q = dict(q, t=t2, p=p2)
             rest.append(q)
         rest.sort(key=lambda q: (order.get(q.get("slot") or "", 99),
                                  q.get("slot") or ""))
@@ -18567,7 +19260,9 @@ class Mascot:
             st, sp = 0, 0
             row = self._room_seen_get().get(slot)
             if self._seen_ok(row, self._my_workday()):
-                st, sp = int(row[0]), float(row[1])
+                st, sp = min(int(row[0]), int(cap)), float(row[1])
+                if int(row[0]) > cap:      # 06시 직후엔 어제 값이 남아 있다
+                    sp = sp * (cap / max(int(row[0]), 1))
             seats.append({"slot": slot, "n": self.ROOM_NAME.get(slot, ""),
                           "lv": 1, "ti": "", "t": st, "s": "off", "p": sp,
                           "a": "", "off": True})
