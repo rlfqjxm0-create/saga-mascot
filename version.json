@@ -1,5 +1,5 @@
 {
- "version": 1787059203,
+ "version": 1787060476,
  "files": {
   "mascot.py": "de855ae3cdd90d359c4c4129cb7e6b801a816af1281703e234ebd58c6dabfa33",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -85,13 +85,13 @@
   "parts_saga/snacks_special/cup_peugo.png": "5ad6757e542d673da015468543ad5040563e5e091594917ce1bd20c25ebfb617",
   "parts_saga/snacks_special/cup_quincy.png": "2fcf891de8701e334443e08bc548062dc7ab7def89980b4af67a8f046ed2088b",
   "parts_saga/snacks_special/cup_saga.png": "192d17b286eba531876a0cba17345d3783736767d0cd6d51e88b91584e2b3583",
-  "parts_saga/sounds/ambient/말발굽.wav": "6075e583f605ce0e23cec24b28fcd4dbedad5c4f08cfdc0f658aa28c307035fa",
-  "parts_saga/sounds/ambient/모닥불.wav": "4ed87d597b731c336143a1c0e414431d7435d61dc424859a7d9b9a42c417a640",
-  "parts_saga/sounds/ambient/무거운 빗소리.wav": "1b14c369a007d1c97f9de74f7ea857ff0a6d7aecf0c555be1f54c9c38e25224d",
-  "parts_saga/sounds/ambient/야외 모닥불.wav": "e113a89aaad4b8a9546b44bdaaac5adf2efa6167b5a707cec121f5f9bd4f8510",
-  "parts_saga/sounds/ambient/야외 모닥불2.wav": "3ed20d3d625a182049a866c0a58c5415af6098fe4137a9366228123d0771d970",
-  "parts_saga/sounds/ambient/일상 빗소리.wav": "c836866cda52f647e80b16ae862fefab46e5c871b8d294963722e741b79ef4bf",
-  "parts_saga/sounds/ambient/캠프파이어.wav": "1304cf2349ea8fc821667c42f460184089376e2a572aa2d53067b3e04fd8406a",
+  "parts_saga/sounds/ambient/말발굽.wav": "da8a2776072deab12000285fe6334fa2523728691fe88366b83ef027e058d6eb",
+  "parts_saga/sounds/ambient/모닥불.wav": "640dd1d690b31f2167448a9c86ec4bb8a30362de59afd6176af4a469c5f7a261",
+  "parts_saga/sounds/ambient/무거운 빗소리.wav": "664a9e3a008196793e9c65f691fda227e0d7f6cf29d33705bf86dcd194554d13",
+  "parts_saga/sounds/ambient/야외 모닥불.wav": "d15a58dae563400eb2d78d3e777ba20c7ccd71714b05a30eab7de62e97d9e818",
+  "parts_saga/sounds/ambient/야외 모닥불2.wav": "83ee284ccf9981bbc944c52a5da108ed1bcde15ef0bf99037ee0f08153b0d891",
+  "parts_saga/sounds/ambient/일상 빗소리.wav": "0498a465a5eabe642a91ff8e6931a04c393fb3300ec3254dd4423c49406b8a3a",
+  "parts_saga/sounds/ambient/캠프파이어.wav": "2c29f6d2b7a76f7625cd397192a9d344204acad136d0f08152ec712254c147eb",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/key1.wav": "34ca127f328b29dfee7e5d777636cad708371d6bdadcfc3d05d988c1555fa97e",
@@ -395,12 +395,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "패왕·성실이가 홈에 입주했어요",
-  "뽀모도로 타이머가 생겼어요 — 우클릭 > 뽀모도로. 25분 집중과 5분 휴식이 네 번 이어지고, 마지막엔 15분 길게 쉽니다",
-  "한 사이클이 끝나면 말풍선에 '다시 시작' 단추가 떠요. 누르면 처음부터 다시 돕니다",
-  "할 일 말풍선을 하나씩 따로 옮길 수 있어요. 첫 번째를 끌면 전체가 같이 움직이고, 우클릭으로 꼬리 방향과 크기도 고를 수 있습니다",
-  "마감 말풍선도 우클릭으로 지울 수 있어요",
-  "BGM 메뉴가 생겼어요 — 유튜브 노래와 환경음(빗소리·모닥불 같은 것)을 겹쳐 틀 수 있습니다"
- ]
+ "notes": [],
+ "silent": true
 }
