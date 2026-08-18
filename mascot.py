@@ -659,6 +659,20 @@ class ShadowLayer:
         """그림자 이미지 교체 (시계 토글로 크기가 바뀔 때)."""
         self._push(image)
 
+    def set_topmost(self, on):
+        """이 레이어의 '항상 위'를 켜고 끈다.
+
+        캐릭터만 내리면 z 그룹이 갈려 이 창이 캐릭터 위로 올라온다.
+        """
+        u, _g = layer_api()
+        if u is None:
+            return
+        try:
+            u.SetWindowPos(self.hwnd, -1 if on else -2, 0, 0, 0, 0,
+                           0x1 | 0x2 | 0x10)     # NOSIZE|NOMOVE|NOACTIVATE
+        except Exception:
+            pass
+
     def place(self, x, y, owner_hwnd):
         """본체 창 바로 아래 z순서로, 오프셋만큼 밀린 위치에 배치."""
         SWP_NOSIZE, SWP_NOACTIVATE = 0x1, 0x10
@@ -680,6 +694,17 @@ class FxLayer:
 
     파티클이 있는 동안만 보이고, 없으면 숨겨 둔다(그때는 비용이 0이다).
     """
+
+    def set_topmost(self, on):
+        """이 레이어의 '항상 위'를 켜고 끈다 (그림자와 같은 이유)."""
+        u, _g = layer_api()
+        if u is None:
+            return
+        try:
+            u.SetWindowPos(self.hwnd, -1 if on else -2, 0, 0, 0, 0,
+                           0x1 | 0x2 | 0x10)
+        except Exception:
+            pass
 
     def __init__(self, root):
         self.ok = False
@@ -5639,7 +5664,17 @@ class Mascot:
             # 그림자가 진다. _draw_deco와 모양을 맞춰 둘 것.
             deco = self.card.get("deco")
             mx = (cx0 + cx1) / 2
-            if deco == "frog":                     # 프고: 개구리 눈 실루엣
+            if deco == "fox":                      # 패왕: 여우 귀 실루엣
+                for sign, ex in ((-1, cx0 + 24), (1, cx1 - 24)):
+                    d.polygon([(ex - 15 * sign, cy0 + 6),
+                               (ex + 2 * sign, cy0 - 26),
+                               (ex + 15 * sign, cy0 + 3)],
+                              fill=(0, 0, 0, 255))
+            elif deco == "mouse":                  # 성실이: 생쥐 귀 실루엣
+                for ex in (cx0 + 24, cx1 - 24):
+                    d.ellipse([ex - 15, cy0 - 20, ex + 15, cy0 + 10],
+                              fill=(0, 0, 0, 255))
+            elif deco == "frog":                   # 프고: 개구리 눈 실루엣
                 for ex in (mx - 26, mx + 26):
                     d.ellipse([ex - 17, cy0 - 16, ex + 17, cy0 + 10],
                               fill=(0, 0, 0, 255))
@@ -7837,27 +7872,36 @@ class Mascot:
             return
         c, cd = self.canvas, self.card
         g = self._card_geom()
-        w, h = 34.0, 22.0
+        r = 14.0                          # 노래 버튼과 같은 동그라미
         cx = (g["x0"] + g["x1"]) / 2
         if self.us.get("yt_url") and self._yt_on():
             cx -= 34.0                    # 노래 버튼 왼쪽으로 비켜 준다
         by = g["y0"] - 24
-        x0, x1 = cx - w / 2, cx + w / 2
-        y0, y1 = by - h / 2, by + h / 2
-        self._rr(c, x0 + 1.5, y0 + 2, x1 + 1.5, y1 + 2, h / 2,
-                 fill="#e3e6ee", outline="", width=0)        # 옅은 그림자
-        self._rr(c, x0, y0, x1, y1, h / 2, fill=cd["bg"],
-                 outline=cd["border"], width=2)
+        c.create_oval(cx - r + 1.5, by - r + 2, cx + r + 1.5, by + r + 2,
+                      fill="#e3e6ee", outline="")            # 옅은 그림자
+        c.create_oval(cx - r, by - r, cx + r, by + r,
+                      fill=cd["bg"], outline=cd["border"], width=2)
         ink = cd["fill"]
-        # 물결 셋 — 소리가 퍼지는 모양. 알약 한가운데에 놓는다.
-        span = 10.0                      # 첫 물결과 끝 물결의 간격
-        wx = cx - span / 2.0
-        for dx, sc in ((0.0, 0.5), (5.0, 0.75), (10.0, 1.0)):
-            rr = 6.0 * sc
-            c.create_arc(wx + dx - rr, by - rr, wx + dx + rr, by + rr,
-                         start=-55, extent=110, style="arc",
-                         outline=ink, width=2)
-        self._amb_btn = (x0, y0, x1, y1)
+        # 나뭇잎 — 위아래가 뾰족하고 배가 부른 렌즈 모양. 살짝 기울여
+        # 놓고, 잎 전체(잎맥 포함)의 한가운데가 동그라미 중심에 온다.
+        lw, lh = 6.2, 9.2                 # 잎의 반폭·반높이
+        rot = math.radians(20)            # 기울기
+        cosr, sinr = math.cos(rot), math.sin(rot)
+
+        def leaf_xy(dx, dy):
+            return (cx + dx * cosr - dy * sinr, by + dx * sinr + dy * cosr)
+
+        pts = []
+        for side in (1, -1):              # 오른쪽 배 → 왼쪽 배
+            for t in range(0, 21):
+                u = t / 20.0 if side > 0 else 1.0 - t / 20.0
+                pts += list(leaf_xy(side * lw * math.sin(math.pi * u),
+                                    -lh + 2 * lh * u))
+        c.create_polygon(pts, fill=ink, outline=ink, width=1, smooth=True)
+        x_a, y_a = leaf_xy(0, -lh + 1.5)
+        x_b, y_b = leaf_xy(0, lh - 1.5)
+        c.create_line(x_a, y_a, x_b, y_b, fill=cd["bg"], width=1.6)
+        self._amb_btn = (cx - r, by - r, cx + r, by + r)
 
     def _draw_update_dot(self):
         """안 본 업데이트가 있으면 카드 오른쪽 위에 작은 빨간 점.
@@ -8640,6 +8684,13 @@ class Mascot:
         self._rec_prev_run = 0.0
         self._rec_armed = True
 
+    def _menu_layers_topmost(self, on):
+        """그림자·파티클 레이어의 '항상 위'를 캐릭터와 함께 움직인다."""
+        for lay in (getattr(self, "shadow", None), getattr(self, "_fx", None)):
+            fn = getattr(lay, "set_topmost", None)
+            if fn is not None:
+                self._safe("layer_z", fn, on)
+
     def _menu_popup(self, x, y):
         """우클릭 메뉴 — 캐릭터('항상 위')에 안 가리게 띄운다.
 
@@ -8653,11 +8704,16 @@ class Mascot:
                 self.root.attributes("-topmost", False)
             except Exception:
                 pass
+            # 그림자·파티클도 같이 내린다. 캐릭터만 내리면 그 둘이 위로
+            # 올라와, 우클릭할 때마다 그림자가 번쩍 보인다(제보).
+            self._menu_layers_topmost(False)
         try:
             self._menu.tk_popup(int(x), int(y))
         finally:
             self._menu.grab_release()
         if was:
+            self._menu_layers_topmost(True)
+
             def back(tries=0):
                 try:
                     if self._menu.winfo_ismapped() and tries < 100:
@@ -8971,6 +9027,25 @@ class Mascot:
                 c.create_polygon(ex - 6 * sign, y0 + 2, ex + 3 * sign, y0 - 10,
                                  ex + 8 * sign, y0 + 1,
                                  fill=inner, outline="")
+        elif deco == "fox":
+            # 여우 귀 — 고양이보다 길고 밑변이 넓다. 안쪽은 옅게.
+            base = self.card["fill"]
+            outer, line = self._tint(base, 0.30), self._shade(base, 0.15)
+            inner = self._tint(base, 0.10)
+            for sign, ex in ((-1, x0 + 24), (1, x1 - 24)):
+                c.create_polygon(ex - 15 * sign, y0 + 6, ex + 2 * sign, y0 - 26,
+                                 ex + 15 * sign, y0 + 3,
+                                 fill=outer, outline=line, width=2)
+                c.create_polygon(ex - 7 * sign, y0 + 2, ex + 2 * sign, y0 - 16,
+                                 ex + 9 * sign, y0 + 1,
+                                 fill=inner, outline="")
+        elif deco == "mouse":
+            # 생쥐 귀 — 크고 동그란 귀. 안쪽에 옅은 원을 겹친다.
+            for ex in (x0 + 24, x1 - 24):
+                c.create_oval(ex - 15, y0 - 20, ex + 15, y0 + 10,
+                              fill="#9a9a9a", outline="#6f6f6f", width=2)
+                c.create_oval(ex - 8, y0 - 13, ex + 8, y0 + 3,
+                              fill="#e8c4c4", outline="")
         elif deco == "dog":
             # 접힌 검은 강아지 귀 — 카드 위 모서리에서 바깥으로 늘어짐
             for sign, ex in ((-1, x0 + 18), (1, x1 - 18)):
@@ -14393,7 +14468,27 @@ class Mascot:
             """캐릭터 귀 + 이름 헤더."""
             hx0, hx1 = PAD, W - PAD
             deco = cd.get("deco")
-            if deco == "scarf":                 # 퀸시: 귀 대신 목도리 띠
+            if deco == "fox":                   # 패왕: 여우 귀
+                base = cd["fill"]
+                outer = self._tint(base, 0.30)
+                line2 = self._shade(base, 0.15)
+                inner = self._tint(base, 0.10)
+                for sign, ex in ((-1, hx0 + 30), (1, hx1 - 30)):
+                    (on or cv).create_polygon(
+                        ex - 15 * sign, y + 6, ex + 2 * sign, y - 24,
+                        ex + 15 * sign, y + 3,
+                        fill=outer, outline=line2, width=2)
+                    (on or cv).create_polygon(
+                        ex - 7 * sign, y + 2, ex + 2 * sign, y - 15,
+                        ex + 9 * sign, y + 1, fill=inner, outline="")
+            elif deco == "mouse":               # 성실이: 생쥐 귀
+                for ex in (hx0 + 30, hx1 - 30):
+                    (on or cv).create_oval(ex - 15, y - 18, ex + 15, y + 12,
+                                           fill="#9a9a9a", outline="#6f6f6f",
+                                           width=2)
+                    (on or cv).create_oval(ex - 8, y - 11, ex + 8, y + 5,
+                                           fill="#e8c4c4", outline="")
+            elif deco == "scarf":               # 퀸시: 귀 대신 목도리 띠
                 rrect(hx0 + 20, y - 6, hx1 - 20, y + 22, 10,
                       fill=cd["border"], outline="")
                 span = (hx1 - hx0 - 96) / 4

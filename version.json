@@ -1,7 +1,7 @@
 {
- "version": 1787052918,
+ "version": 1787054693,
  "files": {
-  "mascot.py": "a3e25fe8096a6e7b7c2973b357f740131bfb44e96c8854227d2ddc00fac960e2",
+  "mascot.py": "6785053cdc723282110b970a5fcef16d3c3d0b9c98b66366a6c01cef0e146cc4",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -396,9 +396,8 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
  "notes": [
-  "뽀모도로 타이머가 도는 동안엔 타이머 카드에 남은 시간이 떠요",
-  "집중 25분 · 쉬는 시간 5분 · 네 번째엔 15분. 한 바퀴가 끝나면 저절로 멈추고 원래대로 돌아와요",
-  "레벨과 칭호, 하루 게이지는 그대로 있어요",
-  "패왕이 눈이 또렷해졌어요"
+  "환경음 아이콘이 동그란 나뭇잎으로 바뀌었어요",
+  "우클릭할 때 그림자가 번쩍이던 것을 고쳤어요",
+  "패왕과 성실이의 타이머 카드·귀 모양·소리를 손봤어요"
  ]
 }
