@@ -15047,15 +15047,21 @@ class Mascot:
             seen = self._room_seen_get()
             day = self._my_workday()
             cap = self._day_min() + 5
-            if t_min > cap:            # 06시 경계 — 아직 안 넘어간 어제 누적
+            capped = t_min > cap       # 06시 경계 — 아직 안 넘어간 어제 누적
+            if capped:
                 pv = round(pv * (cap / max(t_min, 1)), 3)
                 t_min = int(cap)
             row = seen.get(self.char)
             if self._seen_ok(row, day):
                 t_min = max(t_min, int(row[0]))
                 pv = max(pv, float(row[1]))
-            if (not isinstance(row, list) or len(row) < 3 or row[2] != day
-                    or t_min > int(row[0]) or pv > float(row[1])):
+            # 눌린 값은 '오늘 최고치' 바닥으로 남기지 않는다. 진짜 오늘
+            # 작업량이 아니라 '아직 모르는 값'이라, 남겨 두면 그 숫자가
+            # 하루 종일 홈에 박혀 있는다 (실측으로 겪은 그대로다).
+            if not capped and (
+                    not isinstance(row, list) or len(row) < 3
+                    or row[2] != day or t_min > int(row[0])
+                    or pv > float(row[1])):
                 seen[self.char] = [t_min, pv, day, int(time.time())]
                 _save_json(self._room_seen_path(), seen)
         except Exception:
@@ -15209,14 +15215,18 @@ class Mascot:
         # 오염 줄을 가려낼 방법이 없어서다 (준사 '유령 2시간' 제보).
         # 새 형식은 어차피 바로 다시 쌓인다.
         if not (isinstance(row, list) and len(row) >= 4 and row[2] == day
-                and int(row[0]) <= self._day_min() + 30):
+                and int(row[0]) <= self._day_min() + 5):
             return False
         try:
             ts = float(row[3])
             t = time.localtime(ts - 6 * 3600)
             start = time.mktime((t.tm_year, t.tm_mon, t.tm_mday,
                                  6, 0, 0, 0, 0, -1))
-            if int(row[0]) > (ts - start) / 60.0 + 30:
+            # 여유는 2분 — 저장 상한(흐른 분 +5)보다 좁아야 '눌려서 찍힌
+            # 값'이 걸린다. 30분을 주었을 때는 06:48 에 찍힌 53분이
+            # 12시간을 버텼고, 5분으로는 경계값(48+5=53)이 딱 통과했다.
+            # 정상 값은 흐른 분보다 작으므로 이 여유로도 안 걸린다.
+            if int(row[0]) > (ts - start) / 60.0 + 2:
                 return False
         except Exception:
             pass
@@ -15256,7 +15266,8 @@ class Mascot:
                 continue
             t2, p2 = int(q.get("t") or 0), float(q.get("p") or 0)
             cap = self._day_min() + 5
-            if t2 > cap:               # 06시 경계의 시간차 — 어제 누적이 온다
+            capped = t2 > cap          # 06시 경계의 시간차 — 어제 누적이 온다
+            if capped:
                 p2 = p2 * (cap / max(t2, 1))
                 t2 = int(cap)
             old = seen.get(slot)
@@ -15265,6 +15276,8 @@ class Mascot:
                 # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다
                 t2 = max(t2, int(old[0]))
                 p2 = max(p2, float(old[1]))
+            if capped:
+                continue               # 눌린 값은 바닥으로 안 남긴다
             row = [t2, p2, day, int(now)]
             if seen.get(slot, [None])[:3] != row[:3]:
                 seen[slot] = row

@@ -1,7 +1,7 @@
 {
- "version": 1787047079,
+ "version": 1787047459,
  "files": {
-  "mascot.py": "9610e06a5bc155dc5e9a62e8a631c19cca0660c7d3387c898384206e710d5b78",
+  "mascot.py": "924adaa74ab106ebf5b7d0dfc93e3c0aa2c9b9f12d4d0f1d1d1c834bc9ab71f8",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -395,12 +395,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [
-  "환경음이 생겼어요 — 우클릭 > BGM > 환경음",
-  "일상 빗소리·무거운 빗소리·모닥불·캠프파이어·야외 모닥불·야외 모닥불2·말발굽 일곱 가지",
-  "여러 개를 같이 틀 수 있고, 소리 크기도 각각 정할 수 있어요",
-  "틀어 두면 타이머 위에 표시가 뜨고, 그걸 누르면 창이 열려요 (한 번 더 누르면 닫혀요)",
-  "듣다 보면 소리가 갑자기 커지던 것과, 켤 때 잠깐 버벅이던 것도 고쳤어요",
-  "듣고 싶은 환경음이 있으면 추천해 주세요! 넣어 드릴게요"
- ]
+ "notes": [],
+ "silent": true
 }
