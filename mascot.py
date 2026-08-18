@@ -2293,6 +2293,10 @@ CHARS = [
      "tint": "#ee9d2b"},
     {"slot": "parts_lax", "repo": "lax-mascot", "name": "락스",
      "tint": "#48484c"},
+    {"slot": "parts_paewang", "repo": "paewang-mascot", "name": "패왕",
+     "tint": "#7f9ce0"},
+    {"slot": "parts_seongsil", "repo": "seongsil-mascot", "name": "성실이",
+     "tint": "#f0c03c"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -2617,9 +2621,14 @@ class TodoPanel:
     # 우클릭 메뉴에서 고를 수 있는 배율 (%)
     ZOOMS = (60, 70, 80, 90, 100, 120, 140)
 
+    # 칸을 하나씩 따로 옮길 수 있는 범위 (창 사방 여백, 96DPI 기준).
+    # 이 여백은 색상키라 눈에 안 보이고 클릭도 통과한다.
+    MX, MY = 320, 260
+
     def __init__(self, master, card, bg, on_done, on_move, on_edit=None,
                  offset=None, flip=False, on_flip=None, ui_k=1.0,
-                 zoom=100, on_zoom=None, on_delete=None):
+                 zoom=100, on_zoom=None, on_delete=None,
+                 spots=None, on_spot=None, looks=None, on_look=None):
         # 화면 배율 반영 — 비율은 그대로 두고 통째로 키운다. 배율이 큰 화면에서
         # 폭·글자를 안 키우면 물리적으로 너무 작게 보인다. 다만 얼마나 커야
         # 편한지는 사람마다 달라서, 우클릭 메뉴에서 다시 조절할 수 있게 했다.
@@ -2641,6 +2650,15 @@ class TodoPanel:
         self._moved_by_user = bool(offset)
         self.offset = tuple(offset) if offset else (-(self.W + 4), 0)
         self.items = []          # [(말풍선 좌표, 할 일 인덱스)]
+        # 칸마다 따로 옮긴 자리 {할 일 글자: (dx, dy)}. 첫 칸은 안 쓴다
+        # (첫 칸을 끌면 목록 전체가 움직이는 쪽이 자연스럽다).
+        self.spots = dict(spots or {})
+        self.on_spot = on_spot
+        # 칸마다 따로 정한 꼬리 방향·크기 {글자: True/False}, {글자: 퍼센트}
+        self.flips = dict((looks or {}).get("flips") or {})
+        self.zooms = dict((looks or {}).get("zooms") or {})
+        self.on_look = on_look
+        self._spot_drag = None   # 지금 따로 끌고 있는 (키, 처음 자리)
         self._hwnd_cache = None  # 창 핸들 (z순서 조정용)
         self._mcache = {}        # 글자 폭·높이 캐시 (구간별 꾸밈 줄바꿈용)
         self.top = tk.Toplevel(master)
@@ -2655,8 +2673,8 @@ class TodoPanel:
             self.top.attributes("-transparentcolor", bg)
         self.top.config(bg=bg)
         self._key = bg               # 색상키 — 매끈 말풍선 미리 섞기용
-        self.canvas = tk.Canvas(self.top, width=self.W, height=10, bg=bg,
-                                highlightthickness=0)
+        self.canvas = tk.Canvas(self.top, width=self.W + self.MX * 2,
+                                height=10, bg=bg, highlightthickness=0)
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._drag)
@@ -2684,6 +2702,8 @@ class TodoPanel:
         k = self.k = self.ui_k * self.zoom / 100.0
         c = TodoPanel
         self.W = round(c.W * k)
+        self.MX = round(c.MX * self.ui_k)     # 여백은 화면 배율만 따른다
+        self.MY = round(c.MY * self.ui_k)
         self.PAD = round(c.PAD * k)
         self.TAIL_W = round(c.TAIL_W * k)
         self.TAIL_H = round(c.TAIL_H * k)
@@ -2888,57 +2908,69 @@ class TodoPanel:
     def render(self, todos, tints=None):
         """항목을 위에서 아래로 쌓아 그린다. 창 높이도 함께 맞춘다.
 
+        칸마다 크기·꼬리 방향·자리를 따로 정할 수 있어서, 높이를 미리 다
+        재 두지 않고 한 칸씩 '그 칸의 배율로 재고 바로 그린다'.
         tints를 주면 그 항목의 테두리·글자 색을 바꾼다 (마감이 급할 때 등).
         """
         c, cd = self.canvas, self.card
+        self._last_todos = (list(todos), list(tints) if tints else None)
         c.delete("all")
         self.items = []
         if not todos:
             self.top.withdraw()
             return
-        tw = self.W - round(30 * self.k)   # 글자가 들어갈 폭
-        heights = []                          # 먼저 줄바꿈 높이를 잰다
-        # 높이도 그 칸의 글꼴로 재야 한다 — 굵은 글씨는 폭이 넓어서
-        # 보통 글꼴로 재면 말풍선이 한 줄 모자라게 나온다
-        lays = []                             # 섞인 꾸밈이면 미리 줄을 나눠 둔다
-        for item in todos:
+        self._spot_keys = [self._spot_key(t) for t in todos]
+        keep = (self.flip, self.zoom)
+        y = self.PAD + self.MY
+        x_left = self.MX
+        wide = 0                       # 가장 넓은 칸 (창 폭 계산용)
+        for i, item in enumerate(todos):
+            # ── 이 칸의 크기·꼬리로 갈아 끼운다 (그리고 나서 되돌린다) ──
+            z = self._zoom_of(i)
+            self.flip = self._flip_of(i)
+            if z != self.zoom:
+                self.zoom = z
+                self._scale()
+            tw = self.W - round(30 * self.k)
             segs = todo_runs(item)
-            if len(segs) > 1:                 # 한 칸 안에서 꾸밈이 바뀐다
+            lay = None
+            if len(segs) > 1:              # 한 칸 안에서 꾸밈이 바뀐다
                 _b, _i, sz = todo_style(item)
                 lines, hs = self._lay_runs(segs, self.FS, sz, tw)
-                lays.append((lines, hs))
-                heights.append(max(sum(hs) + round(20 * self.k),
-                                   round(32 * self.k)))
-                continue
-            lays.append(None)
-            t = c.create_text(0, 0, anchor="nw", text=todo_text(item), width=tw,
-                              font=todo_font(item, self.FS))
-            bb = c.bbox(t)
-            heights.append(max(bb[3] - bb[1] + round(20 * self.k),
-                               round(32 * self.k)))
-            c.delete(t)
-
-        y = self.PAD
-        x0, x1 = round(8 * self.k), self.W - round(6 * self.k)
-        for i, (item, h) in enumerate(zip(todos, heights)):
-            text = todo_text(item)
+                lay = (lines, hs)
+                h = max(sum(hs) + round(20 * self.k), round(32 * self.k))
+            else:
+                t = c.create_text(0, 0, anchor="nw", text=todo_text(item),
+                                  width=tw, font=todo_font(item, self.FS))
+                bb = c.bbox(t)
+                h = max(bb[3] - bb[1] + round(20 * self.k),
+                        round(32 * self.k))
+                c.delete(t)
+            # 첫 칸은 늘 제자리 — 그것을 끌면 목록 전체가 움직인다
+            sx, sy = (0, 0) if i == 0 else self.spots.get(
+                self._spot_keys[i], (0, 0))
+            x0 = x_left + round(8 * self.k) + sx
+            x1 = x_left + self.W - round(6 * self.k) + sx
+            yy = y + sy
+            wide = max(wide, self.W)
             r = round(13 * self.k)
             tint = (tints[i] if tints and i < len(tints) and tints[i]
                     else None)
             soft = self._soft_item(x1 - x0, h, r, "#ffffff",
                                    tint or cd["border"], self._key)
             if soft is not None:
-                c.create_image(x0, y, image=soft, anchor="nw")
+                c.create_image(x0, yy, image=soft, anchor="nw")
             else:
-                self._rrect(x0 + 2, y + 3, x1 + 2, y + h + 3, r,
+                self._rrect(x0 + 2, yy + 3, x1 + 2, yy + h + 3, r,
                             fill="#e6e2e8", outline="")      # 그림자
-                self._tail(x0 + 2, x1 + 2, y + h, r, "#e6e2e8", dx=0, dy=3)
-                self._rrect(x0, y, x1, y + h, r, fill="#ffffff",
+                self._tail(x0 + 2, x1 + 2, yy + h, r, "#e6e2e8", dx=0, dy=3)
+                self._rrect(x0, yy, x1, yy + h, r, fill="#ffffff",
                             outline=tint or cd["border"], width=2)
-                self._tail(x0, x1, y + h, r, "#ffffff", tint or cd["border"])
-            mid = y + h / 2
-            if lays[i] is not None:           # 꾸밈이 섞인 칸 — 조각을 이어 그린다
-                lines, hs = lays[i]
+                self._tail(x0, x1, yy + h, r, "#ffffff",
+                           tint or cd["border"])
+            mid = yy + h / 2
+            if lay is not None:            # 꾸밈이 섞인 칸 — 조각을 이어 그린다
+                lines, hs = lay
                 ty = mid - sum(hs) / 2
                 ids = []
                 for ln, lh in zip(lines, hs):
@@ -2958,48 +2990,101 @@ class TodoPanel:
                     for it in ids:
                         c.move(it, 0, dy)
             else:
-                ids = self._ptext((x0 + x1) / 2, mid, text=text, width=tw,
-                                  font=todo_font(item, self.FS),
+                ids = self._ptext((x0 + x1) / 2, mid, text=todo_text(item),
+                                  width=tw, font=todo_font(item, self.FS),
                                   fill=tint or cd["text"], justify="center")
                 tb = c.bbox(ids[0])  # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
                 if tb:
                     dy = round(mid - (tb[1] + tb[3]) / 2) - 1
                     for it in ids:               # 겹쳐 그린 두 장을 같이 옮긴다
                         c.move(it, 0, dy)
-            self.items.append(((x0, y, x1, y + h), i))   # 우클릭 영역 = 말풍선
+            self.items.append(((x0, yy, x1, yy + h), i))  # 우클릭 영역
             y += h + self.PAD
-        self.canvas.config(height=y)
-        self.top.geometry(f"{self.W}x{int(y)}")
+            # 되돌린다 — 다음 칸이 이 칸의 배율을 물려받으면 안 된다
+            if (self.flip, self.zoom) != keep:
+                self.flip, self.zoom = keep
+                self._scale()
+        self.flip, self.zoom = keep
+        self._scale()
+        ww = int(max(wide, self.W) + self.MX * 2)
+        hh = int(y + self.MY)
+        self.canvas.config(width=ww, height=hh)
+        self.top.geometry(f"{ww}x{hh}")
         self.top.deiconify()
         # 크기 변경이 실제로 반영된 뒤에 올린다 (바로 부르면 변경이 버려진다)
         self.top.after_idle(self.raise_above)
 
+    @staticmethod
+    def _spot_key(item):
+        """칸을 알아보는 열쇠 — 글자로 잡는다.
+
+        번호로 잡으면 위 칸을 지웠을 때 자리가 통째로 밀린다.
+        """
+        return todo_text(item)[:60]
+
     def _press(self, e):
         self._pressed = (e.x, e.y, e.x_root, e.y_root)
         self._moved = False
+        self._spot_drag = None
+        idx = self._at(e.x, e.y)
+        keys = getattr(self, "_spot_keys", [])
+        if idx is not None and idx > 0 and idx < len(keys):
+            # 둘째 칸부터는 그 칸만 옮긴다 (첫 칸은 목록 전체)
+            key = keys[idx]
+            self._spot_drag = (key, tuple(self.spots.get(key, (0, 0))))
 
     def _drag(self, e):
-        """꾹 눌러 끌면 원하는 자리로 옮긴다."""
+        """꾹 눌러 끌면 원하는 자리로. 첫 칸이면 목록 전체가 따라온다."""
         if self._pressed is None:
             return
         px, py, prx, pry = self._pressed
         if not self._moved and abs(e.x_root - prx) + abs(e.y_root - pry) < 4:
             return
         self._moved = True
+        if self._spot_drag is not None:
+            key, (ox, oy) = self._spot_drag
+            nx = ox + (e.x_root - prx)
+            ny = oy + (e.y_root - pry)
+            # 여백 밖으로는 못 나간다 (창 밖이면 안 보인다)
+            nx = max(-self.MX + 4, min(self.MX - 4, nx))
+            ny = max(-self.MY + 4, min(self.MY - 4, ny))
+            self.spots[key] = (nx, ny)
+            self._redraw()
+            return
         self.top.geometry(f"+{e.x_root - px}+{e.y_root - py}")
+
+    def _redraw(self):
+        """끌고 있는 동안 다시 그린다 (마지막에 그린 목록 그대로)."""
+        got = getattr(self, "_last_todos", None)
+        if got is not None:
+            self.render(got[0], got[1])
 
     def _release(self, e):
         if self._pressed is None:
             return
+        if self._spot_drag is not None:
+            key = self._spot_drag[0]
+            if self.on_spot:
+                self.on_spot(key, self.spots.get(key))
+            self._spot_drag = None
+            self._pressed = None
+            return
         if self._moved:
             self.top.update_idletasks()      # 옮긴 좌표가 반영된 뒤 읽는다
-            self.on_move(self.top.winfo_rootx(), self.top.winfo_rooty())
+            # 창 왼쪽 위가 아니라 '첫 칸이 있는 자리'를 넘긴다 (여백 보정)
+            self.on_move(self.top.winfo_rootx() + self.MX,
+                         self.top.winfo_rooty() + self.MY)
         # 왼쪽 버튼은 옮기기 전용 — 지우기는 우클릭 메뉴로만 (실수 방지)
         self._pressed = None
 
     def _at(self, x, y):
-        """그 자리에 있는 할 일 번호 (없으면 None)."""
-        for (x0, y0, x1, y1), idx in self.items:
+        """그 자리에 있는 할 일 번호 (없으면 None).
+
+        칸이 겹쳤을 때는 **나중에 그린 것**(=위에 보이는 것)을 잡아야 한다.
+        앞에서부터 찾으면 밑에 깔린 칸이 잡혀서, 눈에 보이는 말풍선을
+        아무리 끌어도 안 움직인다 — '겹쳐서 분리가 안 된다'는 제보.
+        """
+        for (x0, y0, x1, y1), idx in reversed(self.items):
             if x0 <= x <= x1 and y0 <= y <= y1:
                 return idx
         return None
@@ -3018,18 +3103,75 @@ class TodoPanel:
             # 완료와 다르다 — 축하도 기록도 없이 목록에서만 뺀다
             m.add_command(label="삭제", command=lambda: self.on_delete(idx))
         m.add_separator()
-        m.add_command(label="꼬리 오른쪽으로" if self.flip else "꼬리 왼쪽으로",
-                      command=self._toggle_flip)
+        key = self._key_at(idx)
+        f_one = self._flip_of(idx)
+        m.add_command(label="꼬리 오른쪽으로" if f_one else "꼬리 왼쪽으로",
+                      command=lambda k=key: self._flip_one(k))
         sub = tk.Menu(m, tearoff=0, font=(UI_FONT, self.MENU_FS))
+        z_one = self._zoom_of(idx)
         for z in self.ZOOMS:
-            sub.add_command(label=("● " if z == self.zoom else "    ") + f"{z}%",
-                            command=lambda p=z: self.set_zoom(p))
-        m.add_cascade(label="크기 조절", menu=sub)
+            sub.add_command(label=("● " if z == z_one else "    ") + f"{z}%",
+                            command=lambda p=z, k=key: self._zoom_one(k, p))
+        m.add_cascade(label="이 칸 크기", menu=sub)
+        sub2 = tk.Menu(m, tearoff=0, font=(UI_FONT, self.MENU_FS))
+        sub2.add_command(label="꼬리 방향 전부 바꾸기",
+                         command=self._toggle_flip)
+        sub3 = tk.Menu(sub2, tearoff=0, font=(UI_FONT, self.MENU_FS))
+        for z in self.ZOOMS:
+            sub3.add_command(
+                label=("● " if z == self.zoom else "    ") + f"{z}%",
+                command=lambda p=z: self.set_zoom(p))
+        sub2.add_cascade(label="크기 전부 바꾸기", menu=sub3)
+        sub2.add_separator()
+        sub2.add_command(label="이 칸만 되돌리기",
+                         command=lambda k=key: self._reset_one(k))
+        m.add_cascade(label="전체 설정", menu=sub2)
+        self._menu_ref2 = (sub2, sub3)
         self._menu_ref = (m, sub)       # 파이썬이 메뉴를 먼저 치우지 않게
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def _key_at(self, idx):
+        keys = getattr(self, "_spot_keys", [])
+        return keys[idx] if 0 <= idx < len(keys) else ""
+
+    def _flip_of(self, idx):
+        """그 칸의 꼬리 방향 (따로 안 정했으면 목록 전체 설정)."""
+        return bool(self.flips.get(self._key_at(idx), self.flip))
+
+    def _zoom_of(self, idx):
+        """그 칸의 크기 (따로 안 정했으면 목록 전체 설정)."""
+        return int(self.zooms.get(self._key_at(idx), self.zoom))
+
+    def _flip_one(self, key):
+        self.flips[key] = not bool(self.flips.get(key, self.flip))
+        self._save_one()
+        self._redraw()
+
+    def _zoom_one(self, key, pct):
+        pct = self._near_zoom(pct)
+        if pct == self.zoom:
+            self.zooms.pop(key, None)     # 전체와 같으면 따로 안 들고 있는다
+        else:
+            self.zooms[key] = pct
+        self._save_one()
+        self._redraw()
+
+    def _reset_one(self, key):
+        """그 칸만 원래대로 — 자리·꼬리·크기를 목록 설정으로 되돌린다."""
+        self.spots.pop(key, None)
+        self.flips.pop(key, None)
+        self.zooms.pop(key, None)
+        if self.on_spot:
+            self.on_spot(key, None)
+        self._save_one()
+        self._redraw()
+
+    def _save_one(self):
+        if self.on_look:
+            self.on_look(dict(self.flips), dict(self.zooms))
 
     def _toggle_flip(self):
         """꼬리 방향만 뒤집는다 — 글자는 그대로다(뒤집으면 읽을 수 없으니)."""
@@ -3072,7 +3214,10 @@ class TodoPanel:
             return                      # 끄는 중에는 건드리지 않는다
         try:
             dx, dy = self.offset
-            self.top.geometry(f"+{int(x + dx)}+{int(y + dy)}")
+            # 창에 사방 여백이 있으므로 그만큼 당겨 놓아야 첫 칸이
+            # 예전과 같은 자리에 온다
+            self.top.geometry("+%d+%d" % (int(x + dx - self.MX),
+                                          int(y + dy - self.MY)))
         except Exception:
             pass
         # 여기서 raise_above를 부르면 안 된다. Tk는 위치 변경을 미뤄 두었다가
@@ -4146,7 +4291,11 @@ class Mascot:
                                         self.todo_flip, self._todo_flipped,
                                         self.ui_k, self.todo_zoom,
                                         self._todo_zoomed,
-                                        on_delete=self._todo_delete)
+                                        on_delete=self._todo_delete,
+                                        spots=self._todo_spots(),
+                                        on_spot=self._todo_spot_moved,
+                                        looks=self.us.get("todo_looks"),
+                                        on_look=self._todo_look_saved)
             self.root.after(250, self._todo_refresh)   # 창 위치가 잡힌 뒤 배치
 
         # ── 마감 목록 (config의 "deadline_on") ───────────────────────────
@@ -4157,7 +4306,8 @@ class Mascot:
                 self._due_edit,
                 self.due_pos or (self.W + 4, 0),   # 기본은 캐릭터 오른쪽
                 self.due_flip, self._due_flipped, self.ui_k, self.due_zoom,
-                self._due_zoomed)
+                self._due_zoomed,
+                on_delete=self._due_delete)
             self.due_panel._moved_by_user = bool(self.due_pos)
             self.root.after(280, self._due_refresh)
 
@@ -4308,6 +4458,9 @@ class Mascot:
             menu.add_command(label="할 일 추가", command=self.add_todo)
         if self.cfg.get("deadline_on"):
             menu.add_command(label="마감 추가", command=self.add_due)
+        menu.add_command(label="뽀모도로 타이머",
+                         command=lambda: self._safe("pomo_win",
+                                                    self._pomo_win))
         if self._yt_on() or self._amb is not None:
             # BGM 하나로 모은다 — 유튜브 노래와 환경음이 같은 자리에 있어야
             # '무엇을 틀까'를 한 곳에서 고르게 된다.
@@ -4539,6 +4692,10 @@ class Mascot:
         self._slime_snd = None       # 만질 때 나는 소리
         self._amb = None             # 환경음(BGM) 재생기 — 소리가 있는 캐릭터만
         self._amb_boot = True        # 첫 프레임에 지난번 환경음을 이어 튼다
+        self._pomo_winref = None     # 뽀모도로 창
+        self._pomo_draw = None       # 그 창을 다시 그리는 함수
+        self._pomo_after = None      # 그 창의 예약 프레임
+        self._pomo_hits = []         # 그 창의 단추 자리
         self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
         self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
         self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
@@ -4636,6 +4793,7 @@ class Mascot:
         self._pl_skip = 0            # 연속으로 건너뛴 곡 수 (전곡 막힘 방지)
         self._pl_adv_at = 0.0        # 마지막으로 곡을 넘긴 시각
         self._pl_hits = []           # 패널 안 누를 수 있는 자리들
+        self._pl_drag = None         # 볼륨 막대를 끌고 있는 중인가
         self._pl_btn = None          # 헤더 ♪ 단추 자리
         self._pl_panel = None        # 패널 전체 자리
         self._room_all_btn = None    # '모두 보기' 토글 자리
@@ -6109,6 +6267,44 @@ class Mascot:
         self._todo_save()
         self._todo_refresh()
 
+    def _todo_spots(self):
+        """칸마다 따로 옮겨 둔 자리 {할 일 글자: (dx, dy)}."""
+        d = self.us.get("todo_spots")
+        out = {}
+        if isinstance(d, dict):
+            for k, v in d.items():
+                try:
+                    out[str(k)] = (int(v[0]), int(v[1]))
+                except Exception:
+                    pass
+        return out
+
+    def _todo_spot_moved(self, key, xy):
+        """한 칸만 따로 옮겼다 — 그 자리를 기억한다.
+
+        열쇠는 할 일 글자다. 지운 할 일의 자리가 쌓이지 않게, 지금 목록에
+        없는 것은 저장할 때 걸러 낸다.
+        """
+        d = self._todo_spots()
+        if xy is None:
+            d.pop(str(key), None)
+        else:
+            d[str(key)] = [int(xy[0]), int(xy[1])]
+        live = set()
+        for t in (self.todos or []):
+            live.add(TodoPanel._spot_key(t))
+        d = dict((k, v) for k, v in d.items() if k in live)
+        self.us["todo_spots"] = d
+        self._safe("todo_spot_save", self._save_settings)
+
+    def _todo_look_saved(self, flips, zooms):
+        """칸마다 정한 꼬리 방향·크기를 기억한다."""
+        self.us["todo_looks"] = {"flips": {str(k): bool(v)
+                                           for k, v in (flips or {}).items()},
+                                 "zooms": {str(k): int(v)
+                                           for k, v in (zooms or {}).items()}}
+        self._safe("todo_look_save", self._save_settings)
+
     def _todo_moved(self, x, y):
         """패널을 끌어서 옮기면 본체 기준 상대 위치로 기억한다."""
         self.todo_pos = (int(x - self.root.winfo_rootx()),
@@ -6844,6 +7040,22 @@ class Mascot:
         self._last_pos = None
         self._due_refresh()
 
+    def _due_delete(self, idx):
+        """말풍선 우클릭 > 삭제 — 축하 없이 목록에서만 뺀다.
+
+        완료(_due_remove)와 다르다. 잘못 넣었거나 없어진 마감을 조용히
+        치우는 길이다.
+        """
+        order = sorted(range(len(self.dues)),
+                       key=lambda i: (self._days_to(self.dues[i]["date"])
+                                      if self._days_to(self.dues[i]["date"])
+                                      is not None else 99999))
+        if not (0 <= idx < len(order)):
+            return
+        self.dues.pop(order[idx])
+        self._due_save()
+        self._due_refresh()
+
     def _due_remove(self, idx):
         """말풍선 우클릭 > 완료 — 그 마감을 목록에서 지운다."""
         order = sorted(range(len(self.dues)),
@@ -7258,7 +7470,13 @@ class Mascot:
         """
         if self._amb_on_any():
             return YT_BAR
-        if not (self.timer_on and self.us.get("yt_url")):
+        if not self.timer_on:
+            return 0
+        # 모두의 플레이리스트로 틀었을 때도 이 줄이 선다. 그 경우 주소가
+        # us["yt_url"] 에 안 들어가서, 개인 노래를 한 번도 안 넣은 사람은
+        # 재생 중인데도 카드 위가 텅 비어 있었다.
+        # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
+        if not (self.us.get("yt_url") or getattr(self, "_pl_on", False)):
             return 0
         return YT_BAR if self._yt_on() else 0
 
@@ -7388,6 +7606,7 @@ class Mascot:
     def _yt_forget(self):
         """재생기가 사라졌다고 표시만 한다 (프로세스 정리는 _yt_stop)."""
         self._pl_on = False          # 재생기가 죽었으면 플레이리스트도 끝
+        self._safe("card", self._relayout_card)
         self._yt_proc = None
         self._yt = {}
         self._yt_want = False
@@ -7397,6 +7616,7 @@ class Mascot:
     def _yt_stop(self):
         """재생기를 거둔다. 프로세스째 사라져 메모리가 통째로 돌아온다."""
         self._pl_on = False
+        self._safe("card", self._relayout_card)
         p = getattr(self, "_yt_proc", None)
         self._yt_forget()
         if p is None or p.poll() is not None:
@@ -7424,6 +7644,16 @@ class Mascot:
 
     def _yt_toggle(self):
         """음악 버튼을 눌렀을 때 — 없으면 띄우고, 있으면 재생/멈춤."""
+        if getattr(self, "_pl_on", False) and self._yt_alive():
+            # 플레이리스트로 트는 중이면 목록을 끄지 않고 멈춤/이어듣기만
+            # 한다. 여기서 _pl_on 을 꺼 버리면 자동 다음곡이 같이 죽는다.
+            if self._yt.get("playing"):
+                self._yt_want = False
+                self._yt_send(c="pause")
+            else:
+                self._yt_want = True
+                self._yt_send(c="play")
+            return
         self._pl_on = False          # 개인 노래 조작이 플레이리스트를 이긴다
         url = str(self.us.get("yt_url") or "")
         if not url:
@@ -11715,6 +11945,7 @@ class Mascot:
             self._room_dead = False
         self._safe("room_diag", self._room_diag, now)
         self._safe("room", self._room_tick, now)
+        self._safe("pomo", self._pomo_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
@@ -12150,6 +12381,238 @@ class Mascot:
             self._slime_grab = None
             self._slime_hand = None
             self._safe("slime_swap", self._slime_open)
+
+    # ── 뽀모도로 타이머 ───────────────────────────────────────────────
+    # 널리 쓰는 규칙 그대로 — 25분 집중, 5분 쉬고, 네 번째 뒤에는 15분.
+    POMO_FOCUS, POMO_SHORT, POMO_LONG, POMO_ROUNDS = 25, 5, 15, 4
+    POMO_LINES = {
+        "focus": "집중 시간이에요! 같이 해요",
+        "short": "%d분 집중 끝! 잠깐 쉬어요",
+        "long": "네 번 했어요! 길게 쉬어요",
+        "back": "잘 쉬었어요? 다시 시작해요",
+    }
+
+    def _pomo(self):
+        """지금 뽀모도로 상태. 없으면 꺼진 것으로 본다.
+
+        끝나는 시각을 절대 시각으로 들고 있어, 프로그램을 껐다 켜도
+        이어진다. 멈춰 두면 남은 초(left)만 남긴다.
+        """
+        d = self.us.get("pomo")
+        if not isinstance(d, dict):
+            d = {}
+        return {"on": bool(d.get("on")),
+                "phase": str(d.get("phase") or "focus"),
+                "end": float(d.get("end") or 0.0),
+                "left": float(d.get("left") or 0.0),
+                "round": int(d.get("round") or 0)}
+
+    def _pomo_save(self, st):
+        self.us["pomo"] = {"on": bool(st["on"]), "phase": st["phase"],
+                           "end": round(float(st["end"]), 1),
+                           "left": round(float(st["left"]), 1),
+                           "round": int(st["round"])}
+        self._safe("pomo_save", self._save_settings)
+
+    def _pomo_len(self, phase):
+        return {"focus": self.POMO_FOCUS, "short": self.POMO_SHORT,
+                "long": self.POMO_LONG}.get(phase, self.POMO_FOCUS) * 60
+
+    def _pomo_left(self, st=None):
+        """남은 초. 멈춰 있으면 멈춘 자리 그대로."""
+        st = st or self._pomo()
+        if not st["on"]:
+            return max(0.0, st["left"] or self._pomo_len(st["phase"]))
+        return max(0.0, st["end"] - time.time())
+
+    def _pomo_running(self):
+        return bool(self._pomo()["on"])
+
+    def _pomo_toggle(self):
+        """시작하거나 잠깐 멈춘다."""
+        st = self._pomo()
+        if st["on"]:
+            st["left"] = self._pomo_left(st)
+            st["on"] = False
+        else:
+            left = st["left"] or self._pomo_len(st["phase"])
+            st["end"] = time.time() + left
+            st["left"] = 0.0
+            st["on"] = True
+        self._pomo_save(st)
+        self._pomo_redraw()
+
+    def _pomo_reset(self):
+        self._pomo_save({"on": False, "phase": "focus", "end": 0.0,
+                         "left": 0.0, "round": 0})
+        self._pomo_redraw()
+
+    def _pomo_skip(self):
+        """지금 구간을 건너뛰고 다음으로 (알림은 안 띄운다)."""
+        self._pomo_next(say=False)
+
+    def _pomo_next(self, say=True):
+        """다음 구간으로 넘어간다. 넘어가는 순간 캐릭터가 알려 준다."""
+        st = self._pomo()
+        ph = st["phase"]
+        if ph == "focus":
+            st["round"] = int(st["round"]) + 1
+            nxt = "long" if st["round"] % self.POMO_ROUNDS == 0 else "short"
+            line = (self.POMO_LINES["long"] if nxt == "long"
+                    else self.POMO_LINES["short"] % self.POMO_FOCUS)
+        else:
+            nxt = "focus"
+            line = self.POMO_LINES["back"]
+        st["phase"] = nxt
+        st["left"] = 0.0
+        st["end"] = time.time() + self._pomo_len(nxt)
+        st["on"] = True
+        self._pomo_save(st)
+        if say:
+            self._safe("pomo_say", self._pomo_alarm, line, nxt)
+        self._pomo_redraw()
+
+    def _pomo_alarm(self, line, phase):
+        """구간이 바뀔 때 — 말풍선을 띄우고 몸을 편다."""
+        self._say(line, 7.0)
+        if phase in ("short", "long"):
+            self._gest_start("stretch", force=True)   # 쉬라고 몸을 편다
+            self._safe("pomo_burst", self._burst, 10, 26)
+        else:
+            self._gest_start("nod", force=True)
+        if self.roomsnd is not None:
+            self._safe("pomo_snd", self.roomsnd.play)
+
+    def _pomo_tick(self, now):
+        """구간이 끝났는지 본다 (프레임마다 — 값 비교뿐이라 싸다)."""
+        st = self._pomo()
+        if not st["on"] or st["end"] <= 0:
+            return
+        if now >= st["end"]:
+            self._pomo_next()
+
+    def _pomo_redraw(self):
+        got = getattr(self, "_pomo_draw", None)
+        if got is not None:
+            self._safe("pomo_draw", got)
+
+    def _pomo_win(self):
+        """뽀모도로 창 — 환경음 창과 같은 결로 캔버스에 둥근 카드."""
+        got = getattr(self, "_pomo_winref", None)
+        if got is not None and got.winfo_exists():
+            got.lift()
+            return
+        cd, u = self.card, self._ui
+        W, H = u(300), u(330)
+        win = tk.Toplevel(self.root)
+        self._pomo_winref = win
+        win.title("뽀모도로")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.55)
+        pad = u(16)
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            cv.delete("all")
+            st = self._pomo()
+            left = self._pomo_left(st)
+            ph = st["phase"]
+            name = {"focus": "집중", "short": "짧은 휴식",
+                    "long": "긴 휴식"}.get(ph, "집중")
+            cv.create_text(W / 2, u(26), text="뽀모도로",
+                           font=self._uf(13, True), fill=cd["text"])
+            # 큰 카드 — 남은 시간
+            self._rr_soft(cv, pad, u(46), W - pad, u(176), u(18),
+                          fill="#ffffff", outline=line, width=1)
+            tone = cd["fill"] if ph == "focus" else "#2a9d8a"
+            self._rr_soft(cv, W / 2 - u(38), u(60), W / 2 + u(38), u(84),
+                          u(12), fill=self._tint(tone, 0.78), outline="",
+                          width=0)
+            cv.create_text(W / 2, u(72), text=name, font=self._uf(10, True),
+                           fill=self._shade(tone, 0.25))
+            cv.create_text(W / 2, u(118), text="%d:%02d" % (int(left) // 60,
+                                                            int(left) % 60),
+                           font=self._uf(34, True), fill=cd["text"])
+            # 몇 번째인가 — 동그라미 넷
+            done = int(st["round"]) % self.POMO_ROUNDS
+            if st["round"] and done == 0:
+                done = self.POMO_ROUNDS
+            for i in range(self.POMO_ROUNDS):
+                cx = W / 2 + (i - (self.POMO_ROUNDS - 1) / 2.0) * u(20)
+                r = u(5)
+                cv.create_oval(cx - r, u(152) - r, cx + r, u(152) + r,
+                               fill=cd["fill"] if i < done else "#ffffff",
+                               outline=line, width=1)
+            cv.create_text(W / 2, u(192),
+                           text="%d분 집중 · %d분 휴식 · 네 번째엔 %d분"
+                           % (self.POMO_FOCUS, self.POMO_SHORT,
+                              self.POMO_LONG),
+                           font=self._uf(8), fill=cd["sub"])
+            cv.create_text(W / 2, u(210),
+                           text="시간이 되면 알려 주고 같이 몸을 펴요",
+                           font=self._uf(8), fill=cd["sub"])
+            # 단추 셋
+            by0, by1 = u(232), u(272)
+            bw = (W - pad * 2 - u(16)) / 3.0
+            self._pomo_hits = []
+            for i, (lab, act) in enumerate(
+                    ((("멈춤" if st["on"] else "시작"), "toggle"),
+                     ("건너뛰기", "skip"), ("처음으로", "reset"))):
+                x0 = pad + i * (bw + u(8))
+                x1 = x0 + bw
+                main = (act == "toggle")
+                self._rr_soft(cv, x0, by0, x1, by1, u(13),
+                              fill=cd["fill"] if main else "#f2edf4",
+                              outline="" if main else line,
+                              width=0 if main else 1)
+                cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
+                               font=self._uf(9, True if main else False),
+                               fill="#ffffff" if main else cd["text"])
+                self._pomo_hits.append((x0, by0, x1, by1, act))
+            cv.create_text(W / 2, H - u(16),
+                           text="창을 닫아도 계속 돌아가요",
+                           font=self._uf(8), fill=cd["sub"])
+
+        def on_click(e):
+            for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    if act == "toggle":
+                        self._pomo_toggle()
+                    elif act == "skip":
+                        self._pomo_skip()
+                    else:
+                        self._pomo_reset()
+                    return
+
+        def beat():
+            if not win.winfo_exists():
+                return
+            draw()
+            self._pomo_after = win.after(500, beat)
+
+        draw()
+        self._pomo_draw = draw
+        cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._pomo_after = win.after(500, beat)
+
+        def gone(_e=None):
+            # 지뢰 20 — 예약해 둔 프레임을 거둔다
+            got2 = getattr(self, "_pomo_after", None)
+            if got2 is not None:
+                try:
+                    win.after_cancel(got2)
+                except Exception:
+                    pass
+                self._pomo_after = None
+            self._pomo_draw = None
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
 
     # ── 환경음 (BGM) ──────────────────────────────────────────────────
     AMB_DEFAULT_VOL = 35
@@ -14730,9 +15193,16 @@ class Mascot:
             pass
 
     def _apply_autostart(self):
-        """로그인 시 자동 실행 등록/해제 (배포본만). 윈도우=레지스트리, 맥=LaunchAgent."""
+        """로그인 시 자동 실행 등록/해제 (배포본만). 윈도우=레지스트리, 맥=LaunchAgent.
+
+        선물본 exe 를 시험 삼아 켜 보기만 해도 자동 실행에 등록된다 — 내
+        컴퓨터에 선물 캐릭터 열 개가 등록돼 켤 때마다 같이 떴다(제보).
+        ENA_NO_AUTOSTART=1 로 켜면 등록도 해제도 하지 않는다.
+        """
         if not getattr(sys, "frozen", False):
             return                       # 소스 실행(로컬)에서는 의미 없음
+        if os.environ.get("ENA_NO_AUTOSTART"):
+            return                       # 시험 실행 — 남의 컴퓨터를 안 건드린다
         if IS_MAC:
             return self._apply_autostart_mac()
         try:
@@ -17441,9 +17911,29 @@ class Mascot:
                                fill=self._shade(mine, 0.25), tags="dyn")
                 self._pl_hits.append((bx2 - r2, cy2 - r2, bx2 + r2, cy2 + r2,
                                       (act,)))
+            # 소리 크기 — 조작 줄 오른쪽에 작은 막대. 홈 캔버스에 직접
+            # 그린다(tk.Scale 은 맥에서 위험하다 — 체크리스트 4번).
+            vol = int(self.us.get("yt_volume", 55))
+            vx1 = px + pw - 18 * k
+            vx0 = vx1 - 62 * k
+            gh2 = 3 * k
+            self._rr(cv, vx0, cy2 - gh2, vx1, cy2 + gh2, gh2,
+                     fill=self._tint(mine, 0.75), width=0)
+            fx2 = vx0 + (vx1 - vx0) * max(0, min(100, vol)) / 100.0
+            if fx2 > vx0 + gh2:
+                self._rr(cv, vx0, cy2 - gh2, fx2, cy2 + gh2, gh2,
+                         fill=self._tint(mine, 0.30), width=0)
+            self._safe("soft_btn", self._soft_dot, cv, fx2, cy2, 6 * k,
+                       "#ffffff", outline=self._tint(mine, 0.30), width=2)
+            cv.create_text(vx0 - 8 * k, cy2, anchor="e", text="♪",
+                           font=self._uf(8), fill=P["sub"], tags="dyn")
+            # 누르는 자리는 막대보다 넉넉하게 (얇으면 못 짚는다)
+            self._pl_hits.append((vx0 - 6 * k, cy2 - 11 * k,
+                                  vx1 + 6 * k, cy2 + 11 * k,
+                                  ("vol", vx0, vx1)))
             if self._pl_on and 0 <= self._pl_i < len(songs):
                 now_t = songs[self._pl_i]["t"]
-                lim2 = pw - 170 * k
+                lim2 = pw - 250 * k
                 f3 = self._uf(8)
                 while now_t and self._room_tw(cv, now_t, f3) > lim2:
                     now_t = now_t[:-1]
@@ -17512,6 +18002,7 @@ class Mascot:
             if not (vid or lst):
                 continue
             self._pl_on = True
+            self._safe("card", self._relayout_card)
             self._pl_i = j
             self._pl_url = songs[j]["u"]
             self._pl_adv_at = time.time()
@@ -17525,11 +18016,16 @@ class Mascot:
 
     def _pl_stop(self):
         self._pl_on = False
+        self._safe("card", self._relayout_card)
         self._yt_want = False
         self._yt_send(c="pause")
 
-    def _room_pl_act(self, act):
-        """패널 안 클릭 — 줄(곡)·재생·멈춤·다음곡."""
+    def _room_pl_act(self, act, mx=None):
+        """패널 안 클릭 — 줄(곡)·재생·멈춤·다음곡·소리 크기.
+
+        mx 는 누른 자리의 x — 볼륨 막대처럼 '어디를 짚었나'가 필요한
+        것에만 쓴다.
+        """
         kind = act[0]
         if kind == "row":
             songs = self._room_pl_songs()
@@ -17547,8 +18043,25 @@ class Mascot:
             self._pl_stop()
         elif kind == "next":
             self._pl_play((self._pl_i + 1) if self._pl_i >= 0 else 0)
+        elif kind == "vol":
+            if mx is not None:
+                self._pl_set_vol(act[1], act[2], mx)
         self._room_key_last = None
         self._safe("room_draw", self._room_draw)
+
+    def _pl_set_vol(self, x0, x1, x):
+        """볼륨 막대를 짚은 자리로 소리 크기를 정한다.
+
+        값은 개인 노래와 같은 곳(us["yt_volume"])에 둔다 — 재생기가 하나라
+        따로 둘 수가 없고, 곡이 바뀌어도 자식이 다시 걸어 준다.
+        """
+        v = int(round((x - x0) / max(1.0, float(x1 - x0)) * 100.0 / 5.0)) * 5
+        v = max(0, min(100, v))
+        if int(self.us.get("yt_volume", 55)) == v:
+            return
+        self.us["yt_volume"] = v
+        self._safe("pl_vol_save", self._save_settings)
+        self._yt_send(c="vol", v=v)
 
     def _room_inbox_draw(self, cv, W, H, P, k):
         """오늘 받은 반응 — 홈 창 안에서 펼쳐진다.
@@ -18800,11 +19313,17 @@ class Mascot:
             return False
 
     def _deco_drag(self, e):
-        """꾸미기 창이 열려 있으면 홈에서 그림을 직접 끌어 옮긴다.
+        """홈에서 끌 때 — 볼륨 막대를 잡고 있으면 그것, 아니면 꾸미기 그림.
 
         내 칸 위에서 시작한 드래그는 방 칸 그림, 그 밖은 배경 그림.
         옮길 수 있는 폭(그림과 칸의 크기 차)의 절반을 끝까지로 본다.
         """
+        act = getattr(self, "_pl_drag", None)
+        if act is not None:            # 플레이리스트 소리 크기 조절 중
+            self._pl_set_vol(act[1], act[2], e.x)
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
+            return
         if not self._deco_editing():
             return
         st = getattr(self, "_deco_drag_st", None)
@@ -18842,6 +19361,7 @@ class Mascot:
 
     def _deco_drop(self, _e):
         """드래그 끝 — 저장하고 친구들에게도 알린다 (방 칸)."""
+        self._pl_drag = None           # 볼륨 막대를 놓았다
         st = getattr(self, "_deco_drag_st", None)
         self._deco_drag_st = None
         if st is None or not self._deco_editing():
@@ -20390,7 +20910,8 @@ class Mascot:
         if self._pl_open:
             for x0, y0, x1, y1, act in list(self._pl_hits):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
-                    self._safe("pl_act", self._room_pl_act, act)
+                    self._safe("pl_act", self._room_pl_act, act, e.x)
+                    self._pl_drag = act if act[0] == "vol" else None
                     return
             pp = self._pl_panel
             if pp and pp[0] <= e.x <= pp[2] and pp[1] <= e.y <= pp[3]:
