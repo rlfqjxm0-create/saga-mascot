@@ -469,6 +469,7 @@ DEFAULT_SETTINGS = {
     # (카드를 줄여 전원을 한 화면에). None 이면 옛 room_all 에서 옮겨 온다.
     "room_view": None,
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
+    "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -12750,6 +12751,7 @@ class Mascot:
         # **하루 넘김을 방 통신보다 먼저.** 방이 먼저 돌면 아직 어제
         # 기준인 '오늘치'가 오늘 날짜로 저장돼 하루 종일 못 박힌다.
         self._safe("floor_fix", self._floor_fix_once)
+        self._safe("wg_wipe", self._wg_wipe_once)
         self._safe("day_roll", self._day_roll, now)
         self._safe("room_diag", self._room_diag, now)
         self._safe("room", self._room_tick, now)
@@ -16814,6 +16816,27 @@ class Mascot:
     # 기다릴 수 없어서 둔 장치다. 최악이라도 '오늘 숫자가 제값으로
     # 돌아가는 것'뿐이라 안전하다.
     FLOOR_FIX = 1
+    # 내 도로롱의 미니 게임 기록을 한 번 지운다. 만들면서 시험 삼아 한
+    # 판들이 '모두의 랭킹' 1위로 남아 다른 사람 기록을 가렸다. 지우는
+    # 것은 **내 자리(dororong)뿐**이다 — 친구들 기록은 건드리지 않는다.
+    # 실행 중인 프로그램이 메모리 값을 파일에 도로 쓰기 때문에, 파일만
+    # 지워서는 안 되고 켤 때 이렇게 지워야 확실하다.
+    WG_WIPE = 1
+    WG_WIPE_SLOT = "dororong"
+
+    def _wg_wipe_once(self):
+        if int(self.us.get("wg_wipe") or 0) >= self.WG_WIPE:
+            return
+        self.us["wg_wipe"] = self.WG_WIPE
+        if self.char == self.WG_WIPE_SLOT:
+            try:
+                _save_json(self._wg_path(), {"best": 0, "rank": []})
+                if self._wg is not None:      # 메모리 값도 같이
+                    self._wg["best"] = 0
+                    self._wg["rank"] = []
+            except Exception:
+                pass
+        self._save_settings()
 
     def _floor_fix_once(self):
         """굳은 바닥을 한 번만 지운다 — **굳었을 때만.**
