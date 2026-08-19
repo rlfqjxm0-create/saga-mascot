@@ -23767,7 +23767,8 @@ class Mascot:
         self._room_game_btn = None
         self._room_deco_btn = None
         self._room_menu_items = []
-        gx0 = ax0 + bw + 10 * k
+        # 오른쪽 끝 — '카드 보기(보기 방식)' 단추의 딱 반대 자리 (요청)
+        gx0 = W - 20 * k - bw
         open9 = bool(self._room_menu_open)
         self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
                    by + bw / 2, bw / 2,
