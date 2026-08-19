@@ -4023,10 +4023,26 @@ class RoomNet:
         self._th.start()
 
     # ── 바깥에서 부르는 것 ────────────────────────────────────────────
+    def _beat_blob(self, now):
+        """이번 비트에 실을 값 — 본체가 오래 조용하면 그 사실을 싣는다.
+
+        본체(tk 메인 루프)가 굳으면 push 가 끊기지만 이 스레드는 살아서
+        마지막 값을 계속 보낸다 — 겉으로는 '접속 중인데 숫자가 굳은'
+        모습이다 (락스 증상과 같다). 몇 초째 조용한지(hang)를 실어 두면
+        서버에서 '본체가 죽었는지 / 타이머만 죽었는지'가 갈린다.
+        """
+        with self._lock:
+            st = dict(self._state)
+            at = float(getattr(self, "_state_at", 0.0) or 0.0)
+        if st and at and now - at > 120.0:
+            st["hang"] = int(min(99999, now - at))
+        return st
+
     def push(self, state):
-        """내 상태를 갈아 끼운다 (보내는 것은 스레드가 알아서)."""
+        """내 상태를 갈아 끼운다 — 받은 시각도 적는다 (hang 판정용)."""
         with self._lock:
             self._state = dict(state)
+            self._state_at = time.time()
 
     def send(self, to_slot, kind, extra=None):
         """콕 찌르기 같은 한 번짜리 신호. 다음 바퀴를 기다리지 않는다."""
@@ -4098,8 +4114,7 @@ class RoomNet:
             try:
                 if now - t_beat >= i_beat:
                     t_beat = now
-                    with self._lock:
-                        st = dict(self._state)
+                    st = self._beat_blob(now)
                     if st:
                         self._rpc("room_beat",
                                   {"p_room": self.room, "p_slot": self.slot,
@@ -4858,6 +4873,7 @@ class Mascot:
         self._wg_pils = {}           # (slot, 지름) → 원본 판 (회전 전)
         self._wg_bake = {}           # 스레드가 미리 구운 판 (PIL)
         self._wg_bake_want = []      # 굽기 계획 — 통째 교체가 곧 새 계획
+        self._wg_bake_n = 0          # 지금 계획이 몇 단계까지 굽는가
         self._wg_bake_th = None      # 굽기 스레드
         self._wg_wrap_after = None   # 구운 것을 PhotoImage 로 싸는 예약
         self._wg_after = None        # 게임 프레임 예약 (지뢰 20)
@@ -4908,6 +4924,11 @@ class Mascot:
         self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
         self._snack_list = None          # 간식 그림 이름들 (첫 사용 때 읽는다)
         self._fail_why = {}              # 구역별 마지막 실패 이유
+        self._tick_fail = 0              # 타이머 셈이 터진 횟수 (진단용)
+        self._tick_why = ""              # 마지막으로 터진 이유
+        self._curwatch_at = 0.0          # 커서 예비 감지 — 마지막 확인 시각
+        self._curwatch_pos = None        # 그때의 커서 자리
+        self._curwatch_n = 0             # 예비 감지가 입력으로 쳐 준 횟수
         self._told_off = set()            # 꺼졌다고 이미 말한 구역
         self._health_at = 0.0             # .health.txt 를 마지막으로 쓴 시각
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
@@ -9306,7 +9327,17 @@ class Mascot:
 
     def _timer_tick(self, now, idle):
         """상태 반환: work(측정)/other(작업앱 아님)/idle(휴식)/off(연동 끊김)."""
+        self._safe("curwatch", self._cursor_watch, now)
         self._safe("day_roll", self._day_roll, now)
+        # 구역이 세 번 터져 꺼지면 날짜가 영영 안 넘어간다 (락스 제보:
+        # '날짜가 지났는데 초기화가 안 됨'). 꺼졌더라도 5분에 한 번은
+        # 직접 불러 본다 — 이쪽은 실패해도 그냥 지나간다.
+        if self._fail.get("day_roll", 0) >= 3 and now - self._day_at > 300:
+            self._day_at = now - 31
+            try:
+                self._day_roll(now)
+            except Exception:
+                self._tick_why = self._tick_why or "day_roll"
         if self.ws_path is not None:
             # 워크스페이스 워크타이머 연동: 에이전트의 라이브 파일을 읽어 표시만 한다
             if now - self._ws_read > 1.0:
@@ -9384,12 +9415,19 @@ class Mascot:
             self._act.add(m)
 
     def _own_tick(self, now, idle):
-        """캐릭터가 직접 재는 경로 (연동 없는 캐릭터 + 연동이 끊겼을 때)."""
+        """캐릭터가 직접 재는 경로 (연동 없는 캐릭터 + 연동이 끊겼을 때).
+
+        **시간 쌓기와 저장은 무슨 일이 있어도 지나가야 한다.** 락스의
+        타이머가 어제부터 숫자도 안 늘고 날짜도 안 넘어간 채로 굳었다 —
+        이 함수 뒤쪽(앞 창 판정·브리핑 집계)에서 예외가 나면 그 뒤가
+        통째로 안 돌고, 부르는 쪽은 try 로 삼켜 조용히 'idle' 이 된다.
+        곁가지는 전부 구역으로 감싸 본체를 못 막게 한다.
+        """
         dt = min(max(now - self._t_last, 0.0), 2.0)
         self._t_last = now
         if idle >= self.idle_thr:
             state = "idle"
-        elif self.us["work_apps_only"] and not self._fg_is_work(now):
+        elif self.us.get("work_apps_only") and not self._fg_work_safe(now):
             state = "other"
         else:
             state = "work"
@@ -9397,12 +9435,66 @@ class Mascot:
         # 하루 브리핑용 집계 (작업/딴짓/휴식 시간, 최장 집중 구간, 시작·마지막)
         s = self.stat
         s[state] = s.get(state, 0.0) + dt
-        self._log_work(now, state, s, dt)
+        self._safe("log_work", self._log_work, now, state, s, dt)
         self._safe("level", self._lv_tick, now)
         if now - self._t_save > 30:
             self._t_save = now
-            self._timer_save()
+            self._safe("timer_save", self._timer_save)
         return state
+
+    def _cursor_watch(self, now):
+        """입력 훅이 죽어도 타이머가 영영 '자리 비움'이 되지 않게.
+
+        훅 스레드(마우스·키보드)가 죽으면 last_pointer 가 굳는다 —
+        그러면 idle 이 한없이 자라 **작업 중인데도 시간이 안 쌓인다**
+        (숫자가 어제에서 멈추는 증상의 유력한 갈래). 커서 위치는 훅과
+        무관하게 읽을 수 있으니 2초마다 견줘서, 커서는 움직였는데 훅이
+        90초 넘게 조용하면 훅이 죽은 것으로 보고 입력으로 쳐 준다.
+        읽기만 하므로 그리는 중인 펜과 다투지 않는다 (지뢰 40).
+        """
+        if not IS_WIN or now - self._curwatch_at < 2.0:
+            return
+        self._curwatch_at = now
+        try:
+            u = getattr(self, "_curwatch_u32", None)
+            if u is None:
+                u = self._curwatch_u32 = ctypes.WinDLL("user32")  # 지뢰 21
+
+            class _PT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            pt = _PT()
+            if not u.GetCursorPos(ctypes.byref(pt)):
+                return
+            pos = (int(pt.x), int(pt.y))
+        except Exception:
+            return
+        old = self._curwatch_pos
+        self._curwatch_pos = pos
+        if old is None or pos == old:
+            return
+        # 커서가 움직였다 — 훅이 그걸 놓치고 있으면 예비로 쳐 준다
+        if now - self.last_pointer > 90.0:
+            self.last_pointer = now
+            self._curwatch_n += 1
+            if self._curwatch_n == 3:      # 세 번이면 우연이 아니다
+                self._tick_why = self._tick_why or "hook_dead?"
+                try:
+                    self._log_error("cursor_backup n=%d" % self._curwatch_n)
+                except Exception:
+                    pass
+
+    def _fg_work_safe(self, now):
+        """앞 창이 작업 프로그램인가 — 터지면 직전 판정을 그대로 쓴다.
+
+        여기는 ctypes 로 남의 창을 들여다보는 자리라 컴퓨터마다 실패할
+        수 있다. 그 실패가 시간 쌓기까지 멈추면 안 된다.
+        """
+        try:
+            return self._fg_is_work(now)
+        except Exception:
+            self._tick_why = self._tick_why or "fg_is_work"
+            return bool(getattr(self, "_fg_work", False))
 
     def _text_w(self, text):
         """상태 텍스트 폭(px) — 캔버스로 측정·캐시 (tkinter.font 의존 제거)."""
@@ -14451,7 +14543,11 @@ class Mascot:
         self._pet_drawn = []
         try:
             state = self._timer_tick(now, idle) if self.timer_on else "idle"
-        except Exception:
+        except Exception as e:
+            # 조용히 'idle' 로 물러나면 숫자가 굳은 채로 몇 날이고 간다.
+            # 무엇이 터졌는지 세어 두고 방에도 실어 보낸다 (지뢰 51).
+            self._tick_fail += 1
+            self._tick_why = "%s: %s" % (type(e).__name__, str(e)[:60])
             state, _ = "idle", self._log_error("timer_tick")
         # 아래는 모두 구역 격리 — 하나가 터져도 캐릭터 본체는 그려진다
         self._safe("greet", self._greet_tick, now, state)
@@ -16160,7 +16256,7 @@ class Mascot:
     def _room_push_now(self):
         """지금 상태를 곧바로 방에 알린다 (다음 주기를 안 기다린다)."""
         try:
-            self.room_net.push(self._room_state_now())
+            self.room_net.push(self._room_state_now(for_net=True))
             self.room_net.wake()
         except Exception:
             pass
@@ -16176,7 +16272,7 @@ class Mascot:
         except Exception:
             self._log_error("room_msg_save")
         try:      # 통신층이 어떤 상태든 한 줄은 저장돼야 한다
-            self.room_net.push(self._room_state_now())
+            self.room_net.push(self._room_state_now(for_net=True))
             self.room_net.wake()          # 곧바로 남에게 보이게
         except Exception:
             pass
@@ -16319,8 +16415,17 @@ class Mascot:
             self._my_build_v = v
         return v
 
-    def _room_state_now(self):
-        """방에 보낼 값. 어떤 프로그램을 쓰는지·창 제목은 절대 안 보낸다."""
+    def _room_state_now(self, for_net=False):
+        """방에 보낼 값. 어떤 프로그램을 쓰는지·창 제목은 절대 안 보낸다.
+
+        **for_net 은 '이 값이 실제로 서버로 나가는가'다.** 이 함수는
+        그리기(_room_seats·단체사진)에서도 불리는데, 그때까지 '한 번만
+        실어 보낼 것'을 소모해 버리면 정작 네트워크 박자에는 안 실린다.
+        예전에 셈 방식으로 같은 사고가 났고(주석 아래), 방 칸 그림도
+        똑같이 당했다 — 그리기가 초당 몇 번씩 _cd_push 를 지워서 친구가
+        청해도(cdq) 그림이 안 갔다. 한마디(m)는 매번 실려 잘 바뀌는데
+        칸 그림만 안 바뀌던 제보의 정체가 이것이다.
+        """
         goal = max(0.1, float(self.us.get("goal_hours") or 6.0)) * 3600.0
         today = self._today_secs()
         if self._sleeping:
@@ -16379,6 +16484,19 @@ class Mascot:
             except Exception:
                 pass
         out["v"] = self._my_build()      # 실행 중 판 번호 (버전 확인용)
+        # 진단 — 꺼진 구역과 마지막 실패 이유. '안 돼요' 제보가 왔을 때
+        # 그 컴퓨터에 가지 않고도 무엇이 죽었는지 갈린다 (지뢰 51).
+        # 사람 이름·파일·창 제목은 안 들어간다 (구역 이름과 예외 종류뿐).
+        try:
+            ko = [w for w, n in (self._fail or {}).items() if n >= 3]
+            if self._tick_fail:
+                ko.append("tick*%d" % min(9999, self._tick_fail))
+            if self._tick_why:
+                ko.append(self._tick_why[:50])
+            if ko:
+                out["ko"] = ",".join(ko)[:120]
+        except Exception:
+            pass
         su, st2 = self._room_song()
         if su:
             out["sg"] = {"u": su, "t": st2}
@@ -16395,7 +16513,8 @@ class Mascot:
             now2 = time.time()
             if getattr(self, "_cd_push", False) or (now2 % 40.0) < 8.0:
                 out["cd"] = b64
-                self._cd_push = False
+                if for_net:          # 진짜 나갈 때만 깃발을 내린다
+                    self._cd_push = False
         return out
 
     def _room_start(self):
@@ -16403,7 +16522,7 @@ class Mascot:
             return
         # 보낼 값을 같이 넘긴다 — 첫 바퀴부터 자리를 알리게 (지뢰: 사가 사례)
         try:
-            first = self._room_state_now()
+            first = self._room_state_now(for_net=True)
         except Exception:
             first = None
             self._log_error("room_first_state")
@@ -16453,7 +16572,7 @@ class Mascot:
         self.room_net.idle = (self.room_win is None)
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
-            self.room_net.push(self._room_state_now())
+            self.room_net.push(self._room_state_now(for_net=True))
         # 서버가 받아 준 신호를 세어 둔다 (그 사람 칸에 보인다)
         take = getattr(self.room_net, "take_sent", None)
         if take is not None:
@@ -16730,14 +16849,15 @@ class Mascot:
     INBOX_MAX = 100          # 하루에 이만큼까지 쌓아 둔다
     INBOX_SHOW = 7           # 목록에 한 번에 보이는 줄 수
     # 종류 → (목록에 쓰는 말, 짧은 말, 색)
-    INBOX_WORD = {"poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
+    INBOX_WORD = {"hello": ("인사했어요", "인사", "#7fb0ff"),
+                  "poke": ("콕 찔렀어요", "콕", "#ff8fb8"),
                   "cheer": ("응원했어요", "응원", "#ffbe55"),
                   "blanket": ("쓰담쓰담 해 줬어요", "쓰담", "#ff9ec4"),
                   "snack": ("간식을 놓고 갔어요", "간식", "#8fd18f"),
                   "praise": ("칭찬해 줬어요", "칭찬", "#ffd75e"),
                   "songlike": ("노래를 좋아해요", "♥노래", "#ff6f8e")}
-    # '인사'는 뺐다 — 보내는 길이 없어진 뒤로 아무도 못 쓴다. 아주 오래된
-    # 판이 보내더라도 '반응을 보냈어요'로 받아 준다 (_inbox_line).
+    # 표에 없는 종류(아주 오래된 판이 보낸 것)는 '반응을 보냈어요'로
+    # 받아 준다 (_inbox_line).
 
     def _inbox_path(self):
         return os.path.join(self.state_dir, ".room_inbox.json")
@@ -16990,8 +17110,11 @@ class Mascot:
         if mine:
             k = ev.get("k")
             self.smile_until = max(self.smile_until, time.time() + 2.5)
+            if k == "hello":
+                self._safe("gest", self._gest_start, "wave", True)
             self._say("내 컵케이크다! 냠" if cup else
                       {"poke": "콕!", "cheer": "혼자 응원해 봤어요",
+                       "hello": "혼자 인사해 봤어요",
                        "blanket": "혼자 쓰담쓰담 했어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
@@ -17048,7 +17171,14 @@ class Mascot:
             # 몸짓을 그 자리에서 멈추고 잠깐 쉰다 (알림 자체는 그대로).
             self.gest = None
             self.stretch_replay = now + 6.0
-        if kind == "poke":
+        if kind == "hello":
+            # 웃으면서 한 손을 흔든다 (이미 있는 'wave' 동작을 쓴다 —
+            # 지뢰 14 의 손 규칙이 그대로 적용된 동작이라 안전하다).
+            self.smile_until = max(self.smile_until, now + 3.5)
+            self._safe("gest", self._gest_start, "wave", True)
+            self._say(("%s 인사해 줬어요!" % _josa(who)) if who
+                      else "누가 인사해 줬어요!", 3.5, big=True)
+        elif kind == "poke":
             self.smile_until = max(self.smile_until, now + 2.5)
             self._say(("%s 콕 찔렀어요" % _josa(who)) if who
                       else "누가 콕 찔렀어요", 3.0, big=True)
@@ -20135,7 +20265,8 @@ class Mascot:
 
     # 신호 이름(blanket)은 그대로 둔다 — 친구마다 업데이트 시점이 달라서
     # 이름을 바꾸면 옛 판이 보낸 것을 못 알아본다. 보이는 글자만 바꾼다.
-    ROOM_BTN = (("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
+    ROOM_BTN = (("인사", "hello", "#dbeaff"),
+                ("콕", "poke", "#ffd6e0"), ("응원", "cheer", "#ffe8ba"),
                 ("쓰담", "blanket", "#ffe0ee"), ("간식", "snack", "#def0d6"),
                 ("칭찬", "praise", "#ffe9a0"))
 
@@ -22024,10 +22155,29 @@ class Mascot:
                     Image.linear_gradient("L").rotate(-45, expand=True)
                     .resize((side, side), Image.BILINEAR))
                 self._wg_pils[("grad", side)] = gr
-            k2 = max(3, (side // 34) | 1)
-            er = a_on.filter(ImageFilter.MinFilter(k2))
-            band = Image.composite(
-                a_on, zero, er.point(lambda v: 255 if v < 128 else 0))
+            # 가장자리 띠 — MinFilter 는 판이 커지면 폭발한다. 실측:
+            # 440px·커널21 에 73ms, 광 전체 116ms 중 106ms 가 이것이었다
+            # (커널 넓이만큼 곱으로 는다). 큰 판은 줄여서 깎고 도로
+            # 늘린다 — 띠는 부드러운 마스크라 눈에 띄는 차이가 없다.
+            def edge_band(div):
+                sc = 3 if side > 340 else (2 if side > 190 else 1)
+                if sc == 1:
+                    kk = max(3, (side // div) | 1)
+                    er3 = a_on.filter(ImageFilter.MinFilter(kk))
+                    return Image.composite(
+                        a_on, zero,
+                        er3.point(lambda v: 255 if v < 128 else 0))
+                w3 = max(8, side // sc)
+                sm = a_on.resize((w3, w3), Image.BILINEAR).point(
+                    lambda v: 255 if v > 100 else 0)
+                kk = max(3, (w3 // div) | 1)
+                er3 = sm.filter(ImageFilter.MinFilter(kk))
+                bd = Image.composite(
+                    sm, Image.new("L", sm.size, 0),
+                    er3.point(lambda v: 255 if v < 128 else 0))
+                return bd.resize(im.size, Image.BILINEAR)
+
+            band = edge_band(34)
             # 위왼쪽 — 얇은 흰 테
             rim = Image.new("RGBA", im.size, (255, 255, 255, 0))
             rim.putalpha(Image.composite(
@@ -22035,10 +22185,7 @@ class Mascot:
                 gr.point(lambda v: 255 if v > 170 else 0)))
             out.alpha_composite(rim)
             # 아래오른쪽 — 반사광 (유리로 읽히게 하는 핵심)
-            k3 = max(3, (side // 22) | 1)
-            er2 = a_on.filter(ImageFilter.MinFilter(k3))
-            band2 = Image.composite(
-                a_on, zero, er2.point(lambda v: 255 if v < 128 else 0))
+            band2 = edge_band(22)
             glow = Image.new("RGBA", im.size, (255, 255, 255, 0))
             glow.putalpha(Image.composite(
                 band2.point(lambda v: int(v * 0.42)), zero,
@@ -22075,8 +22222,8 @@ class Mascot:
         # 광은 돌린 **뒤에** 입힌다 — 굴러도 빛은 왼쪽 위 그대로
         return self._wg_shine(im)
 
-    def _wg_bake_kick(self, k):
-        """이번 벌의 회전 그림 전부(단계×36각도)를 스레드로 미리 굽는다.
+    def _wg_bake_kick(self, k, upto=None):
+        """이번 벌의 회전 그림을 스레드로 미리 굽는다 (단계×36각도).
 
         큰 머리를 그리다 만들면 한 장에 140ms 라 프레임이 뚝뚝 끊겼다
         (실측: 6단계 구르는 동안 90% 프레임 172ms → 구운 뒤 11ms).
@@ -22085,11 +22232,25 @@ class Mascot:
         는 Tk 것이라 창의 after 루프(wrap_some)가 싼다. 작은 단계부터
         구우므로 큰 단계(몇 분 뒤에나 나온다)는 그 전에 끝난다
         (실측 전부 9초쯤, 약 70MB — 창을 닫으면 돌려준다).
+
+        **큰 단계까지 한꺼번에 구우면 초반이 오히려 끊긴다** (제보).
+        실측 12초 동안 전부 구우면 프레임이 1698 → 335 장으로 줄고
+        최악 5.2초가 나왔다 — 작은 단계만 구우면 1458장으로 굽기 안 할
+        때와 거의 같다. 그래서 `upto` 단계까지만 굽고, 판에 그만한
+        공이 실제로 생기면 그때 한 단계씩 더 굽는다. 큰 공이 나올 때는
+        이미 몇 분이 지나 작은 것들이 다 구워져 있다.
         """
+        tiers = self._wg_tiers()
+        if upto is None:
+            upto = self.WG_DROP_N + 1
+        upto = max(1, min(len(tiers), int(upto)))
+        if upto <= self._wg_bake_n and self._wg_bake_want:
+            return                               # 이미 그만큼 굽는 중
+        self._wg_bake_n = upto
         want = []
-        for t2 in range(len(self._wg_tiers())):
+        for t2 in range(upto):
             px = int(self._wg_r(t2) * 2 * k)
-            slot = self._wg_tiers()[t2]
+            slot = tiers[t2]
             for st2 in range(360 // self.WG_ANG):
                 want.append((slot, px, st2))
         self._wg_bake_want = want                # 통째 교체 = 새 계획
@@ -22908,6 +23069,15 @@ class Mascot:
             if now - st["rank_at"] > 5.0:      # 친구 기록이 오면 갱신
                 st["rank_at"] = now
                 self._safe("wg_rank", draw_rank)
+                # 큰 공이 가까워졌으면 그때 한 단계 더 굽는다
+                g3 = self._wg
+                if g3 is not None:
+                    need = 2 + max((f["t"] for f in g3["fruits"]),
+                                   default=0)
+                    if need > self._wg_bake_n:
+                        self._safe("wg_bake", self._wg_bake_kick, k, need)
+                        if self._wg_wrap_after is None:
+                            self._safe("wg_bake", wrap_some)
 
         def on_move(e):
             g2 = self._wg
@@ -22928,6 +23098,7 @@ class Mascot:
                     self._wg_new()
                     self._safe("wg_rank", draw_rank)
                     self._safe("wg_chart", draw_chart)
+                    self._wg_bake_n = 0        # 벌이 바뀐다 — 계획도 새로
                     self._safe("wg_bake", self._wg_bake_kick, k)
                     if self._wg_wrap_after is None:
                         self._safe("wg_bake", wrap_some)
@@ -22942,6 +23113,7 @@ class Mascot:
                     self._wg_new()
                     self._safe("wg_rank", draw_rank)
                     self._safe("wg_chart", draw_chart)
+                    self._wg_bake_n = 0        # 벌이 바뀐다 — 계획도 새로
                     self._safe("wg_bake", self._wg_bake_kick, k)
                     if self._wg_wrap_after is None:
                         self._safe("wg_bake", wrap_some)
@@ -22975,6 +23147,7 @@ class Mascot:
                 self._wg_wrap_after = None
             # 게임 동안만 크게 쓴다 — 닫으면 굽기를 멈추고 전부 돌려준다
             self._wg_bake_want = []
+            self._wg_bake_n = 0
             self._wg_bake.clear()
             self._wg_imgs.clear()
             self._wg_pils.clear()
@@ -23091,7 +23264,8 @@ class Mascot:
     # 반응마다 '몇 초 안에 몇 번까지'. 콕·응원·쓰담은 가볍게 주고받는
     # 것이라 10초에 다섯 번, 간식·칭찬은 상대 화면에 물건이 놓이고
     # 오래 남아서 더 뜸하게 둔다.
-    SEND_LIMIT = {"poke": (5, 10.0), "cheer": (5, 10.0),
+    SEND_LIMIT = {"hello": (5, 10.0),
+                  "poke": (5, 10.0), "cheer": (5, 10.0),
                   "blanket": (5, 10.0), "snack": (3, 30.0),
                   "praise": (3, 30.0)}
     SEND_ALL = (10, 10.0)    # 한 사람에게 종류를 바꿔 가며 쏟아붓는 것도 막는다
