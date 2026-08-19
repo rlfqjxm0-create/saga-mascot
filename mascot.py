@@ -470,6 +470,8 @@ DEFAULT_SETTINGS = {
     "room_view": None,
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
     "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
+    "wg_bgm_on": True,       # 수박게임 브금 재생 여부
+    "wg_bgm_vol": 18,        # 수박게임 브금 볼륨 (0~100, 원본보다 훨씬 작게)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -4949,7 +4951,10 @@ class Mascot:
         self._room_note = None       # 방금 보낸 것 (칸 위에 잠깐 띄운다)
         self._poke_times = []        # 최근에 콕을 보낸 시각들 (연타 제한)
         self._lv_glow = 0.0          # 레벨업 테두리 반짝임이 시작된 시각
-        self._room_goal_done = False # 오늘 다 같이 24시간을 채웠는가
+        self._room_goal_done = False # 오늘 다 같이 목표를 채웠는가
+        self._room_last_p = {}       # slot → (마지막으로 본 시각, 그때 모습)
+        self._room_menu_open = False # 아래 '메뉴' 단추가 펼쳐져 있는가
+        self._room_menu_items = []   # 펼친 항목들의 자리
         self._fx_scale = 1.0         # zzZ·콧방울 배율 (앉은 모습 구울 때 확대)
         self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
         self._sky_key = None
@@ -4959,6 +4964,7 @@ class Mascot:
         self._stamp_win = None       # 도장판 창
         self._stamp_off = 0          # 보고 있는 달 (0 = 이번 달)
         self._stamp_pick = None      # 눌러서 자세히 보는 날
+        self._pbrief_win = None      # 남의 그날 간이 브리핑 카드
         self._stamp_slot = None      # 남의 도장판을 보는 중이면 그 자리
         self._stamp_txt = None       # 일기 입력칸 (내 도장판에서만)
         self._stamp_share_hit = None
@@ -16679,6 +16685,13 @@ class Mascot:
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
+            for q in people:              # 깜빡임 완충용 — 마지막 모습
+                sl9 = q.get("slot") or ""
+                if sl9 and not q.get("off"):
+                    self._room_last_p[sl9] = (now, dict(q))
+            if len(self._room_last_p) > 60:      # 상한 (지뢰 18)
+                for k9 in list(self._room_last_p)[:30]:
+                    self._room_last_p.pop(k9, None)
             # 켜 있을 때 본 레벨·칭호를 담아 둔다 — 꺼진 뒤에도 그대로
             # 보여 주려면 어딘가에 남아 있어야 한다
             self._safe("room_who", self._room_who_note, people)
@@ -17787,7 +17800,7 @@ class Mascot:
     # 캐릭터. 개구리는 눈이 정수리에 있고, 도로롱은 옆머리 장미 뭉치 때문에
     # 머리 중심이 오른쪽으로 잡힌다.
     # 다 같이 채우는 하루 목표 (분). 사람이 늘면 여기를 올린다.
-    ROOM_GOAL_MIN = 40 * 60
+    ROOM_GOAL_MIN = 50 * 60
 
     CROWN_FIT = {"parts_peugo": (0.0, -0.25),
                  "parts_dororong": (-0.22, -0.10),
@@ -18088,7 +18101,7 @@ class Mascot:
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         ts = self._room_toast
         return (tuple(who), self._room_pick, self._room_page,
-                self._room_view(),
+                self._room_view(), bool(self._room_menu_open),
                 tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
@@ -18369,6 +18382,8 @@ class Mascot:
                                 anchor="nw", tags=("dyn", "songmq"))
         # 한마디 말풍선 마퀴 — 커서를 올리면 잘린 한마디가 옆으로 흐른다
         hovm = getattr(self, "_msg_hover", None)
+        if self._room_moving():
+            hovm = None
         if hovm and hovm in getattr(self, "_room_msg_boxes", {}):
             mb = self._room_msg_boxes[hovm]
             got_mm = self._safe_str(self._mq_bubble, mb[4],
@@ -18399,9 +18414,9 @@ class Mascot:
                                font=self._uf(10 + 2 * j2),
                                fill=self._tint(self._room_raw(slot), 0.25),
                                tags=("dyn", "songfx"))
-        # 다 같이 24시간을 채운 날 — 캐릭터 옆에 반짝이가 돈다
+        # 다 같이 목표를 채운 날 — 캐릭터 옆에 반짝이가 돈다
         cv.delete("glit")
-        if self._room_goal_done:
+        if self._room_goal_done and not self._room_moving():
             kk = getattr(self, "_room_card_k", None) or self._room_k()
             if self._room_view() == 1:
                 kk = self._room_k() * 0.5    # 캡슐 크기에 맞춰 반짝이도 작게
@@ -18935,6 +18950,19 @@ class Mascot:
                            text="오늘 다 같이  %d시간 %d분"
                            % (tot // 60, tot % 60),
                            font=self._uf(10, True), fill=P["ink"], tags="dyn")
+            if self._room_goal_done:
+                # 목표를 채웠다 — 초록 동그라미에 체크. 글자(✓)가 아니라
+                # 선으로 그린다 (이모지는 Tk 에서 컴퓨터마다 다르다).
+                ccx, ccy = W - 216 * k + 2 * k, mid - 25 * k + 2 * k
+                cr = 9 * k
+                cv.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
+                               fill="#7fc98f", outline="#ffffff",
+                               width=max(1, int(2 * k)), tags="dyn")
+                cv.create_line(ccx - 4 * k, ccy, ccx - 1 * k, ccy + 3.2 * k,
+                               ccx + 4.4 * k, ccy - 3.4 * k,
+                               fill="#ffffff", width=max(2, int(2.4 * k)),
+                               capstyle="round", joinstyle="round",
+                               tags="dyn")
             gx0, gx1 = W - 204 * k, W - 24 * k
             gy = mid + 9 * k
             goal = self.ROOM_GOAL_MIN     # 다 같이 채우는 목표
@@ -19650,6 +19678,12 @@ class Mascot:
         self._safe("room_draw", self._room_draw)
 
     def _room_one(self, cv, p, cx0, cy0, cw, ch, P, k):
+        # 이 칸의 글꼴은 **칸 배율(k)** 을 따른다. self._uf 는 ui_k 만
+        # 보므로 전체 보기(칸이 작아진다)에서 글자만 그대로 남아 칸 밖으로
+        # 삐져나왔다 (제보 — '2h 3m 100%' 가 튀어나온 화면).
+        def _cf9(size, bold=False):
+            n9 = max(6, int(round(size * k)))
+            return (UI_FONT, n9, "bold") if bold else (UI_FONT, n9)
         slot = p.get("slot") or ""
         if slot == self.char:
             self._room_msg_box = None      # 이번 프레임의 말풍선 자리
@@ -19741,7 +19775,7 @@ class Mascot:
                            (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,
                            fill=self._tint(col, 0.5), width=0, tags="dyn")
             cv.create_text((kx0 + kx1) / 2, floor - 30 * k, text="…",
-                           font=self._uf(12), fill=P["sub"], tags="dyn")
+                           font=_cf9(12), fill=P["sub"], tags="dyn")
         fl = self._room_flash.get(slot, 0)
         # 안 켠 사람은 오늘 한 줄 대신 '아직 안 켰어요' 를 띄운다.
         # 달 글자(☾)는 기본 다면(BMP)이라 어느 글꼴에나 있다 — 이모지
@@ -19758,14 +19792,14 @@ class Mascot:
             self._rr_soft(cv, cx2 - 26 * k, ny - 12 * k, cx2 + 26 * k,
                           ny + 12 * k, 12 * k, fill="#ffffff", outline=col,
                           width=2)
-            cv.create_text(cx2, ny, text=note, font=self._uf(9, True),
+            cv.create_text(cx2, ny, text=note, font=_cf9(9, True),
                            fill=self._shade(col, 0.15), tags="dyn")
         elif msg:
             # 오늘 한 줄 — 캐릭터 머리 위 빈자리에 말풍선으로.
             # 알림이 뜬 동안은 그쪽이 먼저다 (같은 자리라 겹친다).
             # 캐릭터 머리 위 여백은 칸 위에서 44*k 까지다 (그 아래는 그림).
             # 말풍선은 꼬리까지 그 안에 들어가야 머리를 안 가린다.
-            f3 = self._uf(10)
+            f3 = _cf9(10)
             line = msg
             # 말풍선은 늘 가운데, 제 폭 그대로. 자리가 모자라면 표가
             # 비켜 준다(_room_inbox_badge) — 말풍선을 미는 쪽은 보기 안 좋다.
@@ -19804,7 +19838,7 @@ class Mascot:
         # 온다(꺼진 사람의 작업 시간이 합계에 남는 것과 같은 이유).
         lab = "Lv.%d  %s" % (int(p.get("lv") or 1),
                              str(p.get("n") or "")[:12])
-        f = self._uf(10, True)
+        f = _cf9(10, True)
         tw = self._room_tw(cv, lab, f)
         px0 = (kx0 + kx1) / 2 - tw / 2 - 12 * k
         py0 = floor + 2 * k
@@ -19821,7 +19855,7 @@ class Mascot:
         # 칭호는 안 켰어도 그대로 — '안 켰어요'는 머리 위 말풍선으로 옮겼다
         cv.create_text((kx0 + kx1) / 2, py0 + 34 * k,
                        text=str(p.get("ti") or "")[:14],
-                       font=self._uf(8, True), fill=P["sub"], tags="dyn")
+                       font=_cf9(8, True), fill=P["sub"], tags="dyn")
         # 게이지 왼쪽에 오늘 몇 시간째인지 (3h 13m 꼴, 1시간 전에는 분만)
         tmin = max(0, int(p.get("t") or 0))
         tlab = ("%dh %dm" % (tmin // 60, tmin % 60)) if tmin >= 60 \
@@ -19829,7 +19863,7 @@ class Mascot:
         bx0, bx1 = kx0 + 60 * k, kx1 - 42 * k
         by = py0 + 48 * k
         cv.create_text(bx0 - 6 * k, by + 5 * k, anchor="e", text=tlab,
-                       font=self._uf(8, True), fill=P["sub"], tags="dyn")
+                       font=_cf9(8, True), fill=P["sub"], tags="dyn")
         # 바탕·테두리·그라데이션 채움을 한 장으로 — 틈이 없다
         pr = max(0.0, min(1.0, float(p.get("p") or 0)))
         raw = self._room_raw(slot)
@@ -19838,7 +19872,7 @@ class Mascot:
         self._safe("soft_btn", self._soft_gauge, cv, bx0, by, bx1,
                    by + 11 * k, 5 * k, raw, pr, self._tint(col, 0.55))
         cv.create_text(bx1 + 6 * k, by + 5 * k, anchor="w",
-                       text="%d%%" % (pr * 100), font=self._uf(8, True),
+                       text="%d%%" % (pr * 100), font=_cf9(8, True),
                        fill=P["sub"], tags="dyn")
         sg = p.get("sg")
         if isinstance(sg, dict) and self._song_ok(sg.get("u")):
@@ -19946,15 +19980,18 @@ class Mascot:
         # 처음이 붙어 지나가 어디가 처음인지 알 수 없다. 처음과 끝에서
         # 잠깐 멈춰 주면 읽기도 쉽다.
         far = max(1, strip.width - inner)     # 끝까지 가는 데 필요한 거리
-        speed = 22.0 * S                      # 천천히 (초당 ~22px)
-        hold = 1.1                            # 처음·끝에서 쉬는 시간(초)
+        # 보통 앱의 마퀴 빠르기 — 22px/s 는 너무 느리고 처음 1.1초 멈춤은
+        # 끊긴 것처럼 보였다 (제보). 시작은 짧게 쉬고, 흐르고, 끝에서
+        # 읽을 만큼 쉬고 처음으로 되돌아간다.
+        speed = 52.0 * S
+        hold0, hold1 = 0.35, 0.9              # 시작·끝에서 쉬는 시간(초)
         run = far / speed
-        cyc = run + hold * 2
+        cyc = hold0 + run + hold1
         t4 = now % cyc
-        if t4 < hold:
+        if t4 < hold0:
             off = 0
-        elif t4 < hold + run:
-            off = int((t4 - hold) * speed)
+        elif t4 < hold0 + run:
+            off = int((t4 - hold0) * speed)
         else:
             off = int(far)
         off = max(0, min(int(far), off))
@@ -19971,11 +20008,14 @@ class Mascot:
 
     def _room_song_draw(self, cv, p, kx0, ky0, kx1, ky1, k, col, slot):
         """카드 오른쪽 여백의 노래 말풍선 — 누르면 유튜브로 간다."""
+        def _cf9(size, bold=False):
+            n9 = max(6, int(round(size * k)))
+            return (UI_FONT, n9, "bold") if bold else (UI_FONT, n9)
         sg = p["sg"]
         title = str(sg.get("t") or "노래 들으러 가기")
         if len(title) > 9:
             title = title[:9] + "…"
-        f = self._uf(8, True)
+        f = _cf9(8, True)
         txt = "\u266a " + title
         tw = self._room_tw(cv, txt, f)
         h = 20 * k
@@ -19998,7 +20038,7 @@ class Mascot:
             # 하트를 도형으로 그리고, 하트+숫자 묶음을 재서 정중앙에 놓는다.
             pink = "#f7a8bc"
             num = str(min(lk, 99))
-            f2 = self._uf(6, True)
+            f2 = _cf9(6, True)
             nw = self._room_tw(cv, num, f2)
             hw = 7 * k                   # 하트 폭
             gap = 1.5 * k
@@ -20446,6 +20486,89 @@ class Mascot:
         if int(cv.cget("height")) != h_need:
             cv.configure(height=h_need)
 
+    def _peer_brief(self, slot, dd):
+        """남의 도장판 날짜를 눌렀을 때 — 그날의 간이 브리핑 카드.
+
+        내 브리핑(화면 캡처·획·집중)은 그 사람 컴퓨터에만 있다. 신호로
+        같이 오는 것은 달력 꾸러미(날 → 분)뿐이라, 그걸로 만들 수 있는
+        것들을 브리핑 생김새로 보여 준다 — 그날 시간, 이번 달 합계·도장
+        수·연속 일수, 그 달 최고의 날이면 왕관.
+        """
+        pack = next((q.get("cal") for q in self.room_people
+                     if (q.get("slot") or "") == slot), None) or {}
+        try:
+            days = {int(k2): int(v2)
+                    for k2, v2 in (pack.get("d") or {}).items()}
+        except Exception:
+            days = {}
+        if dd not in days:
+            return
+        old = getattr(self, "_pbrief_win", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        u = self._ui
+        col = self._room_tone(slot)
+        name = next((str(q.get("n") or "") for q in self.room_people
+                     if (q.get("slot") or "") == slot), "")             or self.ROOM_NAME.get(slot, "")
+        mon = str(pack.get("m") or "")[-2:].lstrip("0") or "?"
+        mins = days[dd]
+        tot = sum(days.values())
+        # 연속 일수 — 그날에서 거꾸로
+        streak = 0
+        d2 = dd
+        while d2 in days:
+            streak += 1
+            d2 -= 1
+        best_day = max(days, key=lambda k2: days[k2])
+        win = tk.Toplevel(self._stamp_win or self.room_win or self.root)
+        self._pbrief_win = win
+        win.title("%s의 %s월 %d일" % (name, mon, dd))
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=self.card["panel"])
+        W, H = u(292), u(196)
+        cv = tk.Canvas(win, width=W, height=H, bg=self._tint(col, 0.88),
+                       highlightthickness=0)
+        cv.pack()
+        self._rr(cv, u(10), u(10), W - u(10), H - u(10), u(16),
+                 fill="#ffffff", outline=self._tint(col, 0.4), width=2)
+        cv.create_text(W / 2, u(34), text="%s월 %d일 · %s" % (mon, dd, name),
+                       font=self._uf(10, True), fill=self._shade(col, 0.2))
+        big = ("%d시간 %d분" % (mins // 60, mins % 60)) if mins >= 60             else ("%d분" % mins)
+        cv.create_text(W / 2, u(74), text=big, font=self._uf(19, True),
+                       fill=self._shade(col, 0.05))
+        if dd == best_day and len(days) > 1:
+            cv.create_text(W / 2, u(102), text="이 달 최고의 날!",
+                           font=self._uf(8, True), fill="#d99a2b")
+        cv.create_text(W / 2, u(128),
+                       text="이번 달 %d시간 %d분 · 도장 %d개"
+                       % (tot // 60, tot % 60, len(days)),
+                       font=self._uf(9), fill=self._shade(col, 0.25))
+        cv.create_text(W / 2, u(150), text="연속 %d일째 그리는 중" % streak
+                       if streak >= 2 else "이날부터 다시 시동!",
+                       font=self._uf(9), fill=self._shade(col, 0.25))
+        cv.create_text(W / 2, u(176), text="(아무 데나 누르면 닫혀요)",
+                       font=self._uf(7), fill=self._tint(col, 0.25))
+
+        def bye(_e=None):
+            self._pbrief_win = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        cv.bind("<Button-1>", bye)
+        win.bind("<Escape>", bye)
+        # 도장판 옆에 붙여 띄운다
+        try:
+            sw2 = self._stamp_win
+            win.geometry("+%d+%d" % (sw2.winfo_rootx() + 30,
+                                     sw2.winfo_rooty() + 60))
+        except Exception:
+            self._place_near(win)
+
     def _stamp_click(self, e):
         sh = self._stamp_share_hit
         if sh and sh[0] <= e.x <= sh[2] and sh[1] <= e.y <= sh[3]:
@@ -20466,6 +20589,11 @@ class Mascot:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 self._safe("ui_click", self._ui_click)
                 self._stamp_pick = None if self._stamp_pick == dd else dd
+                # 남의 도장판이면 그날의 간이 브리핑도 (달력을 공개한
+                # 사람의 날들만 애초에 그려져 있다 — 요청)
+                if self._stamp_slot and self._stamp_pick is not None:
+                    self._safe("peer_brief", self._peer_brief,
+                               self._stamp_slot, dd)
                 self._safe("stamp_draw", self._stamp_draw)
                 return
 
@@ -22741,7 +22869,11 @@ class Mascot:
         W2, H2 = float(self.WG_W), float(self.WG_H)
         dt = max(0.0, min(float(dt), 1.0 / 30.0))
         # 반걸음 둘 — 한 번에 크게 옮기면 빠른 공이 서로를 뚫는다
-        # (슬라임에서 배운 것, 지뢰 39④)
+        # (슬라임에서 배운 것, 지뢰 39④). **셋 이상으로 올리면 안 된다** —
+        # 홀수 반걸음에서는 마찰·밀치기 상쇄가 어긋나 세게 부딪혀도
+        # 상대가 안 밀린다 (실측: 셋·넷 모두 밀림 22px → 0px. 모듈을
+        # 갈아 끼우며 잰 첫 실험은 같은 초의 mtime 때문에 pyc 캐시가
+        # 옛 코드를 돌려 잘못 22px 로 읽었다).
         for _sub in range(2):
             h = dt / 2.0
             if h <= 1e-6:
@@ -22812,7 +22944,10 @@ class Mascot:
                                     if i2 not in dead] + born
                 g["best"] = max(g["best"], g["score"])
             # 위치 기반 해소 — 겹친 만큼 무게(반지름²) 반비례로 밀어낸다
-            for it2 in range(4):
+            # 겹침 해소 8번 — 4→8 (판정 디테일 제보). 쌓임이 더
+            # 단단해지고 겹침 떨림이 준다. 반걸음이 둘이면 밀치기도
+            # 그대로다 (실측: 밀림 22px 유지 · 한 걸음 0.04ms).
+            for it2 in range(8):
                 for i in range(len(fr)):
                     a = fr[i]
                     ra = self._wg_r(a["t"])
@@ -23019,13 +23154,15 @@ class Mascot:
         # 점수 알약 (왼쪽 위)
         self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
                       fill="#ffffff", outline=line, width=2)
-        cv.create_text(BX + 12 * k, 24 * k, anchor="w", text="점수",
+        # 알약은 BX-3 ~ BX+116 — 글줄 여백을 좌우 16 씩 같게 (제보:
+        # 숫자가 오른쪽 벽에 붙어 보였다)
+        cv.create_text(BX + 13 * k, 24 * k, anchor="w", text="점수",
                        font=uf(8, True), fill=sub2)
-        sc_it = cv.create_text(BX + 108 * k, 24 * k, anchor="e", text="0",
+        sc_it = cv.create_text(BX + 100 * k, 24 * k, anchor="e", text="0",
                                font=uf(13, True), fill=ink)
-        cv.create_text(BX + 12 * k, 47 * k, anchor="w", text="최고",
+        cv.create_text(BX + 13 * k, 47 * k, anchor="w", text="최고",
                        font=uf(8, True), fill=sub2)
-        bs_it = cv.create_text(BX + 108 * k, 47 * k, anchor="e", text="0",
+        bs_it = cv.create_text(BX + 100 * k, 47 * k, anchor="e", text="0",
                                font=uf(10, True), fill=sub2)
         # 다음 — 판 오른쪽 위 (동그란 접시 위에)
         npx = int(40 * k)
@@ -23039,20 +23176,97 @@ class Mascot:
         # ── 오른쪽 칸 — 판과 위아래 선을 맞춘다 ─────────────────────
         sx = bx1 + int(16 * k)
         sw = side - int(26 * k)
+        # 브금 — 창이 떠 있는 동안만 잔잔하게 돈다 (윈도우 전용:
+        # AmbientSound 가 winmm 이라 맥에서는 조용히 건너뛴다).
+        # 기본 볼륨은 원본보다 훨씬 작게 (요청 — 18%).
+        self._wg_bgm = None
+        bgm_dir = os.path.join(self.dir, "sounds", "wgame_bgm")
+        if IS_WIN and os.path.isdir(bgm_dir):
+            try:
+                self._wg_bgm = AmbientSound(bgm_dir)
+            except Exception:
+                self._wg_bgm = None
+
+        def bgm_vol():
+            try:
+                return max(0, min(100, int(self.us.get("wg_bgm_vol", 18))))
+            except Exception:
+                return 18
+
+        def bgm_apply():
+            if self._wg_bgm is None:
+                return
+            on9 = bool(self.us.get("wg_bgm_on", True))
+            try:
+                for nm9 in self._wg_bgm.names:
+                    self._wg_bgm.set(nm9, on9, bgm_vol())
+            except Exception:
+                pass
+        bgm_apply()
         tiers = self._wg_tiers()
         nt = len(tiers)
         # 게임 단추 — 오른쪽 칸 맨 위, **가운데**에 하나
         # (진화 순서 칸과 같은 중심선에 놓아야 줄이 맞아 보인다)
         btn_h = int(32 * k)
         st_btn = {}
-        bw2 = sw * 0.80
-        bx2 = sx + (sw - bw2) / 2.0
+        # 다시하기를 왼쪽으로 좁히고, 오른쪽에 재생·볼륨 단추 (요청)
+        bw2 = sw * 0.58
+        bx2 = sx + 2 * k
         by2 = ncy - btn_h / 2.0        # '다음' 접시와 같은 선상 (제보)
         self._rr_soft(cv, bx2, by2, bx2 + bw2, by2 + btn_h,
                       16 * k, fill="#ffffff", outline=line, width=2)
         cv.create_text(bx2 + bw2 / 2, by2 + btn_h / 2, text="다시하기",
                        font=uf(9, True), fill=ink)
         st_btn["new"] = (bx2, by2, bx2 + bw2, by2 + btn_h)
+        if self._wg_bgm is not None:
+            # 음표 = 음소거 토글, 그 옆에 세로 볼륨 바 (요청)
+            br9 = btn_h / 2.0
+            pcx = bx2 + bw2 + 10 * k + br9
+            vb_x = pcx + br9 + 8 * k
+            vb_w = 8 * k
+            vb_y0, vb_y1 = by2 - 2 * k, by2 + btn_h + 2 * k
+            st_btn["bgm"] = (pcx - br9, by2, pcx + br9, by2 + btn_h)
+            st_btn["volbar"] = (vb_x - 4 * k, vb_y0 - 4 * k,
+                                vb_x + vb_w + 4 * k, vb_y1 + 4 * k)
+
+            def draw_bgm():
+                cv.delete("bgmui")
+                on9 = bool(self.us.get("wg_bgm_on", True))
+                self._safe("soft_btn", self._soft_dot, cv, pcx,
+                           by2 + br9, br9,
+                           self._tint(cd["fill"], 0.55) if on9
+                           else "#ffffff",
+                           outline=line, width=2)
+                cv.create_text(pcx, by2 + br9, text="\u266a",
+                               font=uf(10, True),
+                               fill=ink if on9 else self._tint(line, 0.2),
+                               tags="bgmui")
+                if not on9:            # 음소거 — 음표에 사선
+                    cv.create_line(pcx - 7 * k, by2 + br9 + 7 * k,
+                                   pcx + 7 * k, by2 + br9 - 7 * k,
+                                   fill="#e0455f", width=max(2, int(2 * k)),
+                                   capstyle="round", tags="bgmui")
+                # 세로 볼륨 바 — 위가 100, 아래가 0
+                self._rr(cv, vb_x, vb_y0, vb_x + vb_w, vb_y1, vb_w / 2,
+                         fill="#ffffff", outline=line, width=1)
+                fr9 = bgm_vol() / 100.0
+                fy9 = vb_y1 - (vb_y1 - vb_y0 - 4) * fr9 - 2
+                if fr9 > 0.02:
+                    self._rr(cv, vb_x + 1.5, fy9, vb_x + vb_w - 1.5,
+                             vb_y1 - 2, (vb_w - 3) / 2,
+                             fill=(self._tint(cd["fill"], 0.30) if on9
+                                   else self._tint(cd["fill"], 0.70)),
+                             width=0)
+                cv.tag_raise("bgmui")
+
+            def vol_from_y(yy):
+                fr9 = (vb_y1 - yy) / max(1.0, vb_y1 - vb_y0)
+                self.us["wg_bgm_vol"] = int(max(0, min(100,
+                                                       round(fr9 * 100))))
+                bgm_apply()
+                self._safe("bgm_ui", draw_bgm)
+            win._wg_volfn = vol_from_y   # st 는 아직 없다 — 창에 붙인다
+            draw_bgm()
         # 진화 순서 — **두 벌 모두** 보여 준다 (요청). 지금 하는 벌만
         # 보여 주면 다른 벌에 누가 있는지 영영 알 수 없다.
         rows_n = -(-nt // 4)                   # 한 벌이 차지하는 줄 수
@@ -23257,6 +23471,22 @@ class Mascot:
             # 게임오버 — 한 번만 그린다
             if g2["over"] and not st["over_ui"]:
                 st["over_ui"] = True
+                st["over_t0"] = time.time()
+                # 색종이 조각들 — 방향·색·회전을 한 번 뽑아 두고 아래에서
+                # 프레임마다 위치만 계산한다
+                rnd9 = random.Random(7)
+                cols9 = [self._tint(cd["fill"], 0.25), "#ffd75e",
+                         "#8fd18f", "#7fb0ff", "#ff9ec4", "#ffffff"]
+                st["confetti"] = [
+                    (rnd9.uniform(BX + 20 * k, bx1 - 20 * k),
+                     rnd9.uniform(-60, -8) * k,
+                     rnd9.uniform(-26, 26),
+                     rnd9.uniform(60, 130),
+                     rnd9.choice(cols9),
+                     rnd9.uniform(3.2, 6.0) * k,
+                     rnd9.uniform(1.5, 5.0),
+                     rnd9.random() < 0.22)
+                    for _ in range(26)]
                 mx2, my2 = (BX + bx1) / 2, (BY + by1) / 2
                 self._rr_soft(cv, mx2 - 110 * k, my2 - 64 * k,
                               mx2 + 110 * k, my2 + 64 * k, 16 * k,
@@ -23284,6 +23514,37 @@ class Mascot:
             elif not g2["over"] and st["over_ui"]:
                 st["over_ui"] = False
                 cv.delete("over")
+                cv.delete("overfx")
+            # 끝났을 때 — 색종이·하트가 3초 흩날린다 (귀엽게, 요청)
+            cv.delete("overfx")
+            if g2["over"] and st.get("confetti"):
+                p9 = time.time() - st.get("over_t0", 0.0)
+                if p9 < 3.0:
+                    for (x9, y9, vx9, vy9, c9, s9, w9,
+                         heart9) in st["confetti"]:
+                        yy9 = y9 + vy9 * k * p9 + 40 * k * p9 * p9
+                        if yy9 > by1 - 6 * k:
+                            continue
+                        xx9 = x9 + vx9 * k * p9                             + math.sin(p9 * w9 + x9) * 7 * k
+                        if heart9:
+                            cv.create_text(xx9, max(BY + 8 * k, yy9),
+                                           text="\u2665",
+                                           font=uf(int(6 + 4 * (1 - p9 / 3))),
+                                           fill="#ff9ec4", tags="overfx")
+                        else:
+                            a9 = p9 * w9 * 2 + x9
+                            dx9 = math.cos(a9) * s9
+                            dy9 = math.sin(a9) * s9 * 0.5
+                            cv.create_line(xx9 - dx9,
+                                           max(BY + 6 * k, yy9 - dy9),
+                                           xx9 + dx9,
+                                           max(BY + 6 * k, yy9 + dy9),
+                                           fill=c9,
+                                           width=max(2, int(s9 * 0.7)),
+                                           capstyle="round", tags="overfx")
+                    cv.tag_raise("over")
+                else:
+                    st["confetti"] = None
 
         def tick():
             try:
@@ -23311,6 +23572,10 @@ class Mascot:
                             self._safe("wg_bake", wrap_some)
 
         def on_move(e):
+            fn8 = getattr(win, "_wg_volfn", None)
+            if st.get("voldrag") and fn8:
+                fn8(e.y)               # 볼륨 바를 끌어서 조절
+                return
             g2 = self._wg
             if g2 is not None:
                 g2["drop_x"] = (e.x - BX) / k
@@ -23322,6 +23587,20 @@ class Mascot:
             for act, bb2 in st_btn.items():    # 오른쪽 위 게임 단추
                 if bb2[0] <= e.x <= bb2[2] and bb2[1] <= e.y <= bb2[3]:
                     self._safe("ui_click", self._ui_click)
+                    if act == "bgm":               # 음표 = 음소거 토글
+                        self.us["wg_bgm_on"] = \
+                            not bool(self.us.get("wg_bgm_on", True))
+                        self._save_settings()
+                        bgm_apply()
+                        self._safe("bgm_ui", draw_bgm)
+                        return
+                    if act == "volbar":            # 세로 바 — 누른 높이로
+                        fn9 = getattr(win, "_wg_volfn", None)
+                        if fn9:
+                            st["voldrag"] = True
+                            fn9(e.y)
+                            self._save_settings()
+                        return
                     cv.delete("over")
                     cv.delete("fruit")
                     cv.delete("warn")
@@ -23353,7 +23632,12 @@ class Mascot:
             self._safe("wg_drop", self._wg_drop)
 
         cv.bind("<Motion>", on_move)
+        cv.bind("<B1-Motion>", on_move)
         cv.bind("<Button-1>", on_click)
+        cv.bind("<ButtonRelease-1>",
+                lambda _e: (st.pop("voldrag", None),
+                            self._save_settings()
+                            if getattr(win, "_wg_volfn", None) else None))
         win.bind("<Escape>", lambda _e: win.destroy())
 
         def gone(_e=None):
@@ -23369,6 +23653,13 @@ class Mascot:
                 self._wg_winref = None
             self._safe("wg_save", self._wg_save)
             self._wg = None        # 판은 버린다 — 다음에 열면 처음부터
+            got9 = self._wg_bgm    # 브금도 창과 함께 끈다
+            self._wg_bgm = None
+            if got9 is not None:
+                try:
+                    got9.close()
+                except Exception:
+                    pass
             got3 = self._wg_wrap_after
             if got3 is not None:
                 try:
@@ -23471,26 +23762,41 @@ class Mascot:
                        font=self._uf(7, True), justify="center",
                        fill=P["ink" if vw2 else "sub"], tags="dyn")
         self._room_all_btn = (ax0, by, ax0 + bw, by + bw)
-        # 미니 게임(수박게임) 단추 — config "wgame" (전원 배포)
+        # '메뉴' 단추 — 누르면 위로 미니게임·꾸미기가 펼쳐진다 (요청).
+        # 게임이 늘고 있어 단추를 하나로 모았다.
         self._room_game_btn = None
-        if self.cfg.get("wgame"):
-            gx0 = ax0 + bw + 10 * k
-            self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
-                       by + bw / 2, bw / 2, "#eaf6df",
-                       outline="#ffffff", width=3.5, shadow=True)
-            cv.create_text(gx0 + bw / 2, by + bw / 2, text="미니\n게임",
-                           justify="center",
-                           font=self._uf(7, True), fill="#5f8352",
-                           tags="dyn")
-            self._room_game_btn = (gx0, by, gx0 + bw, by + bw)
-        # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
-        dx0 = W - 20 * k - bw
-        self._safe("soft_btn", self._soft_dot, cv, dx0 + bw / 2, by + bw / 2,
-                   bw / 2, cust or "#f6f0f8", outline="#ffffff", width=3.5,
-                   shadow=True)
-        cv.create_text(dx0 + bw / 2, by + bw / 2, text="꾸미기",
-                       font=self._uf(8, True), fill=P["sub"], tags="dyn")
-        self._room_deco_btn = (dx0, by, dx0 + bw, by + bw)
+        self._room_deco_btn = None
+        self._room_menu_items = []
+        gx0 = ax0 + bw + 10 * k
+        open9 = bool(self._room_menu_open)
+        self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
+                   by + bw / 2, bw / 2,
+                   self._tint(self._room_tone(self.char), 0.55)
+                   if open9 else "#eaf6df",
+                   outline="#ffffff", width=3.5, shadow=True,
+                   tags=("dyn", "ui"))
+        cv.create_text(gx0 + bw / 2, by + bw / 2, text="메뉴",
+                       font=self._uf(8, True),
+                       fill=P["ink"] if open9 else "#5f8352",
+                       tags=("dyn", "ui"))
+        self._room_menu_btn = (gx0, by, gx0 + bw, by + bw)
+        if open9:
+            rows9 = []
+            if self.cfg.get("wgame") or self.cfg.get("ctile"):
+                rows9.append(("미니\n게임", "game", "#eaf6df", "#5f8352"))
+            rows9.append(("꾸미기", "deco", cust or "#f6f0f8", P["sub"]))
+            yy9 = by
+            for label9, act9, col9, ink9 in rows9:
+                yy9 -= bw + 8 * k
+                self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
+                           yy9 + bw / 2, bw / 2, col9,
+                           outline="#ffffff", width=3.5, shadow=True,
+                           tags=("dyn", "ui"))
+                cv.create_text(gx0 + bw / 2, yy9 + bw / 2, text=label9,
+                               justify="center", font=self._uf(7, True),
+                               fill=ink9, tags=("dyn", "ui"))
+                self._room_menu_items.append(
+                    ((gx0, yy9, gx0 + bw, yy9 + bw), act9))
 
     POKE_BURST = 5           # 10초 안에 이 횟수째부터 막는다
     POKE_WINDOW = 10.0
@@ -23703,8 +24009,16 @@ class Mascot:
                                       order.get(q.get("slot") or "", 99),
                                       q.get("slot") or ""))
         here = set(q.get("slot") or "" for q in seats)
+        now9 = time.time()
         for slot in self.ROOM_ALL:
             if slot in here:
+                continue
+            # 명단에서 사라진 지 150초 안이면 마지막 모습 그대로 —
+            # 신호가 한 번 출렁일 때마다 꺼짐/켜짐이 널뛰지 않게 (제보:
+            # 성실이가 홈에서 자꾸 껐다 켜졌다 해 보임)
+            got9 = self._room_last_p.get(slot)
+            if got9 and now9 - got9[0] < 150.0:
+                seats.append(dict(got9[1]))
                 continue
             # '내 캐릭터를 안 보이게'를 켰으면 여기서도 빼야 한다. 위에서
             # 내 자리만 안 넣고 이 줄에서 다시 넣는 바람에, 설정을 켜도
@@ -24535,6 +24849,28 @@ class Mascot:
             H0 += max(0, ideal - base_t) + int(26 * k)
         return cols, rows, cols * cw + pad, min(H0, int(sh * 0.94))
 
+    def _room_moving(self):
+        """홈 창을 지금 끌고 있는가 — 끄는 동안은 무거운 연출을 쉰다.
+
+        창을 잡고 움직이면 WM 드래그와 매 프레임 연출(숨쉬기·반짝이·
+        마퀴의 LANCZOS 축소)이 CPU 를 나눠 써서 버벅였다 (제보). 위치가
+        변하는 동안 + 0.3초는 연출을 멈춘다 — 눈에는 '끌 때 잠깐
+        고요해지는' 정도로만 보인다.
+        """
+        win = self.room_win
+        if win is None:
+            return False
+        try:
+            pos = (win.winfo_x(), win.winfo_y())
+        except Exception:
+            return False
+        now = time.time()
+        if pos != getattr(self, "_room_pos_last", None):
+            self._room_pos_last = pos
+            self._room_pos_at = now
+            return True
+        return now - getattr(self, "_room_pos_at", 0.0) < 0.3
+
     def _room_relayout(self):
         """창 크기가 바뀌면 칸 배치를 다시 잡는다.
 
@@ -24706,14 +25042,27 @@ class Mascot:
                 self._room_key_last = None
                 self._safe("room_draw", self._room_draw)
                 return
-        db = self._room_deco_btn
-        if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
-            self._safe("room_deco", self._room_deco_win)
+        mb2 = getattr(self, "_room_menu_btn", None)
+        if mb2 and mb2[0] <= e.x <= mb2[2] and mb2[1] <= e.y <= mb2[3]:
+            self._room_menu_open = not self._room_menu_open
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
             return
-        gb2 = getattr(self, "_room_game_btn", None)
-        if gb2 and gb2[0] <= e.x <= gb2[2] and gb2[1] <= e.y <= gb2[3]:
-            self._safe("wgame_win", self._wg_win)
-            return
+        if self._room_menu_open:
+            for box9, act9 in list(getattr(self, "_room_menu_items", [])):
+                if box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]:
+                    self._room_menu_open = False
+                    self._room_key_last = None
+                    self._safe("room_draw", self._room_draw)
+                    if act9 == "game":
+                        self._safe("wgame_win", self._wg_win)
+                    else:
+                        self._safe("room_deco", self._room_deco_win)
+                    return
+            # 딴 곳을 누르면 접는다 (그 클릭 자체는 그대로 이어진다)
+            self._room_menu_open = False
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
         ab2 = getattr(self, "_room_all_btn", None)
         if ab2 and ab2[0] <= e.x <= ab2[2] and ab2[1] <= e.y <= ab2[3]:
             # 한 바퀴 돈다 — 묶어 두면 전체 보기에서 단추가 안 먹는다

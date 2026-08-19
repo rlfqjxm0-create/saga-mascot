@@ -1,7 +1,7 @@
 {
- "version": 1787141088,
+ "version": 1787149404,
  "files": {
-  "mascot.py": "b0e1667394965173da3c6710dec1bc8a91f4c8248c66343fb113c537d6e5c793",
+  "mascot.py": "86de92eec2e862cfe83f5677f640ead3c7a3a847ae145ed203d6a9032dac20ba",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -421,10 +421,17 @@
   "parts_saga/sounds/wgame/merge/merge5.wav": "7d5fae96532888841b8f79334c3782afc5e65845140cb5c2999a4b925b86f433",
   "parts_saga/sounds/wgame/merge/merge6.wav": "19aca917bab5520472c1572f9a9454d3ebcf6d58f128dbe7c0c27afaa294f557",
   "parts_saga/sounds/wgame/merge/merge7.wav": "1a0fa10342c6082de3759b725418c654b4a2359fb49caa33ab621a720c3c1453",
+  "parts_saga/sounds/wgame_bgm/bgm.wav": "fb72573434f72592457ebe09806225e7b3d1748202ee5c8b767d79e1a1f54a58",
   "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "**수박게임에 브금이 생겼어요!** 창을 열면 잔잔하게 흘러요. '다시하기' 옆의 음표(♪)를 누르면 음소거, 그 옆 세로 막대를 누르거나 끌면 소리 크기를 바꿀 수 있어요 (꺼 두면 다음에도 꺼진 채예요). 게임이 끝나면 색종이도 흩날립니다",
+  "홈 아래 단추가 '메뉴' 하나로 모였어요 — 누르면 위로 '미니게임'과 '꾸미기'가 펼쳐집니다",
+  "다 같이 채우는 하루 목표가 50시간이 됐어요 (사람이 늘었으니까요!). 다 채우면 시간 옆에 초록 체크가 붙습니다",
+  "달력을 공개한 친구의 도장판에서 날짜를 누르면 **그날의 브리핑 카드**가 떠요 — 그날 시간, 이번 달 합계, 연속 일수까지",
+  "홈이 더 안정됐어요 — 친구 신호가 잠깐 출렁여도 자리가 껐다 켜졌다 하지 않고, 전체 보기에서 글자가 칸 밖으로 나오던 것과 창을 끌 때 버벅이던 것도 고쳤습니다. 말풍선 호버도 더 빠르고 자연스럽게",
+  "수박게임 다듬기 — 부딪히고 쌓이는 판정이 더 촘촘해졌고, 점수 칸 숫자 자리도 정돈했어요"
+ ]
 }
