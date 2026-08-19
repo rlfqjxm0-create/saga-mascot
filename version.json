@@ -1,14 +1,14 @@
 {
- "version": 1787152870,
+ "version": 1787171383,
  "files": {
-  "mascot.py": "add168b3d062c0fc5859f9ef9b94e460bd94b4e11651827de9b61011aac34592",
+  "mascot.py": "248ca93288f5ca1bd90eaaef919eed951f88fde618921f9aae399491d781ee1d",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
   "parts_saga/arm_right_typing.png": "8e2744dd074d326146bd1ea39d0a36490125f9918e466f153be74090638d517b",
   "parts_saga/back.png": "be4f06d5687474c90299d598141a8970c86b8965597343611a098660b6103b62",
   "parts_saga/body_open.png": "65378a26603924fb58d7a015758c831f25af0a025ee5df4e483ec5d2124eef2f",
-  "parts_saga/config.json": "917a6381c16e8eedfec0c3981516609c5fa4bffd71eb0cba09b9ddfc3990da1a",
+  "parts_saga/config.json": "8378dbc1b21daf8994341dd12f09ec6ff57e256ede3cdb2927c92bf9ea8d7709",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "6c54dfa18470e2a17e6080f2b4830a36e3dd49ff751a5c79403c1daa8cb5e5f1",
   "parts_saga/eyes_closed.png": "10b1932ea6dc355094a470d1b4bda98e181b98134986dc0827d9c63d6f2a9143",
@@ -132,6 +132,8 @@
   "parts_saga/sounds/banana split stock/banana-s-6.wav": "48cfd2717239effe50951f4096646d59e310f5d71c2e3d9324690038ca35af41",
   "parts_saga/sounds/banana split stock/config.json": "711d56f0577c4b6bd4e265406b415a6c3c33f78a6715ae8727c94c006d879930",
   "parts_saga/sounds/banana split stock/LICENSE.txt": "2e8578f16b6ea265412166e8b4b1da045fcc11f28db03d664908410124a2f01e",
+  "parts_saga/sounds/ctile/pop/pop1.wav": "dc1c5535c83779e4a41bf21857659275e3954aab2ff2b6b4e58217b4a0d23162",
+  "parts_saga/sounds/ctile_bgm/bgm.wav": "e8f3390c041b05caf07ee869ab0842b7ff38cdc81fb78b92d2a7222bc8f028d3",
   "parts_saga/sounds/frog mini/config.json": "f3d63d0dc8b12d5fc611efb6463516ce50ef75eca87e57ca69247d8a1cd6e6c6",
   "parts_saga/sounds/frog mini/frogmini-back1.wav": "b30155e8242b6b092c10dbd909ac29212597aedeaa24ca5e3e37a952e0ce6696",
   "parts_saga/sounds/frog mini/frogmini-enter1.wav": "e1e62c4ffb7ec5f3ce24f2e8f045a9957915ac73e1335afc3bbc6a492b80760c",
@@ -147,6 +149,7 @@
   "parts_saga/sounds/frog mini/frogmini-key9.wav": "cdebed9101f9b6bfb0bf973f2678a1ef888063d0256290b6167c26de21d6f37a",
   "parts_saga/sounds/frog mini/frogmini-shift1.wav": "d3e46fbbbb2c19d4b2cebb017edbd44504120ed55b3f8e219bc8e216f810ca19",
   "parts_saga/sounds/frog mini/frogmini-space1.wav": "1d063dcd83cd578229b9c01aed47dfb57116eb6fdbe6d650604bedd50396593b",
+  "parts_saga/sounds/gameover/over1.wav": "98f0544212192e5c718ef3fbe3594f427de5c49b1fdfd59cb7ad65246dbcabb2",
   "parts_saga/sounds/Gateron Black Ink - Revolt/config.json": "92b71f492f667f1591a1aaa3bd14c758220e9cbafd649dcc399bd75c2a271168",
   "parts_saga/sounds/Gateron Black Ink - Revolt/Gateron Black.wav": "7e743b05e2c521523bb173cc68c145b628045acbc485599a8d39d57095d0c432",
   "parts_saga/sounds/link65 gold/config.json": "6f6225a5b64efdc73c76039d0081263f6dc402979af3a988c351161f64c01e88",
@@ -209,7 +212,7 @@
   "parts_saga/sounds/pen/clip_5.wav": "52237409b942b76ba313bd20bb8b3222b40a8a87fd33f941c7fd2485b8aa35c8",
   "parts_saga/sounds/pen/clip_6.wav": "ffdb7c929f56e1f27bca1322413e3355497e013248727ccbe940965686b6144e",
   "parts_saga/sounds/poke/poke.wav": "5b4691361a56af9c93ba9ea7429715d60941784d82afcfc715a07b733b4ff213",
-  "parts_saga/sounds/pomo/start.wav": "86557d3d8ac5f43db53f3927797f02414e7d9d5b4cc56eba409d459c1c32037d",
+  "parts_saga/sounds/pomo/start.wav": "e0a752a4c4b586580e49ebc901079734e87831dc39327733326a43719e2bde98",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/alt.wav": "31983a24e5a0190043efcee356d5ad0ecf1d120c761b2dcfc38bac5737cfae77",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/back.wav": "8531c65d5c8ae0d39ae927e95c67c9793152ac5a621804c583d017aed3f7008d",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/caps.wav": "9dcb05127433771017532e0a541d5638da3af030c638d8e0b3c20b309d0e9459",
@@ -421,17 +424,17 @@
   "parts_saga/sounds/wgame/merge/merge5.wav": "7d5fae96532888841b8f79334c3782afc5e65845140cb5c2999a4b925b86f433",
   "parts_saga/sounds/wgame/merge/merge6.wav": "19aca917bab5520472c1572f9a9454d3ebcf6d58f128dbe7c0c27afaa294f557",
   "parts_saga/sounds/wgame/merge/merge7.wav": "1a0fa10342c6082de3759b725418c654b4a2359fb49caa33ab621a720c3c1453",
-  "parts_saga/sounds/wgame_bgm/bgm.wav": "fb72573434f72592457ebe09806225e7b3d1748202ee5c8b767d79e1a1f54a58",
+  "parts_saga/sounds/wgame_bgm/bgm.wav": "a868a90ed84914d20e4bc27991db01f77e4bac8fb5f20da87f78c3076543ebb4",
   "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
  "notes": [
-  "**수박게임에 브금이 생겼어요!** 창을 열면 잔잔하게 흘러요. '다시하기' 옆의 음표(♪)를 누르면 음소거, 그 옆 세로 막대로 소리 크기를 바꿉니다 (꺼 두면 다음에도 꺼진 채예요). 게임이 끝나면 색종이도 흩날려요",
-  "**머리들이 서로·바닥에 딱 붙게 고쳤어요.** 프고·연어처럼 가로가 긴 얼굴이 바닥에서 떠 있고 옆에 빈틈이 생기던 문제예요 — 이제 얼굴 모양 그대로 부딪히고 쌓입니다",
-  "홈 아래 오른쪽에 '메뉴' 단추가 생겼어요 — 누르면 위로 '미니게임'과 '꾸미기'가 펼쳐집니다",
-  "다 같이 채우는 하루 목표가 50시간이 됐어요. 다 채우면 시간 옆에 초록 체크가 붙습니다",
-  "달력을 공개한 친구의 도장판에서 날짜를 누르면 **그날의 브리핑 카드**가 떠요 — 그날 시간, 이번 달 합계, 연속 일수까지",
-  "그 밖에 — 친구 신호가 잠깐 출렁여도 자리가 껐다 켜졌다 하지 않고, 전체 보기에서 글자가 칸 밖으로 나오던 것, 창을 끌 때 버벅이던 것, 말풍선 호버 속도까지 다듬었어요"
+  "**새 게임 '컬러타일'이 생겼어요!** 홈 아래 오른쪽 '메뉴'에서 열 수 있어요. 타일이 없는 빈 칸을 누르면 위·아래·왼쪽·오른쪽으로 가장 가까운 타일을 하나씩 보는데, 그중 같은 얼굴이 둘 이상이면 사라져요. 판을 다 지우는 게 목표! 물음표(?) 단추를 누르면 게임 방법과 요령이 나와요 (요령 하나만 미리 말하면 — **셋이 한꺼번에 지워지는 자리는 피하세요.** 홀수로 지우면 짝을 잃은 타일이 끝에 남아요)",
+  "**게임이 끝나면 캐릭터가 축하해 줘요.** 폭죽이 터지고 한마디 건네요. 바로 아래 큰 단추로 다시 시작할 수 있어요. 끝날 때 나는 소리도 새로 생겼어요",
+  "**수박게임·컬러타일에 모두의 랭킹이 생겼어요.** 친구들 최고 점수를 닉네임과 함께 5위까지 보여 주고, 1·2·3위는 금·은·동으로 표시돼요. 예전에는 사람마다 순위가 달랐는데(서로 접속한 적이 있어야 보였어요) 이제 아는 기록을 서로 전해 줘서 다 같은 순위가 보입니다",
+  "수박게임 머리들이 **덜 통통 튀게** 했어요. 브금도 한 바퀴 돌 때 뚝 끊겼다 살아나던 것을 매끄럽게 이었어요",
+  "뽀모도로 알림음이 **잘 들리게** 커졌어요 (소리는 나고 있었는데 다른 소리의 절반 크기라 안 들렸어요)",
+  "그 밖에 — 게임 화면을 더 아기자기하게 다듬었고(글자에 테두리, 알약 모양 게이지, 굵어진 테두리), 여러 자잘한 손질이 있어요"
  ]
 }
