@@ -4879,6 +4879,7 @@ class Mascot:
         # 수박게임 (홈 미니게임)
         self._wg = None              # 판 상태 (열 때 읽는다)
         self._wg_winref = None       # 게임 창
+        self._wg_abc = {}            # slot → (가로, 세로) 반지름 배수
         self._wg_imgs = {}           # (slot, 지름, 각도칸) → 머리 그림
         self._wg_pils = {}           # (slot, 지름) → 원본 판 (회전 전)
         self._wg_bake = {}           # 스레드가 미리 구운 판 (PIL)
@@ -22304,6 +22305,75 @@ class Mascot:
         """마지막 단계 번호 (사람이 모자라면 그만큼 작다)."""
         return len(self._wg_tiers()) - 1
 
+    # 타원은 **공과 함께 돈다** (아래 _wg_extent·_wg_rdir 이 각도를 받는다).
+    # 그래서 길쭉한 얼굴도 예전처럼 굴러도 되고, 굴러도 바닥·이웃에 딱
+    # 붙는다. (한동안 '납작하면 안 구른다'로 막아 뒀는데, 각도를 넣으면
+    # 막을 이유가 없어져 되돌렸다.)
+    WG_AB_MIN, WG_AB_MAX = 0.34, 1.36   # 타원 반지름의 아래·위 한계
+
+    def _wg_ab(self, slot):
+        """그 얼굴의 가로·세로 반지름 배수 (원 반지름 1 기준).
+
+        머리 그림은 동그랗지 않다 — 프고는 원의 가로를 122%, 세로를
+        43% 채운다(실측). 원으로 부딪히면 납작한 얼굴은 **바닥에서
+        떠 있고 이웃과도 틈이 벌어진다** (제보 사진). 그래서 충돌만
+        타원으로 본다: 벽·바닥·천장은 가로/세로 반지름을 쓰고, 공끼리는
+        맞닿는 방향의 타원 반지름을 쓴다. 그림 크기는 그대로다.
+        """
+        got = self._wg_abc.get(slot)
+        if got is not None:
+            return got
+        ab = (1.0, 1.0)
+        try:
+            head = self._safe_str(self._wg_head_stack, slot) or None
+            if head is None:
+                wp = self._wg_art(slot, "wg_head.png")
+                if wp:
+                    head = Image.open(wp).convert("RGBA")
+            if head is not None and head.width > 4:
+                bb = head.getchannel("A").getbbox()
+                w2, h2 = bb[2] - bb[0], bb[3] - bb[1]
+                gm = (w2 * h2) ** 0.5
+                # 그리는 쪽(_wg_head_pil)과 같은 배율로 재야 뜻이 맞는다
+                kk = 1.0 / max(1.0, (max(w2, h2) * 0.55 + gm * 0.45))
+                ab = (max(self.WG_AB_MIN, min(self.WG_AB_MAX, w2 * kk)),
+                      max(self.WG_AB_MIN, min(self.WG_AB_MAX, h2 * kk)))
+        except Exception:
+            ab = (1.0, 1.0)
+        if len(self._wg_abc) > 40:
+            self._wg_abc.clear()
+        self._wg_abc[slot] = ab
+        return ab
+
+    def _wg_rxy(self, tier):
+        """그 단계의 가로·세로 반지름 (px)."""
+        tiers = self._wg_tiers()
+        i = max(0, min(len(tiers) - 1, int(tier)))
+        r = self._wg_r(tier)
+        a2, b2 = self._wg_ab(tiers[i])
+        return r * a2, r * b2
+
+    def _wg_rdir(self, tier, nx, ny, ang=0.0):
+        """그 방향으로 뻗은 타원 반지름 — 공끼리 닿는 거리에 쓴다.
+
+        타원은 공과 같이 돌므로, 방향을 공의 각도만큼 되돌려 재고 나서
+        타원 식에 넣는다.
+        """
+        rx, ry = self._wg_rxy(tier)
+        if ang:
+            c9, s9 = math.cos(ang), math.sin(ang)
+            nx, ny = c9 * nx + s9 * ny, -s9 * nx + c9 * ny
+        return math.sqrt((rx * nx) ** 2 + (ry * ny) ** 2)
+
+    def _wg_extent(self, tier, ang=0.0):
+        """돌아간 타원이 가로·세로로 차지하는 반폭 (벽·바닥·넘침 선용)."""
+        rx, ry = self._wg_rxy(tier)
+        if not ang:
+            return rx, ry
+        c9, s9 = abs(math.cos(ang)), abs(math.sin(ang))
+        return (math.sqrt((rx * c9) ** 2 + (ry * s9) ** 2),
+                math.sqrt((rx * s9) ** 2 + (ry * c9) ** 2))
+
     def _wg_r(self, tier):
         i = max(0, min(len(self.WG_RADII) - 1, int(tier)))
         return float(self.WG_RADII[i])
@@ -22786,6 +22856,7 @@ class Mascot:
         """다시 하기 — 최고 기록과 랭킹만 남기고 판을 비운다."""
         old = self._wg or {}
         best, rank = old.get("best", 0), list(old.get("rank") or [])
+        self._wg_abc.clear()           # 벌이 바뀌면 얼굴도 바뀐다
         self._wg = self._wg_default()
         self._wg["best"] = best
         self._wg["rank"] = rank
@@ -22798,9 +22869,9 @@ class Mascot:
         if g["over"] or now < g["cool"] or len(g["fruits"]) >= self.WG_MAX:
             return False
         t2 = g["cur"]
-        r = self._wg_r(t2)
-        x = max(r + 1, min(self.WG_W - r - 1, float(g["drop_x"])))
-        g["fruits"].append({"x": x, "y": r + 2.0, "vx": 0.0, "vy": 40.0,
+        rx9, ry9 = self._wg_rxy(t2)
+        x = max(rx9 + 1, min(self.WG_W - rx9 - 1, float(g["drop_x"])))
+        g["fruits"].append({"x": x, "y": ry9 + 2.0, "vx": 0.0, "vy": 40.0,
                             "t": t2, "born": now})
         g["cur"] = g["nxt"]
         g["nxt"] = random.randrange(self.WG_DROP_N)
@@ -22900,14 +22971,16 @@ class Mascot:
                 a = fr[i]
                 if a["t"] >= self._wg_top():
                     continue          # 마지막 단계는 안 합쳐진다 (아래 설명)
-                ra = self._wg_r(a["t"])
                 for j in range(i + 1, len(fr)):
                     if j in used or fr[j]["t"] != a["t"]:
                         continue
                     b = fr[j]
-                    rr = ra + self._wg_r(b["t"])
                     dx = b["x"] - a["x"]
                     dy = b["y"] - a["y"]
+                    dd = math.sqrt(dx * dx + dy * dy) or 1.0
+                    nx0, ny0 = dx / dd, dy / dd
+                    rr = (self._wg_rdir(a["t"], nx0, ny0, a.get("a", 0.0))
+                          + self._wg_rdir(b["t"], nx0, ny0, b.get("a", 0.0)))
                     # '닿으면' 합체 (+0.5 여유) — 겹쳐야만 합쳐지게 두면
                     # 바닥에 나란히 앉은 같은 단계 둘이 영영 안 합쳐진다.
                     # 해소가 정확히 맞닿는 자리(d = rr)에 세워 두기 때문.
@@ -22944,27 +23017,29 @@ class Mascot:
                                     if i2 not in dead] + born
                 g["best"] = max(g["best"], g["score"])
             # 위치 기반 해소 — 겹친 만큼 무게(반지름²) 반비례로 밀어낸다
-            # 겹침 해소 8번 — 4→8 (판정 디테일 제보). 쌓임이 더
-            # 단단해지고 겹침 떨림이 준다. 반걸음이 둘이면 밀치기도
-            # 그대로다 (실측: 밀림 22px 유지 · 한 걸음 0.04ms).
-            for it2 in range(8):
+            # 겹침 해소 4번. 8까지 올려 봤더니 겹침이 더 완전히 풀려
+            # 공들이 서로 멀찍이 앉는 바람에 판이 빨리 차서 한 판이
+            # 절반으로 짧아졌다 (실측 125 → 105판). 4가 균형점이다.
+            for it2 in range(4):
                 for i in range(len(fr)):
                     a = fr[i]
-                    ra = self._wg_r(a["t"])
                     for j in range(i + 1, len(fr)):
                         b = fr[j]
-                        rb = self._wg_r(b["t"])
-                        rr = ra + rb
                         dx = b["x"] - a["x"]
                         dy = b["y"] - a["y"]
                         d2 = dx * dx + dy * dy
-                        if d2 >= rr * rr:
-                            continue
                         if d2 <= 1e-9:         # 같은 자리 — 위로 뽑는다
                             dx, dy, d = 0.0, -1.0, 1.0
                         else:
                             d = math.sqrt(d2)
                         nx, ny = dx / d, dy / d
+                        # 맞닿는 방향의 타원 반지름 — 납작한 얼굴은
+                        # 위아래로 얕고 좌우로 넓다
+                        ra = self._wg_rdir(a["t"], nx, ny, a.get("a", 0.0))
+                        rb = self._wg_rdir(b["t"], nx, ny, b.get("a", 0.0))
+                        rr = ra + rb
+                        if d >= rr:
+                            continue
                         # 깊이 겹친 것을 한 번에 다 밀면 그 점프를 속도
                         # 되구하기가 진짜 속도로 오해해 공이 로켓처럼
                         # 난다 (실측 y=-333, 상한 10에서도 y=-299).
@@ -22999,21 +23074,23 @@ class Mascot:
                             a["w"] = a.get("w", 0.0) + slip / ra * 0.05
                             b["w"] = b.get("w", 0.0) + slip / rb * 0.05
                 for f in fr:                   # 벽·바닥 (자리만 되민다)
-                    r = self._wg_r(f["t"])
-                    if f["x"] < r:
-                        f["x"] = r
+                    # 타원 — 납작한 얼굴이 바닥에 딱 붙는다 (제보 사진:
+                    # 프고가 바닥에서 떠 있었다)
+                    rx9, ry9 = self._wg_extent(f["t"], f.get("a", 0.0))
+                    if f["x"] < rx9:
+                        f["x"] = rx9
                         f["wl"] = True
-                    elif f["x"] > W2 - r:
-                        f["x"] = W2 - r
+                    elif f["x"] > W2 - rx9:
+                        f["x"] = W2 - rx9
                         f["wl"] = True
                     # **천장** — 겹침을 풀다 위로 튄 공이 상자 밖으로
                     # 날아가 안 돌아온 제보. 위로도 막는다.
-                    if f["y"] < self.WG_CEIL + r:
-                        f["y"] = self.WG_CEIL + r
+                    if f["y"] < self.WG_CEIL + ry9:
+                        f["y"] = self.WG_CEIL + ry9
                         if f["vy"] < 0:
                             f["vy"] = 0.0
-                    if f["y"] > H2 - r:
-                        f["y"] = H2 - r
+                    if f["y"] > H2 - ry9:
+                        f["y"] = H2 - ry9
                         f["fl"] = True
             # 속도는 '실제로 움직인 만큼'에서 되구한다 (PBD). 충격량으로
             # 다루면 쌓인 무더기가 부르르 떤다 — 실측: 6초 뒤에도 속도
@@ -23054,7 +23131,8 @@ class Mascot:
         # 만족해야 한다: 선 위에 있고 · 갓 넣은 것이 아니고 · 거의 멎어
         # 있어야(앉아 있어야) 한다.
         now = time.time()
-        hi = any(f["y"] - self._wg_r(f["t"]) < self.WG_LINE
+        hi = any(f["y"] - self._wg_extent(f["t"], f.get("a", 0.0))[1]
+                 < self.WG_LINE
                  and now - f["born"] > 1.6
                  and abs(f["vy"]) < 45 and abs(f["vx"]) < 45
                  for f in fr)
@@ -23439,7 +23517,9 @@ class Mascot:
                 now2 = time.time()
                 for f in g2["fruits"]:
                     r3 = self._wg_r(f["t"])
-                    if (f["y"] - r3 < self.WG_LINE
+                    if (f["y"] - self._wg_extent(f["t"],
+                                                 f.get("a", 0.0))[1]
+                            < self.WG_LINE
                             and now2 - f["born"] > 1.6
                             and abs(f["vy"]) < 45 and abs(f["vx"]) < 45):
                         sx3, sy3 = to_scr(f)
@@ -23450,11 +23530,12 @@ class Mascot:
             cv.delete("aim")
             if not g2["over"]:
                 r2 = self._wg_r(g2["cur"])
-                ax2 = BX + max(r2 + 1, min(self.WG_W - r2 - 1,
-                                           g2["drop_x"])) * k
+                rx8, ry8 = self._wg_rxy(g2["cur"])
+                ax2 = BX + max(rx8 + 1, min(self.WG_W - rx8 - 1,
+                                            g2["drop_x"])) * k
                 # 떨어질 때 실제로 생기는 자리(_wg_drop 의 y = r + 2)와
                 # 똑같이 둔다 — 겨눈 그대로 나타나 보인다.
-                hy2 = BY + (r2 + 2.0) * k
+                hy2 = BY + (ry8 + 2.0) * k
                 cv.create_line(ax2, hy2 + r2 * k, ax2, by1,
                                fill=self._tint(cd["fill"], 0.6),
                                dash=(3, 5), tags="aim")
