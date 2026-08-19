@@ -475,8 +475,18 @@ DEFAULT_SETTINGS = {
     "ct_bgm_on": True,       # 컬러타일 브금 재생 여부
     # 컬러타일 브금은 음원 자체가 수박게임 것보다 1.7배 크다
     # (실측 RMS 0.151 대 0.087). 귀에 같게 들리도록 그만큼 낮게 잡는다.
-    "ct_bgm_vol": 10,        # 컬러타일 브금 볼륨 (0~100)
-    "rank_msg": "",          # 랭킹 한마디 (1·2·3위일 때만 보인다)
+    # 두 곡을 맞바꾸면서(요청) 기본 볼륨도 따라 바꿨다. 귀에 들리는
+    # 크기는 곡의 RMS x 볼륨이라, 곡이 바뀌면 숫자도 바뀌어야 같게 들린다
+    # (새 컬러타일 곡 RMS 0.1295 · 새 2048 곡 0.1535 — 실측).
+    "ct_bgm_vol": 12,        # 컬러타일 브금 볼륨 (0~100)
+    "rank_msg": "",          # 랭킹 한마디 — 옛 한 개짜리 (호환용)
+    # 게임마다 따로 두는 한마디 {"wgb": …, "ctb": …, "g2b": …}.
+    # 열쇠는 랭킹이 쓰는 것과 같다 (수박게임·컬러타일·2048).
+    "rank_msgs": {},
+    "g2_bgm_on": True,       # 2048 브금 재생 여부
+    # 이 음원이 수박게임 것보다 1.7배 커서(실측 RMS 0.130 대 0.077)
+    # 귀에 같게 들리도록 그만큼 낮게 잡는다.
+    "g2_bgm_vol": 9,         # 2048 브금 볼륨 (0~100)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -3878,6 +3888,70 @@ def _hmac_sha256(key, msg):
     return hashlib.sha256(bytes(b ^ 0x5C for b in key) + inner).digest()
 
 
+def _g2_rgb(c):
+    """헥스 → (r, g, b). 이상하면 회색."""
+    try:
+        return (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16))
+    except Exception:
+        return (200, 200, 200)
+
+
+def _g2_lab(c):
+    """헥스 → CIE Lab (D65). colorsys 를 안 쓴다 (지뢰 21)."""
+    def lin(u):
+        u /= 255.0
+        return u / 12.92 if u <= 0.04045 else ((u + 0.055) / 1.055) ** 2.4
+    r, g, b = (lin(int(c[i:i + 2], 16)) for i in (1, 3, 5))
+    x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+    y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b)
+    z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883
+
+    def f(t):
+        return (t ** (1.0 / 3.0) if t > 0.008856451679
+                else 7.787037 * t + 0.137931)
+    fx, fy, fz = f(x), f(y), f(z)
+    return (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+
+
+def _g2_lch(L, C, h):
+    """LCh(ab) → 헥스. sRGB 밖이면 **채도만** 줄인다 (밝기·색상은 지킨다).
+
+    밝기를 건드리면 명암비가 무너지고, 색상을 건드리면 테마가 어긋난다.
+    """
+    rad = math.radians(h)
+    ca, sa = math.cos(rad), math.sin(rad)
+
+    def rgb(cc):
+        fy = (L + 16.0) / 116.0
+        fx, fz = fy + cc * ca / 500.0, fy - cc * sa / 200.0
+
+        def g(t):
+            return t ** 3 if t > 0.2068965517 else (t - 0.137931) / 7.787037
+        x, y, z = g(fx) * 0.95047, g(fy), g(fz) * 1.08883
+        out = []
+        for u in (3.2404542 * x - 1.5371385 * y - 0.4985314 * z,
+                  -0.9692660 * x + 1.8760108 * y + 0.0415560 * z,
+                  0.0556434 * x - 0.2040259 * y + 1.0572252 * z):
+            if u < -0.00001 or u > 1.00001:
+                return None
+            u = max(0.0, min(1.0, u))
+            out.append(12.92 * u if u <= 0.0031308
+                       else 1.055 * (u ** (1 / 2.4)) - 0.055)
+        return out
+    got = rgb(C)
+    if got is None:
+        lo, hi = 0.0, C
+        for _ in range(24):
+            mid = (lo + hi) / 2.0
+            if rgb(mid) is not None:
+                lo = mid
+            else:
+                hi = mid
+        got = rgb(lo)
+    return "#%02x%02x%02x" % tuple(
+        max(0, min(255, int(round(v * 255.0)))) for v in got)
+
+
 def _ct_eq(a, b):
     """길이·내용을 시간차 없이 견준다 (hmac.compare_digest 대신)."""
     if len(a) != len(b):
@@ -4752,7 +4826,8 @@ class Mascot:
         self.snacksnd = None         # 간식을 먹을 때 (오물오물)
         self.wgsnd = None            # 수박게임 {"drop":…, "merge":…, "big":…}
         self.ctsnd = None            # 컬러타일 {"pop":…} (없으면 수박게임 것)
-        self.oversnd = None          # 게임이 끝날 때 (두 게임 공용)
+        self.oversnd = None          # 게임이 끝날 때 (게임 공용)
+        self.g2snd = None            # 2048 합체음 {단계: 소리}
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -4903,6 +4978,17 @@ class Mascot:
         self._ct_imgs = {}           # (slot, 지름) → 타일 그림
         self._ct_bgm = None          # 브금 (창이 떠 있는 동안만)
         self._rmsg_win = None        # 랭킹 한마디 입력창 (지뢰 14)
+        self._g2 = None              # 2048 판 상태
+        self._g2_winref = None       # 2048 창
+        self._g2_after = None        # 프레임 예약 (지뢰 20)
+        self._g2_imgs = {}           # 2048 이 쓰는 그림 (캐릭터 자세)
+        self._g2_cols = {}           # 2048 타일 색 12단 (테마색당 한 번)
+        self._g2_master = {}         # 2048 타일 원판 (PIL, 값마다 한 번)
+        self._g2_tiles = {}          # 2048 타일 그림 (배율마다)
+        self._g2_flash = {}          # 합체 순간의 흰 겹침
+        self._g2_spark = {}          # 반짝이 별
+        self._g2_help_win = None     # 2048 게임 방법 창
+        self._g2_bgm = None          # 2048 브금 (창이 떠 있는 동안만)
         self._room_game_btn = None   # 홈의 게임 단추 자리
         self._room_job = None        # 방 창 다시 그리기 예약
         self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
@@ -6242,6 +6328,21 @@ class Mascot:
                 except Exception:
                     pass
             self.ctsnd = got or None
+        # 2048 합체음 — 값이 클수록 무거운 소리 (다섯 단계).
+        # 수박게임 충돌 소리를 다시 구운 것이라 결이 같다.
+        g2_dir = os.path.join(self.dir, "sounds", "g2048")
+        if os.path.isdir(g2_dir):
+            vol = float(self.us.get("poke_volume", 40))
+            got = {}
+            for lv in range(1, 6):
+                one = os.path.join(g2_dir, "m%d" % lv)
+                if not os.path.isdir(one):
+                    continue
+                try:
+                    got[lv] = PokeSound(one, volume=vol)
+                except Exception:
+                    pass
+            self.g2snd = got or None
         # 게임이 끝날 때 나는 소리 — 수박게임·컬러타일이 함께 쓴다
         ov_dir = os.path.join(self.dir, "sounds", "gameover")
         if os.path.isdir(ov_dir):
@@ -7045,7 +7146,7 @@ class Mascot:
             # 나머지는 close(). 있는 쪽을 부른다.
             for _nm in ("pensnd", "pokesnd", "roomsnd", "sparksnd",
                         "snacksnd", "snd", "_slime_snd", "pomosnd",
-                        "uisnd", "wgsnd", "ctsnd", "oversnd"):
+                        "uisnd", "wgsnd", "ctsnd", "oversnd", "g2snd"):
                 _s = getattr(self, _nm, None)
                 if isinstance(_s, dict):        # 뽀모도로처럼 여럿을 든 것
                     for _one in list(_s.values()):
@@ -8728,6 +8829,17 @@ class Mascot:
                 kin = set()
                 if self._main_hwnd:
                     kin.add(self._main_hwnd)
+                # 게임 창들도 센다. 예전에는 캐릭터 창들만 봐서, 게임 창에
+                # 밀린 대화 창은 '안 밀렸다'로 나왔다 (한마디 창 깜빡임의
+                # 진짜 이유 — 그래서 무조건 올리기를 넣었던 것이다).
+                for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref"):
+                    w9 = getattr(self, nm9, None)
+                    try:
+                        if w9 is not None and w9 is not win \
+                                and w9.winfo_exists():
+                            kin.add(int(w9.wm_frame(), 16))
+                    except Exception:
+                        pass
                 for holder in (self.shadow, self.todo_panel,
                                self.due_panel, self._fx):
                     h = getattr(holder, "hwnd", None)
@@ -16617,9 +16729,15 @@ class Mascot:
         ctb = self._ct_best()
         if ctb > 0:
             out["ctb"] = ctb        # 컬러타일 최고 — 모두의 랭킹감
-        rmsg = str(self.us.get("rank_msg") or "")[:self.RANK_MSG_N]
+        g2b = self._g2_best()
+        if g2b > 0:
+            out["g2b"] = g2b        # 2048 최고 — 모두의 랭킹감
+        rmsg = self._rank_msg_get("wgb")
         if rmsg:
-            out["rm"] = rmsg        # 랭킹 한마디
+            out["rm"] = rmsg        # 한마디 — 옛 판이 읽는 자리
+        rmg = self._rank_msg_all()
+        if rmg:
+            out["rmg"] = rmg        # 게임별 한마디 (새 판)
         rly = self._safe_str(self._room_relay_pack)
         if rly:
             out["rly"] = rly        # 내가 아는 남들 기록 (아래 주석)
@@ -16802,13 +16920,17 @@ class Mascot:
                 continue
             wb = int(w.get("wgb") or 0)
             cb = int(w.get("ctb") or 0)
-            if wb <= 0 and cb <= 0:
+            gb = int(w.get("g2b") or 0)
+            if wb <= 0 and cb <= 0 and gb <= 0:
                 continue
             age = max(0.0, now - float(w.get("seen") or 0.0))
             if age > self.RELAY_TTL:
                 continue
+            # 칸은 **뒤에만 붙인다** — 옛 판은 앞 다섯 칸만 읽는다.
+            g9 = w.get("rmg")
             rows.append([str(slot)[:28], wb, cb, int(age),
-                         str(w.get("rm") or "")[:self.RANK_MSG_N]])
+                         str(w.get("rm") or "")[:self.RANK_MSG_N],
+                         gb, g9 if isinstance(g9, dict) else {}])
         rows.sort(key=lambda r: r[3])          # 싱싱한 것부터
         return rows[:self.RELAY_N] or None
 
@@ -16825,8 +16947,13 @@ class Mascot:
             try:
                 slot = str(row[0])[:28]
                 wb, cb, age = int(row[1]), int(row[2]), float(row[3])
-                # 한마디는 나중에 붙은 칸이라 없을 수도 있다 (옛 판)
+                # 뒤 칸들은 나중에 붙어서 없을 수도 있다 (옛 판)
                 rm9 = str(row[4])[:self.RANK_MSG_N] if len(row) > 4 else ""
+                gb9 = int(row[5]) if len(row) > 5 else 0
+                rg9 = row[6] if len(row) > 6 else None
+                rg9 = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
+                            for a9, b9 in list(rg9.items())[:6])
+                       if isinstance(rg9, dict) else {})
             except Exception:
                 continue
             if not slot or slot == self.char or age < 0:
@@ -16843,14 +16970,20 @@ class Mascot:
             changed = (cur is None
                        or (wb > 0 and int(cur.get("wgb") or 0) != wb)
                        or (cb > 0 and int(cur.get("ctb") or 0) != cb)
-                       or (rm9 and str(cur.get("rm") or "") != rm9))
+                       or (gb9 > 0 and int(cur.get("g2b") or 0) != gb9)
+                       or (rm9 and str(cur.get("rm") or "") != rm9)
+                       or (rg9 and (cur.get("rmg") or {}) != rg9))
             row2 = dict(cur or {})
             if wb > 0:
                 row2["wgb"] = wb
             if cb > 0:
                 row2["ctb"] = cb
+            if gb9 > 0:
+                row2["g2b"] = gb9
             if rm9:
                 row2["rm"] = rm9
+            if rg9:
+                row2["rmg"] = rg9
             row2["seen"] = fresh
             row2.setdefault("n", "")
             who[slot] = row2
@@ -16887,20 +17020,34 @@ class Mascot:
                 cb = int(q.get("ctb") or 0)      # 컬러타일도 같은 규칙
             except Exception:
                 cb = 0
+            try:
+                gb2 = int(q.get("g2b") or 0)     # 2048 도 같은 규칙
+            except Exception:
+                gb2 = 0
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
+            rmg = q.get("rmg")
+            rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
+                        for a9, b9 in list(rmg.items())[:6])
+                   if isinstance(rmg, dict) else {})
             if (not cur or int(cur.get("lv") or 0) != lv
                     or str(cur.get("ti") or "") != ti
                     or str(cur.get("n") or "") != nm
                     or int(cur.get("wgb") or 0) != wb
                     or int(cur.get("ctb") or 0) != cb
-                    or str(cur.get("rm") or "") != rm):
+                    or int(cur.get("g2b") or 0) != gb2
+                    or str(cur.get("rm") or "") != rm
+                    or (cur.get("rmg") or {}) != rmg):
                 row2 = {"lv": lv, "ti": ti, "n": nm}
                 if wb > 0:
                     row2["wgb"] = wb
                 if cb > 0:
                     row2["ctb"] = cb
+                if gb2 > 0:
+                    row2["g2b"] = gb2
                 if rm:
                     row2["rm"] = rm
+                if rmg:
+                    row2["rmg"] = rmg
                 row2["seen"] = _now9              # 직접 본 것은 지금
                 who[slot] = row2
                 dirty = True
@@ -22994,10 +23141,53 @@ class Mascot:
     RANK_MSG_N = 40          # 글자 수 상한
     RANK_MSG_TOP = 3         # 몇 위까지 적을 수 있나
 
-    def _rank_msg_set(self, text):
-        """내 한마디를 저장한다 (다음 신호에 실린다)."""
-        self.us["rank_msg"] = str(text or "").strip()[:self.RANK_MSG_N]
+    RANK_MSG_KEYS = ("wgb", "ctb", "g2b")   # 수박게임 · 컬러타일 · 2048
+
+    def _rank_msg_get(self, key):
+        """이 게임의 내 한마디.
+
+        **'비었다'와 '아직 안 정했다'를 갈라야 한다.** 비었다고 옛 값으로
+        물러나면, 지운 한마디가 도로 살아난다.
+        """
+        try:
+            got = self.us.get("rank_msgs")
+            if isinstance(got, dict) and key in got:
+                return str(got.get(key) or "").strip()[:self.RANK_MSG_N]
+        except Exception:
+            pass
+        return str(self.us.get("rank_msg") or "").strip()[:self.RANK_MSG_N]
+
+    def _rank_msg_all(self):
+        """게임별 한마디 묶음 — 비어 있지 않은 것만."""
+        out = {}
+        for k9 in self.RANK_MSG_KEYS:
+            t9 = self._rank_msg_get(k9)
+            if t9:
+                out[k9] = t9
+        return out
+
+    def _rank_msg_set(self, text, key="wgb"):
+        """내 한마디를 게임별로 저장한다 (다음 신호에 실린다)."""
+        txt = str(text or "").strip()[:self.RANK_MSG_N]
+        got = self.us.get("rank_msgs")
+        if not isinstance(got, dict):
+            got = {}
+        got[str(key)] = txt
+        self.us["rank_msgs"] = got
+        if key == "wgb":
+            self.us["rank_msg"] = txt      # 옛 판을 쓰는 친구가 읽는 값
         self._safe("rank_msg", self._save_settings)
+
+    @staticmethod
+    def _who_msg(w, key):
+        """그 사람의 이 게임 한마디 — 옛 판이면 한 개짜리를 쓴다."""
+        try:
+            g9 = w.get("rmg")
+            if isinstance(g9, dict) and key in g9:
+                return str(g9.get(key) or "")
+        except Exception:
+            pass
+        return str((w or {}).get("rm") or "")
 
     def _game_board(self, key, mine):
         """모두의 랭킹 — [(점수, 이름, 나인가, 한마디)] 높은 순 5개.
@@ -23015,7 +23205,7 @@ class Mascot:
             # 내 줄에는 '·나'가 붙는다 — 그만큼 이름을 더 줄여야 큰
             # 점수(다섯 자리)와 안 겹친다 (자로 재서 맞춘 값)
             rows.append((int(mine), nm[:4], True,
-                         str(self.us.get("rank_msg") or "")))
+                         self._rank_msg_get(key)))
         try:
             for slot, w in (self._room_who_get() or {}).items():
                 if slot == self.char or not isinstance(w, dict):
@@ -23025,8 +23215,7 @@ class Mascot:
                     continue
                 nm = (str(w.get("n") or "").strip()
                       or str(self.ROOM_NAME.get(slot) or slot))
-                rows.append((b, nm[:5], False,
-                             str(w.get("rm") or "")))
+                rows.append((b, nm[:5], False, self._who_msg(w, key)))
         except Exception:
             pass
         rows.sort(key=lambda r: (-r[0], r[1]))
@@ -23960,7 +24149,8 @@ class Mascot:
             for i8, pb in (getattr(win, "_wg_pen", None) or {}).items():
                 if pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
                     self._safe("ui_click", self._ui_click)
-                    self._safe("rank_msg", self._rank_msg_win, draw_rank)
+                    self._safe("rank_msg", self._rank_msg_win, draw_rank,
+                               "wgb")
                     return
             for act, bb2 in st_btn.items():    # 오른쪽 위 게임 단추
                 if bb2[0] <= e.x <= bb2[2] and bb2[1] <= e.y <= bb2[3]:
@@ -24445,7 +24635,9 @@ class Mascot:
             return None
         return self._safe_str(self._mq_bubble, msg, w9, h9, col, now) or None
 
-    def _rank_msg_win(self, after=None):
+    RANK_MSG_GAME = {"wgb": "수박게임", "ctb": "컬러타일", "g2b": "2048"}
+
+    def _rank_msg_win(self, after=None, key="wgb"):
         """랭킹 한마디를 적는 작은 창 (Entry 하나 — 맥에서도 안전).
 
         캔버스에 얹지 않는다 — create_window 로 얹은 칸은 창을 줄이면
@@ -24464,7 +24656,7 @@ class Mascot:
         # 만들면 0.5초마다 도는 다시 올리기에 밀려 뒤로 들어가고, 사람에게는
         # '창이 자꾸 꺼진다'로 보인다 (제보 · 지뢰 15).
         top9 = None
-        for nm9 in ("_ct_winref", "_wg_winref"):
+        for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref"):
             w9 = getattr(self, nm9, None)
             try:
                 if w9 is not None and w9.winfo_exists():
@@ -24484,11 +24676,12 @@ class Mascot:
             pass
         self._keep_front(win, focus=True)
         fnt = (UI_FONT, max(9, int(11 * k)))
-        tk.Label(win, text="랭킹에 함께 뜰 한마디 (%d자까지)"
-                 % self.RANK_MSG_N, bg=cd["panel"], fg=cd["text"],
+        tk.Label(win, text="%s 랭킹에 함께 뜰 한마디 (%d자까지)"
+                 % (self.RANK_MSG_GAME.get(key, ""), self.RANK_MSG_N),
+                 bg=cd["panel"], fg=cd["text"],
                  font=(UI_FONT, max(8, int(9 * k)))).pack(
                      padx=int(16 * k), pady=(int(14 * k), int(6 * k)))
-        var = tk.StringVar(value=str(self.us.get("rank_msg") or ""))
+        var = tk.StringVar(value=self._rank_msg_get(key))
         ent = tk.Entry(win, textvariable=var, font=fnt, width=26,
                        relief="flat", bg="#ffffff", fg=cd["text"],
                        insertbackground=cd["text"])
@@ -24499,7 +24692,7 @@ class Mascot:
         bar.pack(pady=int(12 * k))
 
         def save9(_e=None):
-            self._rank_msg_set(var.get())
+            self._rank_msg_set(var.get(), key)
             win.destroy()
             if callable(after):
                 self._safe("rank_msg", after)
@@ -24513,23 +24706,11 @@ class Mascot:
                       side="left", padx=int(5 * k))
         ent.bind("<Return>", save9)
         win.bind("<Escape>", lambda _e: win.destroy())
-        # 게임 창이 주기적으로 자기를 올리므로, 이쪽도 계속 올려 준다.
-        # (지뢰 20 — 닫을 때 예약을 거둔다)
+        # **주기적으로 무조건 올리지 않는다.** 예전에는 400ms 마다 lift 를
+        # 걸었는데, 그것이 곧 깜빡임이었다 (지뢰 15 — 밀렸는지 먼저 재고
+        # 올릴 것). 지금은 게임 창의 자식(transient)이라 윈도우가 알아서
+        # 위에 붙들어 주고, 그래도 밀리면 `_keep_front` 가 재서 올린다.
         keep9 = {"id": None}
-
-        def raise9():
-            try:
-                if not win.winfo_exists():
-                    return
-            except Exception:
-                return
-            keep9["id"] = win.after(400, raise9)
-            try:
-                win.lift()
-                win.attributes("-topmost", True)
-            except Exception:
-                pass
-        raise9()
         try:
             win.lift()
             ent.focus_force()
@@ -24765,9 +24946,9 @@ class Mascot:
 
         def bgm_vol():
             try:
-                return max(0, min(100, int(self.us.get("ct_bgm_vol", 10))))
+                return max(0, min(100, int(self.us.get("ct_bgm_vol", 12))))
             except Exception:
-                return 10
+                return 12
 
         def bgm_apply():
             if self._ct_bgm is None:
@@ -25344,7 +25525,8 @@ class Mascot:
             for i8, pb in (getattr(win, "_ct_pen", None) or {}).items():
                 if pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
                     self._safe("ui_click", self._ui_click)
-                    self._safe("rank_msg", self._rank_msg_win, draw_rank)
+                    self._safe("rank_msg", self._rank_msg_win, draw_rank,
+                               "ctb")
                     return
             if (btn_help[0] <= e.x <= btn_help[2]
                     and btn_help[1] <= e.y <= btn_help[3]):
@@ -25451,6 +25633,1412 @@ class Mascot:
         self._place_near(win)
         self._dialog_keep(win, "ctile")
         self._ct_after = win.after(50, tick)
+
+    # ── 2048 ──────────────────────────────────────────────────────────
+    # 숫자 규칙은 원작 그대로다. 방향키를 누르면 타일이 그쪽 벽까지
+    # 미끄러지고, 같은 숫자 둘이 만나면 두 배가 된다.
+    #   · 한 이동에서 **각 타일은 한 번만** 합쳐진다 (2·2·2 는 4와 2).
+    #   · 이동 뒤 빈 칸에 새 타일 — **2가 90%, 4가 10%**.
+    #   · 점수는 그 이동에서 **새로 생긴 타일 값의 합**.
+    # 여기에 우리 것을 얹는다 — 옆에 앉은 캐릭터가 방향키를 누를 때마다
+    # 같이 키보드를 치고, 가끔 한마디 한다.
+    G2_N = 4                 # 판 한 변
+    G2_GOAL = 2048           # 이걸 만들면 이김 (계속 할 수 있다)
+    G2_CELL = 62             # 한 칸 (물리 px — 그릴 때 배율을 곱한다)
+    G2_GAP = 9               # 칸 사이 틈
+    G2_ZOOM = 1.30           # 이 창만 크게 (다른 게임과 같은 이유)
+    G2_RANK_N = 5
+    G2_SIDE = 200            # 오른쪽 칸(캐릭터·랭킹) 폭
+    G2_SLIDE = 0.135         # 미끄러지는 연출 길이(초)
+    # 합쳐질 때 — 톡 부풀었다가 살짝 되눌리며 제자리로 (쫀득하게).
+    # 짧으면 '그냥 바뀌었다'로 보이고, 길면 다음 수가 굼떠 보인다.
+    G2_POP = 0.26
+    G2_FLASH = 0.13          # 합쳐진 타일이 하얗게 번쩍이는 길이
+    G2_RING = 0.34           # 합쳐진 자리에서 퍼지는 테두리
+    G2_BORN = 0.20           # 새 타일이 자라나는 길이
+    G2_TYPE = 0.26           # 키를 누른 뒤 '치는 자세'로 있는 시간
+    G2_SLEEP = 75.0          # 이만큼 놔두면 정말 존다 (seat_idle)
+    G2_SAY = 3.4             # 말풍선이 떠 있는 시간
+    G2_IDLE = 12.0           # 이만큼 가만히 있으면 말을 건다
+    G2_DIRS = {"left": (-1, 0), "right": (1, 0),
+               "up": (0, -1), "down": (0, 1)}
+    # 숫자마다 색 — 캐릭터 테마색 하나에서 열두 단을 뽑는다.
+    # 처음에는 테마색을 옅게~진하게 흔들기만 했는데, 재 보니 이웃한 두
+    # 단의 색 차이(ΔE00)가 최소 1.32 로 **눈이 못 가르는 수준**이었고,
+    # 값 2 와 빈 칸의 차이는 1.16 이라 타일이 놓였는지도 안 보였다.
+    # 지금 것은 이웃 최소 4.54 · 평균 11.07, 글자 명암비 최소 4.80 이다
+    # (열넷 테마 전부에서의 최악값).
+    G2_STEPS = (2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+    # 값 12단 = (밝기 L*, 채도 배율, 색상 회전°). 마지막 둘은 '보석 단'이라
+    # 회전 대신 None — 테마의 보색을 쓴다 (원작에서 128 이 갑자기 금색이
+    # 되는 그 자리).
+    #   · 49.5~56 을 비워 둔 것은 일부러다. WCAG 명암비는 밝기(L*)만의
+    #     함수라, 그 사이 밝기는 흰 글자도 먹 글자도 4.5:1 을 못 채운다.
+    #   · **전부 파스텔이다** (요청). 밝기를 95 에서 68 까지만 쓰고,
+    #     채도를 0.55 에서 2.05 배까지 올려 단을 가른다. 글자는 연회색
+    #     하나(#555555)다 — 밝기 폭을 좁힌 것이 그 때문이다.
+    #     **연회색을 쓰려면 어두운 칸이 없어야 한다.** 예전처럼 31 까지
+    #     내려가면 그 칸에서는 연회색이 아예 안 읽혀 흰 글자를 섞어야
+    #     하는데, 그러면 '글자색 하나'가 아니게 된다.
+    #   · 색상 회전은 54도. 더 돌리면 단은 잘 갈리지만 분홍이 파랑이 되어
+    #     **캐릭터 색이 아니게 된다.** 지금은 이웃 최소 ΔE 3.26 으로
+    #     눈 문턱(2.3) 위이고, 명암비는 최소 3.04 다.
+    #   · 명암비 기준이 3.0 인 것은 숫자가 **크고 굵은 글자**이기 때문이다
+    #     (WCAG 는 18.66px 굵은 글자부터 3.0 을 쓴다. 여기 숫자는 35px).
+    G2_RAMP = (
+        (95.0, 0.55, 0.0), (92.0, 0.72, 6.0), (89.0, 0.88, 12.0),
+        (86.0, 1.05, 18.0), (83.0, 1.22, 24.0), (80.0, 1.38, 30.0),
+        (77.0, 1.55, 36.0), (74.0, 1.72, 42.0), (71.0, 1.88, 48.0),
+        (68.0, 2.05, 54.0), (84.0, 1.85, None), (76.0, 2.00, None),
+    )
+    G2_INK_D = "#555555"  # 연회색 (요청) — 파스텔 칸 전부에 쓴다
+    G2_INK_W = "#ffffff"  # 흰색 — 어두운 칸이 생기면 쓰인다 (지금은 없다)
+    G2_DARK_MIN = 60.0    # 이보다 밝으면 연회색, 아니면 흰색
+    G2_GRAY_H = 285.0     # 무채색 테마(개·락스·준사)가 빌려 쓰는 색상
+
+    def _g2_path(self):
+        return os.path.join(self.state_dir, ".g2048.json")
+
+    def _g2_load(self):
+        """이어하기 — 하던 판까지 그대로 돌려준다.
+
+        수박게임·컬러타일은 켤 때마다 처음부터지만, 2048 은 한 판이
+        길어서 창을 닫으면 아까운 판이 날아간다 (원작도 판을 저장한다).
+        """
+        try:
+            with open(self._g2_path(), encoding="utf-8") as fp:
+                raw = json.load(fp)
+        except Exception:
+            raw = {}
+        cells = {}
+        for row in (raw.get("cells") or []):
+            try:
+                x, y, v = int(row[0]), int(row[1]), int(row[2])
+            except Exception:
+                continue
+            if 0 <= x < self.G2_N and 0 <= y < self.G2_N and v >= 2:
+                cells[(x, y)] = v
+        rank = [r for r in (raw.get("rank") or [])
+                if isinstance(r, list)][:self.G2_RANK_N]
+        return {"cells": cells,
+                "score": max(0, int(raw.get("score") or 0)),
+                "best": max(0, int(raw.get("best") or 0)),
+                "rank": rank,
+                "won": bool(raw.get("won")),
+                "over": False, "top": max(cells.values()) if cells else 0,
+                "moves": int(raw.get("moves") or 0),
+                "slide": [], "pop": [], "born": [], "say": ("", 0.0),
+                "t_key": 0.0, "t_move": time.time()}
+
+    def _g2_save(self, g):
+        """하던 판까지 남긴다 (지뢰 35 — _save_json 으로)."""
+        if g is None:
+            return
+        try:
+            _save_json(self._g2_path(), {
+                "cells": [[x, y, v] for (x, y), v in g["cells"].items()],
+                "score": int(g["score"]), "best": int(g["best"]),
+                "won": bool(g.get("won")), "moves": int(g.get("moves") or 0),
+                "rank": list(g.get("rank") or [])[:self.G2_RANK_N]})
+        except Exception:
+            self._log_error("g2_save")
+
+    def _g2_best(self):
+        try:
+            return max(0, int(self._g2_load().get("best") or 0))
+        except Exception:
+            return 0
+
+    def _g2_board(self):
+        return self._game_board("g2b", self._g2_best())
+
+    def _g2_spawn(self, g, now=None, rnd=None):
+        """빈 칸 하나에 새 타일 — 원작대로 2가 90%, 4가 10%."""
+        rnd = rnd or random
+        now = time.time() if now is None else now
+        free = [(x, y) for x in range(self.G2_N) for y in range(self.G2_N)
+                if (x, y) not in g["cells"]]
+        if not free:
+            return None
+        c = free[rnd.randrange(len(free))]
+        g["cells"][c] = 4 if rnd.random() < 0.10 else 2
+        g.setdefault("born", []).append((c, now))
+        del g["born"][:-8]
+        return c
+
+    def _g2_new(self, g=None):
+        """새 판 — 타일 둘로 시작한다 (기록은 이어받는다)."""
+        old = g if g is not None else self._g2_load()
+        now = time.time()
+        g2 = {"cells": {}, "score": 0, "best": int(old.get("best") or 0),
+              "rank": list(old.get("rank") or []), "over": False,
+              "won": False, "top": 0, "moves": 0,
+              "slide": [], "pop": [], "born": [], "say": ("", 0.0),
+              "t_key": 0.0, "t_move": now}
+        self._g2_spawn(g2, now)
+        self._g2_spawn(g2, now)
+        return g2
+
+    def _g2_slide_line(self, line):
+        """한 줄을 앞쪽으로 밀어 합친다.
+
+        line 은 [(줄에서의 자리, 값), …] — 진행 방향의 **앞부터**다.
+        돌려주는 것: (새 값 목록, 얻은 점수, [(온 자리, 갈 자리, 합쳤나)]).
+        같은 값 둘이 만나면 **한 번만** 합친다 — 그래서 i 를 둘씩 넘긴다.
+        """
+        out, gain, moves = [], 0, []
+        i = 0
+        while i < len(line):
+            si, v = line[i]
+            if i + 1 < len(line) and line[i + 1][1] == v:
+                out.append(v * 2)
+                gain += v * 2
+                j = len(out) - 1
+                moves.append((si, j, False))
+                moves.append((line[i + 1][0], j, True))
+                i += 2
+            else:
+                out.append(v)
+                moves.append((si, len(out) - 1, False))
+                i += 1
+        return out, gain, moves
+
+    def _g2_move(self, g, d, now=None):
+        """방향키 한 번. 판이 바뀌었으면 True (안 바뀌면 아무 일 없음)."""
+        if g is None or g.get("over"):
+            return False
+        dx, dy = self.G2_DIRS.get(d, (0, 0))
+        if not (dx or dy):
+            return False
+        now = time.time() if now is None else now
+        n = self.G2_N
+        cells = g["cells"]
+        new, slide, mg_at, gain = {}, [], [], 0
+        for a in range(n):
+            if dx:                       # 가로 — 한 행
+                coords = [(x, a) for x in range(n)]
+                if dx > 0:
+                    coords.reverse()     # 오른쪽으로 밀면 오른쪽이 앞
+            else:                        # 세로 — 한 열
+                coords = [(a, y) for y in range(n)]
+                if dy > 0:
+                    coords.reverse()
+            line = [(idx, cells[c]) for idx, c in enumerate(coords)
+                    if c in cells]
+            out, gn, moves = self._g2_slide_line(line)
+            gain += gn
+            for j, v in enumerate(out):
+                new[coords[j]] = v
+            for si, dj, merged in moves:
+                slide.append({"v": cells[coords[si]], "a": coords[si],
+                              "b": coords[dj], "m": merged, "t": now})
+                if merged:
+                    mg_at.append((coords[dj], new[coords[dj]]))
+        if new == cells:
+            # 막힌 쪽을 눌렀다 — 가끔만 알려 준다 (매번이면 잔소리다)
+            if now - float(g.get("t_none") or 0.0) > 6.0:
+                g["t_none"] = now
+                self._g2_say(g, "move_none", now)
+            return False                 # 아무것도 안 움직였다
+        g["cells"] = new
+        g["score"] += gain
+        g["moves"] = int(g.get("moves", 0)) + 1
+        g["slide"] = slide
+        # **톡·반짝이는 타일이 도착한 뒤에 시작한다.** 예전에는 수를 둔
+        # 그 순간으로 찍었는데, 미끄러지는 동안(0.135초)에는 판을 움직임만
+        # 그리므로 그때의 톡이 화면에 안 나온다. 미끄러짐이 끝났을 때는
+        # 톡(0.26초)이 절반 넘게 지나 배율이 1.05 밖에 안 남아 있었다 —
+        # 재 보고 알았다(제 크기 157px, 부푼 최대도 157px). 소리는 지금
+        # 나므로 소리와 그림이 어긋나지도 않는다.
+        g["pop"] = [(c, v, now + self.G2_SLIDE) for c, v in mg_at]
+        g["t_move"] = now
+        g["t_key"] = now
+        top0 = int(g.get("top") or 0)
+        top = max(new.values()) if new else 0
+        g["top"] = top
+        self._g2_spawn(g, now)
+        if not g.get("won") and top >= self.G2_GOAL:
+            g["won"] = True
+            g["won_at"] = now
+            self._g2_say(g, "win", now)
+        elif top > top0 and top >= 1024:
+            self._g2_say(g, "near", now)
+        elif len(mg_at) >= 3:
+            self._g2_say(g, "combo", now)
+        elif top > top0 and top >= 128:
+            self._g2_say(g, "top", now)
+        elif mg_at and max(v for _c, v in mg_at) >= 128:
+            self._g2_say(g, "big", now)
+        elif len(new) >= n * n - 2:
+            self._g2_say(g, "tight", now)
+        if not self._g2_moves(g):
+            self._g2_over(g)
+        return True
+
+    def _g2_snd(self, v):
+        """합체음 — 숫자가 클수록 무겁게 (다섯 단계).
+
+        2~8 은 m1, 16~32 는 m2, 64~128 은 m3, 256~512 는 m4,
+        1024 이상은 m5. 중심 주파수가 2240 에서 1338 Hz 로 내려간다(실측).
+        """
+        got = self.g2snd if isinstance(self.g2snd, dict) else None
+        if not got:
+            self._ct_snd("pop")          # 음원이 없는 캐릭터 — 물러난다
+            return
+        v = max(2, int(v or 2))
+        lv = 1
+        for th, n in ((16, 2), (64, 3), (256, 4), (1024, 5)):
+            if v >= th:
+                lv = n
+        snd = got.get(lv) or got.get(max(got))
+        if snd is not None:
+            self._safe("g2_snd", snd.play)
+
+    def _g2_moves(self, g):
+        """더 움직일 수 있는가 (빈 칸이 있거나, 옆에 같은 값이 있거나)."""
+        cells = g["cells"]
+        n = self.G2_N
+        if len(cells) < n * n:
+            return True
+        for x in range(n):
+            for y in range(n):
+                v = cells.get((x, y))
+                if v is None:
+                    return True
+                if cells.get((x + 1, y)) == v or cells.get((x, y + 1)) == v:
+                    return True
+        return False
+
+    def _g2_over(self, g):
+        if g.get("over"):
+            return
+        g["over"] = True
+        g["best"] = max(int(g.get("best") or 0), int(g["score"]))
+        if g["score"] > 0:
+            rows = list(g.get("rank") or []) + [
+                [int(g["score"]), time.strftime("%m/%d"),
+                 int(g.get("top") or 0), int(g.get("moves") or 0)]]
+            rows.sort(key=lambda r: -int(r[0]))
+            g["rank"] = rows[:self.G2_RANK_N]
+        self._g2_say(g, "over", time.time())
+        self._g2_save(g)
+
+    # 캐릭터가 하는 말. config 의 g2_talk 로 캐릭터마다 따로 줄 수 있다.
+    G2_TALK = {
+        "start": ("자, 해 보자!", "오늘도 한 판?"),
+        "move_none": ("어라, 안 움직였어.", "그쪽은 막혔어.", "다른 쪽으로!"),
+        "combo": ("우와, 세 개나!", "한 번에 셋!", "지금 그거 좋았어!"),
+        "near": ("1024! 코앞이야!", "하나만 더!", "여기서 침착."),
+        "big": ("오, 커졌다!", "좋아 좋아!", "이거지!"),
+        "top": ("최고 기록이야!", "여기까지 와 봤어?", "우와, 처음 봐!"),
+        "tight": ("자리가 없어…", "조심조심.", "한 수만 잘 두자."),
+        "idle": ("천천히 생각해.", "어디로 갈까?", "급할 것 없어."),
+        "over": ("아쉽다! 다시 하자.", "여기까지! 잘했어.", "한 판 더?"),
+        "win": ("2048이다!! 해냈어!", "우리가 해냈어!"),
+    }
+
+    def _g2_say(self, g, kind, now=None):
+        """말풍선 한마디 — 그 캐릭터의 말투로."""
+        now = time.time() if now is None else now
+        pool = (self.cfg.get("g2_talk") or {}).get(kind) \
+            or self.G2_TALK.get(kind) or ()
+        if not pool:
+            return
+        g["say"] = (str(random.choice(list(pool)))[:28], now)
+
+    def _g2_tick(self, g, now=None):
+        """가만히 있으면 말을 건다 (그리는 쪽이 프레임마다 부른다)."""
+        if g is None or g.get("over"):
+            return
+        now = time.time() if now is None else now
+        if now - float(g.get("t_move") or now) < self.G2_IDLE:
+            return
+        if now - float((g.get("say") or ("", 0))[1]) < self.G2_IDLE:
+            return
+        self._g2_say(g, "idle", now)
+
+    def _g2_seat_img(self, px, pose="sit", ang=0.0):
+        """옆에 앉은 내 캐릭터. pose 는 type(치는 중)·sit(그냥 앉음)·sleep.
+
+        **seat_idle.png 는 '자는 모습'이다** (눈 감고 zzZ — 열다섯 캐릭터
+        전부). 홈의 _room_pose 도 그것을 s=="sleep" 에만 쓴다. 안 칠 때의
+        그림은 seat.png 이고, seat_idle 은 한참 놔뒀을 때만 쓴다.
+        (한동안 안 칠 때 seat_idle 을 써서 게임 내내 캐릭터가 자고 있었다.)
+
+        **그림을 돌리지 말 것.** desk.png 가 seat 그림에 같이 그려져 있어
+        회전이 책상까지 데려간다 — 3도만 돼도 책상이 기운 게 보인다.
+        """
+        ang = 0.0
+        key = ("__g2seat__", int(px), str(pose))
+        got = self._g2_imgs.get(key)
+        if got is not None:
+            return got
+        im = None
+        names = {"type": ("seat_type.png", "seat.png"),
+                 "sleep": ("seat_idle.png", "seat.png")}.get(
+                     pose, ("seat.png",))
+        for nm in names:
+            try:
+                fp = self._room_art_file(self.char, nm)
+                if fp:
+                    im = Image.open(fp).convert("RGBA")
+                    break
+            except Exception:
+                im = None
+        if im is None:
+            im = self._safe_str(self._wg_head_stack, self.char) or None
+        if im is None or im.height < 4:
+            return None
+        kk = float(px) / float(im.height)
+        im = im.resize((max(1, int(im.width * kk)), max(1, int(px))),
+                       Image.LANCZOS)
+        if abs(ang) > 0.01:
+            im = im.rotate(ang, resample=Image.BICUBIC, expand=True)
+        got = ImageTk.PhotoImage(im)
+        if len(self._g2_imgs) > 60:          # 상한 (지뢰 18·42)
+            for k2 in list(self._g2_imgs)[:30]:
+                self._g2_imgs.pop(k2, None)
+        self._g2_imgs[key] = got
+        return got
+
+    def _g2_ramp(self, cd):
+        """이 캐릭터의 12단 (바탕, 글자). 캐릭터당 12쌍뿐이라 한 번만 굽는다.
+
+        전부 card 의 fill 하나에서 나온다 —
+          · 밝기는 G2_RAMP 가 정한 대로 88 에서 34 까지 내려간다.
+          · 채도는 테마 채도(28~58 로 자름)에 배율을 곱해 점점 오른다.
+          · 색상은 '어두워져도 진한' 쪽으로 56도까지 굴린다 — 노랑(약 90도)
+            에서 멀어지는 방향. 초록은 청록·파랑 쪽으로, 노랑·주황·분홍은
+            빨강·자주 쪽으로. **노랑 쪽으로 굴리면 카키·진흙색이 된다**
+            (초록 테마인 기뽀·프고에서 실제로 그렇게 됐다).
+          · 마지막 두 장(2048·4096)만 보색으로 튀고 밝기가 도로 올라간다.
+
+        글자색은 진회색(#333333)과 흰색 둘뿐이다 (요청). cd["text"] 를
+        안 쓰는 이유는 도로롱 text 의 밝기가 49 라 어떤 바탕에서도
+        4.5:1 을 못 채우기 때문이다 (그게 옛 색의 진짜 문제였다).
+        """
+        fill = str((cd or {}).get("fill") or "#f2a7c5")
+        got = self._g2_cols.get(fill)
+        if got is not None:
+            return got
+        try:
+            L0, a0, b0 = _g2_lab(fill)
+            C0 = math.hypot(a0, b0)
+            h0 = math.degrees(math.atan2(b0, a0)) % 360.0
+            if C0 < 8.0:                     # 회색 테마는 색상이 뜻이 없다
+                h0 = self.G2_GRAY_H
+            Cf = max(40.0, min(72.0, C0))   # 파스텔이되 또렷하게
+            d = 1.0 if 95.0 <= h0 < 265.0 else -1.0
+            hj = (h0 + 180.0) % 360.0        # 보석 단 = 보색
+            if 58.0 < hj < 150.0:
+                # 노랑 띠는 보석이 안 된다 — 밝기를 74·64 로 내리는 순간
+                # 카키·올리브가 된다(채도는 58 이나 살아 있는데도 탁하다).
+                # 파랑·회색 테마 다섯이 여기 떨어지므로 코랄로 보낸다.
+                # 초록(155°)도 재 봤지만 그쪽 램프의 끝(청록)과 이웃해
+                # 안 튀었다 — 파랑↔주황이 제 짝이다.
+                hj = 45.0
+            got = []
+            for L, ck, rot in self.G2_RAMP:
+                h = hj if rot is None else (h0 + d * rot)
+                # (색, 글자색, (밝기·채도·색상)) — 셋째는 그라데이션을
+                # **LCh 에서** 만들 때 쓴다. 흰색이나 검정을 섞어 밝히거나
+                # 어둡게 하면 채도가 깎여 색이 탁해진다 (제보: "칙칙하다").
+                got.append((_g2_lch(L, Cf * ck, h),
+                            self.G2_INK_D if L >= self.G2_DARK_MIN
+                            else self.G2_INK_W, (L, Cf * ck, h)))
+        except Exception:
+            got = [("#eeeeee", "#222222", (70.0, 0.0, 0.0))] * len(
+                self.G2_STEPS)
+        self._g2_cols[fill] = got
+        return got
+
+    # 유리 타일을 굽는 값들
+    G2_TILE_SS = 3           # 몇 배로 그려서 줄이나 (안티에일리어싱)
+    G2_PAD = 0.15            # 그림자가 번질 자리 (타일 폭 대비)
+    G2_TILE_MAX = 240        # 배율별 그림 상한. 한 장 ~40KB → 최대 10MB
+    G2_MASTER_MAX = 26       # 원판 상한 (한 장 ~0.4MB)
+    # 유리로 보이려면 **실제로 비쳐야 한다.** 게임 창은 보통 창이라
+    # 알파가 그대로 먹는다(캐릭터 창과 다르다 — 그쪽은 색상키 투명이라
+    # 반투명이 아예 안 된다). 다만 많이 비치면 판 색에 묻혀 단끼리
+    # 안 갈리므로, 얼마나 비치게 할지는 재서 정한 값이다.
+    G2_GLASS = 1.00          # 몸통이 얼마나 불투명한가 (1.0 = 단색)
+    # 빈 칸. 값 2 가 밝은 파스텔이라 예전(0.78)에는 빈 칸과의 차이가
+    # ΔE 0.77 밖에 안 나서 타일이 놓였는지도 안 보였다 (검사가 잡음).
+    G2_EMPTY = 0.60          # 빈 칸 색 (테마색을 이만큼 옅게)
+    G2_SPARK = 0.60          # 반짝이가 사는 시간(초)
+    G2_SPARK_N = 8           # 합체 하나에 몇 개
+
+    def _g2_tile_master(self, cd, v, box):
+        """값 하나의 원판 — 배율 1.0 크기의 G2_TILE_SS 배 (PIL RGBA).
+
+        쌓는 차례는 아래에서 위로:
+          ① 그림자 — 조금 아래로 내려 흐리게 (판에서 살짝 떠 보이게)
+          ② 몸통 — 위는 밝고 **아래로 갈수록 기본색보다 진한** 그라데이션
+          ③ 유리 — 위쪽에 크게 비친 빛 (아래로 사라진다)
+          ④ 크리스털 면 — 비스듬한 밝은 띠 하나
+          ⑤ 테두리 — 위 안쪽은 희게, 아래 안쪽은 진하게 (유리 두께)
+          ⑥ 숫자 — 살짝 그림자/후광을 깔아 띄운다
+        """
+        box = max(8, int(box))
+        key = (str((cd or {}).get("fill")), int(v), box)
+        got = self._g2_master.get(key)
+        if got is not None:
+            return got
+        S = self.G2_TILE_SS
+        bg, ink = self._g2_tile_col(v, cd)
+        L0g, C0g, H0g = self._g2_tile_lch(v, cd)
+        B = box * S
+        P = max(2, int(box * self.G2_PAD) * S)
+        W = B + P * 2
+        r = int(B * 0.155)
+        im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+
+        # ① 그림자
+        off = max(1, int(B * 0.055))
+        sh = Image.new("L", (W, W), 0)
+        ImageDraw.Draw(sh).rounded_rectangle(
+            [P, P + off, P + B, P + B + off], r, fill=105)
+        sh = sh.filter(ImageFilter.GaussianBlur(B * 0.05))
+        im.paste(Image.new("RGBA", (W, W), _g2_rgb(
+            _g2_lch(max(24.0, L0g - 34.0), C0g * 0.85, H0g)) + (255,)),
+            (0, 0), sh)
+
+        # 몸통이 들어갈 둥근 틀
+        mask = Image.new("L", (B, B), 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, B - 1, B - 1], r,
+                                               fill=255)
+        # 위에서 아래로 밝→어둠 (곱하기 대용으로 두루 쓴다)
+        ramp = ImageOps.invert(Image.linear_gradient("L")).resize((B, B))
+
+        # ② 몸통 — **제 색깔대로 밝은** 세로 그라데이션 (요청).
+        #    흰색을 섞어 밝히면 채도가 깎여 탁해지고, 검정을 섞어 어둡게
+        #    하면 진흙색이 된다. 그래서 밝기(L*)만 위아래로 옮기고 채도와
+        #    색상은 그대로 둔다 — 같은 색이 밝았다 짙어질 뿐이다.
+        L9, C9, H9 = self._g2_tile_lch(v, cd)
+        top = _g2_lch(min(97.0, L9 + 7.5), C9 * 1.02, H9)
+        mid = bg
+        bot = _g2_lch(max(30.0, L9 - 5.0), C9 * 1.06, H9)
+        # 알파는 위가 조금 더 진하고 아래로 갈수록 옅다 — 유리 덩어리의
+        # 아랫부분으로 빛이 더 통과하는 꼴이라 '비침'이 자연스럽다.
+        a0 = int(255 * min(1.0, self.G2_GLASS + 0.05))
+        a1 = int(255 * max(0.0, self.G2_GLASS - 0.07))
+        col = Image.new("RGBA", (1, B))
+        for i in range(B):
+            u = i / float(B - 1)
+            if u < 0.40:                       # 위 — 살짝 밝게
+                c9 = self._mix(top, mid, u / 0.40)
+            else:                              # 아래 — 살짝 진하게
+                c9 = self._mix(mid, bot, (u - 0.40) / 0.60)
+            col.putpixel((0, i), _g2_rgb(c9)
+                         + (int(a0 + (a1 - a0) * u),))
+        body = col.resize((B, B))
+        bm = Image.new("L", (B, B), 0)         # 둥근 틀 x 알파
+        bm.paste(body.getchannel("A"), (0, 0), mask)
+        im.paste(body.convert("RGB"), (P, P), bm)
+
+        def lay(shape, strength, colr):
+            """L 그림(shape)을 둥근 틀 안에서만, strength 만큼 얹는다."""
+            m = Image.new("L", (B, B), 0)
+            m.paste(shape, (0, 0), mask)
+            if strength < 0.999:
+                m = m.point(lambda a, _s=strength: int(a * _s))
+            im.paste(Image.new("RGBA", (B, B), _g2_rgb(colr) + (255,)),
+                     (P, P), m)
+
+        # ③ 테두리 — 위는 살짝 희게, 아래는 살짝 진하게.
+        #    광 창은 안 둔다 (요청: 단색 + 옅은 그라데이션).
+        rim = Image.new("L", (B, B), 0)
+        ImageDraw.Draw(rim).rounded_rectangle(
+            [0, 0, B - 1, B - 1], r, outline=255,
+            width=max(2, int(B * 0.026)))
+        # 블러를 안 건다 — 가장자리가 또렷해야 보석으로 읽힌다
+        up = Image.new("L", (B, B), 0)
+        up.paste(ramp, (0, 0), rim)
+        lay(up, 0.40, "#ffffff")
+        dn = Image.new("L", (B, B), 0)
+        dn.paste(ImageOps.invert(ramp), (0, 0), rim)
+        lay(dn, 0.26, _g2_lch(max(28.0, L0g - 16.0), C0g * 1.08, H0g))
+
+        # ⑥ 숫자
+        txt = str(int(v))
+        fpx = int(B * (0.44 if len(txt) <= 2 else
+                       (0.345 if len(txt) == 3 else 0.275)))
+        try:
+            font = ImageFont.truetype(
+                os.path.join(self.dir, "fonts", "Pretendard-Bold.otf"), fpx)
+        except Exception:
+            font = ImageFont.load_default()
+        d9 = ImageDraw.Draw(im)
+        try:
+            bb = d9.textbbox((0, 0), txt, font=font)
+        except Exception:
+            bb = (0, 0, fpx * len(txt) // 2, fpx)
+        tx = P + (B - (bb[2] - bb[0])) / 2.0 - bb[0]
+        ty = P + (B - (bb[3] - bb[1])) / 2.0 - bb[1]
+        # 띄우기 — 흰 글자엔 어두운 그림자, 진회색 글자엔 흰 후광
+        sc9 = ((0, 0, 0, 70) if ink.lower() == "#ffffff"
+               else (255, 255, 255, 80))
+        d9.text((tx, ty + B * 0.016), txt, font=font, fill=sc9)
+        d9.text((tx, ty), txt, font=font, fill=_g2_rgb(ink) + (255,))
+
+        if len(self._g2_master) > self.G2_MASTER_MAX:
+            for _o in list(self._g2_master)[:self.G2_MASTER_MAX // 2]:
+                self._g2_master.pop(_o, None)
+        self._g2_master[key] = im
+        return im
+
+    def _g2_tile_photo(self, cd, v, px, box):
+        """배율이 반영된 크기 px 의 타일 그림. 원판을 줄여 만든다."""
+        px = max(6, int(round(px)))
+        key = (str((cd or {}).get("fill")), int(v), px, int(box))
+        got = self._g2_tiles.get(key)
+        if got is not None:
+            return got
+        base = self._g2_tile_master(cd, v, box)
+        full = max(8, int(round(px * (1.0 + 2.0 * self.G2_PAD))))
+        img = ImageTk.PhotoImage(base.resize((full, full), Image.LANCZOS))
+        if len(self._g2_tiles) > self.G2_TILE_MAX:
+            for _o in list(self._g2_tiles)[:self.G2_TILE_MAX // 2]:
+                self._g2_tiles.pop(_o, None)
+        self._g2_tiles[key] = img
+        return img
+
+    def _g2_flash_photo(self, px, a):
+        """합쳐진 순간 타일 위에 겹치는 흰 빛 (값과 무관해 한 벌뿐)."""
+        px = max(6, int(round(px)))
+        a = max(1, min(8, int(round(a * 8))))
+        key = (px, a)
+        got = self._g2_flash.get(key)
+        if got is not None:
+            return got
+        S = self.G2_TILE_SS
+        B = px * S
+        im = Image.new("RGBA", (B, B), (0, 0, 0, 0))
+        ImageDraw.Draw(im).rounded_rectangle(
+            [0, 0, B - 1, B - 1], int(B * 0.155),
+            fill=(255, 255, 255, int(150 * a / 8.0)))
+        img = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+        if len(self._g2_flash) > 60:
+            for _o in list(self._g2_flash)[:30]:
+                self._g2_flash.pop(_o, None)
+        self._g2_flash[key] = img
+        return img
+
+    def _g2_spark_photo(self, col, px, a):
+        """반짝이 별 하나 — 네 갈래로 뾰족한 빛."""
+        px = max(4, int(round(px)))
+        a = max(1, min(5, int(round(a * 5))))
+        key = (col, px, a)
+        got = self._g2_spark.get(key)
+        if got is not None:
+            return got
+        S = 3
+        W = px * S
+        c = W / 2.0
+        w9 = W * 0.085                       # 가운데 배가 이만큼
+        im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+        al = int(255 * a / 5.0)
+        ImageDraw.Draw(im).polygon(
+            [(c, 0), (c + w9, c - w9), (W, c), (c + w9, c + w9),
+             (c, W), (c - w9, c + w9), (0, c), (c - w9, c - w9)],
+            fill=_g2_rgb(col) + (al,))
+        im = im.filter(ImageFilter.GaussianBlur(W * 0.03))
+        img = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+        if len(self._g2_spark) > 90:
+            for _o in list(self._g2_spark)[:45]:
+                self._g2_spark.pop(_o, None)
+        self._g2_spark[key] = img
+        return img
+
+    def _g2_step(self, v):
+        """값이 램프의 몇째 단인가."""
+        try:
+            return self.G2_STEPS.index(int(v))
+        except (ValueError, TypeError):
+            return len(self.G2_STEPS) - 1
+
+    def _g2_tile_col(self, v, cd):
+        """숫자 타일의 (바탕색, 글자색)."""
+        return self._g2_ramp(cd)[self._g2_step(v)][:2]
+
+    def _g2_tile_lch(self, v, cd):
+        """그 단의 (밝기, 채도, 색상) — 그라데이션을 LCh 에서 만들 때."""
+        return self._g2_ramp(cd)[self._g2_step(v)][2]
+
+    def _g2_win(self):
+        """2048 창 — 왼쪽에 판, 오른쪽에 캐릭터와 랭킹.
+
+        **이 창만 키보드를 쓴다** (요청). 다른 게임 창은 마우스뿐이라
+        포커스를 안 뺏는 관례로 열리는데, 그러면 방향키가 안 들어온다 —
+        여기서는 열 때 포커스를 주고, 판을 누르면 다시 가져온다.
+        """
+        got = self._g2_winref
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    got.focus_force()
+                    return
+            except Exception:
+                pass
+        g = self._g2_load()               # **이어하기** — 하던 판 그대로
+        if not g["cells"]:
+            g = self._g2_new(g)
+        self._g2 = g
+        cd = self.card
+        k = self.ui_k * self.G2_ZOOM
+        bwid = self.G2_N * self.G2_CELL + (self.G2_N + 1) * self.G2_GAP
+        try:      # 화면 밖으로 나가면 들어갈 만큼만 줄인다
+            l0, t0, r0, b0 = self._screen_box()
+            need = (106 + bwid + 16) * k + 70 * self.ui_k
+            room = (b0 - t0) * 0.94
+            if 0 < room < need:
+                k = max(self.ui_k * 0.7, k * room / need)
+            needw = (28 + bwid + self.G2_SIDE) * k
+            roomw = (r0 - l0) * 0.96
+            if 0 < roomw < needw:
+                k = max(self.ui_k * 0.6, k * roomw / needw)
+        except Exception:
+            pass
+
+        def uf(size, bold=False):
+            n = max(7, int(round(size * k)))
+            return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
+
+        win = tk.Toplevel(self.room_win or self.root)
+        self._g2_winref = win
+        win._g2_k = k
+        win.title("2048")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=True)
+        cell = self.G2_CELL * k
+        gap = self.G2_GAP * k
+        # 판이 좁아 안내 글자와 단추가 겹쳤다 — 컬러타일처럼 두 줄로
+        # 나누고 판을 그만큼 내린다.
+        BX, BY = int(14 * k), int(106 * k)
+        CW = BX * 2 + int(bwid * k) + int(self.G2_SIDE * k)
+        CH = BY + int(bwid * k) + int(16 * k)
+        cv = tk.Canvas(win, width=CW, height=CH,
+                       bg=self._tint(cd["fill"], 0.90),
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.55)
+        ink = self._shade(cd["text"], 0.12)
+        sub2 = self._shade(cd["fill"], 0.22)
+        edge = self._tint(cd["fill"], 0.66)
+        win._g2_dots = self._safe_str(
+            self._room_dots_img, CW, CH, int(15 * k),
+            self._tint(cd["fill"], 0.70), 0)
+        if win._g2_dots:
+            cv.create_image(0, 0, image=win._g2_dots, anchor="nw")
+        bx1 = BX + int(bwid * k)
+        by1 = BY + int(bwid * k)
+
+        def cellxy(x, y):
+            return (BX + gap + (cell + gap) * x + cell / 2.0,
+                    BY + gap + (cell + gap) * y + cell / 2.0)
+
+        # 판 — 다른 게임과 같은 두 겹
+        self._rr_soft(cv, BX - 11 * k, BY - 11 * k, bx1 + 11 * k,
+                      by1 + 11 * k, 26 * k,
+                      fill=self._tint(cd["fill"], 0.88), outline="", width=0)
+        self._rr_soft(cv, BX - 7 * k, BY - 7 * k, bx1 + 7 * k, by1 + 7 * k,
+                      22 * k, fill=self._tint(cd["fill"], 0.72),
+                      outline="", width=0)
+        self._rr_soft(cv, BX, BY, bx1, by1, 16 * k,
+                      fill=self._tint(cd["fill"], 0.80), outline=line,
+                      width=4)
+        self._safe("g2_deco", self._cute_corner, cv, BX - 7 * k, BY - 7 * k,
+                   bx1 + 7 * k, by1 + 7 * k, k, self._tint(cd["fill"], 0.45))
+        for x9 in range(self.G2_N):          # 빈 칸 — 한 번만 그린다
+            for y9 in range(self.G2_N):
+                cx9, cy9 = cellxy(x9, y9)
+                # 값 2 가 파스텔(밝기 95)이라, 빈 칸이 예전만큼 옅으면
+                # 타일이 놓였는지 안 보인다. 한 단 진하게 둔다.
+                self._rr(cv, cx9 - cell / 2, cy9 - cell / 2,
+                         cx9 + cell / 2, cy9 + cell / 2, 10 * k,
+                         fill=self._tint(cd["fill"], self.G2_EMPTY),
+                         outline="", width=0)
+        # 점수 알약
+        self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
+                      fill="#ffffff", outline=line, width=4)
+        cv.create_text(BX + 13 * k, 24 * k, anchor="w", text="점수",
+                       font=uf(8, True), fill=sub2)
+        _sc, sc_ids = self._cute_text(cv, BX + 100 * k, 24 * k, "0",
+                                      uf(13, True), ink, edge=edge,
+                                      w=1.8 * k, anchor="e")
+        cv.create_text(BX + 13 * k, 47 * k, anchor="w", text="최고",
+                       font=uf(8, True), fill=sub2)
+        _bs, bs_ids = self._cute_text(cv, BX + 100 * k, 47 * k,
+                                      str(g["best"]), uf(10, True), sub2,
+                                      edge=edge, w=1.4 * k, anchor="e")
+        # 안내 — 둘째 줄 (단추와 안 겹치게)
+        cv.create_text(BX + 4 * k, 82 * k, anchor="w",
+                       text="방향키·WASD·마우스로 밀기",
+                       font=uf(8, True), fill=sub2)
+        _tt, tt_ids = self._cute_text(cv, bx1, 82 * k, "",
+                                      uf(9, True), ink, edge=edge,
+                                      w=1.5 * k, anchor="e")
+        # 브금 — 창이 떠 있는 동안만 (윈도우 전용)
+        self._g2_bgm = None
+        g2b_dir = os.path.join(self.dir, "sounds", "g2048_bgm")
+        if IS_WIN and os.path.isdir(g2b_dir):
+            try:
+                self._g2_bgm = AmbientSound(g2b_dir)
+            except Exception:
+                self._g2_bgm = None
+
+        def bgm_vol():
+            try:
+                return max(0, min(100, int(self.us.get("g2_bgm_vol", 9))))
+            except Exception:
+                return 9
+
+        def bgm_apply():
+            if self._g2_bgm is None:
+                return
+            on9 = bool(self.us.get("g2_bgm_on", True))
+            try:
+                for nm9 in self._g2_bgm.names:
+                    self._g2_bgm.set(nm9, on9, bgm_vol())
+            except Exception:
+                pass
+        bgm_apply()
+        # 다시하기 · 물음표. 판이 좁아 위 띠가 빠듯하다 — 다시하기를
+        # 줄여 음표·볼륨이 점수 알약을 안 덮게 한다 (찍어서 확인).
+        qr = 16 * k
+        bw2 = 74 * k
+        by2 = 18 * k
+        bx2 = bx1 - bw2 - qr * 2 - 8 * k
+        self._rr_soft(cv, bx2, by2, bx2 + bw2, by2 + 32 * k, 16 * k,
+                      fill="#ffffff", outline=line, width=4)
+        cv.create_text(bx2 + bw2 / 2, by2 + 16 * k, text="다시하기",
+                       font=uf(9, True), fill=ink)
+        btn_new = (bx2, by2, bx2 + bw2, by2 + 32 * k)
+        win._g2_newbtn = btn_new
+        qcx, qcy = bx1 - qr, by2 + 16 * k
+        self._safe("soft_btn", self._soft_dot, cv, qcx, qcy, qr,
+                   "#ffffff", outline=line, width=4)
+        cv.create_text(qcx, qcy, text="?", font=uf(12, True), fill=ink)
+        btn_help = (qcx - qr, qcy - qr, qcx + qr, qcy + qr)
+        g2_btn = {}
+        draw_bgm = None
+        if self._g2_bgm is not None:
+            br9 = 16 * k
+            vb_w = 8 * k
+            vb_x = bx2 - 12 * k - vb_w
+            vb_y0, vb_y1 = 16 * k, 52 * k
+            pcx, pcy = vb_x - 8 * k - br9, by2 + 16 * k
+            g2_btn["bgm"] = (pcx - br9, pcy - br9, pcx + br9, pcy + br9)
+            g2_btn["volbar"] = (vb_x - 4 * k, vb_y0 - 4 * k,
+                                vb_x + vb_w + 4 * k, vb_y1 + 4 * k)
+
+            def draw_bgm():
+                cv.delete("bgmui")
+                on9 = bool(self.us.get("g2_bgm_on", True))
+                self._safe("soft_btn", self._soft_dot, cv, pcx, pcy, br9,
+                           self._tint(cd["fill"], 0.55) if on9 else "#ffffff",
+                           outline=line, width=4)
+                cv.create_text(pcx, pcy, text="\u266a", font=uf(10, True),
+                               fill=ink if on9 else self._tint(line, 0.2),
+                               tags="bgmui")
+                if not on9:
+                    cv.create_line(pcx - 7 * k, pcy + 7 * k,
+                                   pcx + 7 * k, pcy - 7 * k, fill="#e0455f",
+                                   width=max(2, int(2 * k)),
+                                   capstyle="round", tags="bgmui")
+                self._rr(cv, vb_x, vb_y0, vb_x + vb_w, vb_y1, vb_w / 2,
+                         fill="#ffffff", outline=line, width=1)
+                fr9 = bgm_vol() / 100.0
+                fy9 = vb_y1 - (vb_y1 - vb_y0 - 4) * fr9 - 2
+                if fr9 > 0.02:
+                    self._rr(cv, vb_x + 1.5, fy9, vb_x + vb_w - 1.5,
+                             vb_y1 - 2, (vb_w - 3) / 2,
+                             fill=(self._tint(cd["fill"], 0.30) if on9
+                                   else self._tint(cd["fill"], 0.70)),
+                             width=0)
+                cv.tag_raise("bgmui")
+
+            def vol_from_y(yy):
+                fr9 = (vb_y1 - yy) / max(1.0, vb_y1 - vb_y0)
+                self.us["g2_bgm_vol"] = int(max(0, min(100,
+                                                       round(fr9 * 100))))
+                bgm_apply()
+                self._safe("bgm_ui", draw_bgm)
+            win._g2_volfn = vol_from_y
+            draw_bgm()
+
+        # ── 오른쪽 — 캐릭터와 랭킹 ────────────────────────────────────
+        rsx = bx1 + int(16 * k)
+        rsw = int(self.G2_SIDE * k - 16 * k)
+        chy0, chy1 = 8 * k, 8 * k + 156 * k
+        self._rr_soft(cv, rsx, chy0, rsx + rsw, chy1, 20 * k,
+                      fill="#ffffff", outline=line, width=4)
+        seat_c = (rsx + rsw / 2.0, chy1 - 54 * k)
+        say_c = (rsx + rsw / 2.0, chy0 + 30 * k)
+        ry0 = chy1 + 12 * k
+        ry1 = by1 + 7 * k
+        self._rr_soft(cv, rsx, ry0, rsx + rsw, ry1, 16 * k,
+                      fill="#ffffff", outline=line, width=4)
+        cv.create_text(rsx + rsw / 2, ry0 + 18 * k, text="랭킹",
+                       font=uf(9, True), fill=ink)
+        g2_rank_its = []
+        rh2 = 34 * k
+        rty = ry0 + 40 * k
+        for i2 in range(self.G2_RANK_N):
+            yy2 = rty + rh2 * (i2 + 0.5)
+            fill2, ink2, mark2 = self._rank_style(i2)
+            top9 = i2 < self.RANK_MSG_TOP
+            ny2 = yy2 - (rh2 * 0.20 if top9 else 0)
+            my2r = yy2 + rh2 * 0.19
+            if fill2:
+                self._rr_soft(cv, rsx + 7 * k, yy2 - rh2 / 2 + 1,
+                              rsx + rsw - 7 * k, yy2 + rh2 / 2 - 1,
+                              rh2 / 2, fill=fill2, outline=ink2, width=2)
+            cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
+                           font=uf(8, True), fill=ink2 or sub2)
+            nit2 = cv.create_text(rsx + 27 * k, ny2, anchor="w", text="—",
+                                  font=uf(8, True), fill=ink2 or ink)
+            sit2 = cv.create_text(rsx + rsw - 20 * k, ny2, anchor="e",
+                                  text="", font=uf(9, True),
+                                  fill=ink2 or ink)
+            mit2 = pit2 = mbg2 = None
+            if top9:
+                mbg2 = cv.create_line(0, -99, 0, -99, width=rh2 * 0.30,
+                                      capstyle="round", fill="#ffffff",
+                                      state="hidden")
+                mit2 = cv.create_text(rsx + 20 * k, my2r, anchor="w",
+                                      text="", font=uf(7, True),
+                                      fill=self._shade(cd["fill"], 0.18))
+                pit2 = cv.create_text(0, -99, text="\u270e", font=uf(8),
+                                      fill=ink2 or sub2, state="hidden")
+            g2_rank_its.append((nit2, sit2, mit2, pit2, mbg2))
+        win._g2_pen = {}
+
+        def draw_rank():
+            rows2 = self._g2_board()
+            win._g2_pen = {}
+            for i3, (nit3, sit3, mit3, pit3, mbg3) \
+                    in enumerate(g2_rank_its):
+                if i3 < len(rows2):
+                    b3, nm3, me3, ms3 = rows2[i3]
+                    cv.itemconfigure(nit3,
+                                     text=nm3 + (" ·나" if me3 else ""))
+                    cv.itemconfigure(sit3, text="%d" % b3)
+                    if mit3 is not None:
+                        cv.itemconfigure(mit3, text=str(ms3 or "")[:22])
+                        bm = cv.bbox(mit3)
+                        if ms3 and bm and mbg3 is not None:
+                            yy8 = (bm[1] + bm[3]) / 2.0
+                            cv.coords(mbg3, bm[0] + 2, yy8,
+                                      min(bm[2] + 4, rsx + rsw - 18 * k),
+                                      yy8)
+                            cv.itemconfigure(mbg3, state="normal")
+                            cv.tag_raise(mit3)
+                        elif mbg3 is not None:
+                            cv.itemconfigure(mbg3, state="hidden")
+                    if pit3 is not None:
+                        bn = cv.bbox(nit3) if me3 else None
+                        if bn:
+                            cv.coords(pit3, bn[2] + 7 * k,
+                                      (bn[1] + bn[3]) / 2.0)
+                            cv.itemconfigure(pit3, state="normal")
+                            win._g2_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
+                                               bn[2] + 15 * k, bn[3] + 3 * k)
+                        else:
+                            cv.itemconfigure(pit3, state="hidden")
+                else:
+                    cv.itemconfigure(nit3, text="—")
+                    cv.itemconfigure(sit3, text="")
+                    if mit3 is not None:
+                        cv.itemconfigure(mit3, text="")
+                    if mbg3 is not None:
+                        cv.itemconfigure(mbg3, state="hidden")
+                    if pit3 is not None:
+                        cv.itemconfigure(pit3, state="hidden")
+        draw_rank()
+        st = {"over_ui": False, "down": None, "voldrag": False}
+
+        base_px = max(8, int(round(cell)))
+
+        def tile(cx, cy, v, sc=1.0, flash=0.0):
+            """타일 한 장 — 구워 둔 유리 그림을 얹는다.
+
+            폴리곤으로 그리던 때는 모서리가 계단졌고 납작했다. 지금은
+            PIL 로 세 배에 그려 줄인 그림이라 가장자리가 곱고, 그림자·
+            그라데이션·유리 하이라이트가 들어 있다 (`_g2_tile_master`).
+
+            flash 는 합쳐진 직후의 흰 빛 (0~1) — 값과 무관한 흰 판을
+            위에 겹친다. 예전처럼 바탕색을 섞으면 그림을 다시 구워야 해서
+            톡 튀는 동안 프레임이 무너진다.
+            """
+            px = max(6, int(round(cell * sc)))
+            img = self._safe_str(self._g2_tile_photo, cd, v, px, base_px)
+            if img:                       # 지뢰 63 — 실패하면 "" 가 온다
+                cv.create_image(cx, cy, image=img, tags="tile")
+            else:                         # 못 구우면 옛 방식으로 물러난다
+                bg9, ik9 = self._g2_tile_col(v, cd)
+                h9 = cell * sc / 2.0
+                self._rr(cv, cx - h9, cy - h9, cx + h9, cy + h9, 10 * k * sc,
+                         fill=bg9, outline="", width=0, tags="tile")
+                d9 = len(str(int(v)))
+                fs = 20 if d9 <= 2 else (16 if d9 == 3 else 13)
+                cv.create_text(cx, cy, text=str(int(v)),
+                               font=uf(fs * sc, True), fill=ik9, tags="tile")
+            if flash > 0.001:
+                fi = self._safe_str(self._g2_flash_photo, px,
+                                    min(1.0, flash))
+                if fi:
+                    cv.create_image(cx, cy, image=fi, tags="tile")
+
+        def sparks(now, g2):
+            """합체 자리에서 튀는 반짝이 — 예쁘고 귀엽게 (요청).
+
+            상태를 새로 두지 않는다. 자리와 시각으로 씨앗을 만들어
+            매 프레임 같은 별이 나오게 한다 (프레임마다 새로 뽑으면
+            별이 사방으로 튀어 지저분하다).
+            """
+            for c9, _v9, t9 in (g2.get("pop") or []):
+                q = (now - t9) / self.G2_SPARK
+                if not (0 <= q < 1):
+                    continue
+                cx9, cy9 = cellxy(*c9)
+                rnd = random.Random((int(c9[0]) * 31 + int(c9[1])) * 7919
+                                    + int(t9 * 1000))
+                for i9 in range(self.G2_SPARK_N):
+                    ang = ((i9 + 0.15 + rnd.random() * 0.7)
+                           * (2 * math.pi / self.G2_SPARK_N))
+                    far = cell * (0.36 + 0.30 * rnd.random())
+                    d9 = far * (1.0 - (1.0 - q) ** 2.4)   # 확 나갔다 멎는다
+                    sz = (cell * (0.20 + 0.10 * rnd.random())
+                          * (1.0 - q * 0.72))
+                    if sz < 3.0:
+                        continue
+                    si = self._safe_str(
+                        self._g2_spark_photo,
+                        "#ffffff" if i9 % 2 else self._tint(cd["fill"], 0.30),
+                        sz, (1.0 - q) ** 0.75)
+                    if si:
+                        cv.create_image(cx9 + math.cos(ang) * d9,
+                                        cy9 + math.sin(ang) * d9
+                                        - cell * 0.12 * q,
+                                        image=si, tags="tile")
+
+        def pop_scale(q):
+            """합쳐질 때의 배율 — 톡 부풀었다 살짝 되눌리며 제자리로.
+
+            앞 34%는 사인으로 부드럽게 1 → 1.22, 뒤는 세제곱으로 돌아오되
+            중간에 1 아래로 살짝 내려갔다 온다 (쫀득한 느낌의 핵심).
+            """
+            if q < 0.34:
+                return 1.0 + 0.22 * math.sin(q / 0.34 * math.pi / 2)
+            u = (q - 0.34) / 0.66
+            return (1.22 - 0.22 * (1.0 - (1.0 - u) ** 3)
+                    - 0.05 * math.sin(u * math.pi) * (1.0 - u * 0.5))
+
+        def draw_board(now=None):
+            now = time.time() if now is None else now
+            cv.delete("tile")
+            g2 = self._g2
+            if g2 is None:
+                return
+            sl = g2.get("slide") or []
+            t0s = sl[0]["t"] if sl else 0.0
+            ps = (now - t0s) / self.G2_SLIDE if sl else 9.0
+            if sl and ps < 1.0:
+                # 미끄러지는 동안에는 **움직임만** 그린다 (겹치지 않게)
+                e9 = 1.0 - (1.0 - max(0.0, ps)) ** 2.6
+                for mv in sl:
+                    ax, ay = cellxy(*mv["a"])
+                    bx, by = cellxy(*mv["b"])
+                    tile(ax + (bx - ax) * e9, ay + (by - ay) * e9, mv["v"])
+                return
+            if sl:
+                g2["slide"] = []
+            pops = dict(((c, (v, t)) for c, v, t in (g2.get("pop") or [])))
+            born = dict(((c, t) for c, t in (g2.get("born") or [])))
+            # 합쳐진 자리에서 퍼지는 테두리 — 타일보다 **먼저** 그려
+            # 뒤에 깔리게 한다 (합체당 도형 하나뿐이라 값이 싸다)
+            for c, _v, t9 in (g2.get("pop") or []):
+                q = (now - t9) / self.G2_RING
+                if not (0 <= q < 1):
+                    continue
+                cx9, cy9 = cellxy(*c)
+                h9 = cell * (0.5 + 0.42 * q)
+                self._rr(cv, cx9 - h9, cy9 - h9, cx9 + h9, cy9 + h9,
+                         12 * k, fill="", outline=self._mix(
+                             self._tint(cd["fill"], 0.30), "#ffffff",
+                             0.25 + 0.7 * q),
+                         width=max(1, int((2.6 - 2.2 * q) * k)), tags="tile")
+            for c, v in g2["cells"].items():
+                sc, fl = 1.0, 0.0
+                pv = pops.get(c)
+                if pv is not None:
+                    q = (now - pv[1]) / self.G2_POP
+                    if 0 <= q < 1:
+                        sc = pop_scale(q)
+                    qf = (now - pv[1]) / self.G2_FLASH
+                    if 0 <= qf < 1:
+                        fl = 1.0 - qf
+                bt = born.get(c)
+                if bt is not None:
+                    q = (now - bt) / self.G2_BORN
+                    if 0 <= q < 1:
+                        # 새 타일도 톡 — 0 에서 1.08 을 지나 1 로
+                        sc = (1.08 * (1.0 - (1.0 - q) ** 2.2) if q < 0.72
+                              else 1.08 - 0.08 * ((q - 0.72) / 0.28))
+                tile(*cellxy(*c), v=v, sc=sc, flash=fl)
+            self._safe("g2_spark", sparks, now, g2)
+            if st.get("over_ui"):
+                # 끝 카드는 타일보다 늘 위에 (타일을 매 프레임 새로 얹으므로
+                # 안 올려 주면 카드가 숫자 칸 뒤로 들어간다 — 제보)
+                cv.tag_raise("over")
+
+        def busy(now, g2):
+            """지금 움직이는 연출이 있는가 — 없으면 판을 다시 안 그린다."""
+            sl = g2.get("slide") or []
+            if sl and now - sl[0]["t"] < self.G2_SLIDE + 0.05:
+                return True
+            lim = max(self.G2_POP, self.G2_RING, self.G2_SPARK,
+                      self.G2_FLASH)
+            for _c9, _v9, t9 in (g2.get("pop") or []):
+                if now - t9 < lim:
+                    return True
+            for _c9, t9 in (g2.get("born") or []):
+                if now - t9 < self.G2_BORN:
+                    return True
+            return False
+
+        def redraw(now):
+            g2 = self._g2
+            if g2 is None:
+                return
+            self._safe("g2_tick", self._g2_tick, g2, now)
+            self._cute_set(cv, sc_ids, str(g2["score"]))
+            self._cute_set(cv, bs_ids, str(max(g2["best"], g2["score"])))
+            self._cute_set(cv, tt_ids, "%d수 · 최고 타일 %d"
+                           % (int(g2.get("moves") or 0),
+                              int(g2.get("top") or 0)))
+            # 60fps 로 도니 **바뀐 게 없으면 판을 다시 안 그린다.**
+            # 연출이 끝난 다음 한 프레임은 그려야 제자리로 돌아온다.
+            bz = busy(now, g2)
+            sig = (g2["score"], g2["best"], g2.get("moves"), g2.get("top"),
+                   tuple(sorted(g2["cells"].items())))
+            if bz or st.get("wasbusy") or sig != st.get("sig"):
+                draw_board(now)
+                st["sig"] = sig
+            st["wasbusy"] = bz
+            # 캐릭터 — 키를 누르면 치는 자세, 아니면 가만히
+            since = now - float(g2.get("t_move") or now)
+            if (now - float(g2.get("t_key") or 0.0)) < self.G2_TYPE:
+                pose = "type"
+            elif since > self.G2_SLEEP:
+                pose = "sleep"          # 한참 놔두면 정말 존다
+            else:
+                pose = "sit"
+            # 들썩임 — **시간창 안에서만.** 이겼다는 깃발로 조건을 걸면
+            # 마지막 수에 합체가 있었을 때 영영 뛴다 (깃발에는 시각이 없다).
+            hop = 0.0
+            t9 = 0.0
+            if g2.get("won") and now - float(g2.get("won_at") or 0) < 3.0:
+                t9 = now - float(g2.get("won_at") or now)
+            elif g2.get("pop") and now - g2["pop"][0][2] < 0.5:
+                t9 = now - g2["pop"][0][2]
+            if t9 > 0.0:
+                hop = abs(math.sin(t9 * 9.0)) ** 0.7 * 5.0 * k
+            chs = (pose, round(hop, 1))
+            if chs != st.get("chs"):        # 자세·들썩임이 바뀔 때만
+                st["chs"] = chs
+                cv.delete("g2ch")
+                im9 = self._safe_str(self._g2_seat_img, int(96 * k), pose)
+                if im9:
+                    win._g2_seat = im9
+                    cv.create_image(seat_c[0], seat_c[1] - hop, image=im9,
+                                    tags="g2ch")
+            # 말풍선 — 글이 바뀔 때만 다시 만든다 (PIL 을 쓰므로 값이 비싸다)
+            sy, sat = (g2.get("say") or ("", 0.0))
+            up9 = sy if (sy and 0 <= now - sat < self.G2_SAY) else ""
+            if up9 != st.get("say"):
+                st["say"] = up9
+                cv.delete("g2say")
+            if up9 and not cv.find_withtag("g2say"):
+                tid = cv.create_text(say_c[0], say_c[1], text=sy,
+                                     font=uf(9, True), fill=ink, tags="g2say")
+                bb9 = cv.bbox(tid)
+                if bb9:
+                    self._rr_soft(cv, bb9[0] - 12 * k, bb9[1] - 8 * k,
+                                  bb9[2] + 12 * k, bb9[3] + 8 * k,
+                                  (bb9[3] - bb9[1]) / 2 + 8 * k,
+                                  fill=self._tint(cd["fill"], 0.86),
+                                  outline=line, width=3, tags="g2say")
+                    cv.create_polygon(say_c[0] - 6 * k, bb9[3] + 6 * k,
+                                      say_c[0] + 6 * k, bb9[3] + 6 * k,
+                                      say_c[0], bb9[3] + 15 * k,
+                                      fill=self._tint(cd["fill"], 0.86),
+                                      outline="", tags="g2say")
+                    cv.tag_raise(tid)
+            if g2["over"] and not st["over_ui"]:
+                st["over_ui"] = True
+                self._safe("g2_rank", draw_rank)
+                self._safe("ct_snd", self._ct_snd, "over")
+                mx2, my2 = (BX + bx1) / 2, (BY + by1) / 2
+                self._rr_soft(cv, mx2 - 130 * k, my2 - 74 * k,
+                              mx2 + 130 * k, my2 + 74 * k, 22 * k,
+                              fill="#ffffff", outline=line, width=4,
+                              tags="over")
+                self._cute_text(cv, mx2, my2 - 40 * k, "끝!", uf(15, True),
+                                cd["text"], edge=edge, w=2.4 * k,
+                                tags="over")
+                cv.create_text(mx2, my2 - 8 * k,
+                               text="점수 %d · 최고 타일 %d"
+                               % (g2["score"], int(g2.get("top") or 0)),
+                               font=uf(10, True), fill=sub2, tags="over")
+                orr = 30 * k
+                ocy = my2 + 34 * k
+                self._safe("soft_btn", self._soft_dot, cv, mx2, ocy, orr,
+                           self._tint(cd["fill"], 0.72), outline=line,
+                           width=4, tags="over")
+                gid = cv.create_text(mx2, ocy, text="\u21bb",
+                                     font=uf(20, True), fill=ink, tags="over")
+                gb = cv.bbox(gid)
+                if gb:
+                    cv.move(gid, mx2 - (gb[0] + gb[2]) / 2.0,
+                            ocy - (gb[1] + gb[3]) / 2.0)
+                st["over_btn"] = (mx2 - orr, ocy - orr, mx2 + orr, ocy + orr)
+
+        def tick():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            # 16ms = 60fps. 예전 50ms 는 미끄러짐(0.135초)이 두 프레임밖에
+            # 안 돼서 뚝뚝 끊겼다 (제보 · 실측 19.5fps).
+            self._g2_after = win.after(16, tick)   # 먼저 예약 (지뢰 20)
+            self._safe("g2048", redraw, time.time())
+
+        def restart():
+            cv.delete("over")
+            st["over_ui"] = False
+            st["over_btn"] = None
+            self._g2 = self._g2_new(self._g2)
+            self._safe("g2_save", self._g2_save, self._g2)
+            self._safe("g2_rank", draw_rank)
+            self._safe("g2048", draw_board)
+
+        def do_move(d):
+            g2 = self._g2
+            if g2 is None or g2.get("over"):
+                return
+            g2["t_key"] = time.time()
+            before = list(g2.get("pop") or [])
+            if self._safe_str(self._g2_move, g2, d):
+                got9 = g2.get("pop") or []
+                if got9 and got9 is not before:
+                    # 합쳐졌다 — 그 수에서 **가장 큰 값**으로 소리를 고른다
+                    self._safe("g2_snd", self._g2_snd,
+                               max(v for _c, v, _t in got9))
+                else:
+                    self._safe("ui_click", self._ui_click)   # 그냥 밀림
+                self._safe("g2_save", self._g2_save, g2)
+                if g2.get("over"):
+                    self._safe("g2_rank", draw_rank)
+
+        win._g2_do = do_move        # 검사가 부르는 손잡이 (합성 키는
+                                    # 포커스 창에만 가서 흔들린다)
+        KEYS = {"Left": "left", "Right": "right", "Up": "up", "Down": "down",
+                "a": "left", "d": "right", "w": "up", "s": "down",
+                "A": "left", "D": "right", "W": "up", "S": "down"}
+
+        def on_key(e):
+            d = KEYS.get(e.keysym)
+            if d:
+                self._safe("g2_move", do_move, d)
+
+        def on_click(e):
+            for act9, bb9 in g2_btn.items():
+                if not (bb9[0] <= e.x <= bb9[2] and bb9[1] <= e.y <= bb9[3]):
+                    continue
+                self._safe("ui_click", self._ui_click)
+                if act9 == "bgm":
+                    self.us["g2_bgm_on"] = \
+                        not bool(self.us.get("g2_bgm_on", True))
+                    self._save_settings()
+                    bgm_apply()
+                    self._safe("bgm_ui", draw_bgm)
+                else:
+                    fn9 = getattr(win, "_g2_volfn", None)
+                    if fn9:
+                        st["voldrag"] = True
+                        fn9(e.y)
+                        self._save_settings()
+                return
+            for i8, pb in (getattr(win, "_g2_pen", None) or {}).items():
+                if pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
+                    self._safe("ui_click", self._ui_click)
+                    self._safe("rank_msg", self._rank_msg_win, draw_rank,
+                               "g2b")
+                    return
+            if (btn_help[0] <= e.x <= btn_help[2]
+                    and btn_help[1] <= e.y <= btn_help[3]):
+                self._safe("ui_click", self._ui_click)
+                self._safe("g2_help", self._g2_help)
+                return
+            ob = st.get("over_btn")
+            if ((ob and ob[0] <= e.x <= ob[2] and ob[1] <= e.y <= ob[3])
+                    or (btn_new[0] <= e.x <= btn_new[2]
+                        and btn_new[1] <= e.y <= btn_new[3])):
+                self._safe("ui_click", self._ui_click)
+                self._safe("g2_new", restart)
+                return
+            win.focus_force()            # 키가 다시 들어오게
+            st["down"] = (e.x, e.y)
+
+        def on_up(e):
+            if st.pop("voldrag", None):
+                self._save_settings()
+                st["down"] = None
+                return
+            a = st.get("down")
+            st["down"] = None
+            if not a:
+                return
+            dx, dy = e.x - a[0], e.y - a[1]
+            if max(abs(dx), abs(dy)) < 24 * k:
+                return                   # 그냥 클릭
+            if abs(dx) > abs(dy):
+                self._safe("g2_move", do_move,
+                           "right" if dx > 0 else "left")
+            else:
+                self._safe("g2_move", do_move, "down" if dy > 0 else "up")
+
+        def on_drag9(e):
+            fn9 = getattr(win, "_g2_volfn", None)
+            if st.get("voldrag") and fn9:
+                fn9(e.y)
+
+        cv.bind("<Button-1>", on_click)
+        cv.bind("<B1-Motion>", on_drag9)
+        cv.bind("<ButtonRelease-1>", on_up)
+        for w9 in (win, cv):
+            w9.bind("<Key>", on_key)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        def gone(_e=None):
+            got2 = self._g2_after           # 지뢰 20 — 예약 회수
+            if got2 is not None:
+                try:
+                    win.after_cancel(got2)
+                except Exception:
+                    pass
+                self._g2_after = None
+            if getattr(self, "_g2_winref", None) is win:
+                self._g2_winref = None
+            if self._g2 is not None:
+                self._safe("g2_save", self._g2_save, self._g2)
+            self._g2 = None                 # 이어하기 — 파일에는 남아 있다
+            self._g2_imgs.clear()
+            got9 = self._g2_bgm             # 브금도 창과 함께 끈다
+            self._g2_bgm = None
+            if got9 is not None:
+                try:
+                    got9.close()
+                except Exception:
+                    pass
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self._place_near(win)
+        self._dialog_keep(win, "g2048")
+        draw_board()
+        self._g2_say(g, "start")
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+        self._g2_after = win.after(16, tick)
+
+    G2_HELP = (
+        ("규칙", (
+            "방향키(또는 WASD)를 누르면 타일이 그쪽 벽까지 미끄러집니다."
+            " 판을 마우스로 밀어도 됩니다.",
+            "같은 숫자 둘이 만나면 합쳐져 두 배가 됩니다.",
+            "**한 번 움직일 때 각 타일은 한 번만 합쳐집니다** —"
+            " 2·2·2 가 한 줄이면 4와 2 가 됩니다.",
+            "움직일 때마다 빈 칸에 2(또는 가끔 4)가 하나 생깁니다.",
+            "점수는 그때 새로 생긴 타일 값의 합입니다.",
+            "2048 을 만들면 이깁니다. 더 못 움직이면 끝.",
+        )),
+        ("요령", (
+            "**큰 수는 한쪽 구석에 몰아 두세요.** 그 줄을 흐트러뜨리는"
+            " 방향(보통 위)은 되도록 안 누릅니다.",
+            "한 방향만 계속 누르지 말고 두 방향을 번갈아 쓰면 정리가"
+            " 쉬워집니다.",
+            "판이 꽉 차기 전에 큰 수끼리 붙여 두세요.",
+        )),
+    )
+
+    def _g2_help(self):
+        """2048 게임 방법 — 물음표 단추가 연다."""
+        got = getattr(self, "_g2_help_win", None)
+        try:
+            if got is not None and got.winfo_exists():
+                got.lift()
+                return
+        except Exception:
+            pass
+        cd = self.card
+        k = self.ui_k * self.G2_ZOOM
+
+        def uf(size, bold=False):
+            n = max(7, int(round(size * k)))
+            return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
+
+        ink = self._shade(cd["text"], 0.12)
+        sub2 = self._shade(cd["fill"], 0.22)
+        W = int(420 * k)
+        win = tk.Toplevel(self._g2_winref or self.room_win or self.root)
+        self._g2_help_win = win
+        win.title("게임 방법")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=10,
+                       bg=self._tint(cd["fill"], 0.90),
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        y = 18 * k
+        self._cute_text(cv, W / 2, y + 8 * k, "2048 — 이렇게 놉니다",
+                        uf(12, True), ink,
+                        edge=self._tint(cd["fill"], 0.66), w=1.8 * k)
+        y += 34 * k
+        for title, rows in self.G2_HELP:
+            y += 12 * k
+            cv.create_text(20 * k, y, anchor="w", text=title,
+                           font=uf(10, True), fill=ink)
+            y += 20 * k
+            for row in rows:
+                txt = row.replace("**", "")
+                bold = "**" in row
+                cv.create_text(26 * k, y, anchor="nw", text="·",
+                               font=uf(9, bold), fill=sub2)
+                it = cv.create_text(40 * k, y, anchor="nw", text=txt,
+                                    font=uf(9, bold),
+                                    fill=(ink if bold else sub2),
+                                    width=W - 62 * k)
+                y += (cv.bbox(it)[3] - cv.bbox(it)[1]) + 7 * k
+            y += 4 * k
+        cv.configure(height=int(y + 14 * k))
+        self._place_near(win)
+        self._dialog_keep(win, "g2help")
+
+        def gone9(_e=None):
+            if getattr(self, "_g2_help_win", None) is win:
+                self._g2_help_win = None
+        win.bind("<Destroy>",
+                 lambda e: gone9() if e.widget is win else None)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
 
     def _room_bar(self, cv, W, H, P, k, people):
         """아래 단추 줄 — 고른 상대에게만 간다.
@@ -25559,6 +27147,8 @@ class Mascot:
                 rows9.append(("수박\n게임", "game", "#eaf6df", "#5f8352"))
             if self.cfg.get("ctile"):
                 rows9.append(("컬러\n타일", "ctile", "#dfeefa", "#4f7590"))
+            if self.cfg.get("g2048"):
+                rows9.append(("2048", "g2048", "#faeedf", "#8a6440"))
             rows9.append(("꾸미기", "deco", cust or "#f6f0f8", P["sub"]))
             # 위로 펼쳐지므로 **거꾸로** 그린다 — 그래야 화면에서 위에서
             # 아래로 목록 차례(수박게임 → 컬러타일 → 꾸미기)가 된다
@@ -26835,6 +28425,8 @@ class Mascot:
                         self._safe("wgame_win", self._wg_win)
                     elif act9 == "ctile":
                         self._safe("ctile_win", self._ct_win)
+                    elif act9 == "g2048":
+                        self._safe("g2048_win", self._g2_win)
                     else:
                         self._safe("room_deco", self._room_deco_win)
                     return
