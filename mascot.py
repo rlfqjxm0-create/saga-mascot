@@ -9810,6 +9810,24 @@ class Mascot:
     ]
     CLICK_TALK = TALK
 
+    def _update_tell(self, now, sleeping):
+        """업데이트 직후 한 번 — 말풍선 + 알림음 + '바뀐 점' 팝업.
+
+        예전에는 이 알림이 혼잣말 기능(_fun_tick) **안쪽**에 있어서,
+        혼잣말을 끈 캐릭터에게는 팝업만 뜨고 말풍선은 한 번도 안 떴다
+        (제보). 알림은 기능과 상관없이 모두에게 가야 한다.
+        """
+        if not self._update_msg or sleeping or self.bubble is not None:
+            return
+        self._say(self._update_msg, 12.0, big=True)
+        self._update_msg = None
+        self.next_talk = now + 120
+        self.smile_until = max(self.smile_until, now + 4.0)
+        self._safe("update_snd", self._sparkle_sound)
+        self._safe("gest", self._gest_start, "wave", True)
+        if self._update_notes:                    # 무엇이 바뀌었는지 팝업으로
+            self._safe("update_popup", self._show_update_popup, False)
+
     def _say(self, text, secs=4.0, big=False, btn=None, act=None):
         """말풍선. btn·act 를 주면 말풍선 안에 누를 수 있는 단추가 생긴다.
 
@@ -9856,12 +9874,6 @@ class Mascot:
         if not self.fun:
             self._rec_tick(now, state)
             return
-        if self._update_msg and self.bubble is None and not sleeping:
-            self._say(self._update_msg, 12.0)     # 업데이트 알림 (시작 후 한 번)
-            self._update_msg = None
-            self.next_talk = now + 120
-            if self._update_notes:                # 무엇이 바뀌었는지 팝업으로
-                self._safe("update_popup", self._show_update_popup, False)
         self._rec_tick(now, state)
         if (self.bubble is None and now >= self.next_talk
                 and not sleeping and now > self.celebrate_until):
@@ -14552,6 +14564,8 @@ class Mascot:
         # 아래는 모두 구역 격리 — 하나가 터져도 캐릭터 본체는 그려진다
         self._safe("greet", self._greet_tick, now, state)
         self._safe("inbox_back", self._inbox_welcome, now)
+        # 업데이트 알림은 혼잣말 기능과 무관하게 누구에게나 (제보)
+        self._safe("update_tell", self._update_tell, now, sleeping)
         self._safe("fun_tick", self._fun_tick, now, state, sleeping)
         if self.timer_on:
             self._safe("timer", self._draw_timer, state, sleeping, now)
