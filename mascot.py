@@ -1568,12 +1568,21 @@ class PokeSound:
                       for fr, pcm in self.clips] if self.volume > 0 else [])
         self.buf = self.bufs[0][1] if self.bufs else None
 
-    def play(self):
+    def play(self, pitch=1.0):
+        """pitch 를 주면 그만큼 낮게·높게 낸다 (1.0 이 원래 높이).
+
+        수박게임이 공 크기에 맞춰 쓴다 — 큰 공은 낮고 무겁게, 작은 공은
+        높고 가볍게. 안 주면 예전 그대로 랜덤 변주만 걸린다.
+        """
         self.reap()
         if not getattr(self, "bufs", None):
             return
         fr, buf, nbytes = random.choice(self.bufs)
-        fr2 = max(8000, int(fr * random.uniform(0.92, 1.10)))
+        try:
+            pitch = max(0.35, min(2.2, float(pitch)))
+        except Exception:
+            pitch = 1.0
+        fr2 = max(8000, int(fr * pitch * random.uniform(0.96, 1.05)))
         wfx = _WAVEFORMATEX(1, 1, fr2, fr2 * 2, 2, 16, 0)
         wm = ctypes.windll.winmm
         h = ctypes.c_void_p()
@@ -1613,7 +1622,11 @@ class PokeSound:
 
 
 class MacPokeSound(_MacSoundPool):
-    """맥용 클릭 소리 (PokeSound와 같은 인터페이스). 피치 변주는 없다."""
+    """맥용 클릭 소리 (PokeSound와 같은 인터페이스).
+
+    맥은 재생 속도를 못 바꿔서 피치 인자를 받아만 두고 무시한다 —
+    부르는 쪽이 갈래를 나누지 않게 하려는 것이다.
+    """
 
     def __init__(self, folder, volume=40):
         names = [f for f in sorted(os.listdir(folder)) if f.lower().endswith(".wav")]
@@ -1621,7 +1634,7 @@ class MacPokeSound(_MacSoundPool):
             raise ValueError("클릭 소리 wav 없음")
         super().__init__([os.path.join(folder, names[0])], volume)
 
-    def play(self):
+    def play(self, pitch=1.0):
         self._fire(0)
 
     def close(self):
@@ -4702,6 +4715,7 @@ class Mascot:
         self.pomosnd = None         # 뽀모도로 시작음·종료음 {"start":…, "end":…}
         self.sparksnd = None         # 스페셜 컵케이크의 '샤라랑'
         self.snacksnd = None         # 간식을 먹을 때 (오물오물)
+        self.wgsnd = None            # 수박게임 {"drop":…, "merge":…, "big":…}
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -4832,6 +4846,18 @@ class Mascot:
         self.room_cv = None
         self.room_people = []        # 방에 있는 사람들
         self._room_who = None        # 마지막으로 본 레벨·칭호
+        # 수박게임 (홈 미니게임)
+        self._wg = None              # 판 상태 (열 때 읽는다)
+        self._wg_winref = None       # 게임 창
+        self._wg_imgs = {}           # (slot, 지름, 각도칸) → 머리 그림
+        self._wg_pils = {}           # (slot, 지름) → 원본 판 (회전 전)
+        self._wg_bake = {}           # 스레드가 미리 구운 판 (PIL)
+        self._wg_bake_want = []      # 굽기 계획 — 통째 교체가 곧 새 계획
+        self._wg_bake_th = None      # 굽기 스레드
+        self._wg_wrap_after = None   # 구운 것을 PhotoImage 로 싸는 예약
+        self._wg_after = None        # 게임 프레임 예약 (지뢰 20)
+        self._wg_snd_at = {}         # 소리 종류별 최근 시각
+        self._room_game_btn = None   # 홈의 게임 단추 자리
         self._room_job = None        # 방 창 다시 그리기 예약
         self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
         self._room_hit = []          # 방 창에서 누를 수 있는 자리
@@ -6129,6 +6155,21 @@ class Mascot:
                 except Exception:
                     pass
             self.pomosnd = got or None
+        # 수박게임 — 떨어뜨림·합체·큰 합체. 폴더마다 여러 개를 두어
+        # 재생기가 하나씩 골라 낸다 (연타해도 안 지겹게).
+        wg_dir = os.path.join(self.dir, "sounds", "wgame")
+        if os.path.isdir(wg_dir):
+            vol = float(self.us.get("poke_volume", 40))
+            got = {}
+            for nm in ("drop", "merge", "big", "hit"):
+                one = os.path.join(wg_dir, nm)
+                if not os.path.isdir(one):
+                    continue
+                try:
+                    got[nm] = PokeSound(one, volume=vol)
+                except Exception:
+                    pass
+            self.wgsnd = got or None
         # '샤라랑' — 스페셜 컵케이크를 받을 때만 나는 반짝임 소리
         sp_dir = os.path.join(self.dir, "sounds", "special")
         if os.path.isdir(sp_dir):
@@ -6923,7 +6964,7 @@ class Mascot:
             # 나머지는 close(). 있는 쪽을 부른다.
             for _nm in ("pensnd", "pokesnd", "roomsnd", "sparksnd",
                         "snacksnd", "snd", "_slime_snd", "pomosnd",
-                        "uisnd"):
+                        "uisnd", "wgsnd"):
                 _s = getattr(self, _nm, None)
                 if isinstance(_s, dict):        # 뽀모도로처럼 여럿을 든 것
                     for _one in list(_s.values()):
@@ -16264,6 +16305,9 @@ class Mascot:
                "ti": self._title()[:14], "t": t_min, "s": st,
                "p": pv,
                "a": act, "sl": bool(self.slime)}
+        wgb = self._wg_best()
+        if wgb > 0:
+            out["wgb"] = wgb        # 수박게임 최고 — 모두의 랭킹감
         if self.us.get("stamp_share"):
             # 도장판 공개 — 이번 달 도장(분)이 같이 실린다. 일기는 안 실린다.
             try:
@@ -16412,11 +16456,19 @@ class Mascot:
                 continue
             ti = str(q.get("ti") or "")[:14]
             nm = str(q.get("n") or "")[:14]
-            cur = who.get(slot)
-            if (not isinstance(cur, dict) or int(cur.get("lv") or 0) != lv
+            cur = who.get(slot) if isinstance(who.get(slot), dict) else {}
+            try:                     # 수박게임 최고 — 큰 쪽만 남긴다
+                wb = max(int(cur.get("wgb") or 0), int(q.get("wgb") or 0))
+            except Exception:
+                wb = 0
+            if (not cur or int(cur.get("lv") or 0) != lv
                     or str(cur.get("ti") or "") != ti
-                    or str(cur.get("n") or "") != nm):
-                who[slot] = {"lv": lv, "ti": ti, "n": nm}
+                    or str(cur.get("n") or "") != nm
+                    or int(cur.get("wgb") or 0) != wb):
+                row2 = {"lv": lv, "ti": ti, "n": nm}
+                if wb > 0:
+                    row2["wgb"] = wb
+                who[slot] = row2
                 dirty = True
         if len(who) > 60:                  # 상한 (지뢰 18)
             for old in list(who)[:30]:
@@ -16845,6 +16897,15 @@ class Mascot:
 
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
+        if ev.get("k") == "cdq":
+            # 방 그림을 다시 보내 달라는 청 — 반응이 아니라 통신이라
+            # mute·방패보다 먼저 본다. 20초에 한 번만 응한다.
+            now9 = time.time()
+            if now9 - getattr(self, "_cdq_at", 0.0) > 20.0:
+                self._cdq_at = now9
+                self._cd_push = True
+                self._safe("room_push", self._room_push_now)
+            return
         # 반응 받지 않기 — 남이 보낸 것은 조용히 버린다 (내가 나에게
         # 보낸 것은 그대로). 신호 번호는 이미 소비돼, 토글을 다시 켜도
         # 꺼져 있던 동안 것이 쏟아지지 않고 새 반응부터 받는다.
@@ -17006,9 +17067,14 @@ class Mascot:
             if slot not in self.ROOM_ART or slot in self._room_art_bad:
                 continue
             for tag in ("seat.png", "seat_idle.png", "seat_type.png",
-                        "seat_pen.png", "seat_pen2.png", "seat_meta.json"):
+                        "seat_pen.png", "seat_pen2.png", "seat_meta.json",
+                        "wg_head.png"):
                 if os.path.isfile(os.path.join(HERE, slot, tag)):
                     continue                      # 원본이 여기 있다
+                fld2 = self.ROOM_ART[slot][1]
+                if fld2 != slot and os.path.isfile(
+                        os.path.join(HERE, fld2, tag)):
+                    continue                      # 별칭 폴더(내 그림)에 있다
                 got = os.path.join(self._room_art_dir(),
                                    "%s_%s" % (slot, tag))
                 try:
@@ -17048,7 +17114,10 @@ class Mascot:
                     base = tag.rsplit(".", 1)[0]
                     self._room_img_cache.pop((slot, base), None)
                 except Exception:
-                    self._room_art_bad.add(slot)
+                    # 게임 머리는 아직 배포 안 된 레포에서 404 가 날 수
+                    # 있다 — 그것 때문에 자리(seat)까지 막으면 안 된다
+                    if tag != "wg_head.png":
+                        self._room_art_bad.add(slot)
             self._room_art_th = None
 
         self._room_art_th = threading.Thread(target=work, daemon=True)
@@ -19184,6 +19253,10 @@ class Mascot:
             if p.get("cd") and cdh:
                 self._safe("deco_peer", self._room_peer_save,
                            slot, cdh, p.get("cd"))
+            elif (cdh and not p.get("off")
+                    and self._room_peer_hashes().get(slot) != cdh):
+                # 해시는 새것인데 그림이 안 실려 왔다 — 청해서 받는다
+                self._safe("room_cdq", self._room_cd_ask, slot)
             cimg = (self._room_peer_img(slot, cdh, kx1 - kx0, ky1 - ky0,
                                         18 * k) if cdh else None)
         # 카드 밑 부드러운 그림자 — 아기자기하게 떠 보이게
@@ -20195,6 +20268,32 @@ class Mascot:
     def _slot_sane(slot):
         return "".join(ch for ch in str(slot)
                        if ch.isalnum() or ch == "_")[:40]
+
+    def _room_cd_ask(self, slot):
+        """'방 그림 좀 다시 보내 줘' — 자리마다 60초에 한 번만 청한다.
+
+        그림(cd)은 40초마다 8초 창에만 신호에 실리는데, 서버는 마지막
+        신호만 남기므로 그 창을 다음 일반 신호가 덮으면 받는 쪽은
+        해시(cdh)만 새것이고 그림은 옛것으로 남는다 — 홈을 닫아 둔
+        쪽(120초 주기)은 새 그림을 평균 10분씩 기다렸다 (제보 '바로바로
+        안 바뀐다'). 마주친 쪽이 직접 청하면 보내는 쪽이 _cd_push 로
+        다음 신호에 그림을 실어 준다. 옛 판 친구는 이 신호를 모르지만
+        조용히 버릴 뿐 다치지 않는다.
+        """
+        now = time.time()
+        ask = getattr(self, "_room_cd_askat", None)
+        if ask is None:
+            ask = self._room_cd_askat = {}
+        if now - float(ask.get(slot) or 0.0) < 60.0:
+            return
+        ask[slot] = now
+        if len(ask) > 60:                        # 상한 (지뢰 18)
+            for old in list(ask)[:30]:
+                ask.pop(old, None)
+        try:
+            self.room_net.send(slot, "cdq")
+        except Exception:
+            pass
 
     def _room_peer_save(self, slot, cdh, b64):
         """남이 보낸 방 칸 그림을 받아 둔다 (해시가 바뀌었을 때만)."""
@@ -21552,6 +21651,1267 @@ class Mascot:
         self._dialog_keep(win, "stk")
         self._stk_redraw(where)
 
+    # ── 수박게임 — 친구들 머리 합치기 (홈 미니게임) ──────────────────
+    # 규칙: 같은 단계 둘이 닿으면 다음 단계로 합체, 점수는 합체할 때만
+    # (삼각수 1·3·6·…·28). **마지막 단계 둘은 안 합쳐진다** — 원작은
+    # 사라지지만, 단계가 일곱뿐인 여기서는 그게 영구 배출구가 되어
+    # 게임이 영영 안 끝난다 (실측: 어떻게 두든 1500번을 넘겨도 안 끝났고,
+    # '둘이 하나로'로 바꿔도 마찬가지였다). 안 합쳐지게 두면 큰 머리가
+    # 쌓여 중앙값 245번에 끝난다.
+    # 물리는 슬라임(_slime_solve)처럼 위치 기반 해소로 직접 쓴다 —
+    # 선물본은 표준 라이브러리 + tkinter + PIL 뿐이다 (지뢰 21·46).
+    # 물리 좌표에는 배율(k)이 없다 — 그리는 쪽에서만 곱한다. 검사가
+    # 창 없이 물리만 돌릴 수 있는 것도 이 덕분이다.
+    # 얼굴은 14 개다 — 자리는 15 인데 도로롱이 둘(내 것·선물본)이라
+    # 이름이 같은 자리를 하나로 친다.
+    #
+    # 그 열넷을 한 판에 다 쓰면 **큰 얼굴을 보기까지 너무 오래 걸린다**
+    # (제보). 그래서 일곱씩 **두 벌**로 나누고, 판을 새로 시작할 때마다
+    # 어느 벌인지 뽑는다. 진화 순서 칸은 그 벌만 보여 준다.
+    WG_FACES = 14                # 등록표에서 뽑는 얼굴 수
+    WG_SETS = 2                  # 벌 수 (14 ÷ 2 = 7 단계)
+    WG_TIERS = 7                 # 한 판의 단계 수
+    WG_SCORES = (1, 3, 6, 10, 15, 21, 28)
+    # 단계가 반으로 줄었으니 한 칸이 더 크게 자란다 (배수 1.35~1.39).
+    # 얼굴이 작다는 제보로 두 번 키웠다 — 마지막 지름은 판 폭의 0.65 배로
+    # 둘이 나란히 앉을 수 없다(그래서 큰 것이 쌓이면 판이 끝난다).
+    WG_RADII = (13, 18, 25, 34, 46, 62, 84)
+    # 보드 (물리 좌표). 가로를 340 → 286 으로 좁혔다 — 한 판이 너무
+    # 길었다 (실측: 자동으로 420~660 번 떨어뜨려야 끝났다). 좁으면 같은
+    # 실수로도 빨리 차오른다. 가장 큰 공의 지름은 폭의 0.53 배.
+    WG_W, WG_H = 258, 430
+    # 위 띠에는 점수·'다음' 만 있다. 조준 공은 **병 목 안**에 있다 —
+    # 띠에 걸어 두면 오른쪽을 겨눌 때 '다음' 접시를 덮었다 (찍어서 확인).
+    WG_TOP = 72                  # 보드 위 띠 높이 (그리기 전용)
+    WG_LINE = 56                 # 이 선 위에 '앉아 있으면' 게임오버
+    WG_DROP_N = 3                # 떨어뜨릴 수 있는 단계 수 (작은 것들)
+    WG_GRAV = 1500.0
+    WG_MAX = 70                  # 과일 수 상한 (안전판)
+    WG_OVER_SEC = 2.6            # 선 위에 이만큼 머물면 끝 (넉넉하게)
+    # 천장 — **판 위끝(0)** 이다. 예전에는 -60 이라 공이 판 밖 위쪽에
+    # 앉을 수 있었고, 보이지도 않는 그 공 때문에 화면은 멀쩡한데 게임이
+    # 끝났다 (제보 '왜 도중에 끝나지'. 실측: y=-18·-26 에 한 개씩 있었다).
+    WG_CEIL = 0
+    WG_VMAX = 1300.0             # 속도 상한
+    # 부딪힘 소리가 나는 문턱 (다가오는 속도). 낮출수록 자주 난다 —
+    # 220 은 너무 뜸했다는 제보로 130 으로 내렸고, 벽·바닥에 닿는 것도
+    # 같이 센다. 소리 자체의 간격 제한(0.045초)이 연타를 막아 준다.
+    WG_HIT_V = 130.0
+
+    def _wg_path(self):
+        return os.path.join(self.state_dir, ".wgame.json")
+
+    def _wg_faces(self):
+        """얼굴 열넷 — 등록표 순서의 친구들 + 마지막은 항상 내 캐릭터.
+
+        내 캐릭터와 **이름이 같은** 자리(선물본 도로롱 등)는 빼야 같은
+        얼굴이 두 단계에 나오지 않는다. 사람이 모자라면 그만큼 짧아진다.
+        """
+        mine = str(self.ROOM_NAME.get(self.char) or "")
+        seen = {mine}
+        rest = []
+        for s2 in self.ROOM_ALL:
+            nm = str(self.ROOM_NAME.get(s2) or "")
+            if nm in seen:
+                continue
+            seen.add(nm)
+            rest.append(s2)
+        return tuple(rest[:self.WG_FACES - 1]) + (self.char,)
+
+    def _wg_set(self):
+        """이번 판이 어느 벌인지 (0 또는 1)."""
+        got = getattr(self, "_wg", None) or {}
+        try:
+            return max(0, int(got.get("set", 0))) % self.WG_SETS
+        except Exception:
+            return 0
+
+    def _wg_tiers(self, which=None):
+        """이번 판의 단계표 — 얼굴 열넷을 나눈 두 벌 중 한 벌.
+
+        한 칸씩 **번갈아** 나눈다(0·2·4… / 1·3·5…). 앞뒤로 뚝 자르면
+        한 벌에 비슷한 사람들만 몰리는데, 번갈아 나누면 어느 벌에도
+        골고루 섞인다. 내 캐릭터는 목록 맨 끝이라 늘 둘째 벌의
+        마지막(★)이 된다.
+        """
+        full = self._wg_faces()
+        if which is None:
+            which = self._wg_set()
+        which = max(0, int(which)) % self.WG_SETS
+        got = tuple(full[which::self.WG_SETS])[:self.WG_TIERS]
+        return got or tuple(full[:self.WG_TIERS])
+
+    def _wg_top(self):
+        """마지막 단계 번호 (사람이 모자라면 그만큼 작다)."""
+        return len(self._wg_tiers()) - 1
+
+    def _wg_r(self, tier):
+        i = max(0, min(len(self.WG_RADII) - 1, int(tier)))
+        return float(self.WG_RADII[i])
+
+    # ── 그림 — 머리를 동그랗게 오린 공 ────────────────────────────────
+    def _wg_art(self, slot, name):
+        """머리 파츠 찾기 — 받아 둔 것 → 내 폴더 → **별칭 폴더**.
+
+        내 자리 이름(slot)이 파츠 폴더와 다른 캐릭터가 있다 (도로롱 슬롯
+        "dororong" 의 그림은 parts_dororong). _room_art_file 은 slot
+        그대로만 보므로, 여기서 등록표(ROOM_ART)의 그림 폴더까지 본다.
+        이게 없던 동안 내 도로롱 공만 글자 공으로 나왔다.
+        """
+        got = self._room_art_file(slot, name)
+        if got:
+            return got
+        try:
+            folder = self.ROOM_ART.get(slot, (None, None))[1]
+            if folder and folder != slot:
+                q = os.path.join(HERE, folder, name)
+                if os.path.isfile(q):
+                    return q
+        except Exception:
+            pass
+        return None
+
+    def _wg_head_stack(self, slot):
+        """그 캐릭터의 '머리' — PSD 머리 레이어 파츠를 합쳐 한 장으로.
+
+        seat.png 에서 잘라내지 않는다 (제보 — 멋대로 자르지 말 것).
+        본체가 고개를 기울일 때 쓰는 합성(_build_tilt_base)과 같은
+        조리법이다: head + pupils + overlays(눈감음·body_mask 제외).
+        파츠 파일들은 배포 레포에 다 있으므로 _room_art_file 로 찾는다.
+        """
+        lp = self._wg_art(slot, "layout.json")
+        if not lp:
+            return None
+        try:
+            with open(lp, encoding="utf-8") as fp:
+                lay = json.load(fp)
+        except Exception:
+            return None
+        # 머리 **뒤**에 오는 파츠를 먼저 깐다. 다만 back.png 는 캐릭터마다
+        # 뜻이 다르다 — 사가는 머리를 감싸는 양갈래이고, 기뽀·햄북이·
+        # 락스·패왕은 몸 뒤에 달린 꼬리다 (제보: 꼬리는 빼 달라).
+        # **머리 꼭대기보다 위로 올라오는 것만** 머리 뒤 파츠로 본다.
+        # 실측: 사가 back 이 149 로 head 170 보다 위, 나머지 넷은 617~1056
+        # 으로 head(148~254) 보다 한참 아래다.
+        names = []
+        bk, hd = lay.get("back"), lay.get("head")
+        try:
+            if (isinstance(bk, dict) and isinstance(hd, dict)
+                    and int(bk["pos"][1]) <= int(hd["pos"][1])):
+                names.append("back")
+        except Exception:
+            pass
+        names.append("head")
+        if isinstance(lay.get("pupils"), dict):
+            names.append("pupils")
+        for nm in (lay.get("overlays") or ["eyes_closed", "hair"]):
+            if nm in ("eyes_closed", "body_mask", "head", "prop"):
+                continue                     # 눈은 뜬 채로, 소품은 빼고
+            names.append(nm)
+        parts = []
+        x0 = y0 = 10 ** 9
+        x1 = y1 = -10 ** 9
+        for nm in names:
+            meta = lay.get(nm)
+            fp2 = self._wg_art(slot, nm + ".png")
+            if not (isinstance(meta, dict) and meta.get("pos") and fp2):
+                if nm == "head":
+                    return None              # 머리가 없으면 소용없다
+                continue
+            if nm == "back" and not os.path.isfile(fp2):
+                continue
+            try:
+                im = Image.open(fp2).convert("RGBA")
+            except Exception:
+                continue
+            px2, py2 = int(meta["pos"][0]), int(meta["pos"][1])
+            parts.append((im, px2, py2))
+            x0, y0 = min(x0, px2), min(y0, py2)
+            x1, y1 = max(x1, px2 + im.width), max(y1, py2 + im.height)
+        if not parts:
+            return None
+        out = Image.new("RGBA", (x1 - x0, y1 - y0), (0, 0, 0, 0))
+        for im, px2, py2 in parts:
+            out.alpha_composite(im, (px2 - x0, py2 - y0))
+        bb = out.split()[3].point(lambda v: 255 if v > 60 else 0).getbbox()
+        return out.crop(bb) if bb else out
+
+    def _wg_head_pil(self, slot, px):
+        """공 한 장 — 머리 파츠 실루엣 그대로, 판은 1.45배 정사각형.
+
+        판이 넉넉해서 돌려도(rotate) 잘리지 않는다. 충돌은 원(r)으로 한다.
+        머리 파츠가 없는 캐릭터(옛 배포본)는 테마색 공 + 이름 첫 글자.
+        """
+        px = max(8, int(px))
+        side = int(px * 1.45)
+        out = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+        head = self._safe_str(self._wg_head_stack, slot) or None
+        if head is None:
+            # 파츠가 없는 자리(선물본의 남 캐릭터)는 미리 합쳐 배포한
+            # 한 장(wg_head.png)을 받아 쓴다 — make_wg_heads.py 가 굽고
+            # make_manifest 가 나른다. 그것도 없으면 글자 공.
+            wp = self._wg_art(slot, "wg_head.png")
+            if wp:
+                try:
+                    head = Image.open(wp).convert("RGBA")
+                except Exception:
+                    head = None
+        if head is not None and head.width > 4 and head.height > 4:
+            # 크기는 '긴 변'과 '넓이 환산 지름'의 절충 — 긴 변만 맞추면
+            # 납작한 머리(프고)가 충돌원 안에서 작아 붕 떠 보이고,
+            # 넓이로만 맞추면 원 밖으로 삐져나가 서로 파고들어 보인다.
+            gm = (head.width * head.height) ** 0.5
+            kk = px / max(1.0, (max(head.width, head.height) * 0.55
+                                + gm * 0.45))
+            head = head.resize((max(1, int(head.width * kk)),
+                                max(1, int(head.height * kk))),
+                               Image.LANCZOS)
+            out.alpha_composite(head, ((side - head.width) // 2,
+                                       (side - head.height) // 2))
+            return out
+        # 폴백 — 테마색 공 + 이름 첫 글자
+        tint = self._tint(self.ROOM_TINT.get(slot, "#e7a8c0"), 0.55)
+        d = ImageDraw.Draw(out)
+        m0 = (side - px) // 2
+        d.ellipse([m0, m0, m0 + px - 1, m0 + px - 1], fill=tint,
+                  outline="#ffffff", width=max(2, px // 24))
+        ch = (str(self.ROOM_NAME.get(slot) or "?")[:1]) or "?"
+        try:
+            fnt = ImageFont.truetype(
+                os.path.join(self.dir, "fonts", "Pretendard-Bold.otf"),
+                int(px * 0.44))
+            tw2 = d.textlength(ch, font=fnt)
+            d.text(((side - tw2) / 2, side * 0.30), ch, font=fnt,
+                   fill="#ffffff")
+        except Exception:
+            pass
+        return out
+
+    def _wg_shine(self, im):
+        """머리 실루엣에 유리구슬 질감 — 딱딱한 경계로 (제보).
+
+        빛은 왼쪽 위에서 온다. 유리로 읽히려면 하이라이트만으로는
+        모자라고 **아래쪽 반사광**이 있어야 한다 — 진짜 구슬은 밑에서
+        빛이 돌아 들어와 아랫가장자리가 밝다. 반대쪽에는 얕은 그늘.
+        돌린 뒤의 실루엣에서 만들므로 굴러도 빛은 제자리다.
+        ImageChops 는 안 쓴다 (지뢰 21).
+        """
+        try:
+            side = im.width
+            a = im.getchannel("A")
+            bb = a.getbbox()
+            if not bb:
+                return im
+            zero = Image.new("L", im.size, 0)
+            a_on = a.point(lambda v: 255 if v > 40 else 0)
+            w2, h2 = bb[2] - bb[0], bb[3] - bb[1]
+            dim = max(w2, h2)
+            cx0 = bb[0] + w2 / 2.0
+            cy0 = bb[1] + h2 / 2.0
+            out = im.copy()
+
+            def stripe(cx2, cy2, ln, wd, val, ang=38):
+                """기울인 알약 한 줄 — 경계 그대로 (블러 없음)."""
+                cap = Image.new("L", im.size, 0)
+                L2, W3 = dim * ln, dim * wd
+                ImageDraw.Draw(cap).rounded_rectangle(
+                    [side / 2 - L2 / 2, side / 2 - W3 / 2,
+                     side / 2 + L2 / 2, side / 2 + W3 / 2],
+                    radius=W3 / 2, fill=val)
+                cap = cap.rotate(ang, resample=Image.NEAREST)
+                lay = Image.new("L", im.size, 0)
+                lay.paste(cap, (int(cx2 - side / 2), int(cy2 - side / 2)),
+                          cap)
+                return lay
+
+            # ①② 하이라이트 두 줄 — 굵은 것과 가는 것
+            hi = stripe(cx0 - dim * 0.16, cy0 - dim * 0.21, 0.40, 0.135, 165)
+            hi2 = stripe(cx0 - dim * 0.02, cy0 - dim * 0.09, 0.17, 0.052, 130)
+            lay = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            lay.putalpha(Image.composite(
+                Image.eval(hi, lambda v: v).point(lambda v: v),
+                zero, a_on))
+            out.alpha_composite(lay)
+            lay2 = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            lay2.putalpha(Image.composite(hi2, zero, a_on))
+            out.alpha_composite(lay2)
+
+            # ③ 점광 — 아주 작고 하얀 (하이라이트 위쪽 끝에)
+            spot = Image.new("L", im.size, 0)
+            sx = cx0 - dim * 0.30
+            sy = cy0 - dim * 0.32
+            r2 = max(1.5, dim * 0.042)
+            ImageDraw.Draw(spot).ellipse(
+                [sx - r2, sy - r2, sx + r2, sy + r2], fill=240)
+            lay3 = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            lay3.putalpha(Image.composite(spot, zero, a_on))
+            out.alpha_composite(lay3)
+
+            # ④⑤ 가장자리 — 아래오른쪽은 반사광, 위왼쪽은 얇은 흰 테,
+            #     아래왼쪽은 얕은 그늘. 실루엣 가장자리 띠에서 방향으로 가른다.
+            gr = self._wg_pils.get(("grad", side))
+            if gr is None:                     # 왼위가 밝은 대각 그라데이션
+                gr = ImageOps.invert(
+                    Image.linear_gradient("L").rotate(-45, expand=True)
+                    .resize((side, side), Image.BILINEAR))
+                self._wg_pils[("grad", side)] = gr
+            k2 = max(3, (side // 34) | 1)
+            er = a_on.filter(ImageFilter.MinFilter(k2))
+            band = Image.composite(
+                a_on, zero, er.point(lambda v: 255 if v < 128 else 0))
+            # 위왼쪽 — 얇은 흰 테
+            rim = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            rim.putalpha(Image.composite(
+                band.point(lambda v: int(v * 0.50)), zero,
+                gr.point(lambda v: 255 if v > 170 else 0)))
+            out.alpha_composite(rim)
+            # 아래오른쪽 — 반사광 (유리로 읽히게 하는 핵심)
+            k3 = max(3, (side // 22) | 1)
+            er2 = a_on.filter(ImageFilter.MinFilter(k3))
+            band2 = Image.composite(
+                a_on, zero, er2.point(lambda v: 255 if v < 128 else 0))
+            glow = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            glow.putalpha(Image.composite(
+                band2.point(lambda v: int(v * 0.42)), zero,
+                gr.point(lambda v: 255 if v < 70 else 0)))
+            out.alpha_composite(glow)
+            # 아래왼쪽 — 얕은 그늘 (부피)
+            dark = Image.new("RGBA", im.size, (62, 44, 78, 0))
+            dark.putalpha(Image.composite(
+                band.point(lambda v: int(v * 0.26)), zero,
+                gr.point(lambda v: 255 if 70 <= v < 120 else 0)))
+            out.alpha_composite(dark)
+            return out
+        except Exception:
+            return im
+
+    WG_ANG = 10          # 회전 그림은 이 각도(도) 단위로 묶어 캐시한다
+
+    def _wg_pil_base(self, slot, px):
+        """원본 판 (회전 전) — 굽기 스레드와 그리기가 같이 쓴다."""
+        base = self._wg_pils.get((slot, px))
+        if base is None:
+            base = self._wg_head_pil(slot, px)
+            if len(self._wg_pils) > 90:          # 상한 (지뢰 18·42)
+                for k2 in list(self._wg_pils)[:45]:
+                    self._wg_pils.pop(k2, None)
+            self._wg_pils[(slot, px)] = base
+        return base
+
+    def _wg_make(self, slot, px, step):
+        """한 장을 실제로 만든다 (PIL). 큰 머리는 한 장에 140ms 쯤."""
+        base = self._wg_pil_base(slot, px)
+        im = base if step == 0 else base.rotate(
+            -step * self.WG_ANG, resample=Image.BICUBIC)
+        # 광은 돌린 **뒤에** 입힌다 — 굴러도 빛은 왼쪽 위 그대로
+        return self._wg_shine(im)
+
+    def _wg_bake_kick(self, k):
+        """이번 벌의 회전 그림 전부(단계×36각도)를 스레드로 미리 굽는다.
+
+        큰 머리를 그리다 만들면 한 장에 140ms 라 프레임이 뚝뚝 끊겼다
+        (실측: 6단계 구르는 동안 90% 프레임 172ms → 구운 뒤 11ms).
+        성능 우선(요청) — 창을 열 때와 벌이 바뀔 때 미리 만들어 두고,
+        그리기는 꺼내 쓰기만 한다. 스레드는 PIL 만 만진다. PhotoImage
+        는 Tk 것이라 창의 after 루프(wrap_some)가 싼다. 작은 단계부터
+        구우므로 큰 단계(몇 분 뒤에나 나온다)는 그 전에 끝난다
+        (실측 전부 9초쯤, 약 70MB — 창을 닫으면 돌려준다).
+        """
+        want = []
+        for t2 in range(len(self._wg_tiers())):
+            px = int(self._wg_r(t2) * 2 * k)
+            slot = self._wg_tiers()[t2]
+            for st2 in range(360 // self.WG_ANG):
+                want.append((slot, px, st2))
+        self._wg_bake_want = want                # 통째 교체 = 새 계획
+        if self._wg_bake_th is not None and self._wg_bake_th.is_alive():
+            return
+
+        def work():
+            while True:
+                plan = self._wg_bake_want
+                for key in plan:
+                    if self._wg_bake_want is not plan:
+                        break                    # 벌이 바뀌었다 — 새 계획
+                    if key in self._wg_imgs or key in self._wg_bake:
+                        continue
+                    try:
+                        self._wg_bake[key] = self._wg_make(*key)
+                    except Exception:
+                        pass
+                else:
+                    if self._wg_bake_want is plan:
+                        return                   # 다 구웠고 계획도 그대로
+        self._wg_bake_th = threading.Thread(target=work, daemon=True)
+        self._wg_bake_th.start()
+
+    def _wg_img(self, tier, px, ang=0.0, which=None):
+        """단계별 공 그림 — (자리, 지름, 각도칸) 으로 캐시.
+
+        which 를 주면 그 벌의 얼굴을 낸다 (진화 순서 칸이 두 벌을 다
+        보여 주므로 필요하다). 캐시 열쇠가 **자리**라 벌이 달라도 안 섞인다.
+
+        구슬처럼 구르는 걸 보여 주려면 얼굴이 돌아야 한다. 매 프레임
+        돌리면 느리므로 10도 단위로 묶는다 — 내용이 원(내접)이라 정사각형
+        판을 돌려도 잘리는 것이 없다. 원본 판은 따로 들고(_wg_pils)
+        각도마다 자르기부터 다시 하지 않는다.
+        """
+        tiers = self._wg_tiers(which)
+        slot = tiers[max(0, min(len(tiers) - 1, int(tier)))]
+        px = max(8, int(px))
+        step = int(round(math.degrees(ang) / self.WG_ANG)) % (
+            360 // self.WG_ANG)
+        key = (slot, px, step)
+        got = self._wg_imgs.get(key)
+        if got is None:
+            im = self._wg_bake.pop(key, None)    # 스레드가 미리 구운 것
+            if im is None:
+                im = self._wg_make(slot, px, step)
+            got = ImageTk.PhotoImage(im)
+            # 상한 (지뢰 18·42). 한 벌을 다 구우면 7단계×36각도 ≈ 252장
+            # (약 70MB) — 게임을 하는 **동안만** 크게 쓰고(성능 우선,
+            # 사용자 확인) 창을 닫으면 통째로 돌려준다. 상한이 벌 하나
+            # 몫보다 작으면 굽는 족족 서로를 밀어내므로 넉넉히 둔다.
+            if len(self._wg_imgs) > 480:
+                for k2 in list(self._wg_imgs)[:240]:
+                    self._wg_imgs.pop(k2, None)
+            self._wg_imgs[key] = got
+        return got
+
+    # ── 판 상태 ───────────────────────────────────────────────────────
+    WG_RANK_N = 5            # 랭킹 게시판에 남기는 기록 수
+    # 이 창만 다른 창보다 크게 그린다. 해상도가 높은 컴퓨터에서 작아
+    # 보인다는 제보 — 화면에 안 들어가면 아래에서 저절로 줄어든다.
+    WG_ZOOM = 1.30
+
+    def _wg_best(self):
+        """내 최고 점수 (없으면 0) — 방 신호와 랭킹이 같이 쓴다."""
+        try:
+            g = self._wg if self._wg is not None else self._wg_load()
+            return max(0, int(g.get("best") or 0))
+        except Exception:
+            return 0
+
+    def _wg_board(self):
+        """모두의 랭킹 — [(점수, 이름, 나인가)] 높은 순 5개.
+
+        서버는 안 고친다 — 방 신호(beat)에 실려 오는 wgb 를 모은다.
+        꺼진 사람 것은 마지막으로 본 값(.room_who.json, 지뢰 55 의 who
+        패턴)이 남고, 그 사람이 새 기록을 세우면 접속해 있는 동안
+        저절로 갱신된다. 이름은 그 사람이 정한 닉네임(n)이다.
+        """
+        rows = []
+        mb = self._wg_best()
+        if mb > 0:
+            nm = str(self._safe_str(self._room_nick) or
+                     self.ROOM_NAME.get(self.char) or "나")
+            # 내 줄에는 '·나'가 붙는다 — 그만큼 이름을 더 줄여야 큰
+            # 점수(다섯 자리)와 안 겹친다 (자로 재서 맞춘 값)
+            rows.append((mb, nm[:4], True))
+        try:
+            for slot, w in (self._room_who_get() or {}).items():
+                if slot == self.char or not isinstance(w, dict):
+                    continue
+                b = int(w.get("wgb") or 0)
+                if b <= 0:
+                    continue
+                nm = (str(w.get("n") or "").strip()
+                      or str(self.ROOM_NAME.get(slot) or slot))
+                rows.append((b, nm[:5], False))
+        except Exception:
+            pass
+        rows.sort(key=lambda r: (-r[0], r[1]))
+        return rows[:self.WG_RANK_N]
+
+    def _wg_rank(self):
+        """지난 점수들 — 높은 순 [[점수, 날짜], …]."""
+        got = (self._wg_load().get("rank") or [])
+        out = []
+        for row in got:
+            try:
+                out.append([int(row[0]), str(row[1])[:10]])
+            except Exception:
+                pass
+        out.sort(key=lambda r: -r[0])
+        return out[:self.WG_RANK_N]
+
+    def _wg_rank_add(self, score):
+        """판이 끝났을 때 기록에 넣는다 (0점은 안 넣는다)."""
+        score = int(score or 0)
+        if score <= 0:
+            return
+        g = self._wg_load()
+        rows = list(g.get("rank") or [])
+        rows.append([score, time.strftime("%m/%d")])
+        rows.sort(key=lambda r: -int(r[0]))
+        g["rank"] = rows[:self.WG_RANK_N]
+        self._wg_save()
+
+    def _wg_default(self):
+        rnd = random.Random()
+        return {"fruits": [], "score": 0, "best": 0, "rank": [],
+                "set": rnd.randrange(self.WG_SETS),   # 이번 판의 벌
+                "cur": rnd.randrange(self.WG_DROP_N),
+                "nxt": rnd.randrange(self.WG_DROP_N),
+                "over": False, "hot": 0.0,
+                "drop_x": self.WG_W / 2.0, "cool": 0.0}
+
+    def _wg_load(self):
+        if self._wg is not None:
+            return self._wg
+        g = self._wg_default()
+        try:
+            with open(self._wg_path(), encoding="utf-8") as fp:
+                raw = json.load(fp)
+            # 판(공 자리·점수)은 안 읽는다 — 단판제라 늘 새 판으로 연다
+            g["best"] = max(0, int(raw.get("best") or 0))
+            if isinstance(raw.get("rank"), list):
+                g["rank"] = raw["rank"][:self.WG_RANK_N]
+        except Exception:
+            pass
+        self._wg = g
+        return g
+
+    def _wg_save(self):
+        """남기는 것은 **최고 기록과 랭킹뿐**이다 (단판제, 요청).
+
+        판을 저장하면 창을 껐다 켰을 때 하던 판이 이어진다. 그러지 말고
+        늘 처음부터 하고 싶다는 요청이라, 공 자리·점수·다음 공은 안 쓴다.
+        이어 하기를 되살리려면 여기와 _wg_load 에 되돌려 놓으면 된다.
+        """
+        g = self._wg
+        if g is None:
+            return
+        try:
+            _save_json(self._wg_path(), {           # 지뢰 35
+                "best": g["best"],
+                "rank": list(g.get("rank") or [])[:self.WG_RANK_N]})
+        except Exception:
+            self._log_error("wg_save")
+
+    def _wg_new(self):
+        """다시 하기 — 최고 기록과 랭킹만 남기고 판을 비운다."""
+        old = self._wg or {}
+        best, rank = old.get("best", 0), list(old.get("rank") or [])
+        self._wg = self._wg_default()
+        self._wg["best"] = best
+        self._wg["rank"] = rank
+        self._wg_save()
+
+    def _wg_drop(self):
+        """지금 조준한 자리에 현재 공을 떨어뜨린다. 됐으면 True."""
+        g = self._wg_load()
+        now = time.time()
+        if g["over"] or now < g["cool"] or len(g["fruits"]) >= self.WG_MAX:
+            return False
+        t2 = g["cur"]
+        r = self._wg_r(t2)
+        x = max(r + 1, min(self.WG_W - r - 1, float(g["drop_x"])))
+        g["fruits"].append({"x": x, "y": r + 2.0, "vx": 0.0, "vy": 40.0,
+                            "t": t2, "born": now})
+        g["cur"] = g["nxt"]
+        g["nxt"] = random.randrange(self.WG_DROP_N)
+        g["cool"] = now + 0.45
+        self._safe("wg_snd", self._wg_snd, "drop", t2)
+        return True
+
+    def _wg_pitch(self, tier):
+        """공 크기에 맞춘 소리 높이 — 클수록 낮고 무겁게.
+
+        가장 작은 공이 1.30, 가장 큰 공이 0.64. 반지름의 세제곱근에
+        반비례시키면(부피 ∝ r³) 실제 물체가 커질 때 음이 내려가는 것과
+        비슷하게 들린다 — 단계마다 똑같이 나누면 큰 쪽이 밋밋하다.
+
+        지수는 **반지름 폭에 맞춰 정한다.** 작은 공을 키우면 큰 공과의
+        비가 좁아져 같은 지수로는 덜 낮아진다 (13~76 으로 바꿨을 때
+        0.34 로는 0.71 까지밖에 안 내려갔다).
+        """
+        try:
+            r = self._wg_r(int(tier))
+            r0 = float(self.WG_RADII[0])
+            return max(0.62, min(1.30, 1.30 * (r0 / max(r, 1.0)) ** 0.40))
+        except Exception:
+            return 1.0
+
+    def _wg_snd(self, kind, tier=None):
+        """수박게임 소리 — 전용 음원이 있으면 그것, 없으면 있는 것으로.
+
+        촘촘한 연쇄에서 웅웅거리지 않게 간격을 둔다. 큰 합체는 드무니
+        그 간격에 안 걸리게 따로 본다. tier 를 주면 그 크기에 맞는
+        높이로 낸다.
+        """
+        # 간격은 **종류별로** 센다. 하나로 세면 합체 소리가 방금 났다는
+        # 이유로 사람이 직접 누른 낙하 소리가 삼켜진다 (검사가 잡았다).
+        now = time.time()
+        at = self._wg_snd_at
+        if not isinstance(at, dict):
+            at = self._wg_snd_at = {}
+        gap = {"big": 0.02, "hit": 0.045}.get(kind, 0.085)
+        if now - float(at.get(kind) or 0.0) < gap:
+            return
+        at[kind] = now
+        got = self.wgsnd if isinstance(self.wgsnd, dict) else None
+        snd = (got or {}).get(kind)
+        if snd is None:                      # 전용 음원이 없는 캐릭터
+            snd = getattr(self, "sparksnd" if kind == "big" else "pokesnd",
+                          None)
+        if snd is not None:
+            if tier is None:
+                self._safe("wg_snd", snd.play)
+            else:
+                self._safe("wg_snd", snd.play, self._wg_pitch(tier))
+
+    def _wg_merge_snd(self, big, tier=None):
+        self._wg_snd("big" if big else "merge", tier)
+
+    def _wg_step(self, dt):
+        """물리 한 걸음 — 중력·충돌·합체·게임오버 판정.
+
+        창 없이도 돈다 (검사는 가짜 시계로 이걸 돌려 숫자로 잰다).
+        """
+        g = self._wg_load()
+        if g["over"]:
+            return
+        fr = g["fruits"]
+        W2, H2 = float(self.WG_W), float(self.WG_H)
+        dt = max(0.0, min(float(dt), 1.0 / 30.0))
+        # 반걸음 둘 — 한 번에 크게 옮기면 빠른 공이 서로를 뚫는다
+        # (슬라임에서 배운 것, 지뢰 39④)
+        for _sub in range(2):
+            h = dt / 2.0
+            if h <= 1e-6:
+                break
+            for f in fr:
+                f["vy"] += self.WG_GRAV * h
+                f["vx"] = max(-self.WG_VMAX, min(self.WG_VMAX, f["vx"]))
+                f["vy"] = max(-self.WG_VMAX, min(self.WG_VMAX, f["vy"]))
+                f["px"] = f["x"]
+                f["py"] = f["y"]
+                f["x"] += f["vx"] * h
+                f["y"] += f["vy"] * h
+                # 구슬처럼 구른다 — 회전각과 이동 전 속도(튐 계산용)
+                f["a"] = f.get("a", 0.0) + f.get("w", 0.0) * h
+                f["ivx"], f["ivy"] = f["vx"], f["vy"]
+                f["fl"] = f["wl"] = False
+                f["kx"] = f["ky"] = 0.0
+            # 같은 단계끼리 닿았나 — 한 공은 한 번만 (셋이 겹칠 때
+            # 이중 합체 방지). 목록을 다 훑고 나서 한꺼번에 바꾼다.
+            used, pairs = set(), []
+            for i in range(len(fr)):
+                if i in used:
+                    continue
+                a = fr[i]
+                if a["t"] >= self._wg_top():
+                    continue          # 마지막 단계는 안 합쳐진다 (아래 설명)
+                ra = self._wg_r(a["t"])
+                for j in range(i + 1, len(fr)):
+                    if j in used or fr[j]["t"] != a["t"]:
+                        continue
+                    b = fr[j]
+                    rr = ra + self._wg_r(b["t"])
+                    dx = b["x"] - a["x"]
+                    dy = b["y"] - a["y"]
+                    # '닿으면' 합체 (+0.5 여유) — 겹쳐야만 합쳐지게 두면
+                    # 바닥에 나란히 앉은 같은 단계 둘이 영영 안 합쳐진다.
+                    # 해소가 정확히 맞닿는 자리(d = rr)에 세워 두기 때문.
+                    if dx * dx + dy * dy <= (rr + 0.5) * (rr + 0.5):
+                        used.add(i)
+                        used.add(j)
+                        pairs.append((i, j))
+                        break
+            if pairs:
+                dead = set()
+                born = []
+                for i, j in pairs:
+                    a, b = fr[i], fr[j]
+                    t2 = a["t"]
+                    g["score"] += self.WG_SCORES[t2]
+                    dead.add(i)
+                    dead.add(j)
+                    nx2 = (a["x"] + b["x"]) / 2.0
+                    ny2 = (a["y"] + b["y"]) / 2.0
+                    born.append({"x": nx2, "y": ny2,
+                                 "vx": (a["vx"] + b["vx"]) / 4.0,
+                                 "vy": -80.0, "t": t2 + 1,
+                                 # 이동 전 자리 — 속도 되구하기에 쓰인다
+                                 "px": nx2, "py": ny2 + 80.0 * h,
+                                 "a": 0.0,
+                                 "w": (a.get("w", 0.0) + b.get("w", 0.0)) / 2,
+                                 "ivx": 0.0, "ivy": 0.0,
+                                 "fl": False, "wl": False,
+                                 "kx": 0.0, "ky": 0.0,
+                                 "born": time.time()})
+                    # 소리는 **생겨난 공**의 크기로 (커진 것이 들린다)
+                    self._wg_merge_snd(t2 + 1 >= self._wg_top(), t2 + 1)
+                g["fruits"] = fr = [f for i2, f in enumerate(fr)
+                                    if i2 not in dead] + born
+                g["best"] = max(g["best"], g["score"])
+            # 위치 기반 해소 — 겹친 만큼 무게(반지름²) 반비례로 밀어낸다
+            for it2 in range(4):
+                for i in range(len(fr)):
+                    a = fr[i]
+                    ra = self._wg_r(a["t"])
+                    for j in range(i + 1, len(fr)):
+                        b = fr[j]
+                        rb = self._wg_r(b["t"])
+                        rr = ra + rb
+                        dx = b["x"] - a["x"]
+                        dy = b["y"] - a["y"]
+                        d2 = dx * dx + dy * dy
+                        if d2 >= rr * rr:
+                            continue
+                        if d2 <= 1e-9:         # 같은 자리 — 위로 뽑는다
+                            dx, dy, d = 0.0, -1.0, 1.0
+                        else:
+                            d = math.sqrt(d2)
+                        nx, ny = dx / d, dy / d
+                        # 깊이 겹친 것을 한 번에 다 밀면 그 점프를 속도
+                        # 되구하기가 진짜 속도로 오해해 공이 로켓처럼
+                        # 난다 (실측 y=-333, 상한 10에서도 y=-299).
+                        # 4px 씩이면 한 프레임에 최대 8px = 속도 480 —
+                        # 살짝 튀어나오는 정도로 끝난다.
+                        ov = min(rr - d, 4.0)
+                        ma, mb = ra * ra, rb * rb
+                        tm = ma + mb
+                        a["x"] -= nx * ov * (mb / tm)
+                        a["y"] -= ny * ov * (mb / tm)
+                        b["x"] += nx * ov * (ma / tm)
+                        b["y"] += ny * ov * (ma / tm)
+                        if it2 == 0:
+                            # 구슬 느낌 ① — 세게 부딪히면 톡 튄다
+                            vn0 = ((b["ivx"] - a["ivx"]) * nx
+                                   + (b["ivy"] - a["ivy"]) * ny)
+                            if vn0 < -self.WG_HIT_V:
+                                # 부딪힘 소리 — 큰 쪽 크기로 (낮고 무겁게).
+                                # 문턱을 두지 않으면 굴러다니는 내내 난다.
+                                self._safe("wg_snd", self._wg_snd, "hit",
+                                           max(a["t"], b["t"]))
+                            if vn0 < -150.0:
+                                kick = -vn0 * 0.22
+                                a["kx"] -= nx * kick * (mb / tm)
+                                a["ky"] -= ny * kick * (mb / tm)
+                                b["kx"] += nx * kick * (ma / tm)
+                                b["ky"] += ny * kick * (ma / tm)
+                            # 구슬 느낌 ② — 스치면 서로 굴린다 (마찰 스핀)
+                            tx2, ty2 = -ny, nx
+                            slip = ((b["ivx"] - a["ivx"]) * tx2
+                                    + (b["ivy"] - a["ivy"]) * ty2)
+                            a["w"] = a.get("w", 0.0) + slip / ra * 0.05
+                            b["w"] = b.get("w", 0.0) + slip / rb * 0.05
+                for f in fr:                   # 벽·바닥 (자리만 되민다)
+                    r = self._wg_r(f["t"])
+                    if f["x"] < r:
+                        f["x"] = r
+                        f["wl"] = True
+                    elif f["x"] > W2 - r:
+                        f["x"] = W2 - r
+                        f["wl"] = True
+                    # **천장** — 겹침을 풀다 위로 튄 공이 상자 밖으로
+                    # 날아가 안 돌아온 제보. 위로도 막는다.
+                    if f["y"] < self.WG_CEIL + r:
+                        f["y"] = self.WG_CEIL + r
+                        if f["vy"] < 0:
+                            f["vy"] = 0.0
+                    if f["y"] > H2 - r:
+                        f["y"] = H2 - r
+                        f["fl"] = True
+            # 속도는 '실제로 움직인 만큼'에서 되구한다 (PBD). 충격량으로
+            # 다루면 쌓인 무더기가 부르르 떤다 — 실측: 6초 뒤에도 속도
+            # 70대. 이 방식이면 자리 잡은 공의 속도가 저절로 0에 간다.
+            # **여기도 상한을 걸어야 한다** — 해소가 자리를 확 옮기면
+            # 그 점프가 속도로 둔갑한다.
+            for f in fr:
+                f["vx"] = max(-self.WG_VMAX,
+                              min(self.WG_VMAX,
+                                  (f["x"] - f["px"]) / h * 0.998))
+                f["vy"] = max(-self.WG_VMAX,
+                              min(self.WG_VMAX,
+                                  (f["y"] - f["py"]) / h * 0.998))
+                # 구슬 느낌 ③ — 바닥·벽에 세게 닿으면 톡 튄다 (반발 0.3)
+                if f["fl"] and f["ivy"] > 160.0:
+                    f["vy"] = -f["ivy"] * 0.3
+                if f["wl"] and abs(f["ivx"]) > 160.0:
+                    f["vx"] = -f["ivx"] * 0.3
+                # 벽·바닥에 부딪히는 소리도 낸다 — 공끼리만 세면 판이
+                # 빌 때 아무 소리도 안 나서 심심하다 (제보)
+                if ((f["fl"] and f["ivy"] > self.WG_HIT_V)
+                        or (f["wl"] and abs(f["ivx"]) > self.WG_HIT_V)):
+                    self._safe("wg_snd", self._wg_snd, "hit", f["t"])
+                f["vx"] += f["kx"]
+                f["vy"] += f["ky"]
+                # 구슬 느낌 ④ — 바닥에서는 이동에 맞춰 구르고, 구르는
+                # 마찰은 **속도에** 아주 약하게 건다. 자리에 걸었더니
+                # (0.92을 해소 반복마다) 구슬이 몇 걸음 못 가고 섰다.
+                r = self._wg_r(f["t"])
+                w0 = f.get("w", 0.0)
+                if f["fl"]:
+                    w0 += (f["vx"] / r - w0) * 0.35
+                    f["vx"] *= 0.988
+                f["w"] = max(-14.0, min(14.0, w0 * 0.995))
+        # 게임오버 — **넘쳐서 자리 잡은** 것만 센다.
+        # 예전에는 '선 위에 있기만 하면' 셌더니, 떨어지는 중이거나 튀어
+        # 오른 공 때문에 갑자기 뚝 끝났다 (제보). 이제 세 가지를 다
+        # 만족해야 한다: 선 위에 있고 · 갓 넣은 것이 아니고 · 거의 멎어
+        # 있어야(앉아 있어야) 한다.
+        now = time.time()
+        hi = any(f["y"] - self._wg_r(f["t"]) < self.WG_LINE
+                 and now - f["born"] > 1.6
+                 and abs(f["vy"]) < 45 and abs(f["vx"]) < 45
+                 for f in fr)
+        g["hot"] = g["hot"] + dt if hi else max(0.0, g["hot"] - dt * 2.0)
+        if g["hot"] >= self.WG_OVER_SEC:
+            g["over"] = True
+            g["best"] = max(g["best"], g["score"])
+            self._safe("wg_rank", self._wg_rank_add, g["score"])
+            self._wg_save()
+            # 새 최고일 수 있다 — 모두의 랭킹이 보도록 곧장 알린다
+            self._safe("room_push", self._room_push_now)
+
+    def _wg_win(self):
+        """수박게임 창 — 홈에서 여는 보통 창 (뽀모도로와 같은 결).
+
+        맥에서도 되어야 하므로 캔버스와 마우스뿐이다 — 위험 위젯 없음
+        (체크리스트 4번). 프레임 예약은 닫을 때 거둔다 (지뢰 20).
+        """
+        got = self._wg_winref
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        g = self._wg_load()
+        cd = self.card
+        k = self.ui_k * self.WG_ZOOM
+        try:      # 화면 밖으로 나가면 들어갈 만큼만 줄인다
+            _l0, t0, _r0, b0 = self._screen_box()
+            need = (self.WG_TOP + self.WG_H + 16) * k + 70 * self.ui_k
+            room = (b0 - t0) * 0.94
+            if 0 < room < need:
+                k = max(self.ui_k * 0.92, k * room / need)
+        except Exception:
+            pass
+        # 성능 우선 (요청): 회전 그림을 스레드가 미리 굽는다. 선물본은
+        # 남의 파츠가 없으니 머리 한 장(wg_head.png)부터 받아 둔다.
+        self._safe("wg_bake", self._wg_bake_kick, k)
+        self._safe("room_art", self._room_want_art,
+                   [{"slot": s2} for s2 in self.ROOM_ART])
+
+        def uf(size, bold=False):
+            """이 창은 배율이 따로다 — 글꼴도 같은 배율로 (제보: 작다).
+
+            self._uf 는 ui_k 만 보므로 그대로 쓰면 글자만 작게 남는다.
+            """
+            n = max(7, int(round(size * k)))
+            return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
+
+        win = tk.Toplevel(self.room_win or self.root)
+        self._wg_winref = win
+        win._wg_k = k                  # 검사·표가 읽는 실제 배율
+        win.title("수박게임")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        side = int(158 * k)                    # 오른쪽 칸 (순서표 + 랭킹)
+        BX, BY = int(14 * k), int(self.WG_TOP * k)
+        CW = BX * 2 + int(self.WG_W * k) + side
+        CH = BY + int(self.WG_H * k) + int(16 * k)
+        wall = self._tint(cd["fill"], 0.90)     # 벽지 — 테마색 파스텔
+        cv = tk.Canvas(win, width=CW, height=CH, bg=wall,
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.55)
+        soft = self._tint(cd["fill"], 0.80)     # 아주 옅은 테마색
+        ink = self._shade(cd["text"], 0.12)     # 글씨는 진하게 (제보)
+        sub2 = self._shade(cd["fill"], 0.22)    # 작은 글씨도 또렷하게
+        # 점 텍스처 — 홈의 점 벽지와 같은 방식(한 장으로 굽는다). 점을
+        # 하나씩 얹으면 공이 움직일 때마다 그 자리가 다시 칠해진다
+        # (지뢰 72). 참조는 창이 든다.
+        win._wg_dots = self._safe_str(
+            self._room_dots_img, CW, CH, int(15 * k),
+            self._tint(cd["fill"], 0.70), 0)
+        if win._wg_dots:
+            cv.create_image(0, 0, image=win._wg_dots, anchor="nw")
+        bx1 = BX + int(self.WG_W * k)
+        by1 = BY + int(self.WG_H * k)
+
+        # ── 한 번만 그리는 것들 ──────────────────────────────────────
+        # 판 — 둥근 유리병 느낌으로 두 겹 (바깥 옅은 테 + 안쪽 흰 바탕)
+        self._rr_soft(cv, BX - 7 * k, BY - 7 * k, bx1 + 7 * k, by1 + 7 * k,
+                      22 * k, fill=soft, outline="", width=0)
+        self._rr_soft(cv, BX - 3 * k, BY - 3 * k, bx1 + 3 * k, by1 + 3 * k,
+                      19 * k, fill="#ffffff", outline=line, width=2)
+        # 넘침 선 — 점선 + 안내
+        ly = BY + self.WG_LINE * k
+        cv.create_line(BX + 6 * k, ly, bx1 - 6 * k, ly,
+                       fill=self._tint(cd["fill"], 0.30), dash=(4, 5))
+        # 안내는 선 **아래**에 — 위에 두면 조준 공이 덮는다
+        cv.create_text(BX + 10 * k, ly + 10 * k, anchor="w",
+                       text="여기 넘치면 끝", font=uf(7, True),
+                       fill=self._tint(cd["fill"], 0.12))
+
+        # 점수 알약 (왼쪽 위)
+        self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
+                      fill="#ffffff", outline=line, width=2)
+        cv.create_text(BX + 12 * k, 24 * k, anchor="w", text="점수",
+                       font=uf(8, True), fill=sub2)
+        sc_it = cv.create_text(BX + 108 * k, 24 * k, anchor="e", text="0",
+                               font=uf(13, True), fill=ink)
+        cv.create_text(BX + 12 * k, 47 * k, anchor="w", text="최고",
+                       font=uf(8, True), fill=sub2)
+        bs_it = cv.create_text(BX + 108 * k, 47 * k, anchor="e", text="0",
+                               font=uf(10, True), fill=sub2)
+        # 다음 — 판 오른쪽 위 (동그란 접시 위에)
+        npx = int(40 * k)
+        ncx, ncy = bx1 - 30 * k, 34 * k
+        cv.create_text(ncx - 34 * k, ncy, anchor="e", text="다음",
+                       font=uf(8, True), fill=sub2)
+        self._safe("soft_btn", self._soft_dot, cv, ncx, ncy, 27 * k,
+                   "#ffffff", outline=line, width=2, shadow=True)
+        nxt_it = cv.create_image(ncx, ncy)
+
+        # ── 오른쪽 칸 — 판과 위아래 선을 맞춘다 ─────────────────────
+        sx = bx1 + int(16 * k)
+        sw = side - int(26 * k)
+        tiers = self._wg_tiers()
+        nt = len(tiers)
+        # 게임 단추 — 오른쪽 칸 맨 위, **가운데**에 하나
+        # (진화 순서 칸과 같은 중심선에 놓아야 줄이 맞아 보인다)
+        btn_h = int(32 * k)
+        st_btn = {}
+        bw2 = sw * 0.80
+        bx2 = sx + (sw - bw2) / 2.0
+        by2 = ncy - btn_h / 2.0        # '다음' 접시와 같은 선상 (제보)
+        self._rr_soft(cv, bx2, by2, bx2 + bw2, by2 + btn_h,
+                      16 * k, fill="#ffffff", outline=line, width=2)
+        cv.create_text(bx2 + bw2 / 2, by2 + btn_h / 2, text="다시하기",
+                       font=uf(9, True), fill=ink)
+        st_btn["new"] = (bx2, by2, bx2 + bw2, by2 + btn_h)
+        # 진화 순서 — **두 벌 모두** 보여 준다 (요청). 지금 하는 벌만
+        # 보여 주면 다른 벌에 누가 있는지 영영 알 수 없다.
+        rows_n = -(-nt // 4)                   # 한 벌이 차지하는 줄 수
+        tpx = int(22 * k)          # 얼굴 크기 — 두 벌을 다 보이니 작게 (제보)
+        grp_h = rows_n * (tpx + int(10 * k))   # 한 벌의 높이
+        gap_g = int(13 * k)                    # 벌과 벌 사이
+        ch_h = (int(20 * k) + grp_h * self.WG_SETS
+                + gap_g * (self.WG_SETS - 1) + int(8 * k))
+        self._rr_soft(cv, sx, BY - 7 * k, sx + sw, BY - 7 * k + ch_h,
+                      16 * k, fill="#ffffff", outline=line, width=2)
+        cv.create_text(sx + sw / 2, BY + 5 * k, text="진화 순서",
+                       font=uf(8, True), fill=ink)
+        win._wg_chart = []                     # 참조는 창이 든다
+        gapx = (sw - 12 * k) / 4.0
+
+        def draw_chart():
+            """두 벌을 위아래로. 지금 하는 벌에는 옅은 바탕을 깐다.
+
+            **다시하기 때 벌이 바뀌므로** 한 번만 그리면 안 된다 —
+            어느 벌을 하는지 표시가 어긋난다.
+            """
+            cv.delete("chart")
+            win._wg_chart = []
+            cur2 = self._wg_set()
+            for w2 in range(self.WG_SETS):
+                got2 = self._wg_tiers(w2)
+                gy = BY + 15 * k + w2 * (grp_h + gap_g)
+                if w2 == cur2:                 # 지금 하는 벌
+                    # _rr_soft 는 **그림 항목**을 만든다. 얼굴과 구분되게
+                    # 따로 표를 달아 둔다 (검사가 얼굴 수를 센다).
+                    self._rr_soft(cv, sx + 4 * k, gy - 3 * k,
+                                  sx + sw - 4 * k, gy + grp_h - 2 * k,
+                                  12 * k, fill=soft, outline="", width=0,
+                                  tags=("chart", "chartbg"))
+                for i2 in range(len(got2)):
+                    cxp = sx + 6 * k + gapx * (i2 % 4) + gapx / 2
+                    cyp = gy + (i2 // 4) * (tpx + 10 * k) + tpx / 2
+                    img2 = self._safe_str(self._wg_img, i2, tpx, 0.0, w2)
+                    if img2:
+                        win._wg_chart.append(img2)
+                        cv.create_image(cxp, cyp, image=img2, tags="chart")
+                    if i2 == len(got2) - 1:    # 그 벌의 마지막은 별표
+                        cv.create_text(cxp, cyp + tpx * 0.62, text="★",
+                                       font=uf(7, True), fill=ink,
+                                       tags="chart")
+        draw_chart()
+        # 랭킹 — **판 아래끝에 딱 맞춘다** (선이 어긋나 보인다는 제보).
+        # 내 기록이 아니라 **모두의 랭킹**이다 (요청) — 방 신호로 모은
+        # 친구들의 최고 점수를 닉네임과 함께 보여 준다. 예전에는 점수와
+        # 날짜가 둘 다 오른쪽 끝이라 서로 겹쳤다 (제보) — 이제 이름은
+        # 왼쪽, 점수는 오른쪽이다.
+        ry0 = BY - 7 * k + ch_h + int(12 * k)
+        ry1 = by1 + 7 * k
+        self._rr_soft(cv, sx, ry0, sx + sw, ry1, 16 * k,
+                      fill="#ffffff", outline=line, width=2)
+        cv.create_text(sx + sw / 2, ry0 + 17 * k, text="랭킹",
+                       font=uf(9, True), fill=ink)
+        rank_its = []
+        avail2 = max(0.0, ry1 - ry0 - 42 * k)
+        rh2 = max(18 * k, min(40 * k, avail2 / self.WG_RANK_N))
+        rty = ry0 + 34 * k + max(0.0, avail2 - rh2 * self.WG_RANK_N) / 2.0
+        for i2 in range(self.WG_RANK_N):
+            yy = rty + rh2 * (i2 + 0.5)
+            if i2 == 0:                        # 1등만 옅은 알약
+                self._rr_soft(cv, sx + 7 * k, yy - rh2 / 2 + 1,
+                              sx + sw - 7 * k, yy + rh2 / 2 - 1,
+                              rh2 / 2, fill=soft, outline="", width=0)
+            cv.create_text(sx + 13 * k, yy, anchor="w",
+                           text=("♥" if i2 == 0 else "%d" % (i2 + 1)),
+                           font=uf(8, True),
+                           fill=ink if i2 == 0 else sub2)
+            nit = cv.create_text(sx + 27 * k, yy, anchor="w", text="—",
+                                 font=uf(8, True),
+                                 fill=ink if i2 == 0 else sub2)
+            sit = cv.create_text(sx + sw - 12 * k, yy, anchor="e", text="",
+                                 font=uf(9, True),
+                                 fill=ink if i2 == 0 else sub2)
+            rank_its.append((nit, sit))
+
+        def draw_rank():
+            rows = self._wg_board()
+            for i3, (nit, sit) in enumerate(rank_its):
+                if i3 < len(rows):
+                    b3, nm3, me3 = rows[i3]
+                    cv.itemconfigure(
+                        nit, text=nm3 + (" ·나" if me3 else ""))
+                    cv.itemconfigure(sit, text="%d" % b3)
+                else:
+                    cv.itemconfigure(nit, text="—")
+                    cv.itemconfigure(sit, text="")
+        draw_rank()
+
+        def wrap_some():
+            """스레드가 구운 PIL 을 80ms 에 한 장씩 PhotoImage 로 싼다.
+
+            한꺼번에 다 싸면 큰 판 수십 장에 수백 ms 가 걸려 그 자체로
+            끊긴다. 큰 공이 나올 때쯤(몇 분 뒤)에는 다 싸여 있다.
+            """
+            self._wg_wrap_after = None
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            for key in list(self._wg_bake)[:1]:
+                im9 = self._wg_bake.pop(key, None)
+                if im9 is not None and key not in self._wg_imgs:
+                    try:
+                        self._wg_imgs[key] = ImageTk.PhotoImage(im9)
+                    except Exception:
+                        pass
+            if (self._wg_bake or (self._wg_bake_th is not None
+                                  and self._wg_bake_th.is_alive())):
+                self._wg_wrap_after = win.after(80, wrap_some)
+        wrap_some()
+
+        st = {"over_ui": False, "last": time.time(), "rank_at": 0.0}
+
+        def to_scr(f):
+            return (BX + f["x"] * k, BY + f["y"] * k)
+
+        def redraw():
+            g2 = self._wg
+            if g2 is None:
+                return
+            # 공 — 있는 것은 옮기고, 새것은 만들고, 사라진 것은 지운다
+            live = set()
+            for f in g2["fruits"]:
+                it2 = f.get("it")
+                x2, y2 = to_scr(f)
+                px2 = int(self._wg_r(f["t"]) * 2 * k)
+                stp = int(round(math.degrees(f.get("a", 0.0))
+                                / self.WG_ANG)) % (360 // self.WG_ANG)
+                if it2 is None or not cv.type(it2):
+                    img3 = self._wg_img(f["t"], px2, f.get("a", 0.0))
+                    f["it"] = it2 = cv.create_image(x2, y2, image=img3,
+                                                    tags="fruit")
+                    f["ir"] = img3       # 참조 유지 — 캐시가 밀려도 안 사라짐
+                    f["stp"] = stp
+                else:
+                    cv.coords(it2, x2, y2)
+                    if stp != f.get("stp"):
+                        img3 = self._wg_img(f["t"], px2, f.get("a", 0.0))
+                        cv.itemconfigure(it2, image=img3)
+                        f["ir"] = img3
+                        f["stp"] = stp
+                live.add(it2)
+            for it2 in cv.find_withtag("fruit"):
+                if it2 not in live:
+                    cv.delete(it2)
+            # 넘치기 경고 — 왜 끝나는지 보이게 (제보 '왜 도중에 끝나지').
+            # 선 위에 앉은 공이 있으면 선이 붉어지고 남은 시간이 준다.
+            cv.delete("warn")
+            hot = float(g2.get("hot") or 0.0)
+            if hot > 0.05 and not g2["over"]:
+                fr2 = max(0.0, min(1.0, hot / self.WG_OVER_SEC))
+                wc = self._mix("#ff8fa3", "#e0455f", fr2)
+                cv.create_line(BX + 6 * k, ly, bx1 - 6 * k, ly,
+                               fill=wc, width=2, tags="warn")
+                cv.create_text(bx1 - 10 * k, ly + 11 * k, anchor="e",
+                               text="넘쳐요!", font=uf(8, True),
+                               fill=wc, tags="warn")
+                # 남은 시간 막대 — 선 바로 아래에
+                wl = (bx1 - BX - 12 * k) * (1.0 - fr2)
+                if wl > 2:
+                    cv.create_line(BX + 6 * k, ly + 4 * k,
+                                   BX + 6 * k + wl, ly + 4 * k,
+                                   fill=wc, width=3, tags="warn")
+                # 그 공에 동그라미를 쳐 준다 — 어느 것 때문인지 보이게
+                now2 = time.time()
+                for f in g2["fruits"]:
+                    r3 = self._wg_r(f["t"])
+                    if (f["y"] - r3 < self.WG_LINE
+                            and now2 - f["born"] > 1.6
+                            and abs(f["vy"]) < 45 and abs(f["vx"]) < 45):
+                        sx3, sy3 = to_scr(f)
+                        cv.create_oval(sx3 - r3 * k - 3, sy3 - r3 * k - 3,
+                                       sx3 + r3 * k + 3, sy3 + r3 * k + 3,
+                                       outline=wc, width=2, tags="warn")
+            # 조준선과 들고 있는 공
+            cv.delete("aim")
+            if not g2["over"]:
+                r2 = self._wg_r(g2["cur"])
+                ax2 = BX + max(r2 + 1, min(self.WG_W - r2 - 1,
+                                           g2["drop_x"])) * k
+                # 떨어질 때 실제로 생기는 자리(_wg_drop 의 y = r + 2)와
+                # 똑같이 둔다 — 겨눈 그대로 나타나 보인다.
+                hy2 = BY + (r2 + 2.0) * k
+                cv.create_line(ax2, hy2 + r2 * k, ax2, by1,
+                               fill=self._tint(cd["fill"], 0.6),
+                               dash=(3, 5), tags="aim")
+                cv.create_image(ax2, hy2,
+                                image=self._wg_img(g2["cur"],
+                                                   int(r2 * 2 * k)),
+                                tags="aim")
+            cv.itemconfigure(sc_it, text=str(g2["score"]))
+            cv.itemconfigure(bs_it, text=str(g2["best"]))
+            # 미리보기는 늘 같은 크기로 — 실제 크기로 그리면 큰 단계가
+            # '다음' 글자와 점수를 통째로 덮는다 (찍어서 확인)
+            cv.itemconfigure(nxt_it, image=self._wg_img(
+                g2["nxt"], int(34 * k)))
+            # 게임오버 — 한 번만 그린다
+            if g2["over"] and not st["over_ui"]:
+                st["over_ui"] = True
+                mx2, my2 = (BX + bx1) / 2, (BY + by1) / 2
+                self._rr_soft(cv, mx2 - 110 * k, my2 - 64 * k,
+                              mx2 + 110 * k, my2 + 64 * k, 16 * k,
+                              fill="#ffffff", outline=line, width=2,
+                              tags="over")
+                cv.create_text(mx2, my2 - 34 * k, text="끝!",
+                               font=uf(14, True), fill=cd["text"],
+                               tags="over")
+                cv.create_text(mx2, my2 - 6 * k,
+                               text="점수 %d · 최고 %d"
+                               % (g2["score"], g2["best"]),
+                               font=uf(10, True),
+                               fill=self._shade(cd["fill"], 0.22),
+                               tags="over")
+                self._rr_soft(cv, mx2 - 52 * k, my2 + 18 * k,
+                              mx2 + 52 * k, my2 + 46 * k, 13 * k,
+                              fill=cd["fill"], outline="", width=0,
+                              tags="over")
+                cv.create_text(mx2, my2 + 32 * k, text="다시 하기",
+                               font=uf(10, True), fill="#ffffff",
+                               tags="over")
+                st["retry"] = (mx2 - 52 * k, my2 + 18 * k,
+                               mx2 + 52 * k, my2 + 46 * k)
+                self._safe("wg_rank", draw_rank)
+            elif not g2["over"] and st["over_ui"]:
+                st["over_ui"] = False
+                cv.delete("over")
+
+        def tick():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            self._wg_after = win.after(16, tick)   # 먼저 예약 (지뢰 14 규칙)
+            now = time.time()
+            dt = now - st["last"]
+            st["last"] = now
+            self._safe("wgame", self._wg_step, dt)
+            self._safe("wgame", redraw)
+            if now - st["rank_at"] > 5.0:      # 친구 기록이 오면 갱신
+                st["rank_at"] = now
+                self._safe("wg_rank", draw_rank)
+
+        def on_move(e):
+            g2 = self._wg
+            if g2 is not None:
+                g2["drop_x"] = (e.x - BX) / k
+
+        def on_click(e):
+            g2 = self._wg
+            if g2 is None:
+                return
+            for act, bb2 in st_btn.items():    # 오른쪽 위 게임 단추
+                if bb2[0] <= e.x <= bb2[2] and bb2[1] <= e.y <= bb2[3]:
+                    self._safe("ui_click", self._ui_click)
+                    cv.delete("over")
+                    cv.delete("fruit")
+                    cv.delete("warn")
+                    st["over_ui"] = False
+                    self._wg_new()
+                    self._safe("wg_rank", draw_rank)
+                    self._safe("wg_chart", draw_chart)
+                    self._safe("wg_bake", self._wg_bake_kick, k)
+                    if self._wg_wrap_after is None:
+                        self._safe("wg_bake", wrap_some)
+                    return
+            if g2["over"]:
+                rb = st.get("retry")
+                if rb and rb[0] <= e.x <= rb[2] and rb[1] <= e.y <= rb[3]:
+                    self._safe("ui_click", self._ui_click)
+                    cv.delete("over")
+                    cv.delete("fruit")
+                    st["over_ui"] = False
+                    self._wg_new()
+                    self._safe("wg_rank", draw_rank)
+                    self._safe("wg_chart", draw_chart)
+                    self._safe("wg_bake", self._wg_bake_kick, k)
+                    if self._wg_wrap_after is None:
+                        self._safe("wg_bake", wrap_some)
+                return
+            g2["drop_x"] = (e.x - BX) / k
+            self._safe("wg_drop", self._wg_drop)
+
+        cv.bind("<Motion>", on_move)
+        cv.bind("<Button-1>", on_click)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        def gone(_e=None):
+            # 지뢰 20 — 예약해 둔 프레임을 거둔다. 남기는 것은 기록뿐
+            got2 = self._wg_after
+            if got2 is not None:
+                try:
+                    win.after_cancel(got2)
+                except Exception:
+                    pass
+                self._wg_after = None
+            if getattr(self, "_wg_winref", None) is win:
+                self._wg_winref = None
+            self._safe("wg_save", self._wg_save)
+            self._wg = None        # 판은 버린다 — 다음에 열면 처음부터
+            got3 = self._wg_wrap_after
+            if got3 is not None:
+                try:
+                    win.after_cancel(got3)
+                except Exception:
+                    pass
+                self._wg_wrap_after = None
+            # 게임 동안만 크게 쓴다 — 닫으면 굽기를 멈추고 전부 돌려준다
+            self._wg_bake_want = []
+            self._wg_bake.clear()
+            self._wg_imgs.clear()
+            self._wg_pils.clear()
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self._place_near(win)
+        self._dialog_keep(win, "wgame")
+        redraw()
+        self._wg_after = win.after(16, tick)
+
     def _room_bar(self, cv, W, H, P, k, people):
         """아래 단추 줄 — 고른 상대에게만 간다.
 
@@ -21632,6 +22992,17 @@ class Mascot:
                        font=self._uf(7, True), justify="center",
                        fill=P["ink" if allon else "sub"], tags="dyn")
         self._room_all_btn = (ax0, by, ax0 + bw, by + bw)
+        # 수박게임 단추 — 아직 도로롱에만 (config "wgame")
+        self._room_game_btn = None
+        if self.cfg.get("wgame"):
+            gx0 = ax0 + bw + 10 * k
+            self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
+                       by + bw / 2, bw / 2, "#eaf6df",
+                       outline="#ffffff", width=3.5, shadow=True)
+            cv.create_text(gx0 + bw / 2, by + bw / 2, text="수박",
+                           font=self._uf(8, True), fill="#5f8352",
+                           tags="dyn")
+            self._room_game_btn = (gx0, by, gx0 + bw, by + bw)
         # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
         dx0 = W - 20 * k - bw
         self._safe("soft_btn", self._soft_dot, cv, dx0 + bw / 2, by + bw / 2,
@@ -22857,6 +24228,10 @@ class Mascot:
         db = self._room_deco_btn
         if db and db[0] <= e.x <= db[2] and db[1] <= e.y <= db[3]:
             self._safe("room_deco", self._room_deco_win)
+            return
+        gb2 = getattr(self, "_room_game_btn", None)
+        if gb2 and gb2[0] <= e.x <= gb2[2] and gb2[1] <= e.y <= gb2[3]:
+            self._safe("wgame_win", self._wg_win)
             return
         ab2 = getattr(self, "_room_all_btn", None)
         if ab2 and ab2[0] <= e.x <= ab2[2] and ab2[1] <= e.y <= ab2[3]:
