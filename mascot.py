@@ -16816,10 +16816,23 @@ class Mascot:
     FLOOR_FIX = 1
 
     def _floor_fix_once(self):
+        """굳은 바닥을 한 번만 지운다 — **굳었을 때만.**
+
+        멀쩡한 사람의 오늘 기록까지 지우면 안 되니, '바닥이 지금 값보다
+        30분 넘게 크다'는 굳음의 표시가 있을 때만 손댄다. 정상이면 이
+        둘은 거의 같다 (바닥을 쓴 것이 자기 자신이기 때문).
+        """
         if int(self.us.get("floor_fix") or 0) >= self.FLOOR_FIX:
             return
         self.us["floor_fix"] = self.FLOOR_FIX
-        self._day_floor_clear()
+        try:
+            raw = max(0.0, self.work_secs - self.day_base)
+            if self._day_floor() > raw + 1800:
+                self._log_error("floor_fix raw=%d floor=%d"
+                                % (int(raw), int(self._day_floor())))
+                self._day_floor_clear()
+        except Exception:
+            pass
         self._save_settings()
 
     ROOM_VIEWS = ("카드 보기", "심플 모드", "전체 보기")
@@ -16896,15 +16909,35 @@ class Mascot:
                 p2 = p2 * (cap / max(t2, 1))
                 t2 = int(cap)
             old = seen.get(slot)
+            low_at = 0.0
             if self._seen_ok(old, day):
                 # 같은 날 안에서는 큰 쪽만 남긴다 — 그 사람이 컴퓨터를
-                # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다
-                t2 = max(t2, int(old[0]))
-                p2 = max(p2, float(old[1]))
+                # 껐다 켜서 0을 보내와도 오늘 최고치가 안 깎인다.
+                # **다만 영원히는 아니다.** 그 사람 쪽 값이 한참 작은
+                # 채로 3분 넘게 이어지면 그 값을 믿는다 — 안 그러면 한 번
+                # 잘못 오른 숫자가 하루 종일 남의 홈에 굳어 있다 (락스
+                # 361분·성실이 213분: 보내는 쪽은 고쳐졌는데 보는 쪽
+                # 캐시가 안 내려갔다). 껐다 켠 직후의 잠깐은 3분을 못 넘는다.
+                if t2 < int(old[0]) - 5:
+                    low_at = (float(old[4])
+                              if isinstance(old, list) and len(old) > 4
+                              and old[4] else now)
+                    if now - low_at > 180.0:
+                        low_at = 0.0           # 받아들인다 (작은 값 그대로)
+                    else:
+                        t2 = max(t2, int(old[0]))
+                        p2 = max(p2, float(old[1]))
+                else:
+                    t2 = max(t2, int(old[0]))
+                    p2 = max(p2, float(old[1]))
             if capped:
                 continue               # 눌린 값은 바닥으로 안 남긴다
-            row = [t2, p2, day, int(now)]
-            if seen.get(slot, [None])[:3] != row[:3]:
+            row = [t2, p2, day, int(now), int(low_at)]
+            was = seen.get(slot)
+            was_low = (int(was[4]) if isinstance(was, list) and len(was) > 4
+                       and was[4] else 0)
+            if (not isinstance(was, list) or was[:3] != row[:3]
+                    or was_low != int(low_at)):
                 seen[slot] = row
                 changed = True
         # 오염으로 판명난 줄은 지운다 — 안 지우면 낮에 도로 살아난다
@@ -18905,6 +18938,7 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
+        self._room_msg_boxes = {}    # 말풍선 마퀴 자리 (카드 모드에서도)
         self._room_cal_btns = {}
         self._room_song_hits = {}
         self._room_song_box = {}
@@ -18952,6 +18986,9 @@ class Mascot:
                 max(80, Hf - int(self.ROOM_BOT * k) - top - int(26 * k)), k)
             kc = k * f2
             cw, chh = int(self.ROOM_CW * kc), int(self.ROOM_CH * kc)
+            # 마지막 줄이 덜 차면 빈 칸을 그려 채운다 — 한 자리만 뻥
+            # 뚫려 있으면 배치가 깨져 보인다 (제보)
+            page_n = cols * max(1, -(-page_n // cols))
         self._room_card_k = kc
         left = max(int(8 * k), (W - cols * cw) // 2)
         # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
@@ -19733,6 +19770,13 @@ class Mascot:
             if slot == self.char:      # 표가 피해 갈 자리 (꼬리까지)
                 self._room_msg_box = (bub - half - 14 * k, ny - 15 * k,
                                       bub + half + 14 * k, ny + 24 * k)
+            # 잘렸으면 커서를 올렸을 때 원문이 옆으로 흐르게 (마퀴).
+            # 전체 보기는 칸이 작아 거의 늘 잘린다 — 이 등록이 없으면
+            # 무슨 말인지 볼 길이 없다 (심플 모드에만 있던 기능).
+            if len(line) < len(msg):
+                self._room_msg_boxes[slot] = (
+                    bub - half - 14 * k, ny - 15 * k,
+                    bub + half + 14 * k, ny + 15 * k, msg, col)
         # 안 켰어도 레벨을 보여 준다 — 명단에 마지막으로 본 값이 실려
         # 온다(꺼진 사람의 작업 시간이 합계에 남는 것과 같은 이유).
         lab = "Lv.%d  %s" % (int(p.get("lv") or 1),
@@ -19874,21 +19918,28 @@ class Mascot:
                 radius=(h * S) // 2, fill="#ffffff",
                 outline=self._tint(col, 0.35), width=S)
             self._mq_cache[tkey] = tpl
-        gap = 14 * S
-        span = strip.width + gap
-        off = int((now * 22 * S) % span)      # 천천히 (초당 ~22px)
+        # 끝까지 흐르면 **처음으로 되돌아가** 다시 흐른다 (제보).
+        # 예전에는 띠를 이어 붙여 무한히 옆으로 흘렸는데, 그러면 끝과
+        # 처음이 붙어 지나가 어디가 처음인지 알 수 없다. 처음과 끝에서
+        # 잠깐 멈춰 주면 읽기도 쉽다.
+        far = max(1, strip.width - inner)     # 끝까지 가는 데 필요한 거리
+        speed = 22.0 * S                      # 천천히 (초당 ~22px)
+        hold = 1.1                            # 처음·끝에서 쉬는 시간(초)
+        run = far / speed
+        cyc = run + hold * 2
+        t4 = now % cyc
+        if t4 < hold:
+            off = 0
+        elif t4 < hold + run:
+            off = int((t4 - hold) * speed)
+        else:
+            off = int(far)
+        off = max(0, min(int(far), off))
         im = tpl.copy()
         win = Image.new("RGBA", (inner, strip.height), (0, 0, 0, 0))
-        # 띠를 off 만큼 민 곳부터 창 폭만큼 이어 붙인다 (끝나면 처음부터)
-        pos = -off
-        while pos < inner:
-            if pos + strip.width > 0:
-                a3 = max(0, -pos)
-                piece = strip.crop((a3, 0,
-                                    min(strip.width, a3 + inner - max(0, pos)),
-                                    strip.height))
-                win.alpha_composite(piece, (max(0, pos), 0))
-            pos += span
+        win.alpha_composite(
+            strip.crop((off, 0, min(strip.width, off + inner), strip.height)),
+            (0, 0))
         y2 = (h * S - strip.height) // 2
         im.alpha_composite(win, (9 * S, max(0, y2)))
         im = im.resize((w, h), Image.LANCZOS)
