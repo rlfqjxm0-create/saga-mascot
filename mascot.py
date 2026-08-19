@@ -25654,7 +25654,6 @@ class Mascot:
     # 짧으면 '그냥 바뀌었다'로 보이고, 길면 다음 수가 굼떠 보인다.
     G2_POP = 0.26
     G2_FLASH = 0.13          # 합쳐진 타일이 하얗게 번쩍이는 길이
-    G2_RING = 0.34           # 합쳐진 자리에서 퍼지는 테두리
     G2_BORN = 0.20           # 새 타일이 자라나는 길이
     G2_TYPE = 0.26           # 키를 누른 뒤 '치는 자세'로 있는 시간
     G2_SLEEP = 75.0          # 이만큼 놔두면 정말 존다 (seat_idle)
@@ -26658,19 +26657,10 @@ class Mascot:
                 g2["slide"] = []
             pops = dict(((c, (v, t)) for c, v, t in (g2.get("pop") or [])))
             born = dict(((c, t) for c, t in (g2.get("born") or [])))
-            # 합쳐진 자리에서 퍼지는 테두리 — 타일보다 **먼저** 그려
-            # 뒤에 깔리게 한다 (합체당 도형 하나뿐이라 값이 싸다)
-            for c, _v, t9 in (g2.get("pop") or []):
-                q = (now - t9) / self.G2_RING
-                if not (0 <= q < 1):
-                    continue
-                cx9, cy9 = cellxy(*c)
-                h9 = cell * (0.5 + 0.42 * q)
-                self._rr(cv, cx9 - h9, cy9 - h9, cx9 + h9, cy9 + h9,
-                         12 * k, fill="", outline=self._mix(
-                             self._tint(cd["fill"], 0.30), "#ffffff",
-                             0.25 + 0.7 * q),
-                         width=max(1, int((2.6 - 2.2 * q) * k)), tags="tile")
+            # 합쳐진 자리에서 퍼지던 테두리는 **없앴다** (제보).
+            # 커지면서 흰색으로 바래고 폭이 1px 로 얇아져, 눈에는
+            # '네모난 흰 줄이 나왔다 사라지는' 것으로만 보였다.
+            # 톡·흰 빛·반짝이 셋이 이미 합체를 알려 준다.
             for c, v in g2["cells"].items():
                 sc, fl = 1.0, 0.0
                 pv = pops.get(c)
@@ -26700,8 +26690,7 @@ class Mascot:
             sl = g2.get("slide") or []
             if sl and now - sl[0]["t"] < self.G2_SLIDE + 0.05:
                 return True
-            lim = max(self.G2_POP, self.G2_RING, self.G2_SPARK,
-                      self.G2_FLASH)
+            lim = max(self.G2_POP, self.G2_SPARK, self.G2_FLASH)
             for _c9, _v9, t9 in (g2.get("pop") or []):
                 if now - t9 < lim:
                     return True
