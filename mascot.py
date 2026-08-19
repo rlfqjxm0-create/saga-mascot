@@ -464,7 +464,11 @@ DEFAULT_SETTINGS = {
     "room_hide_me": False,   # 홈에서 내 캐릭터를 안 보이게
     "room_mute": False,      # 반응 받지 않기 — 남이 보낸 콕·응원 등을 무시
     "slime_seen": None,      # 슬라임 메뉴에서 이미 본 종류들 (새 것 알림용)
-    "room_all": False,       # 홈 '모두 보기' — 전원을 캡슐 목록으로
+    "room_all": False,       # (옛 키) 심플 모드였는가 — room_view 로 옮겼다
+    # 홈 보기 방식: 0 카드 보기 · 1 심플 모드(캡슐 목록) · 2 전체 보기
+    # (카드를 줄여 전원을 한 화면에). None 이면 옛 room_all 에서 옮겨 온다.
+    "room_view": None,
+    "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -3999,6 +4003,9 @@ class RoomNet:
         self.slot = str(slot)[:40]
         self.room, self.key = _room_keys(code)
         self._state = dict(state or {})
+        # 마지막으로 본체에게서 값을 받은 시각. 0 으로 두면 hang 판정이
+        # 영영 안 걸린다 (지뢰 14 — 새 상태 변수는 여기서 초기화).
+        self._state_at = time.time() if state else 0.0
         self._out = []            # 보낼 신호
         self._done = []           # 서버가 받아 준 신호 (보낸 쪽 확인용)
         self._roster = []         # 받은 사람들
@@ -7549,7 +7556,11 @@ class Mascot:
         if not self.cfg.get("history"):
             return
         days = self._hist_load()
-        key = key or self._session_day()
+        # 키를 안 주면 '이번 세션이 시작된 날'인데, 처음 일한 시각이
+        # 없으면 오늘로 떨어진다 — 그러면 어제 누적이 오늘 칸에 들어가
+        # 기록이 바닥이 되어 같은 고정을 만든다. 아는 날짜를 먼저 쓴다.
+        key = key or (self._session_day() if self.stat.get("first")
+                      else (self.day_key or self._session_day()))
         cur = days.get(key) or {}
         s_ = self.stat
         dist = self._dist_m()
@@ -9044,11 +9055,54 @@ class Mascot:
             pass
         try:
             h = (self._hist_load() or {}).get(day) or {}
-            sec = max(sec, float(h.get("work") or 0))
+            # 기록 칸도 오염될 수 있다 (어제 누적이 오늘 칸에 들어가면
+            # room_seen 을 지워도 안 풀린다). 06시 상한으로 걸러 낸다.
+            got2 = float(h.get("work") or 0)
+            if got2 <= self._day_min() * 60.0 + 300.0:
+                sec = max(sec, got2)
         except Exception:
             pass
         self._dfloor = (now, self.day_key, sec)
         return sec
+
+    def _day_floor_clear(self):
+        """오늘치 바닥을 지운다 — 내 '오늘 최고치'와 오늘 기록 칸.
+
+        이 둘이 남아 있으면 시계를 0 으로 만들어도 화면은 옛 숫자를
+        되살린다. 초기화·하루 넘김·한 번 고치기가 같이 쓴다.
+        """
+        self._dfloor = None
+        try:
+            seen = self._room_seen_get()
+            if seen.pop(self.char, None) is not None:
+                _save_json(self._room_seen_path(), seen)
+        except Exception:
+            pass
+        try:
+            # _hist_load 는 days 만 돌려준다 — 파일은 {"days":…, "cum_m":…}
+            # 이므로 통째로 읽어 고쳐야 한다 (그렇게 안 해서 한 번 헛돌았다).
+            hp = os.path.join(self.state_dir, ".history.json")
+            with open(hp, encoding="utf-8") as fp:
+                whole = json.load(fp)
+            days = (whole or {}).get("days")
+            day = self._my_workday()
+            if isinstance(days, dict) and isinstance(days.get(day), dict) \
+                    and days[day].get("work"):
+                days[day]["work"] = 0
+                _save_json(hp, whole)
+        except Exception:
+            pass
+
+    def _day_stale(self):
+        """아직 하루 넘김이 안 끝난 상태인가 (day_key 가 어제다).
+
+        이 동안의 '오늘치'는 어제 누적이다 — 저장하거나 남에게 알리면
+        그 값이 오늘 최고치로 굳는다 (락스 361분 고정 사건).
+        """
+        try:
+            return bool(self.day_key) and self.day_key != self._my_workday()
+        except Exception:
+            return False
 
     def _today_secs(self):
         """오늘(작업일) 일한 시간.
@@ -9062,13 +9116,21 @@ class Mascot:
         없다 (지뢰 60 — 넘으면 어제 누적이 오늘로 새는 것이다).
         """
         if self.work_secs < self.day_base:   # 연동 쪽이 초기화됐다
-            self.day_base = 0.0
-        now = max(0.0, self.work_secs - self.day_base)
+            # 0 으로 되돌리면 '오늘치'가 평생 누적이 된다 — 지금 값에 맞춘다
+            self.day_base = self.work_secs
+        raw = max(0.0, self.work_secs - self.day_base)
+        if self._day_stale():
+            # 아직 어제 기준이다 — 이 값은 어제 누적이므로 바닥으로도
+            # 쓰지 않는다. 곧 _day_roll 이 0부터 다시 세게 한다.
+            return raw
         try:
+            # 오늘 일한 시간은 06시 이후 흐른 시간을 넘을 수 없다 —
+            # **바닥뿐 아니라 지금 값에도** 건다. 예전에는 바닥에만 걸어서,
+            # day_base 가 어제 그대로면 화면과 서버가 서로 다른 값을 말했다.
             cap = self._day_min() * 60.0 + 300.0
-            return max(now, min(self._day_floor(), cap))
+            return min(cap, max(raw, min(self._day_floor(), cap)))
         except Exception:
-            return now
+            return raw
 
     def _day_roll(self, now):
         """작업일이 바뀌면 지난 하루를 기록에 옮겨 담고 0부터 다시 센다.
@@ -9088,6 +9150,10 @@ class Mascot:
         self.day_key = key
         self.day_base = self.work_secs
         self.zero_at = self.work_secs       # 카드도 오늘치부터
+        # 새 하루의 바닥은 비어 있어야 한다. 어제 값이 남아 있으면
+        # 0부터 세는데도 화면은 어제 숫자에 붙박인다 — 이미 그렇게 굳은
+        # 사람도 이 한 줄로 스스로 낫는다.
+        self._safe("day_floor_clear", self._day_floor_clear)
         self.stat["day"] = key
         self._act.clear()
         # 어제 몫은 여기서 끝난다. _hist_add 를 탔으면 이미 0이지만,
@@ -9277,6 +9343,9 @@ class Mascot:
         self.zero_at = 0.0
         self.day_base = 0.0
         self._reset_records()
+        # 바닥값까지 지워야 진짜 0 이 된다. 예전에는 시계만 0 으로 만들고
+        # '오늘 최고치'는 그대로 둬서, 눌러도 숫자가 안 바뀌었다 (제보).
+        self._safe("reset_floor", self._day_floor_clear)
         self._timer_save()
         if self.can_talk:
             self._say("초기화했어요. 잘못 눌렀으면 메뉴의 '초기화 되돌리기'!",
@@ -9443,13 +9512,14 @@ class Mascot:
         return state
 
     def _cursor_watch(self, now):
-        """입력 훅이 죽어도 타이머가 영영 '자리 비움'이 되지 않게.
+        """입력 훅이 죽었는지 커서로 알아채고 곁가지들을 되살린다.
 
-        훅 스레드(마우스·키보드)가 죽으면 last_pointer 가 굳는다 —
-        그러면 idle 이 한없이 자라 **작업 중인데도 시간이 안 쌓인다**
-        (숫자가 어제에서 멈추는 증상의 유력한 갈래). 커서 위치는 훅과
-        무관하게 읽을 수 있으니 2초마다 견줘서, 커서는 움직였는데 훅이
-        90초 넘게 조용하면 훅이 죽은 것으로 보고 입력으로 쳐 준다.
+        **타이머와는 무관하다.** 타이머가 쓰는 idle 은 draw 에서
+        idle_seconds()(GetLastInputInfo)로 매 프레임 새로 받으므로 훅이
+        죽어도 시간은 쌓인다. 훅이 죽으면 last_pointer 가 굳어 프레임
+        수·펜/타자 자세·'자리 비운 사이' 알림이 어긋나는데, 그걸 막는다.
+        커서 위치는 훅과 무관하게 읽을 수 있으니 2초마다 견줘서, 커서는
+        움직였는데 훅이 90초 넘게 조용하면 입력으로 쳐 준다.
         읽기만 하므로 그리는 중인 펜과 다투지 않는다 (지뢰 40).
         """
         if not IS_WIN or now - self._curwatch_at < 2.0:
@@ -12677,6 +12747,10 @@ class Mascot:
             # 5분(FAIL_FORGET)은 너무 기니 1분마다 다시 해 본다.
             self._fail["room"] = 0
             self._room_dead = False
+        # **하루 넘김을 방 통신보다 먼저.** 방이 먼저 돌면 아직 어제
+        # 기준인 '오늘치'가 오늘 날짜로 저장돼 하루 종일 못 박힌다.
+        self._safe("floor_fix", self._floor_fix_once)
+        self._safe("day_roll", self._day_roll, now)
         self._safe("room_diag", self._room_diag, now)
         self._safe("room", self._room_tick, now)
         self._safe("pomo", self._pomo_tick, now)
@@ -16475,7 +16549,8 @@ class Mascot:
             # 눌린 값은 '오늘 최고치' 바닥으로 남기지 않는다. 진짜 오늘
             # 작업량이 아니라 '아직 모르는 값'이라, 남겨 두면 그 숫자가
             # 하루 종일 홈에 박혀 있는다 (실측으로 겪은 그대로다).
-            if not capped and (
+            # 하루 넘김 전이면 이 값은 어제 것이다 — 절대 안 남긴다.
+            if not capped and not self._day_stale() and (
                     not isinstance(row, list) or len(row) < 3
                     or row[2] != day or t_min > int(row[0])
                     or pv > float(row[1])):
@@ -16733,6 +16808,54 @@ class Mascot:
         except Exception:
             pass
         return True
+
+    # 이 번호가 바뀌면 켤 때 오늘 바닥값을 한 번 지운다. 이미 굳어 버린
+    # 사람(락스 361분·성실이 213분)은 하루가 넘어가야 낫는데, 그때까지
+    # 기다릴 수 없어서 둔 장치다. 최악이라도 '오늘 숫자가 제값으로
+    # 돌아가는 것'뿐이라 안전하다.
+    FLOOR_FIX = 1
+
+    def _floor_fix_once(self):
+        if int(self.us.get("floor_fix") or 0) >= self.FLOOR_FIX:
+            return
+        self.us["floor_fix"] = self.FLOOR_FIX
+        self._day_floor_clear()
+        self._save_settings()
+
+    ROOM_VIEWS = ("카드 보기", "심플 모드", "전체 보기")
+
+    def _room_view(self):
+        """지금 보기 방식 (0/1/2). 옛 설정(room_all)도 받아 준다."""
+        v = self.us.get("room_view")
+        if v is None:
+            v = 1 if self.us.get("room_all") else 0
+        try:
+            return max(0, min(len(self.ROOM_VIEWS) - 1, int(v)))
+        except Exception:
+            return 0
+
+    def _room_view_set(self, v):
+        v = max(0, min(len(self.ROOM_VIEWS) - 1, int(v)))
+        self.us["room_view"] = v
+        self.us["room_all"] = (v == 1)      # 옛 키도 맞춰 둔다
+        return v
+
+    def _room_full_fit(self, n, availW, availH, k):
+        """전체 보기 — 전원이 들어가는 가장 큰 배율과 칸 수.
+
+        열 수를 하나씩 넣어 보고 가장 크게 그릴 수 있는 것을 고른다.
+        너무 작아지면 글자를 못 읽으니 하한을 둔다.
+        """
+        n = max(1, int(n))
+        best = None
+        for c2 in range(1, n + 1):
+            r2 = -(-n // c2)
+            f2 = min(availW / max(1.0, c2 * self.ROOM_CW * k),
+                     availH / max(1.0, r2 * self.ROOM_CH * k))
+            if best is None or f2 > best[0]:
+                best = (f2, c2, r2)
+        f2, c2, r2 = best
+        return max(0.34, min(1.0, f2)), c2, r2
 
     def _room_k(self):
         """방 전용 배율 — 화면이 짧으면 3줄이 들어가게 살짝 줄인다.
@@ -17909,7 +18032,7 @@ class Mascot:
         # 통째로 그리지는 않게 (연출은 _room_fx_draw 가 따로 그린다)
         ts = self._room_toast
         return (tuple(who), self._room_pick, self._room_page,
-                bool(self.us.get("room_all")),
+                self._room_view(),
                 tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
@@ -18208,9 +18331,9 @@ class Mascot:
                 x, _y = cv.coords(item)
             except Exception:
                 continue
-            kk2 = self._room_k()
-            if self.us.get("room_all"):
-                kk2 *= 0.5           # 캡슐은 작으니 음표도 소박하게
+            kk2 = getattr(self, "_room_card_k", None) or self._room_k()
+            if self._room_view() == 1:
+                kk2 = self._room_k() * 0.5   # 캡슐은 작으니 음표도 소박하게
             ph2 = hash(slot) % 5
             for j2, (dx2, sp) in enumerate(((-46, 1.0), (44, 1.35))):
                 yy2 = base - 72 * kk2 - ((now * 14 * sp + ph2 * 9 + j2 * 23)
@@ -18223,9 +18346,9 @@ class Mascot:
         # 다 같이 24시간을 채운 날 — 캐릭터 옆에 반짝이가 돈다
         cv.delete("glit")
         if self._room_goal_done:
-            kk = self._room_k()
-            if self.us.get("room_all"):
-                kk *= 0.5            # 캡슐 크기에 맞춰 반짝이도 작게
+            kk = getattr(self, "_room_card_k", None) or self._room_k()
+            if self._room_view() == 1:
+                kk = self._room_k() * 0.5    # 캡슐 크기에 맞춰 반짝이도 작게
             for item, _d, slot, base, _s, _p in self._room_body:
                 try:
                     x, _y = cv.coords(item)
@@ -18799,7 +18922,9 @@ class Mascot:
         people = allp[self._room_page * page_n:
                       (self._room_page + 1) * page_n]
         self._room_pages = pages
-        if self.us.get("room_all"):
+        view = self._room_view()
+        self._room_card_k = k
+        if view == 1:
             # 심플 모드 — 전원을 캡슐 목록으로. 페이지 없음.
             self._room_pages = 1
             self._room_page = 0
@@ -18812,6 +18937,22 @@ class Mascot:
             self._safe("inbox_panel", self._room_inbox_draw, cv, W, H, P, k)
             self._safe("pl_panel", self._room_pl_draw, cv, W, H, P, k)
             return
+        kc = k                       # 카드에 쓰는 배율 (아래 단추는 k 그대로)
+        if view == 2:
+            # 전체 보기 — 카드를 줄여 전원을 한 화면에 (요청). 페이지 없음.
+            self._room_pages = 1
+            self._room_page = 0
+            self._room_page_btn = []
+            people = allp
+            page_n = max(1, len(allp))
+            Hf = cv.winfo_height() or int(self.room_win.winfo_height())
+            f2, cols, _r2 = self._room_full_fit(
+                page_n,
+                max(80, W - int(16 * k)),
+                max(80, Hf - int(self.ROOM_BOT * k) - top - int(26 * k)), k)
+            kc = k * f2
+            cw, chh = int(self.ROOM_CW * kc), int(self.ROOM_CH * kc)
+        self._room_card_k = kc
         left = max(int(8 * k), (W - cols * cw) // 2)
         # 세로도 가운데로 — 창이 칸보다 높으면 위에 딱 붙어 휑했다.
         # 아래 단추 줄(126k)을 뺀 나머지 공간의 한가운데에 놓는다.
@@ -18819,18 +18960,20 @@ class Mascot:
         rows_used = max(1, -(-len(people) // cols))
         # 타이틀 띠 바로 밑에 첫 줄이 붙으면 말풍선이 하늘에 닿는다 —
         # 최소 간격을 두고, 남는 공간이 있으면 그 안에서 가운데로.
-        gap = int(16 * k)
+        gap = int(16 * kc)
         # 페이지마다 배치가 같도록 줄 수는 '가득 찬 페이지' 기준으로 —
         # 2페이지에 몇 명 없어도 1페이지와 같은 자리에 그려진다
         rows_used = max(1, -(-page_n // cols))
         # 위·아래 여백이 똑같도록 남는 공간을 반씩 — 카드 묶음이 정중앙에
         voff = gap + max(0, (H2 - int(self.ROOM_BOT * k) - top - 2 * gap
                              - rows_used * chh) // 2)
+        if view == 2:                # 전체 보기는 위쪽부터 (아래가 남게)
+            voff = gap
         self._room_voff = voff
         for i, p in enumerate(people):
             cx0 = left + (i % cols) * cw
             cy0 = top + voff + (i // cols) * chh
-            self._room_one(cv, p, cx0, cy0, cw, chh, P, k)
+            self._room_one(cv, p, cx0, cy0, cw, chh, P, kc)
         # 빈 칸도 아홉 칸을 다 채운다 — 흰 판만 두면 허전하니 바닥 띠와
         # 빈 이름표까지 얹어 "빈 방"처럼 보이게 한다.
         used = len(people)
@@ -18838,22 +18981,22 @@ class Mascot:
         for i in range(used, page_n):
             cx0 = left + (i % cols) * cw
             cy0 = top + voff + (i // cols) * chh
-            ex0, ey0 = cx0 + 8 * k, cy0 + 6 * k
-            ex1, ey1 = cx0 + cw - 8 * k, cy0 + chh - 16 * k
+            ex0, ey0 = cx0 + 8 * kc, cy0 + 6 * kc
+            ex1, ey1 = cx0 + cw - 8 * kc, cy0 + chh - 16 * kc
             self._safe("soft_btn", self._card_shadow, cv, ex0, ey0, ex1, ey1,
-                       18 * k)
-            self._rr(cv, ex0, ey0, ex1, ey1, 18 * k, fill=P["card"], width=0)
-            floor_e = ey1 - 74 * k
-            self._rr(cv, ex0, floor_e, ex1, ey1, 18 * k,
+                       18 * kc)
+            self._rr(cv, ex0, ey0, ex1, ey1, 18 * kc, fill=P["card"], width=0)
+            floor_e = ey1 - 74 * kc
+            self._rr(cv, ex0, floor_e, ex1, ey1, 18 * kc,
                      fill=self._tint(mut, 0.78), width=0)
-            cv.create_rectangle(ex0, floor_e, ex1, floor_e + 14 * k,
+            cv.create_rectangle(ex0, floor_e, ex1, floor_e + 14 * kc,
                                 fill=self._tint(mut, 0.78), width=0,
                                 tags="dyn")
-            self._rr(cv, ex0, ey0, ex1, ey1, 18 * k, fill="",
+            self._rr(cv, ex0, ey0, ex1, ey1, 18 * kc, fill="",
                      outline=P["line"], width=2)
             ecx = (ex0 + ex1) / 2
-            self._rr_soft(cv, ecx - 26 * k, floor_e - 12 * k,
-                          ecx + 26 * k, floor_e + 12 * k, 12 * k,
+            self._rr_soft(cv, ecx - 26 * kc, floor_e - 12 * kc,
+                          ecx + 26 * kc, floor_e + 12 * kc, 12 * kc,
                           fill="#ffffff", outline=self._tint(mut, 0.4),
                           width=2)
             cv.create_text(ecx, floor_e, text="···",
@@ -18869,7 +19012,7 @@ class Mascot:
         self._room_bar(cv, W, H, P, k, allp)
         # 페이지 화살표 — 카드 그리드 오른쪽·왼쪽 가운데
         self._room_page_btn = []
-        if pages > 1:
+        if pages > 1 and view != 2:      # 전체 보기는 한 장뿐 — 화살표 없음
             ay = top + voff + rows_used * chh / 2
             bw2 = 34 * k
             for dxn, label, on in ((1, "▶", self._room_page < pages - 1),
@@ -23240,17 +23383,19 @@ class Mascot:
             if on:
                 self._room_btn_hit.append((x, by, x + bw, by + bw, kind))
             x += bw + gap
-        # '모두 보기' 토글 — 왼쪽 끝, 꾸미기와 같은 생김새
+        # 보기 방식 단추 — 왼쪽 끝. 누를 때마다 카드→심플→전체→카드.
+        # 글자는 '누르면 무엇이 되는가'(다음 방식)를 보여 준다.
         ax0 = 20 * k
-        allon = bool(self.us.get("room_all"))
+        vw2 = self._room_view()
+        nxt2 = self.ROOM_VIEWS[(vw2 + 1) % len(self.ROOM_VIEWS)]
         self._safe("soft_btn", self._soft_dot, cv, ax0 + bw / 2, by + bw / 2,
                    bw / 2, self._tint(self._room_tone(self.char), 0.55)
-                   if allon else "#f6f0f8",
+                   if vw2 else "#f6f0f8",
                    outline="#ffffff", width=3.5, shadow=True)
         cv.create_text(ax0 + bw / 2, by + bw / 2,
-                       text="카드\n보기" if allon else "모두\n보기",
+                       text=nxt2.replace(" ", "\n"),
                        font=self._uf(7, True), justify="center",
-                       fill=P["ink" if allon else "sub"], tags="dyn")
+                       fill=P["ink" if vw2 else "sub"], tags="dyn")
         self._room_all_btn = (ax0, by, ax0 + bw, by + bw)
         # 미니 게임(수박게임) 단추 — config "wgame" (전원 배포)
         self._room_game_btn = None
@@ -24497,7 +24642,9 @@ class Mascot:
             return
         ab2 = getattr(self, "_room_all_btn", None)
         if ab2 and ab2[0] <= e.x <= ab2[2] and ab2[1] <= e.y <= ab2[3]:
-            self.us["room_all"] = not bool(self.us.get("room_all"))
+            # 한 바퀴 돈다 — 묶어 두면 전체 보기에서 단추가 안 먹는다
+            self._room_view_set((self._room_view() + 1)
+                                % len(self.ROOM_VIEWS))
             self._save_settings()
             self._room_key_last = None
             self._room_bg = None      # 배경(벽지·배경 그림)까지 통째로 다시
