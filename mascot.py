@@ -395,6 +395,10 @@ GOAL_ROW = 22                    # 시계형 카드에 목표 진행바가 쓰�
 # 시작한다 (저장된 lv_secs를 버린다). 함부로 올리지 말 것 — 친구들이 쌓은
 # 레벨이 통째로 사라진다.
 LV_EPOCH = 1
+# 레벨이 태어난 날 (230058f, 모두 Lv1부터). 상태 파일이 날아가면 이 날짜
+# 이후의 하루 기록(.history.json) 합으로 레벨을 재건한다 — 락스가 하루
+# 만에 Lv.1 로 돌아간 사건의 안전망. LV_EPOCH 를 올리면 이 날짜도 그날로.
+LV_EPOCH_DAY = "2026-08-11"
 # 한글 획은 글자 상자 안에서 아래로 쏠려 있어, 점(아이콘)과 같은 y에 놓으면
 # 1.5px 내려앉아 보인다(화면 픽셀로 실측). 그만큼 올려 눈으로 가운데를 맞춘다.
 INK_DY = -1.5
@@ -4316,6 +4320,7 @@ class Mascot:
         self.day_base = 0.0          # 그 작업일이 시작될 때의 누적
         self._day_at = 0.0           # 마지막으로 날짜를 확인한 시각
         self.lv_secs = 0.0           # 레벨용 누적 작업 시간 (줄어들지 않는다)
+        self._lv_keep_at = 0.0       # 예비 저장소에 마지막으로 적은 값
         self._lv_seen = 0            # 마지막으로 알린 레벨 (0이면 아직 모름)
         self._lv_work = None         # 직전 프레임의 누적 작업 시간 (증가분만 셈)
         self._lv_save_at = 0.0       # 레벨을 마지막으로 저장한 시각
@@ -6183,7 +6188,8 @@ class Mascot:
         # 없는 옛 구성(평평한 wav)은 통째로 한 묶음으로 물러난다.
         snack_dir = os.path.join(self.dir, "sounds", "snack")
         if os.path.isdir(snack_dir):
-            vol = float(self.us.get("poke_volume", 40))
+            # 오물오물은 콕 소리보다 조금 작게 (크다는 제보 — 0.7배)
+            vol = float(self.us.get("poke_volume", 40)) * 0.7
             pools = {}
             for cat in os.listdir(snack_dir):
                 d2 = os.path.join(snack_dir, cat)
@@ -7063,6 +7069,8 @@ class Mascot:
                 self.rec["focus"] = float(r.get("focus", 0) or 0)
         except Exception:
             pass
+        # 상태 파일이 없거나 깨져도 예비 저장소로 레벨은 되살린다
+        self.lv_secs = self._lv_guard(self.lv_secs)
 
     def _timer_save(self):
         try:
@@ -7079,6 +7087,7 @@ class Mascot:
                         "stat": self.stat, "rec": self.rec})
         except Exception:
             pass
+        self._safe("lv_keep", self._lv_keep_save)
 
     # ── 레벨 ─────────────────────────────────────────────────────────────
     # 1시간 그리면 1레벨. 숨은 계산이 없어 'Lv42 = 41시간 넘게 그렸다'로 읽힌다.
@@ -7152,6 +7161,60 @@ class Mascot:
             pass
         return 0.0
 
+    def _lv_keep_path(self):
+        return os.path.join(self.state_dir, ".lv_keep.json")
+
+    def _lv_guard(self, got):
+        """예비 저장소(.lv_keep.json)와 견줘 **큰 쪽**을 쓴다.
+
+        락스의 레벨이 하루 만에 Lv.1 로 돌아갔다 — 상태 파일이 어떤
+        이유로든 유실되면(파일 깨짐·중복 실행·강제 종료의 어긋난 조합)
+        누적인 레벨이 통째로 사라진다. 레벨만은 딴 파일에 한 벌 더 두고
+        읽을 때 큰 쪽을 취한다. 실제로 복구가 일어나면 .error.log 에
+        남겨, 다음 제보 때 '무엇이 지워졌는지'의 실마리가 되게 한다.
+        """
+        keep = 0.0
+        try:
+            with open(self._lv_keep_path(), encoding="utf-8") as fp:
+                st = json.load(fp)
+            if int(st.get("lv_epoch", 0)) == LV_EPOCH:
+                keep = max(0.0, float(st.get("lv_secs") or 0))
+        except Exception:
+            pass
+        # 셋째 안전망 — 하루 기록에서 재건한다. 예비 저장소는 이 판부터
+        # 생기므로, 이미 잃어버린 사람(락스)은 이쪽이 되살린다. 하루
+        # 기록은 딴 파일이라 상태 파일이 죽어도 대개 살아 있다.
+        hist = 0.0
+        try:
+            with open(os.path.join(self.state_dir, ".history.json"),
+                      encoding="utf-8") as fp:
+                days = (json.load(fp) or {}).get("days") or {}
+            hist = float(sum(float((v or {}).get("work") or 0)
+                             for d2, v in days.items()
+                             if str(d2) >= LV_EPOCH_DAY))
+        except Exception:
+            hist = 0.0
+        best = max(got, keep, hist)
+        if best > got + 120:           # 2분 넘게 잃었을 때만 흔적을 남긴다
+            try:
+                self._log_error("lv_recover state=%d keep=%d hist=%d"
+                                % (int(got), int(keep), int(hist)))
+            except Exception:
+                pass
+        return best
+
+    def _lv_keep_save(self):
+        """늘어난 만큼만 가끔 적는다 (1분 이상 벌 때마다)."""
+        if self.lv_secs - self._lv_keep_at < 60.0:
+            return
+        self._lv_keep_at = self.lv_secs
+        try:
+            _save_json(self._lv_keep_path(),            # 지뢰 35
+                       {"lv_secs": round(self.lv_secs),
+                        "lv_epoch": LV_EPOCH})
+        except Exception:
+            pass
+
     def _lv_load(self):
         """연동 중인 캐릭터는 타이머 기록을 안 읽으므로 레벨만 되살린다."""
         try:
@@ -7159,6 +7222,7 @@ class Mascot:
                 self.lv_secs = self._lv_of(json.load(fp))
         except Exception:
             pass
+        self.lv_secs = self._lv_guard(self.lv_secs)
 
     def _lv_tick(self, now):
         """레벨용 시간을 쌓는다 — 카드에 보이는 시간이 늘어난 만큼만.
@@ -16457,8 +16521,12 @@ class Mascot:
             ti = str(q.get("ti") or "")[:14]
             nm = str(q.get("n") or "")[:14]
             cur = who.get(slot) if isinstance(who.get(slot), dict) else {}
-            try:                     # 수박게임 최고 — 큰 쪽만 남긴다
-                wb = max(int(cur.get("wgb") or 0), int(q.get("wgb") or 0))
+            try:
+                # 수박게임 최고 — **본인이 보낸 최신 값을 그대로 따른다.**
+                # '큰 쪽만'으로 두면 본인이 기록을 지워도(테스트 점수)
+                # 남의 화면에 영영 남는다. 이 값은 본인 최고라 원래
+                # 줄지 않고, 줄었다면 본인이 지운 것이다.
+                wb = int(q.get("wgb") or 0)
             except Exception:
                 wb = 0
             if (not cur or int(cur.get("lv") or 0) != lv
@@ -21672,10 +21740,11 @@ class Mascot:
     WG_SETS = 2                  # 벌 수 (14 ÷ 2 = 7 단계)
     WG_TIERS = 7                 # 한 판의 단계 수
     WG_SCORES = (1, 3, 6, 10, 15, 21, 28)
-    # 단계가 반으로 줄었으니 한 칸이 더 크게 자란다 (배수 1.35~1.39).
-    # 얼굴이 작다는 제보로 두 번 키웠다 — 마지막 지름은 판 폭의 0.65 배로
-    # 둘이 나란히 앉을 수 없다(그래서 큰 것이 쌓이면 판이 끝난다).
-    WG_RADII = (13, 18, 25, 34, 46, 62, 84)
+    # 단계가 반으로 줄었으니 한 칸이 더 크게 자란다 (배수 1.26~1.38).
+    # 작은 것들은 그대로, 가장 큰 것만 84 → 78 로 살짝 (요청).
+    # 실측: 머리 크기는 판 길이를 거의 못 바꾼다 (12~84 를 훑어도
+    # 중앙 230±20판) — 판 길이의 손잡이는 크기가 아니라 규칙이다.
+    WG_RADII = (13, 18, 25, 34, 46, 62, 78)
     # 보드 (물리 좌표). 가로를 340 → 286 으로 좁혔다 — 한 판이 너무
     # 길었다 (실측: 자동으로 420~660 번 떨어뜨려야 끝났다). 좁으면 같은
     # 실수로도 빨리 차오른다. 가장 큰 공의 지름은 폭의 0.53 배.
@@ -22039,6 +22108,10 @@ class Mascot:
                         self._wg_bake[key] = self._wg_make(*key)
                     except Exception:
                         pass
+                    # 쉼 없이 구우면 첫 30초 동안 본체 프레임이 밀린다
+                    # (제보 '초반에 작은 것 떨굴 때 끊긴다'). 큰 판일수록
+                    # 오래 쉬어 본체에 숨 쉴 틈을 준다.
+                    time.sleep(0.002 if key[1] < 200 else 0.02)
                 else:
                     if self._wg_bake_want is plan:
                         return                   # 다 구웠고 계획도 그대로
@@ -22992,15 +23065,16 @@ class Mascot:
                        font=self._uf(7, True), justify="center",
                        fill=P["ink" if allon else "sub"], tags="dyn")
         self._room_all_btn = (ax0, by, ax0 + bw, by + bw)
-        # 수박게임 단추 — 아직 도로롱에만 (config "wgame")
+        # 미니 게임(수박게임) 단추 — config "wgame" (전원 배포)
         self._room_game_btn = None
         if self.cfg.get("wgame"):
             gx0 = ax0 + bw + 10 * k
             self._safe("soft_btn", self._soft_dot, cv, gx0 + bw / 2,
                        by + bw / 2, bw / 2, "#eaf6df",
                        outline="#ffffff", width=3.5, shadow=True)
-            cv.create_text(gx0 + bw / 2, by + bw / 2, text="수박",
-                           font=self._uf(8, True), fill="#5f8352",
+            cv.create_text(gx0 + bw / 2, by + bw / 2, text="미니\n게임",
+                           justify="center",
+                           font=self._uf(7, True), fill="#5f8352",
                            tags="dyn")
             self._room_game_btn = (gx0, by, gx0 + bw, by + bw)
         # 꾸미기 단추 — 반응 단추와 같은 생김새로 오른쪽 끝에
@@ -23250,14 +23324,14 @@ class Mascot:
                           "ti": str(w.get("ti") or ""),
                           "t": st, "s": "off", "p": sp,
                           "a": "", "off": True})
-        # 차례: 나 → 게이지를 많이 채운 순 → 안 켠 사람. 페이지로 나뉘므로
-        # 차례가 곧 몇 쪽에 실리는지를 정한다 — 오늘 많이 한 사람이 앞에.
-        # (같으면 정해진 차례로 — 매번 자리가 뒤바뀌면 눈이 어지럽다.)
+        # 차례: 나 → 접속한 사람(레벨 높은 순) → 안 켠 사람 (요청).
+        # 예전엔 게이지(%) 순이라 1%마다 자리가 뒤바뀌어 어지러웠다 —
+        # 레벨은 한 시간에 한 번만 변하는 안정된 기준이고, 동률이면
+        # 등록표 차례라 자리가 사실상 고정된다.
         mine = [q for q in seats if (q.get("slot") or "") == self.char]
         rest2 = [q for q in seats if (q.get("slot") or "") != self.char]
         rest2.sort(key=lambda q: (1 if q.get("off") else 0,
-                                  -float(q.get("p") or 0),
-                                  -int(q.get("t") or 0),
+                                  -int(q.get("lv") or 0),
                                   order.get(q.get("slot") or "", 99),
                                   q.get("slot") or ""))
         return mine + rest2
