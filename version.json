@@ -1,5 +1,5 @@
 {
- "version": 1787182054,
+ "version": 1787182117,
  "files": {
   "mascot.py": "4261a88d53c72afd06e6d3a05326e60a86bbd92b25d862df024a371e5886cb24",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -445,5 +445,6 @@
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": []
+ "notes": [],
+ "silent": true
 }
