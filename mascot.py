@@ -23450,7 +23450,7 @@ class Mascot:
 
         # 점수 알약 (왼쪽 위)
         self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
-                      fill="#ffffff", outline=line, width=2)
+                      fill="#ffffff", outline=line, width=4)
         # 알약은 BX-3 ~ BX+116 — 글줄 여백을 좌우 16 씩 같게 (제보:
         # 숫자가 오른쪽 벽에 붙어 보였다)
         cv.create_text(BX + 13 * k, 24 * k, anchor="w", text="점수",
@@ -23514,7 +23514,7 @@ class Mascot:
         bx2 = sx + 2 * k
         by2 = ncy - btn_h / 2.0        # '다음' 접시와 같은 선상 (제보)
         self._rr_soft(cv, bx2, by2, bx2 + bw2, by2 + btn_h,
-                      16 * k, fill="#ffffff", outline=line, width=2)
+                      16 * k, fill="#ffffff", outline=line, width=4)
         cv.create_text(bx2 + bw2 / 2, by2 + btn_h / 2, text="다시하기",
                        font=uf(9, True), fill=ink)
         st_btn["new"] = (bx2, by2, bx2 + bw2, by2 + btn_h)
@@ -23621,7 +23621,7 @@ class Mascot:
         ry0 = BY - 7 * k + ch_h + int(12 * k)
         ry1 = by1 + 7 * k
         self._rr_soft(cv, sx, ry0, sx + sw, ry1, 16 * k,
-                      fill="#ffffff", outline=line, width=2)
+                      fill="#ffffff", outline=line, width=4)
         cv.create_text(sx + sw / 2, ry0 + 17 * k, text="랭킹",
                        font=uf(9, True), fill=ink)
         rank_its = []
@@ -23634,12 +23634,12 @@ class Mascot:
             if fill2:                          # 1·2·3위는 금·은·동
                 self._rr_soft(cv, sx + 7 * k, yy - rh2 / 2 + 1,
                               sx + sw - 7 * k, yy + rh2 / 2 - 1,
-                              rh2 / 2, fill=fill2, outline=ink2, width=1)
+                              rh2 / 2, fill=fill2, outline=ink2, width=2)
             cv.create_text(sx + 13 * k, yy, anchor="w", text=mark2,
                            font=uf(8, True), fill=ink2 or sub2)
             nit = cv.create_text(sx + 27 * k, yy, anchor="w", text="—",
                                  font=uf(8, True), fill=ink2 or ink)
-            sit = cv.create_text(sx + sw - 12 * k, yy, anchor="e", text="",
+            sit = cv.create_text(sx + sw - 20 * k, yy, anchor="e", text="",
                                  font=uf(9, True), fill=ink2 or ink)
             rank_its.append((nit, sit))
 
@@ -24317,9 +24317,21 @@ class Mascot:
         except Exception:
             return self.GAME_TALK[0]
 
-    def _ct_seat_img(self, px):
+    # 종료 카드에서 캐릭터가 뛰는 동작. 만세 자세 그림이 따로 없어서
+    # (seat 계열은 앉아 있는 모습뿐이다) **위아래로 뛰면서 좌우로 갸웃**
+    # 하는 것으로 신나는 느낌을 낸다. 각도는 몇 칸으로 끊어 구워 둔다 —
+    # 매 프레임 돌려 만들면 그림을 새로 굽느라 프레임이 늘어진다.
+    # 너무 심하게 뛰면 정신없다는 제보로 폭을 줄였다 — 살짝 들썩이는
+    # 정도가 '신났다'로 읽히고 글자도 안 흔들려 보인다.
+    CT_HOP_HZ = 1.7          # 초당 몇 번 뛰나
+    CT_HOP_H = 6.0           # 뛰어오르는 높이 (물리 px)
+    CT_HOP_ANG = 3.5         # 갸웃하는 각도 (도)
+    CT_HOP_STEP = 3.5        # 각도를 이 칸으로 끊어 캐시한다
+
+    def _ct_seat_img(self, px, ang=0.0):
         """축하 창에 쓸 내 캐릭터 (앉은 모습). 없으면 머리로 물러난다."""
-        key = ("__seat__", int(px))
+        ang = round(float(ang) / self.CT_HOP_STEP) * self.CT_HOP_STEP
+        key = ("__seat__", int(px), ang)
         got = self._ct_imgs.get(key)
         if got is not None:
             return got
@@ -24337,6 +24349,8 @@ class Mascot:
         kk = float(px) / float(im.height)
         im = im.resize((max(1, int(im.width * kk)), max(1, int(px))),
                        Image.LANCZOS)
+        if abs(ang) > 0.01:
+            im = im.rotate(ang, resample=Image.BICUBIC, expand=True)
         got = ImageTk.PhotoImage(im)
         self._ct_imgs[key] = got
         return got
@@ -24531,7 +24545,7 @@ class Mascot:
                    self._tint(cd["fill"], 0.45))
         # 점수 알약 (왼쪽 위) — 수박게임과 같은 자리·같은 여백
         self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
-                      fill="#ffffff", outline=line, width=2)
+                      fill="#ffffff", outline=line, width=4)
         cv.create_text(BX + 13 * k, 24 * k, anchor="w", text="점수",
                        font=uf(8, True), fill=sub2)
         _sc, sc_ids = self._cute_text(cv, BX + 100 * k, 24 * k, "0",
@@ -24569,19 +24583,22 @@ class Mascot:
                 pass
         bgm_apply()
         # 남은 시간 막대 (가운데) — 브금 단추가 있으면 그만큼 짧게
-        tb0 = BX + 132 * k
+        # **아래 진행 띠와 왼쪽 끝을 맞춘다** — 아래 줄은 왼쪽에 '타일
+        # N개 · 얼굴 N종' 글자가 있어 그만큼 밀리는데, 위만 길면 두 줄
+        # 길이가 달라 보인다 (제보). 둘 다 글자 오른쪽에서 시작한다.
+        tb0 = BX + 196 * k
         tb1 = bx1 - (200 if self._ct_bgm is not None else 146) * k
         cv.create_text((tb0 + tb1) / 2, 20 * k, text="남은 시간",
                        font=uf(8, True), fill=sub2)
         self._rr(cv, tb0, 32 * k, tb1, 46 * k, 7 * k,
-                 fill="#ffffff", outline=line, width=3)
+                 fill="#ffffff", outline=line, width=4)
         # 차오르는 부분도 **알약 모양**으로 (요청). 둥근 사각을 매 프레임
         # 다시 만들면 항목이 쌓이므로, 끝이 둥근 굵은 선 하나로 그리고
         # coords 로 길이만 바꾼다 (지뢰 72).
-        bar_th = 14 * k - 7
+        bar_th = 14 * k - 9
         bar_y = 39 * k
-        bar_x0 = tb0 + 3.5 + bar_th / 2
-        bar_x1 = tb1 - 3.5 - bar_th / 2
+        bar_x0 = tb0 + 4.5 + bar_th / 2
+        bar_x1 = tb1 - 4.5 - bar_th / 2
         bar_it = cv.create_line(bar_x0, bar_y, bar_x1, bar_y,
                                 width=bar_th, capstyle="round",
                                 fill=self._tint(cd["fill"], 0.35))
@@ -24594,14 +24611,14 @@ class Mascot:
         by2 = 18 * k
         bx2 = bx1 - bw2 - qr * 2 - 8 * k
         self._rr_soft(cv, bx2, by2, bx2 + bw2, by2 + 32 * k, 16 * k,
-                      fill="#ffffff", outline=line, width=3)
+                      fill="#ffffff", outline=line, width=4)
         cv.create_text(bx2 + bw2 / 2, by2 + 16 * k, text="다시하기",
                        font=uf(9, True), fill=ink)
         btn_new = (bx2, by2, bx2 + bw2, by2 + 32 * k)
         win._ct_newbtn = btn_new          # 검사가 누를 자리를 안다
         qcx, qcy = bx1 - qr, by2 + 16 * k
         self._safe("soft_btn", self._soft_dot, cv, qcx, qcy, qr,
-                   "#ffffff", outline=line, width=3)
+                   "#ffffff", outline=line, width=4)
         cv.create_text(qcx, qcy, text="?", font=uf(12, True), fill=ink)
         btn_help = (qcx - qr, qcy - qr, qcx + qr, qcy + qr)
         # 판 진행 띠 — 지금 몇 판이고 다음 판까지 얼마나 왔나.
@@ -24610,15 +24627,13 @@ class Mascot:
         _stg, stg_ids = self._cute_text(cv, BX + 4 * k, 82 * k, "",
                                         uf(9, True), ink, edge=edge,
                                         w=1.5 * k, anchor="w")
-        # 이 줄은 왼쪽에 '타일 N개 · 얼굴 N종' 글자가 있으므로 띠를
-        # 그만큼 오른쪽에서 시작한다 (겹쳐 보인다 — 찍어서 확인).
-        pgl = max(tb0, BX + 196 * k)
-        self._rr(cv, pgl, 74 * k, tb1, 90 * k, 8 * k,
-                 fill="#ffffff", outline=line, width=3)
-        pg_th = 16 * k - 8
+        # 위의 시간 막대와 **똑같은 자리·똑같은 길이**로 (제보)
+        self._rr(cv, tb0, 74 * k, tb1, 90 * k, 8 * k,
+                 fill="#ffffff", outline=line, width=4)
+        pg_th = 16 * k - 9
         pg_y = 82 * k
-        pg_x0 = pgl + 4 + pg_th / 2
-        pg_x1 = tb1 - 4 - pg_th / 2
+        pg_x0 = tb0 + 4.5 + pg_th / 2
+        pg_x1 = tb1 - 4.5 - pg_th / 2
         pg_it = cv.create_line(pg_x0, pg_y, pg_x0, pg_y, width=pg_th,
                                capstyle="round",
                                fill=self._tint(cd["fill"], 0.45))
@@ -24679,7 +24694,7 @@ class Mascot:
         ry0 = 8 * k
         ry1 = ry0 + 44 * k + rh2 * self.CT_RANK_N + 10 * k
         self._rr_soft(cv, rsx, ry0, rsx + rsw, ry1, 16 * k,
-                      fill="#ffffff", outline=line, width=2)
+                      fill="#ffffff", outline=line, width=4)
         cv.create_text(rsx + rsw / 2, ry0 + 18 * k, text="랭킹",
                        font=uf(9, True), fill=ink)
         ct_rank_its = []
@@ -24690,12 +24705,12 @@ class Mascot:
             if fill2:                       # 1·2·3위는 금·은·동
                 self._rr_soft(cv, rsx + 7 * k, yy2 - rh2 / 2 + 1,
                               rsx + rsw - 7 * k, yy2 + rh2 / 2 - 1,
-                              rh2 / 2, fill=fill2, outline=ink2, width=1)
+                              rh2 / 2, fill=fill2, outline=ink2, width=2)
             cv.create_text(rsx + 13 * k, yy2, anchor="w", text=mark2,
                            font=uf(8, True), fill=ink2 or sub2)
             nit2 = cv.create_text(rsx + 27 * k, yy2, anchor="w", text="—",
                                   font=uf(8, True), fill=ink2 or ink)
-            sit2 = cv.create_text(rsx + rsw - 12 * k, yy2, anchor="e",
+            sit2 = cv.create_text(rsx + rsw - 20 * k, yy2, anchor="e",
                                   text="", font=uf(9, True),
                                   fill=ink2 or ink)
             ct_rank_its.append((nit2, sit2))
@@ -24706,7 +24721,7 @@ class Mascot:
         mine_its = []
         if my1 - my0 > 90 * k:
             self._rr_soft(cv, rsx, my0, rsx + rsw, my1, 16 * k,
-                          fill="#ffffff", outline=line, width=2)
+                          fill="#ffffff", outline=line, width=4)
             cv.create_text(rsx + rsw / 2, my0 + 18 * k, text="내 기록",
                            font=uf(9, True), fill=ink)
             mh2 = min(34 * k, max(16 * k,
@@ -24779,7 +24794,7 @@ class Mascot:
                         cx3, cy3, image=im2, tags="tile")
         draw_board()
         st = {"over_ui": False, "over_btn": None, "over_fx": [],
-              "over_t0": 0.0}
+              "over_t0": 0.0, "over_seat": None}
 
         def redraw(now):
             g2 = self._ct
@@ -24872,6 +24887,20 @@ class Mascot:
                     win._ct_born.append(im7)
                     cx7, cy7 = cellxy(x7, y7)
                     cv.create_image(cx7, cy7, image=im7, tags="ctborn")
+            # ── 캐릭터가 신나서 방방 뛴다 (종료 카드 안에서만) ──
+            seat9 = st.get("over_seat")
+            if seat9 and st.get("over_ui"):
+                cx9, cy9, pxs = seat9
+                t9 = now - float(st.get("over_t0") or now)
+                w9 = t9 * self.CT_HOP_HZ * math.tau
+                hop = abs(math.sin(w9)) ** 0.7      # 바닥에 붙는 시간을 길게
+                ang9 = self.CT_HOP_ANG * math.sin(w9 * 0.5)
+                imh = self._safe_str(self._ct_seat_img, pxs, ang9)
+                cv.delete("overch")
+                if imh:
+                    win._ct_seat = imh             # 참조는 창이 든다
+                    cv.create_image(cx9, cy9 - hop * self.CT_HOP_H * k,
+                                    image=imh, tags="overch")
             # ── 폭죽 — 끝난 자리에서 터져 흩날린다 ──
             if st.get("over_fx"):
                 cv.delete("overcf")
@@ -24891,6 +24920,8 @@ class Mascot:
                                        (w9, h9), (-w9, h9)):
                             pts += [x9 + ax * c9 - ay * s9,
                                     y9 + ax * s9 + ay * c9]
+                        if not (BX < x9 < bx1 and BY < y9 < by1):
+                            continue      # 판 밖(랭킹 칸)까지 안 날아가게
                         cv.create_polygon(pts, fill=q9["c"], outline="",
                                           tags="overcf")
                     cv.tag_raise("overcf")
@@ -24942,7 +24973,7 @@ class Mascot:
                 # 카드 — 캐릭터가 가운데에서 축하해 준다 (요청).
                 self._rr_soft(cv, mx2 - 150 * k, my2 - 152 * k,
                               mx2 + 150 * k, my2 + 140 * k, 24 * k,
-                              fill="#ffffff", outline=line, width=3,
+                              fill="#ffffff", outline=line, width=4,
                               tags="over")
                 # 말풍선 — 글자를 먼저 만들고 그 폭에 맞춰 알약을 두른다
                 say = self._safe_str(self._ct_cheer_line, done) or "잘했어!"
@@ -24955,19 +24986,16 @@ class Mascot:
                                   bb9[2] + 16 * k, bb9[3] + 9 * k,
                                   (bb9[3] - bb9[1]) / 2 + 9 * k,
                                   fill=self._tint(cd["fill"], 0.86),
-                                  outline=line, width=2, tags="over")
+                                  outline=line, width=3, tags="over")
                     cv.create_polygon(mx2 - 7 * k, bb9[3] + 7 * k,
                                       mx2 + 7 * k, bb9[3] + 7 * k,
                                       mx2, bb9[3] + 17 * k,
                                       fill=self._tint(cd["fill"], 0.86),
                                       outline="", tags="over")
                     cv.tag_raise(tid)
-                # 캐릭터
-                im9 = self._safe_str(self._ct_seat_img, int(96 * k))
-                if im9:
-                    win._ct_seat = im9        # 참조는 창이 든다
-                    cv.create_image(mx2, my2 - 60 * k, image=im9,
-                                    tags="over")
+                # 캐릭터 — 자리만 잡아 두고 **프레임마다** 그린다.
+                # 여기서 한 번 그려 두면 가만히 서 있게 된다 (제보).
+                st["over_seat"] = (mx2, my2 - 60 * k, int(96 * k))
                 cv.create_text(mx2, my2 + 12 * k,
                                text="점수 %d · 남은 타일 %d개"
                                % (g2["score"], len(g2["board"])),
@@ -24980,9 +25008,16 @@ class Mascot:
                 ocy = my2 + 80 * k
                 self._safe("soft_btn", self._soft_dot, cv, mx2, ocy, orr,
                            self._tint(cd["fill"], 0.72), outline=line,
-                           width=3, tags="over")
-                cv.create_text(mx2, ocy - 2 * k, text="↻",
-                               font=uf(20, True), fill=ink, tags="over")
+                           width=4, tags="over")
+                gid = cv.create_text(mx2, ocy, text="↻",
+                                     font=uf(20, True), fill=ink,
+                                     tags="over")
+                # 글꼴마다 글자의 위아래 여백이 달라 좌표만으로는 가운데에
+                # 안 온다. 그린 자리를 재서 그만큼 옮긴다 (제보).
+                gb = cv.bbox(gid)
+                if gb:
+                    cv.move(gid, mx2 - (gb[0] + gb[2]) / 2.0,
+                            ocy - (gb[1] + gb[3]) / 2.0)
                 cv.create_text(mx2, ocy + orr + 12 * k, text="다시하기",
                                font=uf(8, True), fill=sub2, tags="over")
                 st["over_btn"] = (mx2 - orr, ocy - orr, mx2 + orr, ocy + orr)
@@ -25043,9 +25078,11 @@ class Mascot:
                 self._safe("ui_click", self._ui_click)
                 cv.delete("over")
                 cv.delete("overcf")
+                cv.delete("overch")
                 st["over_ui"] = False
                 st["over_btn"] = None
                 st["over_fx"] = []
+                st["over_seat"] = None
                 self._ct_new()
                 self._safe("ctile", draw_board)
                 self._safe("ct_rank", draw_rank)
@@ -25055,9 +25092,11 @@ class Mascot:
                 self._safe("ui_click", self._ui_click)
                 cv.delete("over")
                 cv.delete("overcf")
+                cv.delete("overch")
                 st["over_ui"] = False
                 st["over_btn"] = None
                 st["over_fx"] = []
+                st["over_seat"] = None
                 self._ct_new()
                 self._safe("ctile", draw_board)
                 self._safe("ct_rank", draw_rank)
