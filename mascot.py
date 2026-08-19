@@ -476,6 +476,7 @@ DEFAULT_SETTINGS = {
     # 컬러타일 브금은 음원 자체가 수박게임 것보다 1.7배 크다
     # (실측 RMS 0.151 대 0.087). 귀에 같게 들리도록 그만큼 낮게 잡는다.
     "ct_bgm_vol": 10,        # 컬러타일 브금 볼륨 (0~100)
+    "rank_msg": "",          # 랭킹 한마디 (1·2·3위일 때만 보인다)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "font_v2": False,        # 글자 크기 눈금을 새로 매긴 뒤인가
@@ -4901,6 +4902,7 @@ class Mascot:
         self._ct_after = None        # 프레임 예약 (지뢰 20)
         self._ct_imgs = {}           # (slot, 지름) → 타일 그림
         self._ct_bgm = None          # 브금 (창이 떠 있는 동안만)
+        self._rmsg_win = None        # 랭킹 한마디 입력창 (지뢰 14)
         self._room_game_btn = None   # 홈의 게임 단추 자리
         self._room_job = None        # 방 창 다시 그리기 예약
         self._room_push = 0.0        # 내 상태를 마지막으로 올린 시각
@@ -16615,6 +16617,9 @@ class Mascot:
         ctb = self._ct_best()
         if ctb > 0:
             out["ctb"] = ctb        # 컬러타일 최고 — 모두의 랭킹감
+        rmsg = str(self.us.get("rank_msg") or "")[:self.RANK_MSG_N]
+        if rmsg:
+            out["rm"] = rmsg        # 랭킹 한마디
         rly = self._safe_str(self._room_relay_pack)
         if rly:
             out["rly"] = rly        # 내가 아는 남들 기록 (아래 주석)
@@ -16802,7 +16807,8 @@ class Mascot:
             age = max(0.0, now - float(w.get("seen") or 0.0))
             if age > self.RELAY_TTL:
                 continue
-            rows.append([str(slot)[:28], wb, cb, int(age)])
+            rows.append([str(slot)[:28], wb, cb, int(age),
+                         str(w.get("rm") or "")[:self.RANK_MSG_N]])
         rows.sort(key=lambda r: r[3])          # 싱싱한 것부터
         return rows[:self.RELAY_N] or None
 
@@ -16819,6 +16825,8 @@ class Mascot:
             try:
                 slot = str(row[0])[:28]
                 wb, cb, age = int(row[1]), int(row[2]), float(row[3])
+                # 한마디는 나중에 붙은 칸이라 없을 수도 있다 (옛 판)
+                rm9 = str(row[4])[:self.RANK_MSG_N] if len(row) > 4 else ""
             except Exception:
                 continue
             if not slot or slot == self.char or age < 0:
@@ -16834,12 +16842,15 @@ class Mascot:
             # 싱싱해져서, 그때마다 저장하면 5초에 한 번씩 디스크를 친다.
             changed = (cur is None
                        or (wb > 0 and int(cur.get("wgb") or 0) != wb)
-                       or (cb > 0 and int(cur.get("ctb") or 0) != cb))
+                       or (cb > 0 and int(cur.get("ctb") or 0) != cb)
+                       or (rm9 and str(cur.get("rm") or "") != rm9))
             row2 = dict(cur or {})
             if wb > 0:
                 row2["wgb"] = wb
             if cb > 0:
                 row2["ctb"] = cb
+            if rm9:
+                row2["rm"] = rm9
             row2["seen"] = fresh
             row2.setdefault("n", "")
             who[slot] = row2
@@ -16876,16 +16887,20 @@ class Mascot:
                 cb = int(q.get("ctb") or 0)      # 컬러타일도 같은 규칙
             except Exception:
                 cb = 0
+            rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             if (not cur or int(cur.get("lv") or 0) != lv
                     or str(cur.get("ti") or "") != ti
                     or str(cur.get("n") or "") != nm
                     or int(cur.get("wgb") or 0) != wb
-                    or int(cur.get("ctb") or 0) != cb):
+                    or int(cur.get("ctb") or 0) != cb
+                    or str(cur.get("rm") or "") != rm):
                 row2 = {"lv": lv, "ti": ti, "n": nm}
                 if wb > 0:
                     row2["wgb"] = wb
                 if cb > 0:
                     row2["ctb"] = cb
+                if rm:
+                    row2["rm"] = rm
                 row2["seen"] = _now9              # 직접 본 것은 지금
                 who[slot] = row2
                 dirty = True
@@ -16972,19 +16987,35 @@ class Mascot:
     # 것은 **내 자리(dororong)뿐**이다 — 친구들 기록은 건드리지 않는다.
     # 실행 중인 프로그램이 메모리 값을 파일에 도로 쓰기 때문에, 파일만
     # 지워서는 안 되고 켤 때 이렇게 지워야 확실하다.
-    WG_WIPE = 1
-    WG_WIPE_SLOT = "dororong"
+    WG_WIPE = 2
+    # None 이면 **모두**. 1 판일 때는 내 것만 지웠어서 슬롯이 있었다.
+    WG_WIPE_SLOT = None
 
     def _wg_wipe_once(self):
+        """기록을 한 번 비운다 (판올림 뒤 첫 실행에서 한 번만).
+
+        2 판: 부딪히는 느낌(반발 0.3 → 0.15)을 바꿨으니 그 전 점수와
+        지금 점수를 같은 표에 두면 안 된다는 요청. 남에게서 받아 둔 옛
+        기록도 같이 지운다 — 안 지우면 그 사람이 접속할 때까지 옛 점수가
+        내 화면에 남는다.
+        """
         if int(self.us.get("wg_wipe") or 0) >= self.WG_WIPE:
             return
         self.us["wg_wipe"] = self.WG_WIPE
-        if self.char == self.WG_WIPE_SLOT:
+        if self.WG_WIPE_SLOT in (None, self.char):
             try:
                 _save_json(self._wg_path(), {"best": 0, "rank": []})
                 if self._wg is not None:      # 메모리 값도 같이
                     self._wg["best"] = 0
                     self._wg["rank"] = []
+            except Exception:
+                pass
+            try:
+                who = self._room_who_get() or {}
+                for w9 in who.values():
+                    if isinstance(w9, dict):
+                        w9.pop("wgb", None)
+                _save_json(self._room_who_path(), who)
             except Exception:
                 pass
         self._save_settings()
@@ -22958,8 +22989,18 @@ class Mascot:
             return self.RANK_MEDAL[i]
         return (None, None, "%d" % (i + 1))
 
+    # 랭킹 한마디 — 1·2·3위만 남길 수 있다 (요청). 길면 커서를 올렸을
+    # 때 옆으로 흐른다 (_mq_bubble 재사용).
+    RANK_MSG_N = 40          # 글자 수 상한
+    RANK_MSG_TOP = 3         # 몇 위까지 적을 수 있나
+
+    def _rank_msg_set(self, text):
+        """내 한마디를 저장한다 (다음 신호에 실린다)."""
+        self.us["rank_msg"] = str(text or "").strip()[:self.RANK_MSG_N]
+        self._safe("rank_msg", self._save_settings)
+
     def _game_board(self, key, mine):
-        """모두의 랭킹 — [(점수, 이름, 나인가)] 높은 순 5개.
+        """모두의 랭킹 — [(점수, 이름, 나인가, 한마디)] 높은 순 5개.
 
         서버는 안 고친다 — 방 신호(beat)에 실려 오는 값을 모은다.
         key 가 어느 게임인지 정한다 ("wgb"=수박게임, "ctb"=컬러타일).
@@ -22973,7 +23014,8 @@ class Mascot:
                      self.ROOM_NAME.get(self.char) or "나")
             # 내 줄에는 '·나'가 붙는다 — 그만큼 이름을 더 줄여야 큰
             # 점수(다섯 자리)와 안 겹친다 (자로 재서 맞춘 값)
-            rows.append((int(mine), nm[:4], True))
+            rows.append((int(mine), nm[:4], True,
+                         str(self.us.get("rank_msg") or "")))
         try:
             for slot, w in (self._room_who_get() or {}).items():
                 if slot == self.char or not isinstance(w, dict):
@@ -22983,7 +23025,8 @@ class Mascot:
                     continue
                 nm = (str(w.get("n") or "").strip()
                       or str(self.ROOM_NAME.get(slot) or slot))
-                rows.append((b, nm[:5], False))
+                rows.append((b, nm[:5], False,
+                             str(w.get("rm") or "")))
         except Exception:
             pass
         rows.sort(key=lambda r: (-r[0], r[1]))
@@ -23641,19 +23684,49 @@ class Mascot:
                                  font=uf(8, True), fill=ink2 or ink)
             sit = cv.create_text(sx + sw - 20 * k, yy, anchor="e", text="",
                                  font=uf(9, True), fill=ink2 or ink)
-            rank_its.append((nit, sit))
+            pit = mit = None
+            if i2 < self.RANK_MSG_TOP:
+                pit = cv.create_text(0, -99, text="\u270e", font=uf(8),
+                                     fill=ink2 or sub2, state="hidden")
+                # 이름 뒤에 이어 붙이면 점수와 겹친다 (검사가 잡았다).
+                # 줄이 넉넉할 때만 아랫줄에 따로 둔다.
+                if rh2 >= 30 * k:
+                    cv.coords(nit, sx + 27 * k, yy - rh2 * 0.19)
+                    mit = cv.create_text(sx + 20 * k, yy + rh2 * 0.21,
+                                         anchor="w", text="",
+                                         font=uf(6, True), fill=ink2 or sub2)
+            rank_its.append((nit, sit, pit, mit))
+
+        win._wg_pen = {}          # 펜 아이콘을 누를 자리 {순위: 상자}
 
         def draw_rank():
             rows = self._wg_board()
-            for i3, (nit, sit) in enumerate(rank_its):
+            win._wg_pen = {}
+            for i3, (nit, sit, pit, mit) in enumerate(rank_its):
                 if i3 < len(rows):
-                    b3, nm3, me3 = rows[i3]
-                    cv.itemconfigure(
-                        nit, text=nm3 + (" ·나" if me3 else ""))
+                    b3, nm3, me3, ms3 = rows[i3]
+                    cv.itemconfigure(nit,
+                                     text=nm3 + (" ·나" if me3 else ""))
                     cv.itemconfigure(sit, text="%d" % b3)
+                    if mit is not None:
+                        cv.itemconfigure(mit, text=str(ms3 or "")[:16])
+                    if pit is not None:
+                        bn = cv.bbox(nit) if me3 else None
+                        if bn:
+                            cv.coords(pit, bn[2] + 7 * k,
+                                      (bn[1] + bn[3]) / 2.0)
+                            cv.itemconfigure(pit, state="normal")
+                            win._wg_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
+                                               bn[2] + 15 * k, bn[3] + 3 * k)
+                        else:
+                            cv.itemconfigure(pit, state="hidden")
                 else:
                     cv.itemconfigure(nit, text="—")
                     cv.itemconfigure(sit, text="")
+                    if mit is not None:
+                        cv.itemconfigure(mit, text="")
+                    if pit is not None:
+                        cv.itemconfigure(pit, state="hidden")
         draw_rank()
 
         def wrap_some():
@@ -23884,6 +23957,11 @@ class Mascot:
             g2 = self._wg
             if g2 is None:
                 return
+            for i8, pb in (getattr(win, "_wg_pen", None) or {}).items():
+                if pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
+                    self._safe("ui_click", self._ui_click)
+                    self._safe("rank_msg", self._rank_msg_win, draw_rank)
+                    return
             for act, bb2 in st_btn.items():    # 오른쪽 위 게임 단추
                 if bb2[0] <= e.x <= bb2[2] and bb2[1] <= e.y <= bb2[3]:
                     self._safe("ui_click", self._ui_click)
@@ -24355,6 +24433,125 @@ class Mascot:
         self._ct_imgs[key] = got
         return got
 
+    def _rank_msg_flow(self, cv, box, msg, col, now, tag):
+        """한마디가 길면 그 자리에 **옆으로 흐르는 그림**을 얹는다.
+
+        짧아서 다 보이면 None — 그때는 원래 글자를 그대로 둔다
+        (_mq_bubble 이 그 판단까지 한다).
+        """
+        x0, y0, x1, y1 = box
+        w9, h9 = int(x1 - x0), int(y1 - y0)
+        if w9 < 20 or h9 < 8 or not msg:
+            return None
+        return self._safe_str(self._mq_bubble, msg, w9, h9, col, now) or None
+
+    def _rank_msg_win(self, after=None):
+        """랭킹 한마디를 적는 작은 창 (Entry 하나 — 맥에서도 안전).
+
+        캔버스에 얹지 않는다 — create_window 로 얹은 칸은 창을 줄이면
+        밖으로 삐져나와 아래 단추를 덮는다 (지뢰 22).
+        """
+        got = getattr(self, "_rmsg_win", None)
+        try:
+            if got is not None and got.winfo_exists():
+                got.lift()
+                return
+        except Exception:
+            pass
+        cd = self.card
+        k = self.ui_k
+        # **게임 창의 자식으로** 만든다. 게임 창이 '항상 위'라 다른 부모로
+        # 만들면 0.5초마다 도는 다시 올리기에 밀려 뒤로 들어가고, 사람에게는
+        # '창이 자꾸 꺼진다'로 보인다 (제보 · 지뢰 15).
+        top9 = None
+        for nm9 in ("_ct_winref", "_wg_winref"):
+            w9 = getattr(self, nm9, None)
+            try:
+                if w9 is not None and w9.winfo_exists():
+                    top9 = w9
+                    break
+            except Exception:
+                pass
+        win = tk.Toplevel(top9 or self.room_win or self.root)
+        self._rmsg_win = win
+        win.title("랭킹 한마디")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        try:
+            if top9 is not None:
+                win.transient(top9)
+        except Exception:
+            pass
+        self._keep_front(win, focus=True)
+        fnt = (UI_FONT, max(9, int(11 * k)))
+        tk.Label(win, text="랭킹에 함께 뜰 한마디 (%d자까지)"
+                 % self.RANK_MSG_N, bg=cd["panel"], fg=cd["text"],
+                 font=(UI_FONT, max(8, int(9 * k)))).pack(
+                     padx=int(16 * k), pady=(int(14 * k), int(6 * k)))
+        var = tk.StringVar(value=str(self.us.get("rank_msg") or ""))
+        ent = tk.Entry(win, textvariable=var, font=fnt, width=26,
+                       relief="flat", bg="#ffffff", fg=cd["text"],
+                       insertbackground=cd["text"])
+        ent.pack(padx=int(16 * k), ipady=int(5 * k))
+        ent.focus_set()
+        ent.select_range(0, "end")
+        bar = tk.Frame(win, bg=cd["panel"])
+        bar.pack(pady=int(12 * k))
+
+        def save9(_e=None):
+            self._rank_msg_set(var.get())
+            win.destroy()
+            if callable(after):
+                self._safe("rank_msg", after)
+
+        tk.Button(bar, text="저장", font=fnt, relief="flat",
+                  bg=self._tint(cd["fill"], 0.55), fg=cd["text"],
+                  command=save9).pack(side="left", padx=int(5 * k))
+        tk.Button(bar, text="지우기", font=fnt, relief="flat",
+                  bg="#ffffff", fg=cd["text"],
+                  command=lambda: (var.set(""), save9())).pack(
+                      side="left", padx=int(5 * k))
+        ent.bind("<Return>", save9)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        # 게임 창이 주기적으로 자기를 올리므로, 이쪽도 계속 올려 준다.
+        # (지뢰 20 — 닫을 때 예약을 거둔다)
+        keep9 = {"id": None}
+
+        def raise9():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            keep9["id"] = win.after(400, raise9)
+            try:
+                win.lift()
+                win.attributes("-topmost", True)
+            except Exception:
+                pass
+        raise9()
+        try:
+            win.lift()
+            ent.focus_force()
+        except Exception:
+            pass
+
+        def gone9(_e=None):
+            got9 = keep9.get("id")
+            if got9 is not None:
+                try:
+                    win.after_cancel(got9)
+                except Exception:
+                    pass
+                keep9["id"] = None
+            if getattr(self, "_rmsg_win", None) is win:
+                self._rmsg_win = None
+        win.bind("<Destroy>",
+                 lambda e: gone9() if e.widget is win else None)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        self._place_near(win)
+        self._dialog_keep(win, "rankmsg")
+
     def _ct_grid_img(self, w, h, cell, c1, c2, rad=0):
         """판 바탕의 옅은 바둑판 — **한 장으로 구워서** 얹는다.
 
@@ -24706,14 +24903,36 @@ class Mascot:
                 self._rr_soft(cv, rsx + 7 * k, yy2 - rh2 / 2 + 1,
                               rsx + rsw - 7 * k, yy2 + rh2 / 2 - 1,
                               rh2 / 2, fill=fill2, outline=ink2, width=2)
-            cv.create_text(rsx + 13 * k, yy2, anchor="w", text=mark2,
+            top9 = i2 < self.RANK_MSG_TOP
+            # 한마디 줄은 **알약 안쪽**에 둔다 — 밖으로 나가면 아래 줄과
+            # 겹쳐 보인다 (제보). 이름은 그만큼 위로 올린다.
+            # 알약 높이의 비율로 잡는다. 0.25 로 뒀더니 흰 알약 아래가
+            # 색 알약 밖으로 삐져나왔다 (제보) — 더 위로, 더 얇게.
+            ny2 = yy2 - (rh2 * 0.20 if top9 else 0)
+            my2r = yy2 + rh2 * 0.19
+            cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
                            font=uf(8, True), fill=ink2 or sub2)
-            nit2 = cv.create_text(rsx + 27 * k, yy2, anchor="w", text="—",
+            nit2 = cv.create_text(rsx + 27 * k, ny2, anchor="w", text="—",
                                   font=uf(8, True), fill=ink2 or ink)
-            sit2 = cv.create_text(rsx + rsw - 20 * k, yy2, anchor="e",
+            sit2 = cv.create_text(rsx + rsw - 20 * k, ny2, anchor="e",
                                   text="", font=uf(9, True),
                                   fill=ink2 or ink)
-            ct_rank_its.append((nit2, sit2))
+            mit2 = pit2 = mbg2 = None
+            if top9:      # 1·2·3위만 한마디를 남길 수 있다 (요청)
+                # 글자 뒤에 **흰 알약** — 끝이 둥근 굵은 선 하나로 그리고
+                # 글자 길이에 맞춰 coords 로 늘인다 (도형을 매 프레임
+                # 새로 만들지 않는다 — 지뢰 72).
+                mbg2 = cv.create_line(0, -99, 0, -99, width=rh2 * 0.30,
+                                      capstyle="round", fill="#ffffff",
+                                      state="hidden")
+                mit2 = cv.create_text(rsx + 20 * k, my2r, anchor="w",
+                                      text="", font=uf(7, True),
+                                      fill=self._shade(cd["fill"], 0.18))
+                pit2 = cv.create_text(0, -99, text="\u270e", font=uf(8),
+                                      fill=ink2 or sub2, state="hidden")
+            ct_rank_its.append((nit2, sit2, mit2, pit2, mbg2,
+                                (rsx + 12 * k, my2r - rh2 * 0.17,
+                                 rsx + rsw - 12 * k, my2r + rh2 * 0.17)))
         # 아래 칸 — **내 기록.** 여태 저장만 하고 어디에도 안 보여 줬다.
         # 남과 겨루는 줄(위)과 나와 겨루는 줄(아래)을 나눠 둔다.
         my0 = ry1 + 12 * k
@@ -24739,17 +24958,55 @@ class Mascot:
                                       text="", font=uf(7), fill=sub2)
                 mine_its.append((sit3, eit3))
 
+        win._ct_pen = {}          # 펜 아이콘을 누를 자리 {순위: 상자}
+        win._ct_mbox = {}         # 한마디 자리 (호버 마퀴용)
+        win._ct_mtxt = {}         # 그 줄의 원문
+
         def draw_rank():
             rows2 = self._ct_board()
-            for i3, (nit3, sit3) in enumerate(ct_rank_its):
+            win._ct_pen = {}
+            win._ct_mbox = {}
+            win._ct_mtxt = {}
+            for i3, (nit3, sit3, mit3, pit3, mbg3, mbox)                     in enumerate(ct_rank_its):
                 if i3 < len(rows2):
-                    b3, nm3, me3 = rows2[i3]
+                    b3, nm3, me3, ms3 = rows2[i3]
                     cv.itemconfigure(nit3,
                                      text=nm3 + (" ·나" if me3 else ""))
                     cv.itemconfigure(sit3, text="%d" % b3)
+                    if mit3 is not None:
+                        cv.itemconfigure(mit3, text=str(ms3 or "")[:24])
+                        if ms3:
+                            win._ct_mbox[i3] = mbox
+                            win._ct_mtxt[i3] = str(ms3)
+                            bm = cv.bbox(mit3)
+                            if bm and mbg3 is not None:
+                                yy8 = (bm[1] + bm[3]) / 2.0
+                                cv.coords(mbg3, bm[0] + 2, yy8,
+                                          min(bm[2] + 4, mbox[2] - 6), yy8)
+                                cv.itemconfigure(mbg3, state="normal")
+                                cv.tag_raise(mit3)
+                        elif mbg3 is not None:
+                            cv.itemconfigure(mbg3, state="hidden")
+                    if pit3 is not None:
+                        # 펜은 **내 줄에만** — 남의 한마디는 못 고친다
+                        bn = cv.bbox(nit3) if me3 else None
+                        if bn:
+                            cv.coords(pit3, bn[2] + 7 * k,
+                                      (bn[1] + bn[3]) / 2.0)
+                            cv.itemconfigure(pit3, state="normal")
+                            win._ct_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
+                                               bn[2] + 15 * k, bn[3] + 3 * k)
+                        else:
+                            cv.itemconfigure(pit3, state="hidden")
                 else:
                     cv.itemconfigure(nit3, text="—")
                     cv.itemconfigure(sit3, text="")
+                    if mit3 is not None:
+                        cv.itemconfigure(mit3, text="")
+                    if mbg3 is not None:
+                        cv.itemconfigure(mbg3, state="hidden")
+                    if pit3 is not None:
+                        cv.itemconfigure(pit3, state="hidden")
             # 내 기록 — 옛 줄은 [점수, 날짜] 뿐이라 판이 없을 수 있다
             mine = list((self._ct or {}).get("rank")
                         or self._ct_store()[1] or [])
@@ -24794,7 +25051,7 @@ class Mascot:
                         cx3, cy3, image=im2, tags="tile")
         draw_board()
         st = {"over_ui": False, "over_btn": None, "over_fx": [],
-              "over_t0": 0.0, "over_seat": None}
+              "over_t0": 0.0, "over_seat": None, "rank_hover": None}
 
         def redraw(now):
             g2 = self._ct
@@ -24887,6 +25144,22 @@ class Mascot:
                     win._ct_born.append(im7)
                     cx7, cy7 = cellxy(x7, y7)
                     cv.create_image(cx7, cy7, image=im7, tags="ctborn")
+            # ── 랭킹 한마디 — 길면 커서를 올렸을 때 옆으로 흐른다 ──
+            cv.delete("rmq")
+            win._ct_mq = None
+            hv9 = st.get("rank_hover")
+            if hv9 is not None:
+                mb9 = (getattr(win, "_ct_mbox", None) or {}).get(hv9)
+                tx9 = (getattr(win, "_ct_mtxt", None) or {}).get(hv9)
+                if mb9 and tx9:
+                    im0 = self._rank_msg_flow(cv, mb9, tx9,
+                                              self._tint(cd["fill"], 0.90),
+                                              now, "rmq")
+                    if im0:
+                        win._ct_mq = im0        # 참조는 창이 든다
+                        cv.create_image((mb9[0] + mb9[2]) / 2,
+                                        (mb9[1] + mb9[3]) / 2,
+                                        image=im0, tags="rmq")
             # ── 캐릭터가 신나서 방방 뛴다 (종료 카드 안에서만) ──
             seat9 = st.get("over_seat")
             if seat9 and st.get("over_ui"):
@@ -25068,6 +25341,11 @@ class Mascot:
                         fn9(e.y)
                         self._save_settings()
                 return
+            for i8, pb in (getattr(win, "_ct_pen", None) or {}).items():
+                if pb[0] <= e.x <= pb[2] and pb[1] <= e.y <= pb[3]:
+                    self._safe("ui_click", self._ui_click)
+                    self._safe("rank_msg", self._rank_msg_win, draw_rank)
+                    return
             if (btn_help[0] <= e.x <= btn_help[2]
                     and btn_help[1] <= e.y <= btn_help[3]):
                 self._safe("ui_click", self._ui_click)
@@ -25116,6 +25394,17 @@ class Mascot:
                 self._safe("ct_snd", self._ct_snd, "pop")
             elif hits == []:
                 self._safe("ct_snd", self._ct_snd, "miss")
+
+        def on_hover9(e):
+            hit = None
+            for i8, mb in (getattr(win, "_ct_mbox", None) or {}).items():
+                if mb[0] <= e.x <= mb[2] and mb[1] <= e.y <= mb[3]:
+                    hit = i8
+                    break
+            st["rank_hover"] = hit
+
+        cv.bind("<Motion>", on_hover9)
+        cv.bind("<Leave>", lambda _e: st.__setitem__("rank_hover", None))
 
         def on_drag9(e):
             fn9 = getattr(win, "_ct_volfn", None)
