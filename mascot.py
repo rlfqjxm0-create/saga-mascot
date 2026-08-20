@@ -2379,7 +2379,7 @@ CHARS = [
     {"slot": "parts_seongsil", "repo": "seongsil-mascot", "name": "성실이",
      "tint": "#f0c03c"},
     {"slot": "parts_jerry", "repo": "jerry-mascot", "name": "제리",
-     "tint": "#ef9d63"},
+     "tint": "#9a9ba3"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -17383,11 +17383,10 @@ class Mascot:
         """
         got = getattr(self, "_room_who", None)
         if got is None:
-            try:
-                with open(self._room_who_path(), encoding="utf-8") as fp:
-                    got = json.load(fp)
-            except Exception:
-                got = {}
+            # **빈 값으로 시작했다가 그대로 저장하면 캐시가 통째로 날아간다**
+            # (안 켠 친구가 전부 Lv.1 로 보이던 제보). 예비본까지 보고,
+            # 그래도 못 읽었으면 저장을 막는다 (_room_who_note).
+            got = _load_json(self._room_who_path(), {})
             if not isinstance(got, dict):
                 got = {}
             self._room_who = got
@@ -17527,6 +17526,9 @@ class Mascot:
             # 것이 남에게 계속 보인다 (_room_who_get 은 날짜와 무관한
             # 값만 두는 자리다 — 그 독스트링이 그렇게 못 박고 있다).
             dl = str(q.get("dl") or "")[:10]
+            # 방 칸 꾸미기 그림의 해시 — 안 켠 칸에서도 그림을 보여 주려면
+            # 이것이 있어야 한다 (요청). 그림 자체는 이미 파일로 받아 뒀다.
+            cdh9 = str(q.get("cdh") or "")[:64]
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             rmg = q.get("rmg")
             rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
@@ -17540,6 +17542,7 @@ class Mascot:
                     or int(cur.get("g2b") or 0) != gb2
                     or str(cur.get("rm") or "") != rm
                     or str(cur.get("dl") or "") != dl
+                    or str(cur.get("cdh") or "") != cdh9
                     or (cur.get("rmg") or {}) != rmg):
                 row2 = {"lv": lv, "ti": ti, "n": nm}
                 if wb > 0:
@@ -17554,6 +17557,8 @@ class Mascot:
                     row2["rmg"] = rmg
                 if dl:
                     row2["dl"] = dl
+                if cdh9:
+                    row2["cdh"] = cdh9
                 row2["seen"] = _now9              # 직접 본 것은 지금
                 who[slot] = row2
                 dirty = True
@@ -17571,7 +17576,9 @@ class Mascot:
             for old in list(who)[:30]:
                 who.pop(old, None)
             dirty = True
-        if dirty:
+        if dirty and not _load_failed(self._room_who_path()):
+            # 못 읽은 파일에는 안 쓴다 — 지금 손에 든 것은 빈 값이라
+            # 그대로 저장하면 남들 레벨·칭호가 통째로 사라진다.
             try:
                 _save_json(self._room_who_path(), who)   # 지뢰 35
             except Exception:
@@ -20732,14 +20739,15 @@ class Mascot:
             # 골라 둔 방 그림 — 바탕 위에 깐다 (테두리는 맨 나중에)
             cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
         # 바닥 띠는 **칸 모양으로 오려 낸 한 장**이라 좌우에 흰 테가 없다
+        band9 = self._room_band(slot)
         flimg = self._safe_str(self._room_floor_img, kx1 - kx0, ky1 - ky0,
-                               18 * k, ky1 - floor, self._tint(col, 0.72))
+                               18 * k, ky1 - floor, band9)
         if flimg:
             cv.create_image(int(kx0), int(floor), image=flimg, anchor="nw",
                             tags="dyn")
         else:                     # 만들기 실패 — 예전 방식으로 물러난다
             self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
-                     fill=self._tint(col, 0.72), width=0)
+                     fill=band9, width=0)
         # 평소에는 테두리를 안 두른다 — 얇은 선이 칸 그림보다 안쪽에 그려져
         # 그림이 선 밖으로 삐져나온 것처럼 보였다 (제보). 고른 칸만 굵게
         # 둘러 어느 것을 골랐는지 알 수 있게 한다.
@@ -28639,13 +28647,24 @@ class Mascot:
             # 예전에는 내 캐릭터와 같은 그림의 선물본 자리를 '겹친다'고
             # 뺐는데, 그 자리에 진짜 친구가 들어오면서 내 화면에서만 그
             # 사람이 사라졌다 (도로롱 제보). 같은 그림이어도 다 보여 준다.
-            # 접속을 껐어도 오늘 본 마지막 시간·게이지는 그대로 보여 준다
+            # 접속을 껐어도 **마지막으로 끈 상태 그대로** 보여 준다 (요청).
+            # 날이 바뀌었다고 0 으로 돌리면, 아직 안 켠 친구들이 전부
+            # Lv.1 · 0% 로 보인다 (제보). 그 사람이 다시 켜면 그때
+            # 새 값으로 바뀐다.
+            # — 내 오늘치(지뢰 60·78)와는 다른 이야기다. 이건 남의 화면
+            #   표시일 뿐이고 내 기록에는 들어가지 않는다.
             st, sp = 0, 0
             row = self._room_seen_get().get(slot)
             if self._seen_ok(row, self._my_workday()):
                 st, sp = min(int(row[0]), int(cap)), float(row[1])
                 if int(row[0]) > cap:      # 06시 직후엔 어제 값이 남아 있다
                     sp = sp * (cap / max(int(row[0]), 1))
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                try:                       # 어제 것이어도 그대로 (요청)
+                    st = max(0, int(row[0]))
+                    sp = max(0.0, min(1.0, float(row[1])))
+                except Exception:
+                    st, sp = 0, 0
             # 레벨·칭호는 마지막으로 본 값을 그대로 (없으면 Lv.1)
             w = self._room_who_get().get(slot)
             w = w if isinstance(w, dict) else {}
@@ -28659,6 +28678,8 @@ class Mascot:
                           # 목표·체크는 오늘치라 여기 없다 — 그래서 꺼진
                           # 사람 칸에는 D-3 만 뜨고 동그라미는 안 뜬다.
                           "dl": str(w.get("dl") or "")[:10],
+                          # 칸 꾸미기 그림도 마지막으로 본 것 그대로 (요청)
+                          "cdh": str(w.get("cdh") or "")[:64],
                           "a": "", "off": True})
         # 차례: 나 → 접속한 사람(레벨 높은 순) → 안 켠 사람 (요청).
         # 예전엔 게이지(%) 순이라 1%마다 자리가 뒤바뀌어 어지러웠다 —
@@ -29189,6 +29210,28 @@ class Mascot:
         except Exception:
             return col
 
+    def _room_card_of(self, slot):
+        """그 캐릭터 config 의 card 묶음 — 한 번만 읽어 둔다.
+
+        매 프레임 파일을 열면 안 된다. 값이 몇 개뿐이라 통째로 들고 있는다.
+        """
+        cache = getattr(self, "_room_card_cache", None)
+        if cache is None:
+            cache = self._room_card_cache = {}
+        if slot not in cache:
+            got = {}
+            if slot == self.char:
+                got = dict(self.card or {})
+            else:
+                try:
+                    with open(os.path.join(HERE, slot, "config.json"),
+                              encoding="utf-8") as fp:
+                        got = (json.load(fp).get("card") or {})
+                except Exception:
+                    got = {}
+            cache[slot] = got if isinstance(got, dict) else {}
+        return cache[slot]
+
     def _room_pastel(self, slot, light=0.88, smin=0.55, smax=0.85):
         """그 사람 테마색의 파스텔. 밝기는 정해 놓고 색기만 살린다.
 
@@ -29197,6 +29240,15 @@ class Mascot:
         하면 칸이 전부 흰색처럼 보인다. 원래 테마색에서 따로 뽑는다.
         회색 테마(준사·개)는 색기를 억지로 올리지 않는다 — 엉뚱한 색이 된다.
         """
+        # 캐릭터가 밝기를 따로 정할 수 있다 (config 의 card.band_light).
+        # **회색 테마끼리는 색기가 없어 밝기 말고는 구별할 길이 없다** —
+        # 제리(#43444b)와 준사(#4a4a52)가 같은 띠로 나왔다 (실측 228 대 229).
+        try:
+            got9 = self._room_card_of(slot).get("band_light")
+            if got9:
+                light = max(0.70, min(0.985, float(got9)))
+        except Exception:
+            pass
         key = (slot, round(light, 3), smin, smax)
         hit = self._room_pastel_cache.get(key)
         if hit:
@@ -29361,6 +29413,21 @@ class Mascot:
             col = self._tint(col, 0.16)
         self._room_tone_cache[slot] = col
         return col
+
+    def _room_band(self, slot):
+        """카드 아래 띠 색.
+
+        평소에는 테마색에 밝기 하한을 준 뒤(_room_tone) 옅게 한다. 그런데
+        **회색 테마끼리는 그 하한 때문에 값이 같아진다** — 제리와 준사가
+        똑같은 띠로 나왔다 (실측 228 대 229). config 에 band_light 를 준
+        캐릭터는 하한을 거치지 않고 그 밝기로 바로 만든다 (요청).
+        """
+        try:
+            if self._room_card_of(slot).get("band_light"):
+                return self._room_pastel(slot)
+        except Exception:
+            pass
+        return self._tint(self._room_tone(slot), 0.72)
 
     def _room_photo(self):
         """지금 방에 있는 사람들로 한 장 남긴다 — 작업 종료 때 부른다.
