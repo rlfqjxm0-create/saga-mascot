@@ -4569,6 +4569,10 @@ class Mascot:
         self.day_base = 0.0          # 그 작업일이 시작될 때의 누적
         self._day_at = 0.0           # 마지막으로 날짜를 확인한 시각
         self.lv_secs = 0.0           # 레벨용 누적 작업 시간 (줄어들지 않는다)
+        # 레벨을 파일에서 읽었는가 — 읽기 전에는 방 신호에 lv 를 싣지
+        # 않는다. 재시작 직후의 lv=1 신호가 남들 캐시의 30 을 덮은 사건
+        # (전원 Lv.1 초기화 제보)의 보내는 쪽 방패다.
+        self._lv_ready = False
         self._lv_keep_at = 0.0       # 예비 저장소에 마지막으로 적은 값
         self._lv_seen = 0            # 마지막으로 알린 레벨 (0이면 아직 모름)
         self._lv_work = None         # 직전 프레임의 누적 작업 시간 (증가분만 셈)
@@ -7419,6 +7423,7 @@ class Mascot:
             pass
         # 상태 파일이 없거나 깨져도 예비 저장소로 레벨은 되살린다
         self.lv_secs = self._lv_guard(self.lv_secs)
+        self._lv_ready = True        # 이제부터 방 신호에 lv 를 실어도 된다
 
     def _timer_save(self):
         try:
@@ -7567,6 +7572,7 @@ class Mascot:
         except Exception:
             pass
         self.lv_secs = self._lv_guard(self.lv_secs)
+        self._lv_ready = True
 
     def _lv_tick(self, now):
         """레벨용 시간을 쌓는다 — 카드에 보이는 시간이 늘어난 만큼만.
@@ -9395,7 +9401,7 @@ class Mascot:
         try:
             seen = self._room_seen_get()
             if seen.pop(self.char, None) is not None:
-                _save_json(self._room_seen_path(), seen)
+                self._seen_save(seen)
         except Exception:
             pass
         try:
@@ -17206,14 +17212,19 @@ class Mascot:
                     or row[2] != day or t_min > int(row[0])
                     or pv > float(row[1])):
                 seen[self.char] = [t_min, pv, day, int(time.time())]
-                _save_json(self._room_seen_path(), seen)
+                self._seen_save(seen)
         except Exception:
             pass
         out = {"n": self._room_nick()[:14], "m": self._room_msg(),
-               "lv": self._level(),
-               "ti": self._title()[:14], "t": t_min, "s": st,
+               "t": t_min, "s": st,
                "p": pv,
                "a": act, "sl": bool(self.slime)}
+        if getattr(self, "_lv_ready", False):
+            # 레벨은 **읽고 나서만** 싣는다. 읽기 전의 lv=1 이 나가면 남들
+            # 캐시가 '본인 최신 값' 규칙대로 30 → 1 로 덮인다 (실제 사건).
+            # lv 없는 신호는 받는 쪽이 원래 건너뛴다 (옛 판 포함).
+            out["lv"] = self._level()
+            out["ti"] = self._title()[:14]
         wgb = self._wg_best()
         if wgb > 0:
             out["wgb"] = wgb        # 수박게임 최고 — 모두의 랭킹감
@@ -17276,6 +17287,12 @@ class Mascot:
             now2 = time.time()
             if getattr(self, "_cd_push", False) or (now2 % 40.0) < 8.0:
                 out["cd"] = b64
+                # 그림(≤20000자)과 릴레이를 **같은 신호에 싣지 않는다.**
+                # 둘을 합치면 봉인 후 서버 상한(32000)을 넘을 수 있고,
+                # 넘으면 신호가 통째로 조용히 버려져 그 사람이 방에서
+                # 사라진다 (지뢰 56 — 실측 최악 49980자). 릴레이는 다음
+                # 신호(8초 뒤)에 실리면 그만이다.
+                out.pop("rly", None)
                 if for_net:          # 진짜 나갈 때만 깃발을 내린다
                     self._cd_push = False
         return out
@@ -17392,8 +17409,10 @@ class Mascot:
             self._room_who = got
         return got
 
-    # 실어 나르는 기록 수·수명. 열다섯 캐릭터가 상한이라 넉넉하다.
-    RELAY_N = 24
+    # 실어 나르는 기록 수·수명. 캐릭터가 열다섯이니 16 이면 전원이다.
+    # 24 로 두었을 때 최악 크기가 서버 상한(32000)을 넘을 수 있었다 (실측
+    # 33680 — 넘으면 신호가 통째로 조용히 버려진다, 지뢰 56).
+    RELAY_N = 16
     RELAY_TTL = 30 * 86400.0
 
     def _room_relay_pack(self):
@@ -17419,7 +17438,11 @@ class Mascot:
             wb = int(w.get("wgb") or 0)
             cb = int(w.get("ctb") or 0)
             gb = int(w.get("g2b") or 0)
-            if wb <= 0 and cb <= 0 and gb <= 0:
+            try:
+                lv8 = int(w.get("lv") or 0)
+            except Exception:
+                lv8 = 0
+            if wb <= 0 and cb <= 0 and gb <= 0 and lv8 <= 1:
                 continue
             age = max(0.0, now - float(w.get("seen") or 0.0))
             if age > self.RELAY_TTL:
@@ -17428,7 +17451,10 @@ class Mascot:
             g9 = w.get("rmg")
             rows.append([str(slot)[:28], wb, cb, int(age),
                          str(w.get("rm") or "")[:self.RANK_MSG_N],
-                         gb, g9 if isinstance(g9, dict) else {}])
+                         gb, g9 if isinstance(g9, dict) else {},
+                         # 레벨·칭호 — 오염된 캐시(Lv.1)를 서로 고쳐 주는
+                         # 재료다. 옛 판은 앞 칸만 읽으므로 뒤에만 붙인다.
+                         lv8, str(w.get("ti") or "")[:14]])
         rows.sort(key=lambda r: r[3])          # 싱싱한 것부터
         return rows[:self.RELAY_N] or None
 
@@ -17452,6 +17478,8 @@ class Mascot:
                 rg9 = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
                             for a9, b9 in list(rg9.items())[:6])
                        if isinstance(rg9, dict) else {})
+                lv9 = int(row[7]) if len(row) > 7 else 0
+                ti9 = str(row[8])[:14] if len(row) > 8 else ""
             except Exception:
                 continue
             if not slot or slot == self.char or age < 0:
@@ -17460,12 +17488,29 @@ class Mascot:
                 continue
             fresh = now - age
             cur = who.get(slot) if isinstance(who.get(slot), dict) else None
+            # **오염 복구는 싱싱함 문 앞에서.** 내 캐시가 Lv.1 로 오염됐을
+            # 때, 내 직접 관찰(오염된 값)이 늘 더 싱싱해서 문 뒤에 두면
+            # 영영 복구가 안 된다. 큰 값(>1)으로만 채우니 오염(1)이
+            # 전파되지도, 진짜 신인의 1 이 남의 캐시를 깎지도 않는다.
+            if (lv9 > 1 and cur is not None
+                    and int(cur.get("lv") or 0) <= 1):
+                cur["lv"] = lv9
+                if ti9:
+                    cur["ti"] = ti9
+                cur.pop("lvd", None)
+                got = True
             if cur is not None and float(cur.get("seen") or 0.0) >= fresh:
                 continue                        # 내 것이 더 싱싱하다
             # 값이 그대로면 '언제 봤나'만 새로 하고 저장은 안 한다 —
             # 옮겨 주는 사람이 그 사람을 계속 보고 있으면 신호마다
             # 싱싱해져서, 그때마다 저장하면 5초에 한 번씩 디스크를 친다.
+            # 레벨은 **비었거나 Lv.1 인 칸만** 채운다 (오염 복구 전용).
+            # 큰 값을 덮지 않으니 오염(1)이 남에게 전파되지도 않고,
+            # 진짜 신인의 1 이 남의 높은 캐시를 깎지도 않는다.
+            lv_fix = (lv9 > 1
+                      and int((cur or {}).get("lv") or 0) <= 1)
             changed = (cur is None
+                       or lv_fix
                        or (wb > 0 and int(cur.get("wgb") or 0) != wb)
                        or (cb > 0 and int(cur.get("ctb") or 0) != cb)
                        or (gb9 > 0 and int(cur.get("g2b") or 0) != gb9)
@@ -17482,11 +17527,17 @@ class Mascot:
                 row2["rm"] = rm9
             if rg9:
                 row2["rmg"] = rg9
+            if lv_fix:
+                row2["lv"] = lv9
+                if ti9:
+                    row2["ti"] = ti9
             row2["seen"] = fresh
             row2.setdefault("n", "")
             who[slot] = row2
             got = got or changed
         return got
+
+    LV_DOWN_GAP = 1800.0     # 내려간 레벨을 며칠은 아니고 30분 지켜본다
 
     def _room_who_note(self, people):
         """명단에서 본 레벨·칭호를 담아 둔다 (바뀐 것이 있을 때만 저장).
@@ -17506,6 +17557,22 @@ class Mascot:
             ti = str(q.get("ti") or "")[:14]
             nm = str(q.get("n") or "")[:14]
             cur = who.get(slot) if isinstance(who.get(slot), dict) else {}
+            # **내려간 레벨은 30분 지켜보고 받아들인다.** 레벨은 원래 안
+            # 내려간다 — 내려간 신호는 십중팔구 '아직 레벨을 못 읽은 창'
+            # 이다 (전원 Lv.1 초기화 사건). 내려간 채 30분을 버티면 그때는
+            # 진짜다 (판 리셋). seen 캐시의 3분 규칙과 같은 짜임이다.
+            lvd = 0.0
+            try:
+                cur_lv = int(cur.get("lv") or 0)
+            except Exception:
+                cur_lv = 0
+            if 0 < lv < cur_lv:
+                lvd = float(cur.get("lvd") or 0) or _now9
+                if _now9 - lvd <= self.LV_DOWN_GAP:
+                    lv = cur_lv
+                    ti = str(cur.get("ti") or ti)[:14]
+                else:
+                    lvd = 0.0        # 30분을 버텼다 — 진짜로 받아들인다
             try:
                 # 수박게임 최고 — **본인이 보낸 최신 값을 그대로 따른다.**
                 # '큰 쪽만'으로 두면 본인이 기록을 지워도(테스트 점수)
@@ -17527,8 +17594,11 @@ class Mascot:
             # 값만 두는 자리다 — 그 독스트링이 그렇게 못 박고 있다).
             dl = str(q.get("dl") or "")[:10]
             # 방 칸 꾸미기 그림의 해시 — 안 켠 칸에서도 그림을 보여 주려면
-            # 이것이 있어야 한다 (요청). 그림 자체는 이미 파일로 받아 뒀다.
-            cdh9 = str(q.get("cdh") or "")[:64]
+            # 이것이 있어야 한다. **빈 값으로 오면 기존 것을 지킨다** —
+            # 재시작 직후의 빈 신호가 해시를 지워 그림이 사라졌다 (실제
+            # 사건). 새 그림이 오면 값이 달라서 자연히 바뀐다.
+            cdh9 = (str(q.get("cdh") or "")[:64]
+                    or str(cur.get("cdh") or "")[:64])
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             rmg = q.get("rmg")
             rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
@@ -17543,6 +17613,7 @@ class Mascot:
                     or str(cur.get("rm") or "") != rm
                     or str(cur.get("dl") or "") != dl
                     or str(cur.get("cdh") or "") != cdh9
+                    or float(cur.get("lvd") or 0) != lvd
                     or (cur.get("rmg") or {}) != rmg):
                 row2 = {"lv": lv, "ti": ti, "n": nm}
                 if wb > 0:
@@ -17559,6 +17630,8 @@ class Mascot:
                     row2["dl"] = dl
                 if cdh9:
                     row2["cdh"] = cdh9
+                if lvd:
+                    row2["lvd"] = lvd
                 row2["seen"] = _now9              # 직접 본 것은 지금
                 who[slot] = row2
                 dirty = True
@@ -17587,14 +17660,18 @@ class Mascot:
     def _room_seen_get(self):
         """오늘 마지막으로 본 남들의 (시간, 게이지). 껐다 켜도 남는다."""
         if self._room_seen is None:
-            got = {}
-            try:
-                with open(self._room_seen_path(), encoding="utf-8") as fp:
-                    got = json.load(fp)
-            except Exception:
-                got = {}
+            # 읽기 실패로 빈 값이 되면, 다음 저장이 남들 오늘치를 통째로
+            # 지운다 (.room_who 와 같은 사고 유형) — 예비본까지 보고,
+            # 그래도 못 읽었으면 저장 쪽(_seen_save)이 건너뛴다.
+            got = _load_json(self._room_seen_path(), {})
             self._room_seen = got if isinstance(got, dict) else {}
         return self._room_seen
+
+    def _seen_save(self, seen):
+        """오늘치 캐시 저장 — **못 읽은 파일에는 안 쓴다** (덮어쓰기 방지)."""
+        if _load_failed(self._room_seen_path()):
+            return
+        _save_json(self._room_seen_path(), seen)
 
     def _day_min(self):
         """오늘 작업일이 시작(06:00)한 뒤 흐른 분 — '오늘치'의 물리적 상한.
@@ -17821,7 +17898,7 @@ class Mascot:
                 changed = True
         if changed and now - self._room_seen_at > 20.0:
             self._room_seen_at = now
-            _save_json(self._room_seen_path(), seen)
+            self._seen_save(seen)
 
     def _room_diag(self, now):
         """방 상태를 파일 하나에 적는다 (.room_diag.txt).
@@ -22169,12 +22246,9 @@ class Mascot:
     def _room_peer_hashes(self):
         got = getattr(self, "_room_peer_hash", None)
         if got is None:
-            try:
-                with open(self._room_peer_hash_path(),
-                          encoding="utf-8") as fp:
-                    got = json.load(fp)
-            except Exception:
-                got = {}
+            # 이것도 '읽기 실패 → 빈 값 → 저장' 이면 받아 둔 그림 해시가
+            # 통째로 사라진다 — 같은 가드를 쓴다.
+            got = _load_json(self._room_peer_hash_path(), {})
             self._room_peer_hash = got if isinstance(got, dict) else {}
         return self._room_peer_hash
 
@@ -22239,7 +22313,8 @@ class Mascot:
             return
         hs[slot] = cdh
         try:
-            _save_json(self._room_peer_hash_path(), hs)
+            if not _load_failed(self._room_peer_hash_path()):
+                _save_json(self._room_peer_hash_path(), hs)
         except Exception:
             pass
         # 크기별 캐시에 옛 그림이 남아 있으니 그 사람 것만 비운다
@@ -28668,6 +28743,11 @@ class Mascot:
             # 레벨·칭호는 마지막으로 본 값을 그대로 (없으면 Lv.1)
             w = self._room_who_get().get(slot)
             w = w if isinstance(w, dict) else {}
+            # 칸 그림 — who 의 해시가 지워졌어도 **받아 둔 그림이 있으면**
+            # 그 해시로 그린다 (.deco_*.png 는 디스크에 그대로 있다).
+            cdh0 = (str(w.get("cdh") or "")[:64]
+                    or str((self._room_peer_hashes() or {}).get(slot)
+                           or "")[:64])
             seats.append({"slot": slot,
                           "n": (str(w.get("n") or "")
                                 or self.ROOM_NAME.get(slot, "")),
@@ -28679,7 +28759,7 @@ class Mascot:
                           # 사람 칸에는 D-3 만 뜨고 동그라미는 안 뜬다.
                           "dl": str(w.get("dl") or "")[:10],
                           # 칸 꾸미기 그림도 마지막으로 본 것 그대로 (요청)
-                          "cdh": str(w.get("cdh") or "")[:64],
+                          "cdh": cdh0,
                           "a": "", "off": True})
         # 차례: 나 → 접속한 사람(레벨 높은 순) → 안 켠 사람 (요청).
         # 예전엔 게이지(%) 순이라 1%마다 자리가 뒤바뀌어 어지러웠다 —
