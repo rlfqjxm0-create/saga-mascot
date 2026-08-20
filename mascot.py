@@ -2382,7 +2382,7 @@ CHARS = [
      "tint": "#9a9ba3"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
-     "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
+     "tint": "#f2a7c5", "gift": False},
 ]
 
 
