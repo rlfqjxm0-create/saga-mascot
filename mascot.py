@@ -468,6 +468,7 @@ DEFAULT_SETTINGS = {
     # 홈 보기 방식: 0 카드 보기 · 1 심플 모드(캡슐 목록) · 2 전체 보기
     # (카드를 줄여 전원을 한 화면에). None 이면 옛 room_all 에서 옮겨 온다.
     "room_view": None,
+    "fortune_day": "",       # 오늘의 운세를 보여 준 작업일 (하루 한 번)
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
     "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
     "wg_bgm_on": True,       # 수박게임 브금 재생 여부
@@ -2377,6 +2378,8 @@ CHARS = [
      "tint": "#7f9ce0"},
     {"slot": "parts_seongsil", "repo": "seongsil-mascot", "name": "성실이",
      "tint": "#f0c03c"},
+    {"slot": "parts_jerry", "repo": "jerry-mascot", "name": "제리",
+     "tint": "#ef9d63"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False, "art": "parts_dororong_gift"},
@@ -2412,7 +2415,7 @@ def _save_json_text(path, text):
     os.replace(tmp, path)
 
 
-def _save_json(path, data, **kw):
+def _save_json(path, data, bak=True, **kw):
     """중간에 꺼져도 파일이 반쪽으로 남지 않게 — 임시 파일에 쓰고 갈아 끼운다.
 
     open(path, "w")는 여는 순간 내용을 지운다. 그 직후에 프로세스가 사라지면
@@ -2428,6 +2431,136 @@ def _save_json(path, data, **kw):
         fp.flush()
         os.fsync(fp.fileno())
     os.replace(tmp, path)
+    # **방금 쓴 것을 예비본으로 한 벌 더 둔다.** 원본이 잘리거나 사라지면
+    # 여기서 되살린다 (_load_json·_heal_state).
+    #
+    # '직전 내용'을 옮겨 두는 쪽이 더 싸지만, 그러면 잘렸을 때 마지막
+    # 저장이 통째로 날아간다. 대신 **한 번이라도 못 읽은 파일은 예비본을
+    # 건드리지 않는다** — 그때의 예비본이 사람이 되찾을 수 있는 마지막
+    # 온전한 값이라, 기본값으로 덮어쓰면 그것마저 잃는다.
+    if bak and path not in _LOAD_FAIL:
+        try:
+            with open(path, "rb") as fp:
+                raw = fp.read()
+            btmp = path + ".bak.tmp"
+            with open(btmp, "wb") as fp:
+                fp.write(raw)
+                fp.flush()
+                os.fsync(fp.fileno())
+            os.replace(btmp, path + ".bak")
+        except Exception:
+            pass
+
+
+STATE_RETRY = 4          # 읽기를 몇 번 더 해 보나 (백신·동기화가 잠깐 잡는다)
+STATE_WAIT = 0.05        # 그 사이 쉬는 시간(초)
+_LOAD_FAIL = set()       # '있는데 못 읽은' 파일 — 저장하는 쪽이 이걸 본다
+
+
+def _keep_bad(path):
+    """깨진 원본을 .bad 로 남긴다 — 사람이 나중에 되살릴 수 있게.
+
+    shutil 을 안 쓴다. 굳힌 앱에 없는 모듈을 들이면 켜지지도 않는다
+    (지뢰 21 — 사가가 hmac 때문에 죽었다). 바이트를 그대로 옮긴다.
+    """
+    try:
+        if os.path.getsize(path) <= 0 or os.path.exists(path + ".bad"):
+            return
+        with open(path, "rb") as fp:
+            raw = fp.read()
+        with open(path + ".bad", "wb") as fp:
+            fp.write(raw)
+    except Exception:
+        pass
+
+
+def _load_json(path, default=None):
+    """상태 파일 읽기 — 한 번 실패했다고 기본값으로 시작하지 않는다.
+
+    기본값으로 시작하면 그 뒤의 저장이 원본을 덮어써 기록이 통째로
+    사라진다 (프고 제보). 그래서 ①몇 번 다시 하고 ②예비본(.bak)을 보고
+    ③깨진 원본은 .bad 로 남긴다. 그래도 못 읽으면 `_load_failed(path)`
+    가 참이 되어, 저장하는 쪽이 덮어쓰기를 건너뛸 수 있다.
+    """
+    exists = os.path.exists(path)
+    for i in range(STATE_RETRY):
+        try:
+            with open(path, encoding="utf-8") as fp:
+                d = json.load(fp)
+            if d is not None:
+                _LOAD_FAIL.discard(path)
+                return d
+            break                      # 내용이 null — 깨진 것으로 본다
+        except FileNotFoundError:
+            exists = False
+            break
+        except Exception:
+            if i + 1 < STATE_RETRY:
+                time.sleep(STATE_WAIT)
+    try:                               # 예비본으로 물러난다
+        with open(path + ".bak", encoding="utf-8") as fp:
+            d = json.load(fp)
+        if d is not None:
+            if exists:
+                _keep_bad(path)
+            try:                       # 되살려 놓는다 (다음부터 정상)
+                _save_json(path, d, bak=False)
+            except Exception:
+                pass
+            _LOAD_FAIL.discard(path)
+            return d
+    except Exception:
+        pass
+    if exists:
+        _LOAD_FAIL.add(path)           # 저장하는 쪽이 덮어쓰지 않게
+        _keep_bad(path)
+    else:
+        _LOAD_FAIL.discard(path)
+    return default
+
+
+def _load_failed(path):
+    """'있는데 못 읽은' 파일인가 — 기본값으로 덮어쓰면 안 된다."""
+    return path in _LOAD_FAIL
+
+
+def _heal_state(state_dir):
+    """켤 때 한 번 — 비었거나 깨진 상태 파일을 예비본으로 되돌린다.
+
+    읽는 곳이 스무 군데가 넘어 하나하나 고치면 반드시 하나를 빠뜨린다.
+    그래서 **아무도 읽기 전에 파일 자체를 고쳐 놓는다.** 되살린 파일
+    이름을 돌려주므로 부르는 쪽이 기록에 남길 수 있다.
+    """
+    fixed = []
+    try:
+        names = sorted(os.listdir(state_dir))
+    except Exception:
+        return fixed
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(state_dir, name)
+        try:
+            if os.path.getsize(path) > 0:
+                with open(path, encoding="utf-8") as fp:
+                    if json.load(fp) is not None:
+                        continue       # 멀쩡하다
+        except Exception:
+            pass
+        try:
+            with open(path + ".bak", encoding="utf-8") as fp:
+                d = json.load(fp)
+        except Exception:
+            continue
+        if d is None:
+            continue
+        _keep_bad(path)
+        try:
+            _save_json(path, d, bak=False)
+            fixed.append(name)
+        except Exception:
+            pass
+    return fixed
 
 
 def mark_updated(state_dir, restart, notes=None):
@@ -4297,6 +4430,10 @@ class Mascot:
         self.state_dir = state_dir or self.dir
         os.makedirs(self.state_dir, exist_ok=True)
         _CRASH_DIR[0] = self.state_dir      # 여기서부터는 기록을 남길 수 있다
+        # **아무것도 읽기 전에** 깨진 상태 파일을 예비본으로 되돌린다.
+        # 안 하면 기본값으로 시작해 30초 뒤 저장이 원본을 덮어쓴다
+        # (업데이트마다 누군가의 기록이 날아가던 원인 — 프고 제보).
+        self._healed = _heal_state(self.state_dir)
         self._boot_step("시작")
         # 같은 캐릭터가 이미 떠 있으면 여기서 물러난다. 둘이 같이 뜨면 두
         # 프로세스가 같은 기록 파일에 번갈아 써서 작업 시간·할 일이 서로를
@@ -4330,8 +4467,9 @@ class Mascot:
         self.settings_path = os.path.join(self.state_dir, ".settings.json")
         self._font_pct_saved = False
         try:
-            with open(self.settings_path, encoding="utf-8") as fp:
-                saved = json.load(fp)
+            saved = _load_json(self.settings_path)
+            if not isinstance(saved, dict):
+                raise ValueError("설정 없음")
             self._font_pct_saved = "font_pct" in saved
             self.us.update(saved)
             # 목록을 손대지 않고 예전 기본값 그대로 쓰던 사람은 새 목록으로.
@@ -4563,6 +4701,9 @@ class Mascot:
         self.bubble = None           # (텍스트, 사라질 시각)
         self._bubble_act = None      # 말풍선 속 단추 (글자, 이름, 할 일)
         self._bubble_btn = None      # 그 단추가 그려진 자리 (x0,y0,x1,y1)
+        self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
+        self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
+        self._fortune_at = 0.0       # 이 시각이 되면 운세를 말한다 (0=없음)
         self.particles = []          # 폭죽 조각 [x, y, vx, vy, 색, 수명]
         self.hat_until = 0.0         # 고깔모자 표시 종료 시각
         self.smile_until = 0.0       # 웃는 표정 종료 시각
@@ -5041,6 +5182,8 @@ class Mascot:
         self._room_inbox_card = None     # 내 칸의 자리 (목록을 그 아래에 붙인다)
         self._room_msg_box = None        # 내 칸 '오늘 한 줄' 말풍선이 쓴 자리
         self._goal_hits = {}        # 목표 말풍선 누를 자리 {slot: (상자, 갈래)}
+        self._due_hits = {}         # 마감 말풍선 누를 자리 {slot: 상자}
+        self._goal_due = False      # 단추를 마감 쪽에서 띄웠나 (늘 채찍질)
         self._goal_open = None      # 지금 '보낼까요?' 아이콘이 뜬 사람
         self._goal_act = None       # 그 아이콘 자리 (상자, slot, 갈래)
         self._goal_recv_at = {}     # 칭찬·채찍질을 마지막으로 받은 때
@@ -5973,6 +6116,10 @@ class Mascot:
                 for ex in (cx0 + 24, cx1 - 24):
                     d.ellipse([ex - 15, cy0 - 20, ex + 15, cy0 + 10],
                               fill=(0, 0, 0, 255))
+            elif deco == "bear":                   # 제리: 곰 귀 실루엣
+                for ex in (cx0 + 26, cx1 - 26):
+                    d.ellipse([ex - 12, cy0 - 18, ex + 12, cy0 + 6],
+                              fill=(0, 0, 0, 255))
             elif deco == "frog":                   # 프고: 개구리 눈 실루엣
                 for ex in (mx - 26, mx + 26):
                     d.ellipse([ex - 17, cy0 - 16, ex + 17, cy0 + 10],
@@ -6610,6 +6757,18 @@ class Mascot:
                 return
             # 말풍선 속 단추 — 머리 위에 있어 '콕 찌르기'와 자리가 겹치므로
             # 그보다 먼저 본다
+            # 눌러야 꺼지는 말풍선 (오늘의 운세) — 머리 위라 '콕 찌르기'와
+            # 자리가 겹치므로 그보다 먼저 본다.
+            hb = getattr(self, "_bubble_box", None)
+            if (self._bubble_hold and self.bubble
+                    and self.bubble[0] == self._bubble_hold
+                    and hb and hb[0] <= px <= hb[2] and hb[1] <= py <= hb[3]):
+                self.bubble = None
+                self._bubble_hold = None
+                self._bubble_box = None
+                self._safe("ui_click", self._ui_click)
+                self._press = None
+                return
             pb = getattr(self, "_pomo_badge", None)
             bb = getattr(self, "_bubble_btn", None)
             act = getattr(self, "_bubble_act", None)
@@ -6655,8 +6814,9 @@ class Mascot:
 
     def _todo_load(self):
         try:
-            with open(self.todo_path, encoding="utf-8") as fp:
-                data = json.load(fp)
+            data = _load_json(self.todo_path)
+            if data is None:
+                raise ValueError("할 일 없음")
             items = data if isinstance(data, list) else data.get("items", [])
             keep = []
             for t in items:
@@ -7231,8 +7391,9 @@ class Mascot:
         """
         # 자동 초기화 없음 — 우클릭 '타이머 초기화'로만 리셋 (확정 방침)
         try:
-            with open(self.state_path, encoding="utf-8") as fp:
-                st = json.load(fp)
+            st = _load_json(self.state_path)
+            if not isinstance(st, dict):
+                raise ValueError("타이머 상태 없음")
             if secs:
                 self.work_secs = float(st.get("seconds", 0))
             self.zero_at = float(st.get("zero_at", 0) or 0)
@@ -7362,8 +7523,7 @@ class Mascot:
         """
         keep = 0.0
         try:
-            with open(self._lv_keep_path(), encoding="utf-8") as fp:
-                st = json.load(fp)
+            st = _load_json(self._lv_keep_path()) or {}
             if int(st.get("lv_epoch", 0)) == LV_EPOCH:
                 keep = max(0.0, float(st.get("lv_secs") or 0))
         except Exception:
@@ -7373,9 +7533,7 @@ class Mascot:
         # 기록은 딴 파일이라 상태 파일이 죽어도 대개 살아 있다.
         hist = 0.0
         try:
-            with open(os.path.join(self.state_dir, ".history.json"),
-                      encoding="utf-8") as fp:
-                days = (json.load(fp) or {}).get("days") or {}
+            days = (_load_json(self._hist_path()) or {}).get("days") or {}
             hist = float(sum(float((v or {}).get("work") or 0)
                              for d2, v in days.items()
                              if str(d2) >= LV_EPOCH_DAY))
@@ -7405,8 +7563,7 @@ class Mascot:
     def _lv_load(self):
         """연동 중인 캐릭터는 타이머 기록을 안 읽으므로 레벨만 되살린다."""
         try:
-            with open(self.state_path, encoding="utf-8") as fp:
-                self.lv_secs = self._lv_of(json.load(fp))
+            self.lv_secs = self._lv_of(_load_json(self.state_path) or {})
         except Exception:
             pass
         self.lv_secs = self._lv_guard(self.lv_secs)
@@ -7501,9 +7658,7 @@ class Mascot:
 
     def _due_load(self):
         try:
-            with open(os.path.join(self.state_dir, ".dues.json"),
-                      encoding="utf-8") as fp:
-                d = json.load(fp)
+            d = _load_json(os.path.join(self.state_dir, ".dues.json"))
             items = d.get("items", []) if isinstance(d, dict) else []
             self.dues = [{"name": str(i.get("name", ""))[:60],
                           "date": str(i.get("date", ""))}
@@ -7695,15 +7850,13 @@ class Mascot:
         self._dialog_keep(win, "due")
         ents[0].focus_force()
 
+    def _hist_path(self):
+        return os.path.join(self.state_dir, ".history.json")
+
     def _hist_load(self):
         """날짜별 하루 기록 {"2026-07-30": {...}}."""
-        try:
-            with open(os.path.join(self.state_dir, ".history.json"),
-                      encoding="utf-8") as fp:
-                d = json.load(fp)
-            return d.get("days", {}) if isinstance(d, dict) else {}
-        except Exception:
-            return {}
+        d = _load_json(self._hist_path())
+        return d.get("days", {}) if isinstance(d, dict) else {}
 
     def _hist_add(self, key=None):
         """그날 기록을 남긴다. 작업 종료 때와 작업일이 바뀔 때 부른다.
@@ -7715,6 +7868,11 @@ class Mascot:
         if not self.cfg.get("history"):
             return
         days = self._hist_load()
+        if _load_failed(self._hist_path()):
+            # 파일이 있는데 못 읽었다 — 여기서 저장하면 몇 달치가 한 줄로
+            # 줄어든다. 이번만 건너뛰고 기록은 그대로 둔다.
+            self._log_error("hist_locked")
+            return
         # 키를 안 주면 '이번 세션이 시작된 날'인데, 처음 일한 시각이
         # 없으면 오늘로 떨어진다 — 그러면 어제 누적이 오늘 칸에 들어가
         # 기록이 바닥이 되어 같은 고정을 만든다. 아는 날짜를 먼저 쓴다.
@@ -7739,8 +7897,7 @@ class Mascot:
         # 마일스톤은 '처음부터 지금까지'라 거기서 빼면 뒷걸음질친다.
         try:
             cum = round(self._cum_m() + dist, 2)
-            _save_json(os.path.join(self.state_dir, ".history.json"),
-                       {"days": days, "cum_m": cum})
+            _save_json(self._hist_path(), {"days": days, "cum_m": cum})
         except Exception:
             pass
         # 이번 세션 몫은 여기서 0으로 되돌린다. 안 그러면 하루에 두 번
@@ -7758,13 +7915,8 @@ class Mascot:
 
     def _cum_m(self):
         """지금까지 그린 누적 거리(m) — 저장된 값만. 이번 세션은 안 들어 있다."""
-        try:
-            with open(os.path.join(self.state_dir, ".history.json"),
-                      encoding="utf-8") as fp:
-                d = json.load(fp)
-            return float(d.get("cum_m", 0.0)) if isinstance(d, dict) else 0.0
-        except Exception:
-            return 0.0
+        d = _load_json(self._hist_path())
+        return float((d or {}).get("cum_m", 0.0)) if isinstance(d, dict) else 0.0
 
     def _hist_summary(self):
         """브리핑에 붙일 요약 — 어제 대비 · 최근 7일 · 연속 일수."""
@@ -8714,10 +8866,8 @@ class Mascot:
         살아 있는 동안 주기적으로 다시 올린다. 자리는 .ui_prefs.json 에
         창 이름별로 남겨, 다음에 열 때 그 자리에서 뜬다.
         """
-        try:
-            with open(self.ui_prefs_path, encoding="utf-8") as fp:
-                prefs = json.load(fp)
-        except Exception:
+        prefs = _load_json(self.ui_prefs_path, {})
+        if not isinstance(prefs, dict):
             prefs = {}
         self._safe("btn_snd", self._btn_snd, win)   # 창 안 단추에 '똑'
         pos = (prefs.get("dlg") or {}).get(name)
@@ -9251,9 +9401,8 @@ class Mascot:
         try:
             # _hist_load 는 days 만 돌려준다 — 파일은 {"days":…, "cum_m":…}
             # 이므로 통째로 읽어 고쳐야 한다 (그렇게 안 해서 한 번 헛돌았다).
-            hp = os.path.join(self.state_dir, ".history.json")
-            with open(hp, encoding="utf-8") as fp:
-                whole = json.load(fp)
+            hp = self._hist_path()
+            whole = _load_json(hp)
             days = (whole or {}).get("days")
             day = self._my_workday()
             if isinstance(days, dict) and isinstance(days.get(day), dict) \
@@ -9858,6 +10007,17 @@ class Mascot:
                               fill="#9a9a9a", outline="#6f6f6f", width=2)
                 self._oval(c, ex - 8, y0 - 13, ex + 8, y0 + 3,
                               fill="#e8c4c4", outline="")
+        elif deco == "bear":
+            # 곰 귀 — 작고 동그랗게, 카드 위에 살짝 걸친다. 색은 테마색에서
+            # 뽑는다 (회색으로 박으면 카드마다 혼자 튄다 — 고양이 귀와 같다).
+            base = self.card["fill"]
+            outer, line = self._tint(base, 0.26), self._shade(base, 0.16)
+            inner = self._tint(base, 0.06)
+            for ex in (x0 + 26, x1 - 26):
+                self._oval(c, ex - 12, y0 - 18, ex + 12, y0 + 6,
+                           fill=outer, outline=line, width=2)
+                self._oval(c, ex - 6, y0 - 11, ex + 6, y0 + 1,
+                           fill=inner, outline="")
         elif deco == "dog":
             # 접힌 검은 강아지 귀 — 카드 위 모서리에서 바깥으로 늘어짐
             for sign, ex in ((-1, x0 + 18), (1, x1 - 18)):
@@ -10059,7 +10219,9 @@ class Mascot:
         """
         if not self._update_msg or sleeping or self.bubble is not None:
             return
-        self._say(self._update_msg, 12.0, big=True)
+        # **눌러야 꺼진다** (요청). 자리를 비운 사이에 12초가 지나면
+        # 새 소식이 있다는 것을 아예 못 보고 지나쳤다.
+        self._say(self._update_msg, 12.0, big=True, hold=True)
         self._update_msg = None
         self.next_talk = now + 120
         self.smile_until = max(self.smile_until, now + 4.0)
@@ -10068,7 +10230,8 @@ class Mascot:
         if self._update_notes:                    # 무엇이 바뀌었는지 팝업으로
             self._safe("update_popup", self._show_update_popup, False)
 
-    def _say(self, text, secs=4.0, big=False, btn=None, act=None):
+    def _say(self, text, secs=4.0, big=False, btn=None, act=None,
+             hold=False):
         """말풍선. btn·act 를 주면 말풍선 안에 누를 수 있는 단추가 생긴다.
 
         단추는 **말풍선 글자에 묶어** 둔다 (act 에 글자를 함께 담는다).
@@ -10076,9 +10239,14 @@ class Mascot:
         그 모두에 '단추도 지워라'를 붙이면 반드시 하나를 빠뜨린다 —
         글자가 다르면 단추를 안 그리는 쪽이 저절로 맞는다.
         """
-        self.bubble = (text, time.time() + secs)
+        # hold 면 눌러야 꺼진다 (오늘의 운세). 그래도 시한은 둔다 —
+        # 자리를 비운 사이에 떠서 영영 안 꺼지면 혼잣말이 통째로 막힌다.
+        self.bubble = (text, time.time() + (self.HOLD_MAX if hold else secs))
         self._bubble_big = bool(big)   # 반응 알림처럼 크게 보여야 하는 말
         self._bubble_act = ((text, str(btn), act) if (btn and act) else None)
+        self._bubble_hold = text if hold else None
+
+    HOLD_MAX = 1800.0            # 눌러야 꺼지는 말풍선의 안전 시한(초)
 
     def _talk_pool(self, state):
         return self.cfg.get("talk") or self.TALK
@@ -10105,6 +10273,10 @@ class Mascot:
         # 캐릭터에서 한 번 뜬 말풍선이 영영 남았다.
         if self.bubble and now > self.bubble[1]:
             self.bubble = None
+            self._bubble_hold = None
+        if self._fortune_at and now >= self._fortune_at:
+            self._safe("fortune", self._fortune_say)
+            self._fortune_at = 0.0     # 실패해도 다시 안 부른다
         if self.particles:
             self._step_particles()
         if self.notes:
@@ -10349,6 +10521,8 @@ class Mascot:
         arc(x0 + r, y0 + r, 180, 270)               # 좌상
         return pts
 
+    BUBBLE_UP = 0           # 말풍선 아래끝을 카드 아래끝에서 얼마나 (요청)
+
     def _draw_bubble(self, yo):
         """머리 위 말풍선 — 둥근 모서리 + 아래 V자 꼬리.
 
@@ -10356,6 +10530,7 @@ class Mascot:
         여기서 알아채므로, 말풍선을 채우는 쪽 코드는 아무것도 몰라도 된다.
         """
         if not (self.can_talk and self.bubble):
+            self._bubble_box = None
             return
         text = self.bubble[0]
         if text != self._bubble_text_last:
@@ -10367,9 +10542,17 @@ class Mascot:
         # 그래서 글자 크기 설정을 그대로 따라도 겹칠 일이 없다. 다만 창보다
         # 넓어지면 안 되니 그 선에서만 줄인다.
         big = bool(getattr(self, "_bubble_big", False))
-        font = self._fit(text, 11 if big else 9, self.W - 46)
-        w = max(self._mw(text, font) + (42 if big else 34), 74)
-        h = max(44 if big else 36, self._mh(font) + (26 if big else 20))
+        # **글꼴을 줄이지 않는다** (요청). 창 폭에 안 들어가면 줄을 나눠
+        # 말풍선이 아래로 자란다 — 긴 말이 깨알같이 작아지던 것을 고쳤다.
+        font = self._cf_n(max(6, round((11 if big else 9)
+                                       * getattr(self, "font_k", 1.0))))
+        lines = self._wrap_lines(text, font, self.W - 46)
+        text = "\n".join(lines)
+        lh = self._mh(font) + (4 if len(lines) > 1 else 0)
+        w = max(max(self._mw(ln, font) for ln in lines)
+                + (42 if big else 34), 74)
+        h0 = max(44 if big else 36, self._mh(font) + (26 if big else 20))
+        h = max(h0, lh * len(lines) + (26 if big else 20))
         # 단추가 붙는 말풍선 — 글자 아래에 자리를 더 낸다. 지금 떠 있는
         # 말과 짝이 맞을 때만 (다른 말로 바뀌었으면 단추는 따라가지 않는다)
         act = getattr(self, "_bubble_act", None)
@@ -10391,17 +10574,28 @@ class Mascot:
         card_bottom = self._card_geom()["y1"] if self.timer_on else self.oy
         # 톡 등장 — max 로 자리를 정한 '뒤에' 더해야 한다. yo 에 더하면
         # 카드 아래 기준(max 의 오른쪽)이 이겨서 오프셋이 통째로 사라진다.
-        by = max(top + 10, card_bottom + 40) + (1.0 - u) ** 2 * 8
+        # 줄이 늘어난 만큼은 **아래로** 자란다. 위로 키우면 타이머 카드를
+        # 파고든다. 자리를 정한 '뒤에' 더해야 한다 — max 안에 넣으면
+        # 머리 기준(왼쪽 항)이 이길 때 그만큼이 통째로 사라진다.
+        # **타이머 카드 자리까지 올린다** (요청). 카드 아래에 두면
+        # 말풍선이 캐릭터 얼굴을 덮었다 — 이제 카드 쪽으로 올라간다.
+        # 창 위로 넘치면 그만큼만 내린다 (글이 길어 말풍선이 클 때).
+        by = (max(h + 4.0, card_bottom + self.BUBBLE_UP)
+              + (1.0 - u) ** 2 * 8)
         x0, x1 = cx - w / 2, cx + w / 2
         pts = self._bubble_pts(x0, by - h, x1, by, 13, cx + 4, 17, 13)
+        # 눌러서 끄는 말풍선(오늘의 운세)이 쓸 자리. 화면에 그린 값 그대로라
+        # 내부 깃발이 아니다 (지뢰 24).
+        self._bubble_box = (x0, by - h, x1, by)
         c.create_polygon([p + 2 for p in pts], fill="#e6e2e8", outline="")
         c.create_polygon(pts, fill="#ffffff", outline=cd["border"], width=2)
         if not act:
-            c.create_text(cx, by - h / 2, text=text, font=font, fill=cd["text"])
+            c.create_text(cx, by - h / 2, text=text, font=font,
+                          fill=cd["text"], justify="center")
             return
         # 글자는 위쪽, 단추는 아래쪽
         c.create_text(cx, by - h + (h - bh - 8) / 2, text=text, font=font,
-                      fill=cd["text"])
+                      fill=cd["text"], justify="center")
         bx0, bx1 = cx - bw / 2, cx + bw / 2
         by1 = by - 10
         by0 = by1 - bh
@@ -12116,8 +12310,12 @@ class Mascot:
 
         줄바꿈이 들어 있으면 첫 줄이 제목이다. 없으면 첫 문장을 제목으로
         삼는다 — 배포할 때 첫 문장을 '무엇이 생겼는지'로 쓰는 관습에 맞춘 것.
+
+        굵게 표시(`**...**`)는 **여기서 떼어 낸다.** 안 떼면 별표가 글에
+        그대로 보인다 (팝업에서 실제로 그랬다). 제목은 어차피 굵은 글꼴로
+        그리므로 표시가 없어도 뜻이 산다.
         """
-        s = str(note).strip()
+        s = str(note).replace("**", "").strip()
         if "\n" in s:
             a, b = s.split("\n", 1)
             return a.strip(), b.strip()
@@ -12251,7 +12449,11 @@ class Mascot:
                            font=self._uf(11, True), fill=cd["text"])
             try:
                 v = int(pages[i].get("ver") or 0)
-                when = time.strftime("%Y-%m-%d", time.localtime(v)) if v else ""
+                # 배포판 번호는 시각이라 날짜가 나오지만, 내 도로롱처럼
+                # 작은 일련번호를 쓰는 곳은 1970-01-01 이 된다 — 그럴
+                # 때는 날짜를 아예 안 보여 준다.
+                when = (time.strftime("%Y-%m-%d", time.localtime(v))
+                        if v > 1000000000 else "")
             except Exception:
                 when = ""
             sub = when or ("" if empty else "이번에 바뀐 점이에요")
@@ -12498,6 +12700,34 @@ class Mascot:
             self.canvas.delete(t)
             self._tw_cache[key] = h
         return h
+
+    BUBBLE_LINES = 6         # 말풍선이 커질 수 있는 최대 줄 수
+
+    def _wrap_lines(self, text, font, max_w):
+        """글꼴은 그대로 두고 줄을 나눈다 (요청 — 길면 말풍선이 커진다).
+
+        띄어쓰기에서 끊는 것을 먼저 보고, 한 낱말이 통째로 넘치면 글자
+        단위로 끊는다. 한글은 낱말이 짧아 대개 띄어쓰기에서 갈린다.
+        """
+        out = []
+        for para in str(text).split("\n"):
+            line = ""
+            for word in para.split(" "):
+                cand = (line + " " + word) if line else word
+                if not line or self._mw(cand, font) <= max_w:
+                    line = cand
+                    continue
+                out.append(line)
+                line = word
+                while self._mw(line, font) > max_w and len(line) > 1:
+                    # 한 낱말이 한 줄보다 길다 — 글자 단위로 끊는다
+                    cut = len(line) - 1
+                    while cut > 1 and self._mw(line[:cut], font) > max_w:
+                        cut -= 1
+                    out.append(line[:cut])
+                    line = line[cut:]
+            out.append(line)
+        return out[:self.BUBBLE_LINES] or [""]
 
     def _fit(self, text, size, max_w, bold=False):
         """카드 안에 들어가는 가장 큰 글꼴.
@@ -17392,23 +17622,30 @@ class Mascot:
         self._save_settings()
 
     def _floor_fix_once(self):
-        """굳은 바닥을 한 번만 지운다 — **굳었을 때만.**
+        """**이제 아무것도 지우지 않는다** — 표시만 찍고 지나간다.
 
-        멀쩡한 사람의 오늘 기록까지 지우면 안 되니, '바닥이 지금 값보다
-        30분 넘게 크다'는 굳음의 표시가 있을 때만 손댄다. 정상이면 이
-        둘은 거의 같다 (바닥을 쓴 것이 자기 자신이기 때문).
+        원래는 '바닥이 지금 값보다 30분 넘게 크면 굳은 것'으로 보고
+        `.room_seen` 과 `.history.json` 의 오늘 칸을 지웠다. 그런데 그
+        판정은 **정상 상황과 똑같이 생겼다.** 바닥을 두는 이유가 바로
+        '연동 시계가 다시 켜져 숫자가 줄었다'는 것이기 때문이다.
+
+        실측(프고 데이터 유실 조사):
+          · 연동 모드에서는 첫 프레임에 `work_secs` 가 아직 0이라
+            raw=0 · floor=14893 으로 **무조건** 참이 된다.
+          · `.timer_state.json` 을 못 읽은 사람도 0 이라 참이 된다.
+          · 그 자리에서 오늘 기록이 14893 → 0 이 됐다.
+        `floor_fix` 깃발 때문에 사람마다 **새 판으로 올라간 뒤 처음 켤 때
+        딱 한 번** 터진다 — '업데이트할 때마다 랜덤하게 누군가의 기록이
+        날아간다'가 이것이었다.
+
+        굳은 사람은 이미 다른 세 겹이 스스로 고친다 (지뢰 78 ①②③) —
+        `_day_roll` 이 하루가 바뀔 때 바닥을 지우고, `_day_stale` 이
+        경계 몇 초를 막고, 06시 상한이 넘치는 값을 걸러 낸다. 그러니
+        여기서 지울 이유가 없다. 깃발만 찍어 이 함수를 조용히 끝낸다.
         """
         if int(self.us.get("floor_fix") or 0) >= self.FLOOR_FIX:
             return
         self.us["floor_fix"] = self.FLOOR_FIX
-        try:
-            raw = max(0.0, self.work_secs - self.day_base)
-            if self._day_floor() > raw + 1800:
-                self._log_error("floor_fix raw=%d floor=%d"
-                                % (int(raw), int(self._day_floor())))
-                self._day_floor_clear()
-        except Exception:
-            pass
         self._save_settings()
 
     ROOM_VIEWS = ("카드 보기", "심플 모드", "전체 보기")
@@ -17768,9 +18005,76 @@ class Mascot:
         self._snack_take()
         self.smile_until = max(self.smile_until, time.time() + 2.5)
         self._safe("snack_snd", self._snack_sound, kind_name)
-        self._say(random.choice(self.SNACK_EAT), 3.0)
+        self._say(random.choice(self.SNACK_EAT), self.FORTUNE_WAIT)
+        # 포춘쿠키처럼 쪽지가 나온다 (요청). **하루에 한 번** — 그날 처음
+        # 받은 간식에서만이다. `root.after` 로 예약하면 창을 닫은 뒤에
+        # 불려 죽은 창을 건드리므로 (지뢰 20), 프레임 루프가 시각을 보고
+        # 띄우게 한다.
+        if str(self.us.get("fortune_day") or "") != self._my_workday():
+            self._fortune_at = time.time() + self.FORTUNE_WAIT
 
     SNACK_EAT = ("잘 먹었습니다!", "맛있다…", "고마워요!", "힘이 나요!")
+
+    # 포춘쿠키 쪽지 — 그림 작업하는 사람에게 맞춘 말들.
+    FORTUNE = (
+        "오늘 그은 선이 예쁩니다",
+        "미뤄 둔 작업이 술술 풀려요",
+        "레퍼런스가 딱 걸립니다",
+        "색이 한 번에 맞는 날이에요",
+        "저장을 자주 하면 복이 와요",
+        "러프가 완성본보다 좋아요",
+        "손목을 아끼면 두 배로 갚아요",
+        "막힌 곳은 쉬면 풀립니다",
+        "누군가 오래 들여다볼 그림",
+        "지우개보다 펜이 바쁜 날",
+        "새 브러시가 쏙 들 거예요",
+        "밤보다 낮이 잘 풀려요",
+        "컨디션을 먼저 챙기세요",
+        "오늘 고른 색이 오래 갑니다",
+        "칭찬을 그냥 받으세요",
+        "한 시간만 더 하면 고비 끝",
+        "따뜻한 걸 마시면 잘 됩니다",
+        "실수한 선이 살아남아요",
+        "마감이 생각보다 여유로워요",
+        "폴더를 정리하면 개운해져요",
+        "노래를 틀면 속도가 붙어요",
+        "오늘 그린 것이 대표작 돼요",
+        "쉬는 사람이 오래 그립니다",
+        "구도는 뒤집으면 답이 나와요",
+    )
+
+    def _fortune_today(self):
+        """오늘의 운세 — 작업일과 캐릭터로 정해지므로 하루 내내 같다.
+
+        간식을 두 번 먹어도 같은 쪽지가 나온다 ('오늘의' 운세니까).
+        random 을 쓰면 먹을 때마다 달라져 '운세'가 아니게 된다.
+        """
+        h = 0
+        for ch in (self._my_workday() + "|" + str(self.char)):
+            h = (h * 131 + ord(ch)) & 0xffffffff
+        return self.FORTUNE[h % len(self.FORTUNE)]
+
+    FORTUNE_WAIT = 1.5           # 다 먹고 몇 초 뒤에 쪽지가 나오나
+
+    def _fortune_say(self):
+        """쪽지가 나왔다 — 샤라랑 + 웃는 얼굴 + 하트, 눌러야 꺼진다."""
+        self._fortune_at = 0.0
+        now = time.time()
+        self.smile_until = max(self.smile_until, now + 6.0)
+        self._safe("sparkle_snd", self._sparkle_sound)
+        for _ in range(3):
+            self._safe("fx", self._spawn_note, now, "heart")
+        # 두 줄로 — 제목(꽃 사이)과 쪽지 내용 (요청). 꽃은 기본 다면(BMP)
+        # 글자라 어느 글꼴에나 있다. 이모지 그림문자는 Tk 캔버스에서
+        # 네모로 나오는 컴퓨터가 있어 쓰지 않는다.
+        self._say(self.FORTUNE_HEAD + "\n" + self._fortune_today(),
+                  big=True, hold=True)
+        # 오늘 몫은 여기서 끝. 저장이 실패해도 메모리 값은 올린다 —
+        # 최악이 '다음에 한 번 더 뜨는 것'이다 (지뢰 30과 같은 이야기).
+        self.us["fortune_day"] = self._my_workday()
+        self._safe("save_settings", self._save_settings)
+
+    FORTUNE_HEAD = "\u273f 오늘의 운세 \u273f"
 
     def _snack_take(self):
         """눌러서 먹었다 — 자리에서 치운다."""
@@ -19193,11 +19497,13 @@ class Mascot:
         cv.create_image(x0 - 12, y0 - 12 + 5, image=ph, anchor="nw", tags=tags)
 
     def _rr_soft(self, cv, x0, y0, x1, y1, r, fill="#ffffff", outline="",
-                 width=1, tail=None, tags="dyn"):
+                 width=1, tail=None, tags="dyn", tail_dir=-1):
         """매끈한 둥근 사각형 — PIL로 3배로 그려 줄인다.
 
         Tk 다각형(_rr)은 계단이 져서 말풍선이 못생겨 보인다는 제보.
         tail=(tx, 높이)면 아래에 V자 꼬리를 붙인다. 실패하면 _rr로 물러난다.
+        tail_dir 은 꼬리 끝이 기우는 쪽 — -1 이면 왼쪽(기본), 1 이면 오른쪽.
+        말풍선의 어느 끝에 다느냐에 따라 기울기가 반대여야 자연스럽다.
         """
         w, h = int(round(x1 - x0)), int(round(y1 - y0))
         if w < 4 or h < 4:
@@ -19206,7 +19512,8 @@ class Mascot:
                             raw=True)
         th = int(round(tail[1])) if tail else 0
         tx = int(round(tail[0] - x0)) if tail else 0
-        key = (w, h, int(r), fill, outline, int(width), tx, th)
+        td = 1 if tail_dir > 0 else -1
+        key = (w, h, int(r), fill, outline, int(width), tx, th, td)
         cache = self._bubble_cache
         img = cache.get(key)
         if img is None:
@@ -19225,7 +19532,7 @@ class Mascot:
                     # 꼬리 — 속을 몸통 테두리 '위'까지 파고들게 칠해 아랫선을
                     # 지우고(한 덩어리), 빗변 두 줄만 테두리색으로 긋는다.
                     lx, rx = (tx - 8) * S, (tx + 8) * S
-                    tipx, tipy = (tx - 3) * S, (h + th) * S - lw
+                    tipx, tipy = (tx + 3 * td) * S, (h + th) * S - lw
                     topy = h * S - lw * 2 - S
                     d2.polygon([(lx, topy), (rx, topy), (tipx, tipy)],
                                fill=fill)
@@ -19279,22 +19586,6 @@ class Mascot:
                 cv.itemconfigure(it, text=text)
             except Exception:
                 pass
-
-    def _cute_corner(self, cv, x0, y0, x1, y1, k, col, tags=""):
-        """칸 네 귀퉁이에 작은 하트 — 아기자기한 맛만 내는 장식.
-
-        도형 여덟 개뿐이라 값이 싸다. 칸마다 뿌리면 안 된다 (지뢰 72).
-        """
-        r = 3.0 * k
-        for cx, cy in ((x0 + 12 * k, y0 + 12 * k), (x1 - 12 * k, y0 + 12 * k),
-                       (x0 + 12 * k, y1 - 12 * k), (x1 - 12 * k, y1 - 12 * k)):
-            cv.create_oval(cx - r, cy - r * 0.9, cx + r * 0.15, cy + r * 0.7,
-                           fill=col, outline="", tags=tags)
-            cv.create_oval(cx - r * 0.15, cy - r * 0.9, cx + r, cy + r * 0.7,
-                           fill=col, outline="", tags=tags)
-            cv.create_polygon(cx - r, cy + r * 0.05, cx + r, cy + r * 0.05,
-                              cx, cy + r * 1.15, fill=col, outline="",
-                              tags=tags)
 
     def _rr(self, cv, x0, y0, x1, y1, r, **kw):
         """둥근 사각형. smooth 스플라인을 쓰지 않는다.
@@ -19607,6 +19898,7 @@ class Mascot:
         # 보기를 바꿨을 때 옛 자리가 남아 엉뚱한 곳이 눌린다 —
         # `_room_inbox_hit` 이 실제로 그 상태였다.
         self._goal_hits = {}
+        self._due_hits = {}
         self._goal_act = None
         cols = max(1, self._room_cols)
         # 사람이 많아지면 페이지로 나눈다 — 첫 페이지 9명, 화살표로 넘김.
@@ -19834,6 +20126,7 @@ class Mascot:
         self._room_song_slots = set()
         self._room_msg_boxes = {}
         self._goal_hits = {}
+        self._due_hits = {}
         self._goal_act = None
         # 심플 모드에는 배지가 없다. 안 비우면 카드 보기에서 마지막에
         # 잡힌 자리가 남아, 배지가 없는 자리를 눌러도 목록이 열린다.
@@ -20447,8 +20740,8 @@ class Mascot:
         # 안 켠 사람은 오늘 한 줄 대신 '아직 안 켰어요' 를 띄운다.
         # 달 글자(☾)는 기본 다면(BMP)이라 어느 글꼴에나 있다 — 이모지
         # 그림문자는 Tk 캔버스에서 네모로 나오는 컴퓨터가 있다.
-        # 말풍선에 무엇을 띄우나 — **목표가 있으면 목표가 이긴다.**
-        # 카드마다 말풍선은 하나뿐이라(머리 위 여백 44*k) 둘 다 못 띄운다.
+        # 목표는 **캐릭터 왼쪽에 제 말풍선**을 갖는다 (요청) — 여기
+        # 머리 위 말풍선은 '오늘 한 줄'만 맡는다.
         goal9 = ("" if off
                  else str(p.get("gm") or "").strip()[:self.ROOM_GOAL_N])
         done9 = bool(goal9) and bool(p.get("gd"))
@@ -20456,7 +20749,7 @@ class Mascot:
         dleft = self._due_left(str(p.get("dl") or "").strip()) \
             if p.get("dl") else None
         msg = (self.ROOM_OFF_MSG if off
-               else (goal9 or str(p.get("m") or "").strip()))
+               else str(p.get("m") or "").strip())
         cx2 = (kx0 + kx1) / 2
         if fl > time.time() - 1.6:
             note = (self._room_note[0]
@@ -20480,12 +20773,12 @@ class Mascot:
             # 안 켠 사람은 글자 앞에 초승달 그림을 붙인다
             moon = self._safe_str(self._moon_img, 13 * k) if off else None
             iw = (moon.width() + 5 * k) if moon else 0
-            # 마감 · 목표 표시 — 글자로 그린다. 그림을 새로 구우면 캐시가
-            # 하나 더 늘고(지뢰 18·42), 글자는 칸 배율(_cf9)을 저절로 따른다.
+            # 동그라미(목표)는 왼쪽 말풍선으로 옮겼다. **마감은 여기
+            # 남는다** — 왼쪽 말풍선은 얼굴을 안 가리려고 좁아서, 마감까지
+            # 넣으면 목표 글이 두 글자로 잘렸다 (실측).
             dtxt = self._due_text(dleft) if dleft is not None else ""
             dw = (self._room_tw(cv, dtxt, fD) + 7 * k) if dtxt else 0
-            mtxt = ("\u2714" if done9 else "\u25cb") if goal9 else ""
-            mw = (self._room_tw(cv, mtxt, fM) + 7 * k) if mtxt else 0
+            mtxt, mw = "", 0
             # 카드 위쪽 띠에 남은 것은 왼쪽 달력 아이콘뿐이다 (받은 수
             # 배지는 이름표 옆으로 옮겼다). 그래서 말풍선은 **달력 바로
             # 뒤부터 오른쪽 끝까지** 다 쓸 수 있다 (요청).
@@ -20562,10 +20855,17 @@ class Mascot:
             cv.create_text(gx9, ny, text=line, font=f3,
                            anchor="w", fill=self._shade(col, 0.25),
                            tags="dyn")
-            # 남의 목표를 눌렀으면 그 옆에 '보낼까요?' 아이콘을 띄운다
-            if self._goal_open == slot and slot != self.char and goal9:
+            # 마감(D-n)을 누를 자리 — 목표 말풍선과 **따로** 잡는다.
+            # 마감은 '아직 안 끝났다'는 뜻이라 언제나 채찍질이다 (요청).
+            if dtxt and slot != self.char:
+                self._due_hits[slot] = (bub - half - 14 * k, ny - 15 * k,
+                                        bub + half + 14 * k, ny + 15 * k)
+            # 목표는 왼쪽 말풍선이 맡는다 — 여기서 또 그리면 단추가 둘이
+            # 된다 (제보: '칭찬' 이 두 개 나왔다).
+            if self._goal_open == slot and slot != self.char \
+                    and self._goal_due:
                 self._safe("goal_act", self._room_goal_act_draw, cv,
-                           kx0, ny, k, col, slot, done9)
+                           kx0, ny, k, col, slot, False)
             if slot == self.char:      # 표가 피해 갈 자리 (꼬리까지)
                 self._room_msg_box = (bub - half - 14 * k, ny - 15 * k,
                                       bub + half + 14 * k, ny + 24 * k)
@@ -20621,7 +20921,12 @@ class Mascot:
                        text="%d%%" % (pr * 100), font=_cf9(8, True),
                        fill=P["sub"], tags="dyn")
         sg = p.get("sg")
-        if isinstance(sg, dict) and self._song_ok(sg.get("u")):
+        has_song = isinstance(sg, dict) and self._song_ok(sg.get("u"))
+        if goal9:          # 마감만 있는 사람은 위 말풍선이 맡는다
+            self._safe("room_goal", self._room_goal_draw, cv, p,
+                       kx0, ky0, kx1, ky1, k, col, slot,
+                       goal9, done9, dleft, has_song)
+        if has_song:
             self._safe("room_song", self._room_song_draw,
                        cv, p, kx0, ky0, kx1, ky1, k, col, slot)
         # 자는 표시는 seat_idle 그림에 이미 들어 있다 (여기서 또 그리면 겹친다)
@@ -20786,6 +21091,91 @@ class Mascot:
         self._mq_img = ImageTk.PhotoImage(im)
         return self._mq_img
 
+    # 자리는 사용자가 그려 준 그림을 픽셀로 재서 맞췄다 —
+    # 세로 중심 ky0+56k, 왼쪽 끝은 칸 왼쪽에 거의 붙는다.
+    ROOM_GOAL_Y = 49        # 목표 말풍선의 세로 자리 (칸 위에서 몇 k)
+    ROOM_GOAL_OUT = 6       # 칸 왼쪽으로 얼마나 삐져나가나 (요청 — 조금 OK)
+    ROOM_GOAL_R = 0.62      # 오른쪽 끝 — 칸 폭의 몇 할까지 (얼굴 앞)
+    ROOM_GOAL_R_SONG = 0.50  # 노래 말풍선이 있으면 그 앞에서 멈춘다
+
+    def _room_goal_draw(self, cv, p, kx0, ky0, kx1, ky1, k, col, slot,
+                        goal9, done9, dleft, has_song=False):
+        """카드 **왼쪽**의 '오늘 목표' 말풍선 (요청 — 한 줄과 자리를 나눴다).
+
+        예전에는 목표와 한 줄이 머리 위 말풍선 하나를 다퉈서, 목표를 쓰면
+        한 줄이 물러났다. 이제 한 줄은 제자리에 두고 목표는 캐릭터 왼쪽에
+        제 말풍선을 갖는다. 글꼴·높이·테두리는 위 말풍선과 똑같다 (요청).
+        """
+        def _cf9(size, bold=False):
+            n9 = max(6, int(round(size * k)))
+            return (UI_FONT, n9, "bold") if bold else (UI_FONT, n9)
+        f3 = _cf9(10)
+        fD = _cf9(10, True)          # 마감은 굵게 (위 말풍선과 같다)
+        fM = _cf9(12, True)          # 동그라미·체크
+        dtxt, dw = "", 0        # 마감은 위 말풍선이 맡는다
+        mtxt = ("✔" if done9 else "○") if goal9 else ""
+        mw = (self._room_tw(cv, mtxt, fM) + 7 * k) if mtxt else 0
+        # **캐릭터를 덜 가리도록 왼쪽으로 삐져나간다** (요청). 칸 밖으로
+        # 조금 나가도 되니, 그만큼 오른쪽 끝을 얼굴 앞에서 멈춘다.
+        # 맨 왼쪽 칸에서는 창 밖으로 나가 잘리므로 거기서만 붙여 세운다.
+        x0 = max(2.0, kx0 - self.ROOM_GOAL_OUT * k)
+        # 노래 말풍선(오른쪽 위)과 세로가 겹치므로, 노래가 있으면 그 앞에서
+        # 멈춘다 — 안 그러면 둘이 서로를 덮는다.
+        r9 = self.ROOM_GOAL_R_SONG if has_song else self.ROOM_GOAL_R
+        wide = max(34 * k, kx0 + (kx1 - kx0) * r9 - x0)
+        # 자리가 아주 좁으면(전체 보기는 칸 배율 0.34) 동그라미를 접는다.
+        if mtxt and wide - mw < 20 * k:
+            mtxt, mw = "", 0
+        room = max(9 * k, wide - dw - mw - 28 * k)
+        line = goal9
+        while line and self._room_tw(cv, line, f3) > room:
+            line = line[:-1]
+        tw3 = self._room_tw(cv, line, f3)
+        x1 = x0 + tw3 + dw + mw + 28 * k
+        ny = ky0 + self.ROOM_GOAL_Y * k
+        edge = self._tint(col, 0.35)
+        # 꼬리는 말풍선 **왼쪽**에 달고 **좌우반전** 한다 (요청).
+        # 꼬리는 원래 늘 왼쪽으로 기울어 있어서, 오른쪽 끝에 달면 기울기가
+        # 반대가 되어 어색했다.
+        self._rr_soft(cv, x0, ny - 15 * k, x1, ny + 15 * k, 14 * k,
+                      fill="#ffffff", outline=edge, width=2,
+                      tail=(x0 + 16 * k, 9 * k), tail_dir=1)
+        gx9 = x0 + 14 * k
+        if dtxt:
+            cv.create_text(gx9, ny, text=dtxt, font=fD, anchor="w",
+                           fill=("#d8556b" if dleft <= 1
+                                 else self._shade(col, 0.30)), tags="dyn")
+            gx9 += dw
+        if mtxt:
+            mx9 = gx9
+            cv.create_text(gx9, ny, text=mtxt, font=fM, anchor="w",
+                           fill=("#3fae7a" if done9
+                                 else self._shade(col, 0.22)), tags="dyn")
+            gx9 += mw
+            # 누를 자리 — 내 것은 동그라미만 딱, 남의 것은 말풍선 전체.
+            # 내 것을 넓게 잡으면 '오늘 한 줄' 창을 못 열고, 남의 것을
+            # 좁게 잡으면 누르기가 너무 까다롭다.
+            if slot == self.char:
+                self._goal_hits[slot] = (
+                    (mx9 - 4 * k, ny - 13 * k, mx9 + mw + 2 * k,
+                     ny + 13 * k), "mine")
+            else:
+                self._goal_hits[slot] = (
+                    (x0, ny - 15 * k, x1, ny + 15 * k),
+                    "done" if done9 else "todo")
+        if line:
+            cv.create_text(gx9, ny, text=line, font=f3, anchor="w",
+                           fill=self._shade(col, 0.25), tags="dyn")
+        # 남의 목표를 눌렀으면 그 아래에 '보낼까요?' 단추를 띄운다
+        if self._goal_open == slot and slot != self.char and goal9 \
+                and not self._goal_due:
+            self._safe("goal_act", self._room_goal_act_draw, cv,
+                       kx0, ny, k, col, slot, done9)
+
+    ROOM_SONG_W = 0.38      # 노래 말풍선 폭 — 칸 폭의 몇 할 (제목과 무관).
+    #                         위 말풍선 꼬리(칸 한가운데)를 피할 만큼 좁게.
+    ROOM_SONG_OUT = 10      # 칸 오른쪽으로 얼마나 삐져나가나 (요청)
+
     def _room_song_draw(self, cv, p, kx0, ky0, kx1, ky1, k, col, slot):
         """카드 오른쪽 여백의 노래 말풍선 — 누르면 유튜브로 간다."""
         def _cf9(size, bold=False):
@@ -20793,14 +21183,29 @@ class Mascot:
             return (UI_FONT, n9, "bold") if bold else (UI_FONT, n9)
         sg = p["sg"]
         title = str(sg.get("t") or "노래 들으러 가기")
-        if len(title) > 9:
-            title = title[:9] + "…"
         f = _cf9(8, True)
-        txt = "\u266a " + title
-        tw = self._room_tw(cv, txt, f)
         h = 20 * k
-        x1 = kx1 - 6 * k
-        x0 = max(kx0 + 6 * k, x1 - tw - 14 * k)
+        # 칸 밖으로 조금 나간다 (요청). 맨 오른쪽 칸에서는 창 밖으로
+        # 나가 잘리므로 거기서만 안으로 들인다.
+        x1 = kx1 + self.ROOM_SONG_OUT * k
+        try:
+            lim = float(cv.winfo_width() or 0)
+            if lim > 8:
+                x1 = min(x1, lim - 2)
+        except Exception:
+            x1 = kx1 - 6 * k
+        # **폭을 고정한다** (요청). 예전에는 제목 길이대로 좌우로 늘어나
+        # 카드마다 들쭉날쭉했고, 긴 제목은 칸 왼쪽까지 뻗어 목표 말풍선과
+        # 부딪혔다. 이제 칸 폭의 정해진 몫만 쓰고 넘치면 … 로 줄인다.
+        x0 = x1 - (kx1 - kx0) * self.ROOM_SONG_W
+        room = (x1 - x0) - 14 * k
+        txt = "\u266a " + title
+        if self._room_tw(cv, txt, f) > room:
+            while title and self._room_tw(
+                    cv, "\u266a " + title + "…", f) > room:
+                title = title[:-1]
+            txt = "\u266a " + title + "…"
+        tw = self._room_tw(cv, txt, f)
         y0 = ky0 + 34 * k                # 하트 배지 아래, 오른쪽 여백
         edge = self._tint(col, 0.35)
         self._rr_soft(cv, x0, y0, x1, y0 + h, h / 2, fill="#ffffff",
@@ -23111,21 +23516,25 @@ class Mascot:
     # 선물본은 표준 라이브러리 + tkinter + PIL 뿐이다 (지뢰 21·46).
     # 물리 좌표에는 배율(k)이 없다 — 그리는 쪽에서만 곱한다. 검사가
     # 창 없이 물리만 돌릴 수 있는 것도 이 덕분이다.
-    # 얼굴은 14 개다 — 자리는 15 인데 도로롱이 둘(내 것·선물본)이라
-    # 이름이 같은 자리를 하나로 친다.
+    # 얼굴은 등록표에 있는 **모든** 선물 캐릭터다 (이름이 같은 자리는
+    # 하나로 친다 — 도로롱이 내 것·선물본 둘이다). 상한을 14 로 두었더니
+    # 캐릭터가 늘자 **표 맨 끝 사람이 조용히 빠졌다** (제리). 상한은
+    # 벌 수 x 단계 수 이상으로 둔다.
     #
     # 그 열넷을 한 판에 다 쓰면 **큰 얼굴을 보기까지 너무 오래 걸린다**
     # (제보). 그래서 일곱씩 **두 벌**로 나누고, 판을 새로 시작할 때마다
     # 어느 벌인지 뽑는다. 진화 순서 칸은 그 벌만 보여 준다.
-    WG_FACES = 14                # 등록표에서 뽑는 얼굴 수
-    WG_SETS = 2                  # 벌 수 (14 ÷ 2 = 7 단계)
-    WG_TIERS = 7                 # 한 판의 단계 수
-    WG_SCORES = (1, 3, 6, 10, 15, 21, 28)
+    WG_FACES = 16                # 등록표에서 뽑는 얼굴 수 (= SETS x TIERS)
+    WG_SETS = 2                  # 벌 수
+    WG_TIERS = 8                 # 한 판의 단계 수 (16 ÷ 2)
+    WG_SCORES = (1, 3, 6, 10, 15, 21, 28, 36)
     # 단계가 반으로 줄었으니 한 칸이 더 크게 자란다 (배수 1.26~1.38).
     # 작은 것들은 그대로, 가장 큰 것만 84 → 78 로 살짝 (요청).
     # 실측: 머리 크기는 판 길이를 거의 못 바꾼다 (12~84 를 훑어도
     # 중앙 230±20판) — 판 길이의 손잡이는 크기가 아니라 규칙이다.
-    WG_RADII = (13, 18, 25, 34, 46, 62, 78)
+    # 단계가 하나 늘었지만 **가장 큰 공은 그대로 78** 이다 — 중간에 한
+    # 칸을 끼웠을 뿐이라 판 길이와 판 폭 대비 크기가 안 바뀐다.
+    WG_RADII = (13, 17, 22, 29, 37, 47, 61, 78)
     # 보드 (물리 좌표). 가로를 340 → 286 으로 좁혔다 — 한 판이 너무
     # 길었다 (실측: 자동으로 420~660 번 떨어뜨려야 끝났다). 좁으면 같은
     # 실수로도 빨리 차오른다. 가장 큰 공의 지름은 폭의 0.53 배.
@@ -23194,8 +23603,18 @@ class Mascot:
         if which is None:
             which = self._wg_set()
         which = max(0, int(which)) % self.WG_SETS
-        got = tuple(full[which::self.WG_SETS])[:self.WG_TIERS]
-        return got or tuple(full[:self.WG_TIERS])
+        got = list(full[which::self.WG_SETS])[:self.WG_TIERS]
+        if got and len(got) < self.WG_TIERS:
+            # 사람 수가 **홀수**면 한 벌이 한 칸 모자란다. 그러면 벌마다
+            # 진화 순서가 달라 보이므로 다른 벌에서 하나를 빌려 채운다
+            # (요청). 먼저 **내 캐릭터**를 쓴다 — 어느 벌에서든 마지막
+            # 단계가 나 자신인 편이 자연스럽다.
+            spare = [s9 for s9 in (self.char,) if s9 not in got]
+            spare += [s9 for s9 in reversed(full)
+                      if s9 not in got and s9 not in spare]
+            while spare and len(got) < self.WG_TIERS:
+                got.append(spare.pop(0))
+        return tuple(got) or tuple(full[:self.WG_TIERS])
 
     def _wg_top(self):
         """마지막 단계 번호 (사람이 모자라면 그만큼 작다)."""
@@ -23653,9 +24072,168 @@ class Mascot:
 
     # 랭킹 1·2·3위 강조 — 금·은·동. 캐릭터 테마색에서 뽑지 않는다:
     # 어두운 테마(준사 #4a4a52 · 퀸시 #3c5488)에서는 셋이 서로 안 갈린다.
-    RANK_MEDAL = (("#fdf0cf", "#c08a12", "\u2665"),
+    # 1위 표시는 숫자다 — 하트는 한마디 앞으로 옮겼다 (요청).
+    RANK_MEDAL = (("#fdf0cf", "#c08a12", "1"),
                   ("#eceef3", "#78838f", "2"),
                   ("#f7e5d2", "#a4673a", "3"))
+
+    def _fit_text(self, cv, txt, font, avail):
+        """폭에 맞게 글자를 자른다.
+
+        글자 수로 자르면(예: [:22]) 한글·숫자 폭이 달라 어떤 이름은 칸
+        밖으로 나간다 (제보: "글자들이 다 삐져나와 있다").
+        """
+        t = str(txt or "")
+        cut = False
+        while t and self._room_tw(cv, t, font) > avail:
+            t = t[:-1]
+            cut = True
+        if cut:
+            # 잘린 끝에 꾸밈 글자만 덩그러니 남으면 오타처럼 보인다
+            # ('젖소교사 ·' — ' ·나' 가 반만 잘린 것). 그것까지 떼어 낸다.
+            t = t.rstrip(" ·‧・")
+        return t
+
+    RANK_PAD = 5             # _rank_pills 가 글자 위아래로 두는 여백(k)
+    RANK_HEART = 15          # 한마디 앞 하트 크기(k)
+
+    def _rank_lay(self, k, uf, n, topn, avail=0.0):
+        """랭킹 줄 자리 — 한마디가 붙는 위 줄은 크게, 아래 줄은 작게.
+
+        줄 높이를 모두 같게 두면 다섯 줄이 판을 넘쳐 마지막 줄이 창 밖으로
+        밀려난다 (2048에서 실측). 한마디가 없는 아래 줄은 얇아도 된다.
+        avail(판의 세로 여유)을 주면 그 안에 들어가도록 여백부터 줄인다.
+
+        돌려주는 것은 [(알약 y, 한마디 y, 줄 아래끝), …] 과 알약 높이이며,
+        y 는 모두 첫 줄 위끝으로부터의 거리다. **손으로 적은 비율로 잡지
+        말 것** — 알약 높이는 글꼴에서 나오므로 반드시 어긋난다 (제보).
+        """
+        ph = (max(self._mh(uf(8, True)), self._mh(uf(9, True)))
+              + 2 * self.RANK_PAD * k)
+        mh = self._mh(uf(7, True))
+        big, small = ph + mh + 9 * k, ph + 7 * k
+        need = big * topn + small * max(0, n - topn)
+        if avail > 0 and need > avail:
+            slack = need - ph * n
+            f = max(0.0, (avail - ph * n) / slack) if slack > 0 else 0.0
+            big, small = ph + (big - ph) * f, ph + (small - ph) * f
+        out, y = [], 0.0
+        for i in range(n):
+            h = big if i < topn else small
+            out.append((y + ph / 2.0, y + ph + (h - ph) / 2.0, y + h))
+            y += h
+        return out, ph
+
+    def _rank_name(self, cv, nm, me, font, avail):
+        """랭킹 이름 — 자리가 모자라면 **이름만** 줄이고 '·나' 는 지킨다.
+
+        통째로 잘라 넣으면 내 줄이라는 표시가 먼저 떨어져 나간다
+        ('젖소교사 ·나' → '젖소교사 ·'). 표시는 짧고 뜻이 크다.
+        """
+        tag = " ·나" if me else ""
+        if not tag:
+            return self._fit_text(cv, nm, font, avail)
+        tw = self._room_tw(cv, tag, font)
+        return self._fit_text(cv, nm, font, max(10.0, avail - tw)) + tag
+
+    def _rank_heart(self, cv, cx, cy, w, fill, tags):
+        """한마디 앞의 작은 하트 — 순위 색으로 (요청).
+
+        글꼴의 ♥ 는 기계마다 높낮이가 달라 줄에서 떠 보인다 (노래
+        말풍선에서 겪었다). 도형으로 그린다.
+        """
+        r2 = w * 0.27
+        ty = cy - w * 0.18
+        for sx9 in (-1, 1):
+            self._oval(cv, cx + sx9 * w * 0.23 - r2, ty - r2,
+                       cx + sx9 * w * 0.23 + r2, ty + r2,
+                       fill=fill, width=0, tags=tags)
+        cv.create_polygon(cx - w * 0.47, ty + r2 * 0.35,
+                          cx + w * 0.47, ty + r2 * 0.35,
+                          cx, cy + w * 0.52, fill=fill, width=0, tags=tags)
+
+    def _rank_msg_draw(self, cv, i, mit, tag, x0):
+        """한마디 줄 — 앞에 순위 색 하트를 놓는다. 글자가 없으면 안 그린다."""
+        fill9, ink9, _m = self._rank_style(i)
+        bm = cv.bbox(mit)
+        if not bm or not str(cv.itemcget(mit, "text")).strip():
+            return
+        # 알약색 그대로면 흰 바탕에서 안 보인다 — 글자색 쪽으로 당긴다.
+        col9 = (self._mix(fill9, ink9, 0.62) if fill9 and ink9
+                else self.card["sub"])
+        self._rank_heart(cv, bm[0] - self.RANK_HEART * 0.75,
+                         (bm[1] + bm[3]) / 2.0, self.RANK_HEART * 1.0,
+                         col9, tag)
+
+    def _rank_pills(self, cv, k, box, left, sit, i, tag, below,
+                    split=False):
+        """랭킹 한 줄의 금·은·동 알약 — **이름과 점수에 따로** (요청).
+
+        한 줄을 가로지르는 알약 하나였던 것을 둘로 나눴다. 이름 길이가
+        사람마다 다르니 **글자를 그린 뒤에 재야** 해서, 만들 때가 아니라
+        기록을 채우는 `draw_rank` 에서 그린다 (거기는 매 프레임이 아니라
+        기록이 바뀔 때만 돈다).
+
+        box 는 그 줄의 네모 (x0, y0, x1, y1). 왼쪽 알약은 x0 에서 이름
+        끝까지, 오른쪽 알약은 점수 앞에서 x1 까지.
+        """
+        fill9, ink9, _m = self._rank_style(i)
+        if not fill9:
+            return
+        x0, _b1, x1, _b3 = box
+        pad = 9 * k
+        its = [it for it in (left if isinstance(left, (list, tuple))
+                             else [left]) if it is not None]
+        if not its:
+            return
+        # **세로는 이름과 점수를 같이 본다.** 점수 글꼴이 이름보다 커서,
+        # 이름만 기준으로 잡으면 숫자가 알약 밖으로 삐져나온다 (제보).
+        # 한마디는 일부러 뺀다 — 넣으면 알약이 아래 줄까지 덮는다.
+        tops, bots = [], []
+        for it in (list(its) + ([sit] if sit is not None else [])):
+            bb = cv.bbox(it)
+            if bb:
+                tops.append(bb[1])
+                bots.append(bb[3])
+        if not tops:
+            return
+        pv = 5 * k
+        y0, y1 = min(tops) - pv, max(bots) + pv
+        rt = None
+        for it in its:
+            bb = cv.bbox(it)
+            if bb:
+                rt = bb[2] if rt is None else max(rt, bb[2])
+        if not split:
+            # **한 줄로 쭉 잇는다** (요청). 둘로 나눠 봤지만 이름·점수 길이가
+            # 제각각이라 줄마다 알약 길이가 달라 어수선했다. 세로는 여전히
+            # 이름 글자에 맞춰 얇게 — 아래 한마디 자리를 안 덮는다.
+            self._rr_soft(cv, x0, y0, x1, y1, (y1 - y0) / 2,
+                          fill=fill9, outline=ink9, width=2, tags=tag)
+        else:
+            if rt is not None:
+                b = min(rt + pad, x1)
+                if b - x0 >= 8 * k:
+                    self._rr_soft(cv, x0, y0, b, y1, (y1 - y0) / 2,
+                                  fill=fill9, outline=ink9, width=2, tags=tag)
+            if sit is not None:
+                bb = cv.bbox(sit)
+                if bb:
+                    # **숫자를 감싼다.** 오른쪽 끝까지 늘리면 숫자가 알약
+                    # 안에서 한쪽으로 쏠려 보인다 (제보). 좌우 같은 여백만.
+                    a = max(bb[0] - pad, x0)
+                    b = min(bb[2] + pad, x1)
+                    if b - a >= 8 * k:
+                        self._rr_soft(cv, a, y0, b, y1, (y1 - y0) / 2,
+                                      fill=fill9, outline=ink9, width=2,
+                                      tags=tag)
+        try:
+            # **가장 아래 글자보다도 밑으로.** Tk 는 나중에 만든 것이 위라,
+            # 마지막 줄의 이름 밑으로만 내리면 앞줄 이름들은 여전히
+            # 알약에 덮인다 (실제로 그렇게 가려졌다).
+            cv.tag_lower(tag, below)
+        except Exception:
+            pass
 
     def _rank_style(self, i):
         """랭킹 i번째(0부터)의 알약색·글자색·표시. 4위부터는 알약이 없다."""
@@ -24195,9 +24773,6 @@ class Mascot:
                       22 * k, fill=soft, outline="", width=0)
         self._rr_soft(cv, BX - 3 * k, BY - 3 * k, bx1 + 3 * k, by1 + 3 * k,
                       19 * k, fill="#ffffff", outline=line, width=2)
-        self._safe("wg_deco", self._cute_corner, cv, BX - 7 * k, BY - 7 * k,
-                   bx1 + 7 * k, by1 + 7 * k, k,
-                   self._tint(cd["fill"], 0.45))
         # 넘침 선 — 점선 + 안내
         ly = BY + self.WG_LINE * k
         cv.create_line(BX + 6 * k, ly, bx1 - 6 * k, ly,
@@ -24384,31 +24959,35 @@ class Mascot:
         cv.create_text(sx + sw / 2, ry0 + 17 * k, text="랭킹",
                        font=uf(9, True), fill=ink)
         rank_its = []
+        wg_rank_box = []            # 줄마다의 네모 (알약을 나중에 그린다)
+        wg_rank_low = [None]        # 랭킹에서 가장 밑에 있는 글자
         avail2 = max(0.0, ry1 - ry0 - 42 * k)
         rh2 = max(18 * k, min(40 * k, avail2 / self.WG_RANK_N))
-        rty = ry0 + 34 * k + max(0.0, avail2 - rh2 * self.WG_RANK_N) / 2.0
+        lay9, ph2 = self._rank_lay(k, uf, self.WG_RANK_N,
+                                   self.RANK_MSG_TOP, avail2)
+        rty = ry0 + 34 * k + max(0.0, avail2 - lay9[-1][2]) / 2.0
         for i2 in range(self.WG_RANK_N):
-            yy = rty + rh2 * (i2 + 0.5)
+            py9, my9, _b9 = [rty + v for v in lay9[i2]]
             fill2, ink2, mark2 = self._rank_style(i2)
-            if fill2:                          # 1·2·3위는 금·은·동
-                self._rr_soft(cv, sx + 7 * k, yy - rh2 / 2 + 1,
-                              sx + sw - 7 * k, yy + rh2 / 2 - 1,
-                              rh2 / 2, fill=fill2, outline=ink2, width=2)
-            cv.create_text(sx + 13 * k, yy, anchor="w", text=mark2,
-                           font=uf(8, True), fill=ink2 or sub2)
-            nit = cv.create_text(sx + 27 * k, yy, anchor="w", text="—",
+            # 알약은 `draw_rank` 에서 (이름 길이를 알아야 한다)
+            wg_rank_box.append((sx + 7 * k, py9 - ph2 / 2,
+                                sx + sw - 7 * k, py9 + ph2 / 2))
+            mk2 = cv.create_text(sx + 13 * k, py9, anchor="w", text=mark2,
+                                 font=uf(8, True), fill=ink2 or sub2)
+            if wg_rank_low[0] is None:
+                wg_rank_low[0] = mk2
+            nit = cv.create_text(sx + 27 * k, py9, anchor="w", text="—",
                                  font=uf(8, True), fill=ink2 or ink)
-            sit = cv.create_text(sx + sw - 20 * k, yy, anchor="e", text="",
+            sit = cv.create_text(sx + sw - 20 * k, py9, anchor="e", text="",
                                  font=uf(9, True), fill=ink2 or ink)
             pit = mit = None
             if i2 < self.RANK_MSG_TOP:
                 pit = cv.create_text(0, -99, text="\u270e", font=uf(8),
                                      fill=ink2 or sub2, state="hidden")
-                # 이름 뒤에 이어 붙이면 점수와 겹친다 (검사가 잡았다).
-                # 줄이 넉넉할 때만 아랫줄에 따로 둔다.
-                if rh2 >= 30 * k:
-                    cv.coords(nit, sx + 27 * k, yy - rh2 * 0.19)
-                    mit = cv.create_text(sx + 20 * k, yy + rh2 * 0.21,
+                # 한마디는 **알약 아래 바깥**에 (요청). 자리가 눌려 알약과
+                # 붙을 만하면 아예 안 그린다.
+                if my9 - py9 >= ph2 * 0.55:
+                    mit = cv.create_text(sx + 33 * k, my9,
                                          anchor="w", text="",
                                          font=uf(6, True), fill=ink2 or sub2)
             rank_its.append((nit, sit, pit, mit))
@@ -24418,24 +24997,40 @@ class Mascot:
         def draw_rank():
             rows = self._wg_board()
             win._wg_pen = {}
+            cv.delete("wgpill")     # 이름 길이가 바뀌므로 매번 다시
             for i3, (nit, sit, pit, mit) in enumerate(rank_its):
                 if i3 < len(rows):
                     b3, nm3, me3, ms3 = rows[i3]
-                    cv.itemconfigure(nit,
-                                     text=nm3 + (" ·나" if me3 else ""))
-                    cv.itemconfigure(sit, text="%d" % b3)
+                    cv.itemconfigure(sit, text="%d점" % b3)
+                    sb9 = cv.bbox(sit)
+                    # 이름이 점수를 밀지 않게 남는 폭으로 자른다. 내 줄은
+                    # 펜 아이콘 자리도 비워 둔다.
+                    lim9 = ((sb9[0] if sb9 else sx + sw) - (sx + 27 * k)
+                            - (24 * k if me3 else 10 * k))
+                    cv.itemconfigure(nit, text=self._rank_name(
+                        cv, nm3, me3, uf(8, True), max(18 * k, lim9)))
+                    pv3 = None          # 보이는 펜 (알약이 감싼다)
                     if mit is not None:
-                        cv.itemconfigure(mit, text=str(ms3 or "")[:16])
+                        cv.itemconfigure(mit, text=self._fit_text(
+                            cv, ms3, uf(7, True), sw - 53 * k))
+                        self._safe("rank_msg", self._rank_msg_draw,
+                                   cv, i3, mit, "wgpill", sx)
                     if pit is not None:
                         bn = cv.bbox(nit) if me3 else None
                         if bn:
                             cv.coords(pit, bn[2] + 7 * k,
                                       (bn[1] + bn[3]) / 2.0)
                             cv.itemconfigure(pit, state="normal")
+                            pv3 = pit
                             win._wg_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
                                                bn[2] + 15 * k, bn[3] + 3 * k)
                         else:
                             cv.itemconfigure(pit, state="hidden")
+                    # **알약은 맨 마지막에** — 펜까지 감싸야 한다.
+                    if i3 < len(wg_rank_box):
+                        self._safe("rank_pill", self._rank_pills, cv, k,
+                                   wg_rank_box[i3], (nit, pv3), sit, i3,
+                                   "wgpill", wg_rank_low[0] or nit)
                 else:
                     cv.itemconfigure(nit, text="—")
                     cv.itemconfigure(sit, text="")
@@ -25445,9 +26040,6 @@ class Mascot:
             self._tint(cd["fill"], 0.93), 16 * k)
         if win._ct_grid:
             cv.create_image(BX, BY, image=win._ct_grid, anchor="nw")
-        self._safe("ct_deco", self._cute_corner, cv, BX - 7 * k, BY - 7 * k,
-                   bx1 + 7 * k, by1 + 7 * k, k,
-                   self._tint(cd["fill"], 0.45))
         # 점수 알약 (왼쪽 위) — 수박게임과 같은 자리·같은 여백
         self._rr_soft(cv, BX - 3 * k, 8 * k, BX + 116 * k, 62 * k, 16 * k,
                       fill="#ffffff", outline=line, width=4)
@@ -25595,31 +26187,35 @@ class Mascot:
         # 방 신호에 실려 오는 ctb 를 모은다 (서버는 안 고친다).
         rsx = bx1 + int(16 * k)
         rsw = int(self.CT_SIDE * k - 16 * k)
-        rh2 = 36 * k
+        lay9, ph2 = self._rank_lay(k, uf, self.CT_RANK_N,
+                                   self.RANK_MSG_TOP)
+        rh2 = ph2                      # 한마디 흰 알약 굵기 등에 쓰던 값
         ry0 = 8 * k
-        ry1 = ry0 + 44 * k + rh2 * self.CT_RANK_N + 10 * k
+        ry1 = ry0 + 44 * k + lay9[-1][2] + 10 * k
         self._rr_soft(cv, rsx, ry0, rsx + rsw, ry1, 16 * k,
                       fill="#ffffff", outline=line, width=4)
         cv.create_text(rsx + rsw / 2, ry0 + 18 * k, text="랭킹",
                        font=uf(9, True), fill=ink)
         ct_rank_its = []
+        ct_rank_box = []            # 줄마다의 네모 (알약을 나중에 그린다)
+        ct_rank_low = [None]        # 랭킹에서 가장 밑에 있는 글자
         rty = ry0 + 40 * k
         for i2 in range(self.CT_RANK_N):
-            yy2 = rty + rh2 * (i2 + 0.5)
             fill2, ink2, mark2 = self._rank_style(i2)
-            if fill2:                       # 1·2·3위는 금·은·동
-                self._rr_soft(cv, rsx + 7 * k, yy2 - rh2 / 2 + 1,
-                              rsx + rsw - 7 * k, yy2 + rh2 / 2 - 1,
-                              rh2 / 2, fill=fill2, outline=ink2, width=2)
             top9 = i2 < self.RANK_MSG_TOP
+            # 알약은 `draw_rank` 에서 그린다 — 이름 길이를 알아야 한다
+            ct_rank_box.append((rsx + 7 * k, rty + lay9[i2][0] - ph2 / 2,
+                                rsx + rsw - 7 * k,
+                                rty + lay9[i2][0] + ph2 / 2))
             # 한마디 줄은 **알약 안쪽**에 둔다 — 밖으로 나가면 아래 줄과
             # 겹쳐 보인다 (제보). 이름은 그만큼 위로 올린다.
             # 알약 높이의 비율로 잡는다. 0.25 로 뒀더니 흰 알약 아래가
             # 색 알약 밖으로 삐져나왔다 (제보) — 더 위로, 더 얇게.
-            ny2 = yy2 - (rh2 * 0.20 if top9 else 0)
-            my2r = yy2 + rh2 * 0.19
-            cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
-                           font=uf(8, True), fill=ink2 or sub2)
+            ny2, my2r, _b9 = [rty + v for v in lay9[i2]]
+            mk2 = cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
+                                 font=uf(8, True), fill=ink2 or sub2)
+            if ct_rank_low[0] is None:
+                ct_rank_low[0] = mk2
             nit2 = cv.create_text(rsx + 27 * k, ny2, anchor="w", text="—",
                                   font=uf(8, True), fill=ink2 or ink)
             sit2 = cv.create_text(rsx + rsw - 20 * k, ny2, anchor="e",
@@ -25633,7 +26229,7 @@ class Mascot:
                 mbg2 = cv.create_line(0, -99, 0, -99, width=rh2 * 0.30,
                                       capstyle="round", fill="#ffffff",
                                       state="hidden")
-                mit2 = cv.create_text(rsx + 20 * k, my2r, anchor="w",
+                mit2 = cv.create_text(rsx + 33 * k, my2r, anchor="w",
                                       text="", font=uf(7, True),
                                       fill=self._shade(cd["fill"], 0.18))
                 pit2 = cv.create_text(0, -99, text="\u270e", font=uf(8),
@@ -25675,25 +26271,28 @@ class Mascot:
             win._ct_pen = {}
             win._ct_mbox = {}
             win._ct_mtxt = {}
+            cv.delete("ctpill")     # 이름 길이가 바뀌므로 매번 다시
             for i3, (nit3, sit3, mit3, pit3, mbg3, mbox)                     in enumerate(ct_rank_its):
                 if i3 < len(rows2):
                     b3, nm3, me3, ms3 = rows2[i3]
-                    cv.itemconfigure(nit3,
-                                     text=nm3 + (" ·나" if me3 else ""))
-                    cv.itemconfigure(sit3, text="%d" % b3)
+                    cv.itemconfigure(sit3, text="%d점" % b3)
+                    sb9 = cv.bbox(sit3)
+                    lim9 = ((sb9[0] if sb9 else rsx + rsw) - (rsx + 27 * k)
+                            - (24 * k if me3 else 10 * k))
+                    cv.itemconfigure(nit3, text=self._rank_name(
+                        cv, nm3, me3, uf(8, True), max(18 * k, lim9)))
+                    pv3 = None          # 보이는 펜 (알약이 감싼다)
                     if mit3 is not None:
-                        cv.itemconfigure(mit3, text=str(ms3 or "")[:24])
+                        cv.itemconfigure(mit3, text=self._fit_text(
+                            cv, ms3, uf(7, True), rsw - 42 * k))
                         if ms3:
                             win._ct_mbox[i3] = mbox
                             win._ct_mtxt[i3] = str(ms3)
-                            bm = cv.bbox(mit3)
-                            if bm and mbg3 is not None:
-                                yy8 = (bm[1] + bm[3]) / 2.0
-                                cv.coords(mbg3, bm[0] + 2, yy8,
-                                          min(bm[2] + 4, mbox[2] - 6), yy8)
-                                cv.itemconfigure(mbg3, state="normal")
-                                cv.tag_raise(mit3)
-                        elif mbg3 is not None:
+                            self._safe("rank_msg", self._rank_msg_draw,
+                                       cv, i3, mit3, "ctpill", rsx)
+                        # 흰 알약(mbg3)은 한마디가 색 알약 **안**에 있던
+                        # 시절의 것이다. 이제 아래 바깥으로 나왔으니 안 쓴다.
+                        if mbg3 is not None:
                             cv.itemconfigure(mbg3, state="hidden")
                     if pit3 is not None:
                         # 펜은 **내 줄에만** — 남의 한마디는 못 고친다
@@ -25702,10 +26301,17 @@ class Mascot:
                             cv.coords(pit3, bn[2] + 7 * k,
                                       (bn[1] + bn[3]) / 2.0)
                             cv.itemconfigure(pit3, state="normal")
+                            pv3 = pit3
                             win._ct_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
                                                bn[2] + 15 * k, bn[3] + 3 * k)
                         else:
                             cv.itemconfigure(pit3, state="hidden")
+                    # **알약은 맨 마지막에** — 펜까지 감싸야 한다.
+                    # 한마디는 일부러 뺀다 (요청).
+                    if i3 < len(ct_rank_box):
+                        self._safe("rank_pill", self._rank_pills, cv, k,
+                                   ct_rank_box[i3], (nit3, pv3), sit3, i3,
+                                   "ctpill", ct_rank_low[0] or nit3)
                 else:
                     cv.itemconfigure(nit3, text="—")
                     cv.itemconfigure(sit3, text="")
@@ -26875,8 +27481,6 @@ class Mascot:
         self._rr_soft(cv, BX, BY, bx1, by1, 16 * k,
                       fill=self._tint(cd["fill"], 0.80), outline=line,
                       width=4)
-        self._safe("g2_deco", self._cute_corner, cv, BX - 7 * k, BY - 7 * k,
-                   bx1 + 7 * k, by1 + 7 * k, k, self._tint(cd["fill"], 0.45))
         for x9 in range(self.G2_N):          # 빈 칸 — 한 번만 그린다
             for y9 in range(self.G2_N):
                 cx9, cy9 = cellxy(x9, y9)
@@ -27010,23 +27614,31 @@ class Mascot:
         cv.create_text(rsx + rsw / 2, ry0 + 18 * k, text="랭킹",
                        font=uf(9, True), fill=ink)
         g2_rank_its = []
-        rh2 = 34 * k
+        g2_rank_box = []            # 줄마다의 네모 (알약을 나중에 그린다)
+        g2_rank_low = [None]        # 랭킹에서 가장 밑에 있는 글자 (z순서 기준)
         rty = ry0 + 40 * k
+        lay9, ph2 = self._rank_lay(k, uf, self.G2_RANK_N,
+                                   self.RANK_MSG_TOP, ry1 - 12 * k - rty)
+        rh2 = ph2                      # 한마디 흰 알약 굵기 등에 쓰던 값
         for i2 in range(self.G2_RANK_N):
-            yy2 = rty + rh2 * (i2 + 0.5)
             fill2, ink2, mark2 = self._rank_style(i2)
             top9 = i2 < self.RANK_MSG_TOP
-            ny2 = yy2 - (rh2 * 0.20 if top9 else 0)
-            my2r = yy2 + rh2 * 0.19
-            if fill2:
-                self._rr_soft(cv, rsx + 7 * k, yy2 - rh2 / 2 + 1,
-                              rsx + rsw - 7 * k, yy2 + rh2 / 2 - 1,
-                              rh2 / 2, fill=fill2, outline=ink2, width=2)
-            cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
-                           font=uf(8, True), fill=ink2 or sub2)
+            ny2, my2r, _b9 = [rty + v for v in lay9[i2]]
+            # 알약은 여기서 안 그린다 — 이름 길이를 알아야 하므로
+            # `draw_rank` 에서 글자를 채운 뒤에 그린다.
+            # 오른쪽 끝을 더 안으로 (요청 — 랭킹 텍스트 폭 줄이기).
+            g2_rank_box.append((rsx + 7 * k, ny2 - ph2 / 2,
+                                rsx + rsw - 20 * k, ny2 + ph2 / 2))
+            # 표시(♥·2·3)는 이름보다 **먼저** 만들어지므로 z순서가 더
+            # 낮다. 알약을 이름 밑으로만 내리면 이 표시가 덮인다 —
+            # 그래서 첫 줄의 표시를 붙들어 두고 그것보다 밑으로 내린다.
+            mk2 = cv.create_text(rsx + 13 * k, ny2, anchor="w", text=mark2,
+                                 font=uf(8, True), fill=ink2 or sub2)
+            if g2_rank_low[0] is None:
+                g2_rank_low[0] = mk2
             nit2 = cv.create_text(rsx + 27 * k, ny2, anchor="w", text="—",
                                   font=uf(8, True), fill=ink2 or ink)
-            sit2 = cv.create_text(rsx + rsw - 20 * k, ny2, anchor="e",
+            sit2 = cv.create_text(rsx + rsw - 32 * k, ny2, anchor="e",
                                   text="", font=uf(9, True),
                                   fill=ink2 or ink)
             mit2 = pit2 = mbg2 = None
@@ -27034,7 +27646,7 @@ class Mascot:
                 mbg2 = cv.create_line(0, -99, 0, -99, width=rh2 * 0.30,
                                       capstyle="round", fill="#ffffff",
                                       state="hidden")
-                mit2 = cv.create_text(rsx + 20 * k, my2r, anchor="w",
+                mit2 = cv.create_text(rsx + 33 * k, my2r, anchor="w",
                                       text="", font=uf(7, True),
                                       fill=self._shade(cd["fill"], 0.18))
                 pit2 = cv.create_text(0, -99, text="\u270e", font=uf(8),
@@ -27045,24 +27657,30 @@ class Mascot:
         def draw_rank():
             rows2 = self._g2_board()
             win._g2_pen = {}
+            # 알약은 이름 길이에 맞춰 매번 다시 그린다 (이름이 바뀐다)
+            cv.delete("g2pill")
             for i3, (nit3, sit3, mit3, pit3, mbg3) \
                     in enumerate(g2_rank_its):
                 if i3 < len(rows2):
                     b3, nm3, me3, ms3 = rows2[i3]
-                    cv.itemconfigure(nit3,
-                                     text=nm3 + (" ·나" if me3 else ""))
-                    cv.itemconfigure(sit3, text="%d" % b3)
+                    cv.itemconfigure(sit3, text="%d점" % b3)
+                    sb9 = cv.bbox(sit3)
+                    # 이름은 점수 앞에서 넉넉히 멈춘다 (요청 — 폭을 더
+                    # 줄인다). 예전에는 점수 코앞까지 붙어 답답했다.
+                    lim9 = ((sb9[0] if sb9 else rsx + rsw) - (rsx + 27 * k)
+                            - (30 * k if me3 else 16 * k))
+                    cv.itemconfigure(nit3, text=self._rank_name(
+                        cv, nm3, me3, uf(8, True), max(18 * k, lim9)))
+                    pv3 = None          # 보이는 펜 아이콘 (알약이 감싼다)
                     if mit3 is not None:
-                        cv.itemconfigure(mit3, text=str(ms3 or "")[:22])
-                        bm = cv.bbox(mit3)
-                        if ms3 and bm and mbg3 is not None:
-                            yy8 = (bm[1] + bm[3]) / 2.0
-                            cv.coords(mbg3, bm[0] + 2, yy8,
-                                      min(bm[2] + 4, rsx + rsw - 18 * k),
-                                      yy8)
-                            cv.itemconfigure(mbg3, state="normal")
-                            cv.tag_raise(mit3)
-                        elif mbg3 is not None:
+                        cv.itemconfigure(mit3, text=self._fit_text(
+                            cv, ms3, uf(7, True), rsw - 66 * k))
+                        if ms3:
+                            self._safe("rank_msg", self._rank_msg_draw,
+                                       cv, i3, mit3, "g2pill", rsx)
+                        # 흰 알약(mbg3)은 한마디가 색 알약 **안**에 있던
+                        # 시절의 것이다. 이제 아래 바깥으로 나왔으니 안 쓴다.
+                        if mbg3 is not None:
                             cv.itemconfigure(mbg3, state="hidden")
                     if pit3 is not None:
                         bn = cv.bbox(nit3) if me3 else None
@@ -27070,10 +27688,19 @@ class Mascot:
                             cv.coords(pit3, bn[2] + 7 * k,
                                       (bn[1] + bn[3]) / 2.0)
                             cv.itemconfigure(pit3, state="normal")
+                            pv3 = pit3
                             win._g2_pen[i3] = (bn[2] + 1 * k, bn[1] - 3 * k,
                                                bn[2] + 15 * k, bn[3] + 3 * k)
                         else:
                             cv.itemconfigure(pit3, state="hidden")
+                    # **알약은 맨 마지막에.** 펜 아이콘이 이름 뒤에 놓인
+                    # 뒤라야 그것까지 감쌀 수 있다. 한마디(mit3)는 일부러
+                    # 뺀다 — 알약이 한마디까지 늘어나면 안 된다 (요청).
+                    if i3 < len(g2_rank_box):
+                        self._safe("rank_pill", self._rank_pills, cv, k,
+                                   g2_rank_box[i3], (nit3, pv3), sit3, i3,
+                                   "g2pill",
+                                   g2_rank_low[0] or g2_rank_its[0][0])
                 else:
                     cv.itemconfigure(nit3, text="—")
                     cv.itemconfigure(sit3, text="")
@@ -27826,8 +28453,8 @@ class Mascot:
             who = next((q for q in self.room_people
                         if q.get("slot") == to), None)
             if to == self.char or who is None                     or float(who.get("p") or 0) < 1.0:
-                self._room_toast = ("목표를 다 채운 사람에게만 칭찬할 수 "
-                                    "있어요", time.time())
+                self._room_toast = ("게이지를 100% 채운 사람에게만 칭찬할 "
+                                    "수 있어요", time.time())
                 return
         # 간식은 그림 하나를 골라 신호에 실어 보낸다 — 받는 쪽도 같은 것을 본다
         extra = self._snack_pick(time.time() * 1000) if kind == "snack" else ""
@@ -29068,10 +29695,22 @@ class Mascot:
             else:
                 # 남의 것 — 단추를 띄우기만. **한 번에 안 보낸다** (퀸시 제보)
                 self._goal_open = None if self._goal_open == slot2 else slot2
+                self._goal_due = False
+            self._safe("room_draw", self._room_draw)
+            return
+        for slot2, dbox in list(getattr(self, "_due_hits", {}).items()):
+            # 마감 말풍선 — 눌러서 채찍질 (요청). 목표 말풍선보다 뒤에
+            # 본다 — 둘이 겹치면 목표 쪽이 더 또렷한 뜻이다.
+            if not (dbox[0] <= e.x <= dbox[2] and dbox[1] <= e.y <= dbox[3]):
+                continue
+            same = (self._goal_open == slot2 and self._goal_due)
+            self._goal_open = None if same else slot2
+            self._goal_due = not same
             self._safe("room_draw", self._room_draw)
             return
         if self._goal_open:            # 딴 데를 누르면 단추를 접는다
             self._goal_open = None
+            self._goal_due = False
             self._safe("room_draw", self._room_draw)
         for x0, y0, x1, y1, slot, sleeping in self._room_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
