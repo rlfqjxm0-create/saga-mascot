@@ -12311,9 +12311,9 @@ class Mascot:
         줄바꿈이 들어 있으면 첫 줄이 제목이다. 없으면 첫 문장을 제목으로
         삼는다 — 배포할 때 첫 문장을 '무엇이 생겼는지'로 쓰는 관습에 맞춘 것.
 
-        굵게 표시(`**...**`)는 **여기서 떼어 낸다.** 안 떼면 별표가 글에
-        그대로 보인다 (팝업에서 실제로 그랬다). 제목은 어차피 굵은 글꼴로
-        그리므로 표시가 없어도 뜻이 산다.
+        굵게 표시(`**...**`)는 부르는 쪽(팝업 layout)이 미리 떼어 낸다 —
+        굵은 구간을 되짚어 **진짜 굵게** 그리기 위해서다. 여기서도 혹시
+        남아 있으면 떼어 첫 문장 자르기가 별표에 걸리지 않게 한다.
         """
         s = str(note).replace("**", "").strip()
         if "\n" in s:
@@ -12378,6 +12378,7 @@ class Mascot:
 
         F_TITLE = self._uf(10, True)
         F_BODY = self._uf(9)
+        F_BODY_B = self._uf(9, True)      # 본문 안의 `**굵게**`
         ROW_T, ROW_B = u(25), u(21)
         GAP_TB, GAP_ITEM = u(10), u(16)   # 제목→본문, 항목→항목
 
@@ -12405,24 +12406,68 @@ class Mascot:
                 out.append(cur)
             return out
 
+        def md_plain(text):
+            """`**굵게**` 를 뗀 글과 굵은 구간 [(시작, 끝), …]."""
+            out, spans, bold, n = [], [], False, 0
+            for part in str(text).split("**"):
+                if part:
+                    if bold:
+                        spans.append((n, n + len(part)))
+                    out.append(part)
+                    n += len(part)
+                bold = not bold
+            return "".join(out), spans
+
+        def runs_of(line, base, spans):
+            """그 줄을 (글, 굵기) 조각으로 (base = 줄이 원문에서 시작한 자리)."""
+            if not spans:
+                return [(line, False)]
+            out, i, L = [], 0, len(line)
+            while i < L:
+                bo = any(a <= base + i < b for a, b in spans)
+                j = i + 1
+                while j < L and any(a <= base + j < b
+                                    for a, b in spans) == bo:
+                    j += 1
+                out.append((line[i:j], bo))
+                i = j
+            return out
+
         def layout(notes):
-            """(종류, 글자) 목록과 전체 높이."""
+            """(종류, 조각목록) 과 전체 높이. 조각은 (글, 굵기)."""
             inner = W - PAD * 2 - u(46)
             rows, h = [], u(14)
             for i, note in enumerate(notes):
                 if i:
-                    rows.append(("gap", ""))
+                    rows.append(("gap", []))
                     h += GAP_ITEM
-                title, body = self._note_split(note)
-                for j, t in enumerate(wrap_one(title, F_TITLE, inner)):
-                    rows.append(("title" if j == 0 else "title2", t))
-                    h += ROW_T
+                plain, spans = md_plain(note)
+                title, body = self._note_split(plain)
+
+                def add(kind, txt, font, rowh, start):
+                    """줄바꿈한 뒤 줄마다 굵은 구간을 되짚어 넣는다."""
+                    pos = start
+                    hh = 0
+                    for j2, t2 in enumerate(wrap_one(txt, font, inner)):
+                        try:
+                            pos = plain.index(t2, pos)
+                        except ValueError:
+                            pass
+                        k2 = kind if (j2 == 0 or kind != "title") else "title2"
+                        rows.append((k2, runs_of(t2, pos, spans)))
+                        pos += len(t2)
+                        hh += rowh
+                    return hh
+
+                h += add("title", title, F_TITLE, ROW_T, 0)
                 if body:
-                    rows.append(("gap2", ""))
+                    rows.append(("gap2", []))
                     h += GAP_TB
-                    for t in wrap_one(body, F_BODY, inner):
-                        rows.append(("body", t))
-                        h += ROW_B
+                    try:
+                        bpos = plain.index(body, len(title))
+                    except ValueError:
+                        bpos = 0
+                    h += add("body", body, F_BODY, ROW_B, bpos)
             return rows, h + u(14)
 
         def render():
@@ -12520,12 +12565,19 @@ class Mascot:
                     self._oval(cv, PAD + u(16), ly + u(9), PAD + u(22),
                                    ly + u(15), fill=cd["fill"], outline="")
                 if kind in ("title", "title2"):
+                    # 제목은 통째로 굵으므로 조각을 다시 붙여 한 번에
                     cv.create_text(PAD + u(32), ly + u(12), anchor="w",
-                                   text=text, font=F_TITLE, fill=cd["text"])
+                                   text="".join(t2 for t2, _b in text),
+                                   font=F_TITLE, fill=cd["text"])
                     ly += ROW_T
                 else:
-                    cv.create_text(PAD + u(32), ly + u(10), anchor="w",
-                                   text=text, font=F_BODY, fill=cd["sub"])
+                    x9 = PAD + u(32)
+                    for t2, bo2 in text:
+                        f9 = F_BODY_B if bo2 else F_BODY
+                        cv.create_text(x9, ly + u(10), anchor="w", text=t2,
+                                       font=f9,
+                                       fill=cd["text"] if bo2 else cd["sub"])
+                        x9 += self._room_tw(cv, t2, f9)
                     ly += ROW_B
             cv.yview_moveto(0)
 
@@ -21134,12 +21186,12 @@ class Mascot:
         x1 = x0 + tw3 + dw + mw + 28 * k
         ny = ky0 + self.ROOM_GOAL_Y * k
         edge = self._tint(col, 0.35)
-        # 꼬리는 말풍선 **왼쪽**에 달고 **좌우반전** 한다 (요청).
-        # 꼬리는 원래 늘 왼쪽으로 기울어 있어서, 오른쪽 끝에 달면 기울기가
-        # 반대가 되어 어색했다.
+        # 꼬리는 말풍선 **오른쪽**에 (요청 — 캐릭터가 그쪽에 있다).
+        # 기울기도 오른쪽으로 뒤집는다(tail_dir=1) — 원래 꼬리는 늘 왼쪽으로
+        # 기울어 있어서, 그대로 오른쪽 끝에 달면 방향이 반대가 된다.
         self._rr_soft(cv, x0, ny - 15 * k, x1, ny + 15 * k, 14 * k,
                       fill="#ffffff", outline=edge, width=2,
-                      tail=(x0 + 16 * k, 9 * k), tail_dir=1)
+                      tail=(x1 - 16 * k, 9 * k), tail_dir=1)
         gx9 = x0 + 14 * k
         if dtxt:
             cv.create_text(gx9, ny, text=dtxt, font=fD, anchor="w",
@@ -24136,21 +24188,48 @@ class Mascot:
         tw = self._room_tw(cv, tag, font)
         return self._fit_text(cv, nm, font, max(10.0, avail - tw)) + tag
 
+    HEART_CACHE = 48         # 구워 둔 하트 장수 (크기·색 몇 가지뿐)
+
+    def _heart_photo(self, w, fill):
+        """매끈한 하트 한 장 — PIL 로 네 배에 그려 줄인다.
+
+        Tk 의 create_polygon 은 가장자리를 안 다듬어서 작은 하트가
+        계단처럼 깨진다 (제보). 도형 셋으로 나눠 그리던 것을 한 장으로.
+        """
+        n = max(6, int(round(w)))
+        key = (n, str(fill))
+        cache = getattr(self, "_heart_cache", None)
+        if cache is None:
+            cache = self._heart_cache = {}
+        got = cache.get(key)
+        if got is None:
+            S = 4
+            N = n * S
+            im = Image.new("RGBA", (N, N), (0, 0, 0, 0))
+            d9 = ImageDraw.Draw(im)
+            r2 = N * 0.27
+            ty = N * 0.30
+            for sx9 in (-1, 1):
+                cx9 = N / 2.0 + sx9 * N * 0.23
+                d9.ellipse([cx9 - r2, ty - r2, cx9 + r2, ty + r2], fill=fill)
+            d9.polygon([(N * 0.03, ty + r2 * 0.32),
+                        (N * 0.97, ty + r2 * 0.32),
+                        (N / 2.0, N * 0.97)], fill=fill)
+            got = ImageTk.PhotoImage(im.resize((n, n), Image.LANCZOS))
+            if len(cache) > self.HEART_CACHE:      # 오래된 절반만 (지뢰 18)
+                for k9 in list(cache)[:self.HEART_CACHE // 2]:
+                    cache.pop(k9, None)
+            cache[key] = got
+        return got
+
     def _rank_heart(self, cv, cx, cy, w, fill, tags):
         """한마디 앞의 작은 하트 — 순위 색으로 (요청).
 
-        글꼴의 ♥ 는 기계마다 높낮이가 달라 줄에서 떠 보인다 (노래
-        말풍선에서 겪었다). 도형으로 그린다.
+        글꼴의 \u2665 는 기계마다 높낮이가 달라 줄에서 떠 보인다 (노래
+        말풍선에서 겪었다). 그림으로 그린다.
         """
-        r2 = w * 0.27
-        ty = cy - w * 0.18
-        for sx9 in (-1, 1):
-            self._oval(cv, cx + sx9 * w * 0.23 - r2, ty - r2,
-                       cx + sx9 * w * 0.23 + r2, ty + r2,
-                       fill=fill, width=0, tags=tags)
-        cv.create_polygon(cx - w * 0.47, ty + r2 * 0.35,
-                          cx + w * 0.47, ty + r2 * 0.35,
-                          cx, cy + w * 0.52, fill=fill, width=0, tags=tags)
+        img = self._heart_photo(w, fill)
+        cv.create_image(cx, cy, image=img, anchor="center", tags=tags)
 
     def _rank_msg_draw(self, cv, i, mit, tag, x0):
         """한마디 줄 — 앞에 순위 색 하트를 놓는다. 글자가 없으면 안 그린다."""
