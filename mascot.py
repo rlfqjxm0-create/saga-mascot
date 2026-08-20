@@ -5043,6 +5043,7 @@ class Mascot:
         self._goal_hits = {}        # 목표 말풍선 누를 자리 {slot: (상자, 갈래)}
         self._goal_open = None      # 지금 '보낼까요?' 아이콘이 뜬 사람
         self._goal_act = None       # 그 아이콘 자리 (상자, slot, 갈래)
+        self._goal_recv_at = {}     # 칭찬·채찍질을 마지막으로 받은 때
         self._snack_list = None          # 간식 그림 이름들 (첫 사용 때 읽는다)
         self._fail_why = {}              # 구역별 마지막 실패 이유
         self._tick_fail = 0              # 타이머 셈이 터진 횟수 (진단용)
@@ -27689,8 +27690,13 @@ class Mascot:
                   "poke": (5, 10.0), "cheer": (5, 10.0),
                   "blanket": (5, 10.0), "snack": (3, 30.0),
                   "praise": (3, 30.0),
-                  # 남의 목표를 눌러 보내는 것 — 성가시게 하는 쪽이라 뜸하게
-                  "gpraise": (3, 30.0), "gwhip": (2, 60.0)}
+                  # 남의 목표를 눌러 보내는 것 — **10분에 한 번** (요청).
+                  # 표의 수는 '몇 번까지'가 아니라 **n-1 번까지**다
+                  # (`len(keep) >= n - 1` 로 막는다). 그래서 한 번은 2 다.
+                  # 1 로 두면 `len >= 0` 이라 아예 못 보낸다 — 함정.
+                  "gpraise": (2, 600.0), "gwhip": (2, 600.0)}
+    GOAL_KINDS = ("gpraise", "gwhip")   # 목표에 붙는 반응 (칭찬·채찍질)
+    GOAL_RECV_GAP = 600.0               # 받는 쪽 — 보낸 사람과 무관하게
     SEND_ALL = (10, 10.0)    # 한 사람에게 종류를 바꿔 가며 쏟아붓는 것도 막는다
 
     def _send_ok(self, kind, to=None):
@@ -27719,7 +27725,12 @@ class Mascot:
         key = (who, kind)
         keep = [t for t in times.get(key, []) if now - t < win]
         times[key] = keep
-        label = dict((b, a) for a, b, _c in self.ROOM_BTN).get(kind, "반응")
+        label = dict((b, a) for a, b, _c in self.ROOM_BTN).get(kind, "")
+        if not label:
+            # 아래 단추에 없는 것(칭찬·채찍질)은 제 이름으로 말해 준다 —
+            # 안 그러면 '반응은 잠깐 쉬었다가' 라고만 나온다
+            got9 = [v[0] for v in self.GOAL_ACT.values() if v[3] == kind]
+            label = got9[0] if got9 else "반응"
         if len(keep) >= n - 1:
             self._room_toast = ("%s 잠깐 쉬었다가 눌러 주세요"
                                 % _josa(label, "은/는"), now)
@@ -27763,6 +27774,16 @@ class Mascot:
         got[key] = keep
         if len(keep) >= n - 1:
             return False
+        # 칭찬·채찍질은 **보낸 사람과 무관하게** 10분에 한 번만 받는다
+        # (요청). 사람별로만 세면 여러 친구가 잇달아 눌렀을 때 놀람
+        # 연출이 연속으로 터진다.
+        if kind in self.GOAL_KINDS:
+            at = getattr(self, "_goal_recv_at", None)
+            if not isinstance(at, dict):
+                at = self._goal_recv_at = {}
+            if now - float(at.get(kind, 0.0)) < self.GOAL_RECV_GAP:
+                return False
+            at[kind] = now
         keep.append(now)
         return True
 
