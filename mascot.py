@@ -17678,6 +17678,9 @@ class Mascot:
                     self._safe("sent_add", self._sent_add, to)
         people, events = self.room_net.drain()
         if people:
+            # 검사용 임시 캐릭터는 걸러 낸다 — 남의 홈에 '환경음검사'·
+            # '슬라임검사'·'까만 고양이'로 떠 있었다 (제보)
+            people = [q for q in people if self._slot_ok(q.get("slot"))]
             self.room_people = people
             # **그림은 도착한 자리에서 받아 둔다.** 그리기에 매달면 안 된다 —
             # 다시 그리기 열쇠에는 해시만 있어서, 해시가 그대로인 채 그림만
@@ -17708,6 +17711,18 @@ class Mascot:
     def _room_who_path(self):
         return os.path.join(self.state_dir, ".room_who.json")
 
+    # 검사가 만든 임시 캐릭터가 진짜 방에 앉는 일이 있었다 — 남의 홈에
+    # '환경음검사'·'슬라임검사'·'까만 고양이'(슬롯 이름이 그냥 `parts`)로
+    # 보였다 (제보). 슬롯 이름만 보고 걸러 낸다.
+    #   · `parts_<이름>` 꼴이 아니면 캐릭터가 아니다
+    #   · 이름에 'test' 가 들어가면 검사용이다
+    # **CHARS 에 있는지로 거르지 않는다** — 새 캐릭터를 배포한 날, 아직
+    # 다시 켜지 않은 친구에게 그 사람이 통째로 안 보이게 된다.
+    @staticmethod
+    def _slot_ok(slot):
+        s = str(slot or "")
+        return (s.startswith("parts_") and len(s) > 6 and "test" not in s)
+
     def _room_who_get(self):
         """마지막으로 본 남들의 레벨·칭호 — 안 켠 자리에 계속 보여 준다.
 
@@ -17722,6 +17737,9 @@ class Mascot:
             got = _load_json(self._room_who_path(), {})
             if not isinstance(got, dict):
                 got = {}
+            # 이미 담긴 검사용 자리는 여기서 지운다 (스스로 낫는다)
+            for k9 in [k for k in got if not self._slot_ok(k)]:
+                got.pop(k9, None)
             self._room_who = got
         return got
 
@@ -17865,8 +17883,8 @@ class Mascot:
         _now9 = time.time()
         for q in people or []:
             slot = str(q.get("slot") or "")
-            if not slot or q.get("off"):
-                continue
+            if not slot or q.get("off") or not self._slot_ok(slot):
+                continue          # 검사용 임시 캐릭터는 담지 않는다
             lv = int(q.get("lv") or 0)
             if lv <= 0:
                 continue
@@ -29453,7 +29471,7 @@ class Mascot:
         seen = {self.char}
         for q in (self.room_people or []):
             slot = str(q.get("slot") or "")
-            if not slot or slot in seen:
+            if not slot or slot in seen or not self._slot_ok(slot):
                 continue
             seen.add(slot)
             w = who.get(slot) or {}
@@ -29856,13 +29874,15 @@ class Mascot:
                                text=self._fit_text(
                                    cv, nm + ("·나" if mine else ""),
                                    uf(9, True), RW - int(120 * k)),
-                               font=uf(9, True), fill=ink, tags="kkrank")
+                               font=uf(9, True),
+                               # 판을 낸 사람은 눌러 볼 수 있다 — 이름을
+                               # 진하게 두어 누를 수 있음을 알린다
+                               fill=(ink if kd else self._tint(ink, 0.42)),
+                               tags="kkrank")
                 if solved:
-                    s9 = int(kd.get("s") or 0)
-                    tail = "%d/%d · %s" % (
-                        int(kd["n"]), self.KK_TRY,
-                        ("%d분%02d초" % (s9 // 60, s9 % 60)) if s9 >= 60
-                        else "%d초" % s9)
+                    # 걸린 시간은 안 적는다 — 빨리 푸는 놀이가 아니다 (요청).
+                    # 차례도 횟수로만 정한다.
+                    tail = "%d/%d" % (int(kd["n"]), self.KK_TRY)
                 elif kd:
                     tail = "실패"
                 else:
@@ -29932,12 +29952,17 @@ class Mascot:
                 st["copy"] = None
 
         def draw_card(kd, nm, mine, yy):
-            """펼친 카드 — 몇 번 만에·언제, 그리고 한마디.
+            """펼친 카드 — 색깔판과 몇 번 만에·언제, 그리고 한마디.
 
-            색깔판(작은 그리드)은 **일부러 없다** (요청). 칸이 작아 무슨
-            뜻인지 안 읽히고, 홈에서 이미 좁은 자리를 더 좁혔다.
+            **등수와 상관없이 판을 낸 사람은 모두 볼 수 있다** (요청).
+            누를 수 있는 줄은 `has=bool(kd)` 로 정해지므로 실패한 사람도
+            들어간다. 낱말은 어디에도 안 담긴다 — 색깔판만 오간다.
             """
-            hh = int(20 * k) + int(24 * k)
+            pat = str(kd.get("g") or "")
+            n9 = max(0, len(pat) // self.KK_N)
+            bs = 10 * k
+            gap9 = 2 * k
+            hh = int(20 * k) + n9 * (bs + gap9) + int(24 * k)
             rr(RX + int(14 * k), yy, RX + RW - int(14 * k), yy + hh,
                int(8 * k), fill=self._tint(cd["fill"], 0.94),
                outline=edge, width=1, tags="kkrank")
@@ -29955,7 +29980,18 @@ class Mascot:
                                text=str(kd["t"]) + ("에 맞힘" if solv9
                                                     else "에 끝남"),
                                font=uf(8, True), fill=sub2, tags="kkrank")
-            gy = yy + int(18 * k)
+            # 색깔판 — 그 사람이 어떻게 좁혀 갔는지. 여섯 칸이 한 줄이다.
+            gy = yy + int(22 * k)
+            for r9 in range(n9):
+                gx = RX + int(24 * k)
+                for c9 in range(self.KK_N):
+                    v9 = pat[r9 * self.KK_N + c9: r9 * self.KK_N + c9 + 1]
+                    rr(gx, gy, gx + bs, gy + bs, int(2 * k),
+                       fill=KEYCOL.get(v9, "#e6e2e8"), outline="",
+                       tags="kkrank")
+                    gx += bs + gap9
+                gy += bs + gap9
+            gy += int(2 * k)
             msg = (self._rank_msg_get("kkd") if mine
                    else self._who_msg(self._room_who_get().get(
                        st.get("open")) or {}, "kkd"))
