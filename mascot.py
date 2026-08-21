@@ -5489,6 +5489,49 @@ class Mascot:
                   "jitter": 0.3},                            # 천사 날개
     }
 
+    def _prop_delta(self):
+        """소품 좌표를 지금 입은 옷에 맞추는 어긋남 (dx, dy).
+
+        패션 슬롯에 소품이 없으면 **기본 폴더의 layout** 에서 좌표를
+        가져다 쓴다. 그런데 슬롯마다 파츠가 통째로 옮겨져 있어서
+        (준사 메이드복은 전부 111px 위) 그대로 쓰면 **소품만 그만큼
+        아래로 처진다** (제보: '소품이 전부 아래로 내려가 있어').
+
+        같은 이름을 가진 파츠들의 어긋남 **중앙값**으로 맞춘다. 평균이
+        아니라 중앙값인 이유는, 머리·책상처럼 그림 자체가 슬롯마다 다른
+        것이 섞여 있어서다 (준사 머리는 64px 더 큰 그림이라 -175 로
+        나온다 — 나머지 열은 모두 -111 이다).
+        """
+        src = self._prop_layout
+        if src is self.layout or not isinstance(src, dict):
+            return 0.0, 0.0
+        dxs, dys = [], []
+        for k9, v9 in self.layout.items():
+            if not (isinstance(v9, dict) and isinstance(v9.get("pos"), list)):
+                continue
+            w9 = src.get(k9)
+            if not (isinstance(w9, dict) and isinstance(w9.get("pos"), list)):
+                continue
+            dxs.append(v9["pos"][0] - w9["pos"][0])
+            dys.append(v9["pos"][1] - w9["pos"][1])
+        if not dxs:
+            return 0.0, 0.0
+        dxs.sort()
+        dys.sort()
+        i9 = len(dxs) // 2
+        return float(dxs[i9]), float(dys[i9])
+
+    def _prop_at(self, name):
+        """그 소품의 layout 한 칸 — 지금 옷에 맞게 옮겨 둔 사본.
+
+        원본을 고치면 안 된다 (다음에 다른 옷으로 갈아입을 때 또 옮긴다).
+        """
+        got = dict(self._prop_layout[name])
+        dx9, dy9 = self._prop_delta()
+        if (dx9 or dy9) and isinstance(got.get("pos"), list):
+            got["pos"] = [got["pos"][0] + dx9, got["pos"][1] + dy9]
+        return got
+
     def _load_prop_back(self, pick, s, pil_cache):
         """뽑힌 소품에 '몸 뒤에 그리는 짝'이 있으면 같이 읽는다.
 
@@ -5505,7 +5548,7 @@ class Mascot:
         if s != 1.0:
             im = im.resize((max(1, round(im.width * s)),
                             max(1, round(im.height * s))), Image.LANCZOS)
-        self.layout["prop_back"] = self._prop_layout[name]
+        self.layout["prop_back"] = self._prop_at(name)
         pil_cache["prop_back"] = im
         self.im["prop_back"] = ImageTk.PhotoImage(self._hard(im))
         self.has["prop_back"] = True
@@ -5678,14 +5721,15 @@ class Mascot:
         # (레냥 prop10) 이 그렇다. 예전에는 여기서 KeyError 로 죽어
         # 캐릭터가 아예 안 떴다.
         if pick and pick in self._prop_layout and os.path.exists(front):
-            self.layout["prop"] = self._prop_layout[pick]
+            # 다른 옷의 layout 에서 가져온 좌표는 지금 옷에 맞게 옮긴다
+            self.layout["prop"] = self._prop_at(pick)
             im = Image.open(front).convert("RGBA")
             if s != 1.0:
                 im = im.resize((max(1, round(im.width * s)),
                                 max(1, round(im.height * s))), Image.LANCZOS)
             # 소품도 머리 안에만 있으면 이분화하지 않는다 (안경테 계단 방지)
             covered = self._covered_by_base(
-                self._prop_layout[pick],
+                self.layout["prop"],
                 os.path.join(self.prop_dir, f"{pick}.png"))
             pil_cache["prop"] = im
             self.im["prop"] = ImageTk.PhotoImage(im if covered
@@ -27432,7 +27476,15 @@ class Mascot:
             y = int((e.y - BY) // cell)
             if not (0 <= x < self.CT_COLS and 0 <= y < self.CT_ROWS):
                 return
-            hits = self._safe_str(self._ct_click, g2, x, y)
+            # **`_safe_str` 로 감싸면 안 된다.** 그 함수는 `값 or ""` 라
+            # 빈 목록([])까지 빈 글자로 바꾼다 — '틀렸다'가 곧 [] 인데
+            # 그러면 아래 `hits == []` 가 한 번도 참이 안 돼서 **오답
+            # 소리가 영영 안 났다** (제보). 지뢰 63 의 변형이다.
+            try:
+                hits = self._ct_click(g2, x, y)
+            except Exception:
+                self._log_error("ct_click")
+                return
             if hits:
                 for (p2, _s2) in hits:
                     it2 = (getattr(win, "_ct_tiles", {}) or {}).pop(p2, None)
@@ -29044,7 +29096,8 @@ class Mascot:
                           "#f3c9cf" if mute9 else "#f7f2ee",
                           "#8c4351" if mute9 else P["sub"]))
             # 사용법 — 알림 끄기 아래에 (요청). 화면에서는 맨 아래다.
-            rows9.append(("?", "help", "#eef3fa", "#5b6f8c"))
+            # '?' 한 글자는 무엇인지 안 읽혀서 이름을 적는다 (요청).
+            rows9.append(("설명서", "help", "#eef3fa", "#5b6f8c"))
             # 위로 펼쳐지므로 **거꾸로** 그린다 — 그래야 화면에서 위에서
             # 아래로 목록 차례(미니게임 → 꾸미기 → 알림 끄기)가 된다
             yy9 = by
@@ -29055,10 +29108,7 @@ class Mascot:
                            outline="#ffffff", width=3.5, shadow=True,
                            tags=("dyn", "ui"))
                 cv.create_text(gx0 + bw / 2, yy9 + bw / 2, text=label9,
-                               justify="center",
-                               # '?' 한 글자는 크게 (두 줄짜리와 같은 크기로
-                               # 두면 동그라미 안이 텅 비어 보인다)
-                               font=self._uf(13 if label9 == "?" else 7, True),
+                               justify="center", font=self._uf(7, True),
                                fill=ink9, tags=("dyn", "ui"))
                 self._room_menu_items.append(
                     ((gx0, yy9, gx0 + bw, yy9 + bw), act9))
