@@ -29235,7 +29235,39 @@ class Mascot:
         g["streak"] = max(0, int(g.get("streak") or 0))
         g["played"] = max(0, int(g.get("played") or 0))
         g["wins"] = max(0, int(g.get("wins") or 0))
+        self._kk_drop_stale(g)
         return g
+
+    def _kk_drop_stale(self, g):
+        """낱말이 바뀌었으면 그날 판을 무효로 돌린다.
+
+        낱말 목록이나 씨앗(KK_SALT)이 바뀌면 저장된 줄의 색이 지금 답과
+        안 맞는다 — 화면에는 **옛 답으로 매긴 색**과 새 답 안내가 섞여
+        나온다(실제로 겪음). 다시 그리는 것으로는 못 고친다. 그 판은
+        없던 것으로 하고 셈까지 되돌린다.
+        """
+        rows = g.get("rows") or []
+        if not rows:
+            return
+        ans = self._kk_jamo(self._kk_answer(g.get("day")))
+        if not ans:
+            return
+        if all(self._kk_judge(str(q.get("j") or ""), ans)
+               == str(q.get("m") or "") for q in rows):
+            return
+        if str(g.get("last") or "") == str(g.get("day") or ""):
+            g["played"] = max(0, int(g.get("played") or 0) - 1)
+            if int(g.get("done") or 0) == 1:
+                g["wins"] = max(0, int(g.get("wins") or 0) - 1)
+                g["streak"] = max(0, int(g.get("streak") or 0) - 1)
+                d9 = list(g.get("dist") or [])
+                i9 = len(rows) - 1
+                if 0 <= i9 < len(d9):
+                    d9[i9] = max(0, int(d9[i9] or 0) - 1)
+                    g["dist"] = d9
+            g["last"] = ""
+        g["rows"], g["cur"], g["done"] = [], "", 0
+        g["t0"], g["secs"], g["at"] = 0.0, 0, ""
 
     def _kk_save(self, g):
         if g is None:

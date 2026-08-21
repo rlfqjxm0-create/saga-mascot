@@ -1,14 +1,14 @@
 {
- "version": 1787304282,
+ "version": 1787304968,
  "files": {
-  "mascot.py": "aababd882f9ab547d0b68474873749221b4503ef7a52cc022fc948f32e4c5750",
+  "mascot.py": "2a1de8238569e1fc656ff4e83416455e9998682c21b0fd8f97f65d29a012e9a3",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
   "parts_saga/arm_right_typing.png": "8e2744dd074d326146bd1ea39d0a36490125f9918e466f153be74090638d517b",
   "parts_saga/back.png": "be4f06d5687474c90299d598141a8970c86b8965597343611a098660b6103b62",
   "parts_saga/body_open.png": "65378a26603924fb58d7a015758c831f25af0a025ee5df4e483ec5d2124eef2f",
-  "parts_saga/config.json": "fce0b314f62f00d2fd6ae9d42eddf34df404a73b95f048db565847c9f7305543",
+  "parts_saga/config.json": "81c1f338bb11faf01a127a22d6102fd49e35d2d3c1c0c4a8df847803b46e333f",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "6c54dfa18470e2a17e6080f2b4830a36e3dd49ff751a5c79403c1daa8cb5e5f1",
   "parts_saga/eyes_closed.png": "10b1932ea6dc355094a470d1b4bda98e181b98134986dc0827d9c63d6f2a9143",
@@ -169,6 +169,12 @@
   "parts_saga/sounds/gameover/over1.wav": "98f0544212192e5c718ef3fbe3594f427de5c49b1fdfd59cb7ad65246dbcabb2",
   "parts_saga/sounds/Gateron Black Ink - Revolt/config.json": "92b71f492f667f1591a1aaa3bd14c758220e9cbafd649dcc399bd75c2a271168",
   "parts_saga/sounds/Gateron Black Ink - Revolt/Gateron Black.wav": "7e743b05e2c521523bb173cc68c145b628045acbc485599a8d39d57095d0c432",
+  "parts_saga/sounds/kkodle/bad/bad_1.wav": "860c89186528b1fa1635a1d079950f826982c7ca2dd24de4aac56e23472bfaf3",
+  "parts_saga/sounds/kkodle/key/key_1.wav": "67cca67ccac95c5abd13f264643cd9270bb42692b2bbc8a63c1b58072f484fed",
+  "parts_saga/sounds/kkodle/key/key_2.wav": "adae72cd46d8eb3bd76230bd28f2ac37a56b7b42636dabbbf9d140495f82166c",
+  "parts_saga/sounds/kkodle/key/key_3.wav": "2ff5e36bef5b78fdb35ca346243013ed374d56a092f22112544f06cf0e5b8fe8",
+  "parts_saga/sounds/kkodle/win/win_1.wav": "f9e30e6948e2690d589b86964f1c145cf39b7988a3aef5ba0a93921f6f519b93",
+  "parts_saga/sounds/kkodle_bgm/bgm.wav": "b217c5ff36fcfbdacb7b114b4fbc0ac5c0dfd322cb00dab80538493d06bbecc7",
   "parts_saga/sounds/link65 gold/config.json": "6f6225a5b64efdc73c76039d0081263f6dc402979af3a988c351161f64c01e88",
   "parts_saga/sounds/link65 gold/link65gold-back1.wav": "36ceead79ac1f1d56314d8bccf407ca60c8bfc6b80c48b7b9a5df46e7eacedc2",
   "parts_saga/sounds/link65 gold/link65gold-enter1.wav": "cba282de33d5398e593505150f1f960d0beec1d3e7b8964cc9bc4ca348c010a1",
@@ -445,11 +451,13 @@
   "parts_saga/sounds/whip/whip1.wav": "31c6ef2b789e3713eda0e61ba532246be05c5144affc53e64fe0f06795b7b528",
   "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
-  "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
+  "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
+  "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "**랭킹 한마디를 게임마다 따로 쓸 수 있습니다.** 수박게임에 남긴 글이 컬러타일·2048에도 똑같이 떠 있던 문제예요. 옛날에 한마디가 하나뿐이던 시절의 값을 다른 게임까지 물려 쓰고 있었습니다 — 이제 게임마다 제 글만 뜹니다",
-  "**홈에서 미니게임을 펼치면 누를 때까지 접히지 않습니다.** 게임이 늘면서 칸이 길어져, 겨냥하다 마우스가 조금만 벗어나도 접혀 버렸어요. 이제 다른 곳을 누를 때에만 접힙니다",
-  "**수박게임 아이콘 색을 '미니게임' 단추와 갈랐습니다.** 둘 다 연두라 어느 것이 무엇인지 알아보기 어려웠어요"
+  "**미니게임에 '꼬들'이 생겼습니다.** 두 글자 낱말을 자모 여섯 칸으로 풀어 여섯 번 안에 맞히는 놀이예요 (초록=자리까지 맞음, 노랑=낱말엔 있지만 자리가 다름). 자판은 두벌식 그대로라 한/영을 안 바꿔도 되고, 새벽 6시에 새 낱말로 바뀝니다",
+  "**모두가 같은 낱말을 풉니다.** 창 오른쪽 '오늘의 기록'에 친구들이 몇 번 만에·언제 맞혔는지 모여요. 차례는 걸린 시간이 아니라 **적은 횟수**로 정해지고, 같으면 먼저 끝낸 사람이 위입니다. 줄을 누르면 그 사람 카드가 펼쳐지고, 제 줄에서는 한마디를 남길 수 있어요",
+  "**랭킹 한마디를 게임마다 따로 쓸 수 있습니다.** 수박게임에 남긴 글이 컬러타일·2048에도 똑같이 떠 있던 문제예요 — 옛날에 한마디가 하나뿐이던 시절의 값을 다른 게임까지 물려 쓰고 있었습니다",
+  "**홈에서 미니게임을 펼치면 누를 때까지 접히지 않습니다.** 게임이 늘면서 칸이 길어져, 겨냥하다 마우스가 조금만 벗어나도 접혀 버렸어요. 수박게임 아이콘 색도 '미니게임' 단추와 갈라 두었습니다"
  ]
 }
