@@ -4987,6 +4987,7 @@ class Mascot:
         self.ctsnd = None            # 컬러타일 {"pop":…} (없으면 수박게임 것)
         self.oversnd = None          # 게임이 끝날 때 (게임 공용)
         self.g2snd = None            # 2048 합체음 {단계: 소리}
+        self.kksnd = None            # 꼬들 {"key":…, "bad":…, "win":…}
         self._pen_playing = False
         self._pen_release_t = None
         # 그레인 펜 소리 — 획 감지·재생은 마우스 콜백(_on_click/_on_move)에서,
@@ -5249,6 +5250,15 @@ class Mascot:
         self._pl_open = False        # 모두의 플레이리스트 패널 펼침
         self._pl_on = False          # 플레이리스트로 재생 중인가
         self._pl_i = -1              # 지금 트는 곡 번호
+        # 꼬들 (한국어 워들)
+        self._kk = None              # 오늘 판
+        self._kk_winref = None       # 창
+        self._kk_after = None        # 프레임 예약 (닫을 때 회수 — 지뢰 20)
+        self._kk_imgs = {}           # 그림 캐시 (상한 있음)
+        self._kk_st = None           # 창 안의 누를 자리 (지뢰 13)
+        self._kk_bgm = None          # 꼬들 브금 (창이 떠 있는 동안만)
+        self._kk_wordset = None      # 낱말 목록 (처음 쓸 때 한 번)
+        self._kk_help_win = None
         self._yt_want_vid = ""       # 틀어 달라고 청해 둔 영상 (지뢰 14)
         self._pl_stuck_at = 0.0      # 다시 청한 시각
         self._pl_url = ""            # 지금 트는 곡 주소
@@ -6532,6 +6542,21 @@ class Mascot:
                 except Exception:
                     pass
             self.g2snd = got or None
+        # 꼬들 — 글자 입력음·오답·정답. 폴더가 없는 캐릭터는 조용히
+        # 물러난다 (지뢰 76 — 코드만 넣고 파일을 안 넣으면 안 난다).
+        kk_dir = os.path.join(self.dir, "sounds", "kkodle")
+        if os.path.isdir(kk_dir):
+            vol = float(self.us.get("poke_volume", 40))
+            got = {}
+            for nm in ("key", "bad", "win"):
+                one = os.path.join(kk_dir, nm)
+                if not os.path.isdir(one):
+                    continue
+                try:
+                    got[nm] = PokeSound(one, volume=vol)
+                except Exception:
+                    pass
+            self.kksnd = got or None
         # 게임이 끝날 때 나는 소리 — 수박게임·컬러타일이 함께 쓴다
         ov_dir = os.path.join(self.dir, "sounds", "gameover")
         if os.path.isdir(ov_dir):
@@ -7349,9 +7374,21 @@ class Mascot:
             # 오류 기록도 안 남아서, 사람에게는 '그냥 꺼졌다'로만 보인다.
             # 거두는 이름이 클래스마다 다르다 — PenSound 는 stop(),
             # 나머지는 close(). 있는 쪽을 부른다.
+            for _nm9 in ("_kk_after",):     # 꼬들 프레임 예약 (지뢰 20)
+                try:
+                    if getattr(self, _nm9, None) is not None \
+                            and self._kk_winref is not None:
+                        self._kk_winref.after_cancel(getattr(self, _nm9))
+                except Exception:
+                    pass
+                try:
+                    setattr(self, _nm9, None)
+                except Exception:
+                    pass
             for _nm in ("pensnd", "pokesnd", "roomsnd", "whipsnd", "sparksnd",
                         "snacksnd", "snd", "_slime_snd", "pomosnd",
-                        "uisnd", "wgsnd", "ctsnd", "oversnd", "g2snd"):
+                        "uisnd", "wgsnd", "ctsnd", "oversnd", "g2snd",
+                        "kksnd"):
                 _s = getattr(self, _nm, None)
                 if isinstance(_s, dict):        # 뽀모도로처럼 여럿을 든 것
                     for _one in list(_s.values()):
@@ -9130,7 +9167,8 @@ class Mascot:
                 # 게임 창들도 센다. 예전에는 캐릭터 창들만 봐서, 게임 창에
                 # 밀린 대화 창은 '안 밀렸다'로 나왔다 (한마디 창 깜빡임의
                 # 진짜 이유 — 그래서 무조건 올리기를 넣었던 것이다).
-                for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref"):
+                for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref",
+                            "_kk_winref"):
                     w9 = getattr(self, nm9, None)
                     try:
                         if w9 is not None and w9 is not win \
@@ -17492,6 +17530,21 @@ class Mascot:
             out["ctb"] = self._ct_best()   # 컬러타일 최고 (0 = 지웠다)
         if not _load_failed(self._g2_path()):
             out["g2b"] = self._g2_best()   # 2048 최고 (0 = 지웠다)
+        # 꼬들은 '최고'가 아니라 **오늘 결과**다 — 날짜가 함께 실려 오고,
+        # 받는 쪽이 오늘 것만 쓴다. 낱말은 안 실린다 (색깔판만) — 아직
+        # 안 푼 사람이 봐도 괜찮아야 한다.
+        # 아직 안 풀었으면 **빈 것을 보낸다** — 안 보내면 받는 쪽이
+        # '읽기 실패'로 보고 옛 결과를 지켜서, 기록을 지워도 남의 화면에
+        # 영영 남는다 (지뢰 77 — 본인이 보낸 최신 값을 따른다).
+        # 다만 **못 읽었을 때는 아무것도 안 보낸다** — 빈 것을 보내면
+        # 파일이 한 번 안 읽힌 것 때문에 남의 화면에서 기록이 사라진다
+        # (지뢰 92).
+        if self.cfg.get("kkodle") and not _load_failed(self._kk_path()):
+            try:
+                kd9 = self._kk_mine()
+                out["kd"] = kd9 if isinstance(kd9, dict) else {}
+            except Exception:
+                self._log_error("kk_mine")
         gm9 = self._my_goal()
         if gm9:
             out["gm"] = gm9         # 오늘 목표 (있을 때만 — 없으면 열쇠도 뺀다)
@@ -17860,6 +17913,22 @@ class Mascot:
             # 것이 남에게 계속 보인다 (_room_who_get 은 날짜와 무관한
             # 값만 두는 자리다 — 그 독스트링이 그렇게 못 박고 있다).
             dl = str(q.get("dl") or "")[:10]
+            # 꼬들 오늘 결과 — 날짜가 안에 있어 묵으면 저절로 안 쓰인다.
+            # **온 것이 dict 이면 그것이 최신이다** (빈 것 = 아직 안 풀었다
+            # ·지웠다). 열쇠가 아예 없을 때만 기존 것을 지킨다 — 옛 판이나
+            # 꼬들이 없는 캐릭터다.
+            kd9 = q.get("kd")
+            if isinstance(kd9, dict):
+                kd9 = kd9 or None
+            else:
+                kd9 = cur.get("kd") if isinstance(cur.get("kd"), dict) else None
+            if isinstance(kd9, dict):
+                kd9 = {"d": str(kd9.get("d") or "")[:10],
+                       "n": max(0, min(9, int(kd9.get("n") or 0))),
+                       "s": max(0, min(86400, int(kd9.get("s") or 0))),
+                       "t": str(kd9.get("t") or "")[:5],
+                       "k": max(0, min(9999, int(kd9.get("k") or 0))),
+                       "g": str(kd9.get("g") or "")[:36]}
             # 방 칸 꾸미기 그림의 해시 — 안 켠 칸에서도 그림을 보여 주려면
             # 이것이 있어야 한다. **빈 값으로 오면 기존 것을 지킨다** —
             # 재시작 직후의 빈 신호가 해시를 지워 그림이 사라졌다 (실제
@@ -17879,6 +17948,7 @@ class Mascot:
                     or int(cur.get("g2b") or 0) != gb2
                     or str(cur.get("rm") or "") != rm
                     or str(cur.get("dl") or "") != dl
+                    or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
                     or float(cur.get("lvd") or 0) != lvd
                     or (cur.get("rmg") or {}) != rmg):
@@ -17895,6 +17965,8 @@ class Mascot:
                     row2["rmg"] = rmg
                 if dl:
                     row2["dl"] = dl
+                if kd9:
+                    row2["kd"] = kd9
                 if cdh9:
                     row2["cdh"] = cdh9
                 if lvd:
@@ -24849,13 +24921,18 @@ class Mascot:
     RANK_MSG_N = 40          # 글자 수 상한
     RANK_MSG_TOP = 3         # 몇 위까지 적을 수 있나
 
-    RANK_MSG_KEYS = ("wgb", "ctb", "g2b")   # 수박게임 · 컬러타일 · 2048
+    # 수박게임 · 컬러타일 · 2048 · 꼬들
+    RANK_MSG_KEYS = ("wgb", "ctb", "g2b", "kkd")
 
     def _rank_msg_get(self, key):
         """이 게임의 내 한마디.
 
         **'비었다'와 '아직 안 정했다'를 갈라야 한다.** 비었다고 옛 값으로
         물러나면, 지운 한마디가 도로 살아난다.
+
+        옛 한 개짜리(`rank_msg`)는 **수박게임 것**이다. 다른 게임까지
+        그걸로 물러나면 한 곳에 쓴 글이 모든 게임에 똑같이 뜬다 (제보:
+        "다른 게임에도 똑같이 적용된다") — 그래서 wgb 에만 물러난다.
         """
         try:
             got = self.us.get("rank_msgs")
@@ -24863,6 +24940,8 @@ class Mascot:
                 return str(got.get(key) or "").strip()[:self.RANK_MSG_N]
         except Exception:
             pass
+        if key != "wgb":
+            return ""
         return str(self.us.get("rank_msg") or "").strip()[:self.RANK_MSG_N]
 
     def _rank_msg_all(self):
@@ -24888,13 +24967,19 @@ class Mascot:
 
     @staticmethod
     def _who_msg(w, key):
-        """그 사람의 이 게임 한마디 — 옛 판이면 한 개짜리를 쓴다."""
+        """그 사람의 이 게임 한마디.
+
+        옛 한 개짜리(`rm`)는 **수박게임 것**이다 — 다른 게임에 물려 쓰면
+        남의 수박게임 한마디가 2048·꼬들에도 똑같이 뜬다.
+        """
         try:
             g9 = w.get("rmg")
             if isinstance(g9, dict) and key in g9:
                 return str(g9.get(key) or "")
         except Exception:
             pass
+        if key != "wgb":
+            return ""
         return str((w or {}).get("rm") or "")
 
     def _game_board(self, key, mine):
@@ -26368,7 +26453,8 @@ class Mascot:
             return None
         return self._safe_str(self._mq_bubble, msg, w9, h9, col, now) or None
 
-    RANK_MSG_GAME = {"wgb": "수박게임", "ctb": "컬러타일", "g2b": "2048"}
+    RANK_MSG_GAME = {"wgb": "수박게임", "ctb": "컬러타일", "g2b": "2048",
+                     "kkd": "꼬들"}
 
     def _rank_msg_win(self, after=None, key="wgb"):
         """랭킹 한마디를 적는 작은 창 (Entry 하나 — 맥에서도 안전).
@@ -26389,7 +26475,7 @@ class Mascot:
         # 만들면 0.5초마다 도는 다시 올리기에 밀려 뒤로 들어가고, 사람에게는
         # '창이 자꾸 꺼진다'로 보인다 (제보 · 지뢰 15).
         top9 = None
-        for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref"):
+        for nm9 in ("_g2_winref", "_ct_winref", "_wg_winref", "_kk_winref"):
             w9 = getattr(self, nm9, None)
             try:
                 if w9 is not None and w9.winfo_exists():
@@ -28939,6 +29025,1253 @@ class Mascot:
                         self._room_game_items.append(
                             ((xx9, yy9, xx9 + bw, yy9 + bw), act8))
 
+    # ── 꼬들 (한국어 워들) ───────────────────────────────────────────
+    # 원본(kordle.kr) 규칙 그대로 — 2음절 단어를 **자모 6칸**으로 풀어쓰고
+    # 6번 안에 맞춘다. 겹모음(ㅘ=ㅗㅏ)·겹받침(ㄺ=ㄹㄱ)은 낱자모로 쪼개고,
+    # 쌍자음(ㄲ·ㅆ)과 ㅐㅔㅚㅟㅢ 는 더 안 쪼갠다 (두벌식 기준).
+    #
+    # 자정이 아니라 **작업일 경계(06시)** 에 단어가 바뀐다 — 이 프로그램의
+    # 하루가 그렇게 도니까 (지뢰 60). 밤새 그리다 05시에 푸는 사람에게는
+    # 그날 것이 맞다.
+    KK_TRY = 6                  # 시도 횟수
+    KK_N = 6                    # 자모 칸
+    KK_CELL = 44                # 칸 한 변 (k=1 기준)
+    KK_GAP = 6
+    KK_SIDE = 268               # 오른쪽 기록 패널 폭
+    KK_ZOOM = 1.0
+    KK_RANK_N = 9               # 기록 칸에 한 번에 보이는 줄
+    KK_FLIP = 0.26              # 칸 하나가 뒤집히는 시간(초)
+    KK_STEP = 0.13              # 칸끼리 뒤집히는 간격(초)
+    KK_IDLE = 22.0              # 이만큼 가만히 있으면 캐릭터가 말을 건다
+
+    # 초성 19 · 중성 21 · 종성 28 (0번은 받침 없음)
+    KK_CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+    KK_JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
+    KK_JONG = " ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ"
+    # 겹모음·겹받침 → 두벌식으로 실제 눌러야 하는 낱자모
+    KK_SPLIT = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅣ", "ㅝ": "ㅜㅓ",
+                "ㅞ": "ㅜㅔ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ",
+                "ㄳ": "ㄱㅅ", "ㄵ": "ㄴㅈ", "ㄶ": "ㄴㅎ", "ㄺ": "ㄹㄱ",
+                "ㄻ": "ㄹㅁ", "ㄼ": "ㄹㅂ", "ㄽ": "ㄹㅅ", "ㄾ": "ㄹㅌ",
+                "ㄿ": "ㄹㅍ", "ㅀ": "ㄹㅎ", "ㅄ": "ㅂㅅ"}
+
+    # 두벌식 자판 — **IME 를 안 거친다.** tkinter 는 한글 조합 중 키가
+    # 새는 문제가 있어(한글 상태로 두면 입력이 안 들어온다), 원본 꼬들과
+    # 같이 영문 자판의 원시 키를 자모로 직접 옮긴다. 화면 자판과 물리
+    # 자판이 같은 길로 들어와 조합 문제가 아예 없어진다.
+    KK_KEYMAP = {
+        "q": "ㅂ", "w": "ㅈ", "e": "ㄷ", "r": "ㄱ", "t": "ㅅ",
+        "y": "ㅛ", "u": "ㅕ", "i": "ㅑ", "o": "ㅐ", "p": "ㅔ",
+        "a": "ㅁ", "s": "ㄴ", "d": "ㅇ", "f": "ㄹ", "g": "ㅎ",
+        "h": "ㅗ", "j": "ㅓ", "k": "ㅏ", "l": "ㅣ",
+        "z": "ㅋ", "x": "ㅌ", "c": "ㅊ", "v": "ㅍ", "b": "ㅠ",
+        "n": "ㅜ", "m": "ㅡ",
+        "Q": "ㅃ", "W": "ㅉ", "E": "ㄸ", "R": "ㄲ", "T": "ㅆ",
+        "O": "ㅒ", "P": "ㅖ",
+    }
+    # 화면 자판 — 두벌식 배열 그대로 세 줄
+    KK_ROWS = ("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔ", "ㅁㄴㅇㄹㅎㅗㅓㅏㅣ", "ㅋㅌㅊㅍㅠㅜㅡ")
+    KK_ROWS2 = ("ㅃㅉㄸㄲㅆ", "ㅒㅖ")      # 시프트 자모 (넷째 줄에 따로)
+
+    KK_TALK = {
+        "start": ("오늘 단어 뭘까?", "같이 풀어 보자!", "오늘도 한 판!"),
+        "green": ("오 그거 맞아!", "초록이다!", "좋아 좋아!"),
+        "yellow": ("있긴 있대!", "자리만 옮기면 돼.", "가까워졌어."),
+        "gray": ("음… 아니래.", "그건 아닌가 봐.", "다른 걸로!"),
+        "last": ("마지막 한 번…!", "이번엔 꼭!", "떨린다…"),
+        "win": ("맞혔다!! 우와!", "해냈어!", "오늘도 성공!"),
+        "lose": ("아쉽다… 내일 또!", "이런 단어였구나.", "괜찮아, 내일!"),
+        "bad": ("그런 말은 없대.", "사전에 없는데?", "다시 생각해 보자."),
+        "idle": ("천천히 생각해.", "뭘까…", "급할 것 없어."),
+        "done": ("오늘 건 벌써 풀었어!", "내일 또 오자!"),
+    }
+
+    KK_HELP = (
+        ("꼬들이란", "두 글자 낱말을 **자모 여섯 칸**으로 풀어 쓴 것을 "
+                     "여섯 번 안에 맞히는 놀이예요. 겹모음(ㅘ)과 "
+                     "겹받침(ㄺ)은 ㅗ+ㅏ, ㄹ+ㄱ 처럼 나눠서 한 칸씩 씁니다."),
+        ("색의 뜻", "초록은 자리까지 맞은 자모, 노랑은 낱말에 있지만 "
+                    "자리가 다른 자모, 회색은 아예 없는 자모예요."),
+        ("치는 법", "그냥 영문 자판처럼 치면 됩니다 (한/영 안 바꿔도 돼요). "
+                    "ㅂ은 Q, ㅈ은 W… 두벌식 그대로예요. 아래 자판을 "
+                    "눌러도 되고, 엔터로 확인·백스페이스로 지웁니다."),
+        ("하루 한 판", "모두가 **같은 낱말**을 풀어요. 새벽 6시에 새 낱말로 "
+                       "바뀝니다 (타이머의 하루가 그때 넘어가니까요)."),
+        ("기록", "오른쪽에 친구들이 몇 번 만에·언제 맞혔는지 모여요. "
+                 "줄을 누르면 그 사람의 색깔판이 펼쳐지고, 낱말은 "
+                 "안 보이니 아직 안 푼 사람이 봐도 괜찮습니다."),
+    )
+
+    def _kk_path(self):
+        return os.path.join(self.state_dir, ".kkodle.json")
+
+    def _kk_jamo(self, word):
+        """한글 낱말 → 자모 문자열 (한글이 아니면 빈 글자)."""
+        out = []
+        for ch in str(word or ""):
+            v = ord(ch) - 0xAC00
+            if not (0 <= v < 11172):
+                return ""
+            out.append(self.KK_CHO[v // 588])
+            ju = self.KK_JUNG[(v % 588) // 28]
+            out.append(self.KK_SPLIT.get(ju, ju))
+            jo = self.KK_JONG[v % 28]
+            if jo != " ":
+                out.append(self.KK_SPLIT.get(jo, jo))
+        return "".join(out)
+
+    def _kk_words(self):
+        """낱말 목록 — (정답 목록, {자모: 낱말}). 처음 쓸 때 한 번 읽는다.
+
+        파일이 없으면 (None, None) — 게임은 '낱말이 없어요'로 물러난다.
+        자모를 열쇠로 두면 '사전에 있나'와 '무슨 낱말이었나'가 한 번에
+        풀린다 (낸 줄 옆에 낱말을 적어 주려면 되찾기가 필요하다).
+        창을 한 번이라도 열면 계속 들고 있는다 — 다시 열 때 다시 읽는
+        것보다 낫다.
+        """
+        got = getattr(self, "_kk_wordset", None)
+        if got is not None:
+            return got
+        try:
+            p = os.path.join(self.dir, "words", "kkodle.json")
+            with open(p, encoding="utf-8") as fp:
+                d = json.load(fp)
+            ans = [s for s in (d.get("answers") or []) if len(s) == 2]
+            if not ans:
+                raise ValueError("정답 목록이 비었다")
+            jmap = {}
+            for s in (d.get("guesses") or []):
+                j = self._kk_jamo(s)
+                if len(j) == self.KK_N and j not in jmap:
+                    jmap[j] = s
+            for s in ans:                      # 정답은 반드시 통과해야 한다
+                jmap.setdefault(self._kk_jamo(s), s)
+            got = (ans, jmap)
+        except Exception:
+            got = (None, None)
+        self._kk_wordset = got
+        return got
+
+    def _kk_answer(self, day=None):
+        """그 작업일의 낱말 — 날짜에서 정해지므로 모두가 같은 것을 본다.
+
+        서버가 정해 주지 않는다. 날짜 글자를 해시해 목록에서 고르므로
+        어느 컴퓨터에서든 같은 값이 나온다 (같은 목록을 들고 있는 한).
+        """
+        ans, _ = self._kk_words()
+        if not ans:
+            return ""
+        day = str(day or self._my_workday())
+        h = hashlib.sha256(("kkodle|%s|%s" % (self.KK_SALT, day))
+                           .encode("utf-8")).hexdigest()
+        return ans[int(h[:12], 16) % len(ans)]
+
+    def _kk_day_no(self, day=None):
+        """'며칠째'인가 — 공유 카드에 적는 번호 (첫날을 1로)."""
+        day = str(day or self._my_workday())
+        try:
+            t = time.mktime(time.strptime(day, "%Y-%m-%d"))
+            t0 = time.mktime(time.strptime(self.KK_DAY0, "%Y-%m-%d"))
+            return max(1, int(round((t - t0) / 86400.0)) + 1)
+        except Exception:
+            return 1
+
+    KK_DAY0 = "2026-08-21"       # 1일차 (숫자가 뒤로 안 가게 고정)
+    # 낱말을 고르는 씨앗. **한 번 내보낸 뒤에는 바꾸지 말 것** — 바꾸면
+    # 그날 낱말이 통째로 달라져, 이미 푼 사람과 아직 안 푼 사람이 서로
+    # 다른 답을 보게 된다. 지금 올리는 것은 아직 아무도 안 받았을 때다.
+    KK_SALT = "2"
+
+    @staticmethod
+    def _kk_judge(guess, answer):
+        """자모 여섯 칸 판정 — '2'=초록, '1'=노랑, '0'=회색.
+
+        같은 자모가 여러 번 나오면 **개수만큼만** 노랑이 된다 (원조
+        워들과 같은 두 번 훑기: 먼저 초록을 빼고, 남은 것에서 노랑).
+        """
+        n = min(len(guess), len(answer))
+        out = ["0"] * n
+        left = {}
+        for i in range(n):
+            if guess[i] == answer[i]:
+                out[i] = "2"
+            else:
+                left[answer[i]] = left.get(answer[i], 0) + 1
+        for i in range(n):
+            if out[i] == "2":
+                continue
+            c = guess[i]
+            if left.get(c, 0) > 0:
+                left[c] -= 1
+                out[i] = "1"
+        return "".join(out)
+
+    def _kk_default(self, day=None):
+        day = str(day or self._my_workday())
+        return {"day": day, "rows": [], "cur": "", "done": 0,
+                "t0": 0.0, "secs": 0, "at": "", "say": ("", 0.0),
+                "t_move": time.time(), "shake": 0.0, "flip": 0.0,
+                "streak": 0, "last": "", "played": 0, "wins": 0,
+                "dist": [0] * self.KK_TRY}
+
+    def _kk_load(self):
+        """하던 판. 날이 바뀌었으면 새 판으로 (기록·연속은 이어받는다)."""
+        g = self._kk_default()
+        raw = _load_json(self._kk_path())
+        if isinstance(raw, dict):
+            for k2 in ("streak", "last", "played", "wins"):
+                if k2 in raw:
+                    g[k2] = raw[k2]
+            d9 = raw.get("dist")
+            if isinstance(d9, list) and len(d9) == self.KK_TRY:
+                g["dist"] = [max(0, int(v or 0)) for v in d9]
+            if str(raw.get("day") or "") == g["day"]:
+                g["rows"] = [q for q in (raw.get("rows") or [])
+                             if isinstance(q, dict)][:self.KK_TRY]
+                g["done"] = int(raw.get("done") or 0)
+                g["t0"] = float(raw.get("t0") or 0)
+                g["secs"] = int(raw.get("secs") or 0)
+                g["at"] = str(raw.get("at") or "")[:5]
+        g["streak"] = max(0, int(g.get("streak") or 0))
+        g["played"] = max(0, int(g.get("played") or 0))
+        g["wins"] = max(0, int(g.get("wins") or 0))
+        return g
+
+    def _kk_save(self, g):
+        if g is None:
+            return
+        if _load_failed(self._kk_path()):
+            self._log_error("kk_locked")     # 못 읽은 파일은 안 덮는다
+            return
+        try:
+            _save_json(self._kk_path(), {         # 지뢰 35
+                "day": g.get("day"), "rows": g.get("rows") or [],
+                "done": int(g.get("done") or 0),
+                "t0": float(g.get("t0") or 0), "secs": int(g.get("secs") or 0),
+                "at": str(g.get("at") or ""),
+                "streak": int(g.get("streak") or 0),
+                "last": str(g.get("last") or ""),
+                "played": int(g.get("played") or 0),
+                "wins": int(g.get("wins") or 0),
+                "dist": list(g.get("dist") or [])})
+        except Exception:
+            pass
+
+    def _kk_say(self, g, kind, now=None):
+        pool = (self.cfg.get("kk_talk") or {}).get(kind) \
+            or self.KK_TALK.get(kind) or ()
+        if not pool:
+            return
+        g["say"] = (str(random.choice(list(pool)))[:28],
+                    time.time() if now is None else now)
+
+    def _kk_snd(self, kind):
+        """꼬들 소리. 음원이 없는 캐릭터는 있던 소리로 물러난다 (지뢰 76)."""
+        got = self.kksnd if isinstance(self.kksnd, dict) else None
+        one = got.get(kind) if got else None
+        if one is not None:
+            self._safe("kk_snd", one.play)
+            return
+        if kind == "win":
+            self._safe("spark", self._sparkle_sound)
+        else:
+            self._safe("ui_click", self._ui_click)
+
+    def _kk_tick(self, g, now=None):
+        """가만히 있으면 말을 건다."""
+        if g is None or g.get("done"):
+            return
+        now = time.time() if now is None else now
+        if now - float(g.get("t_move") or now) < self.KK_IDLE:
+            return
+        if now - float((g.get("say") or ("", 0))[1]) < self.KK_IDLE:
+            return
+        self._kk_say(g, "idle", now)
+
+    def _kk_submit(self, g, now=None):
+        """지금 친 여섯 자모를 낸다. 돌려주는 것은 무슨 일이 있었는지.
+
+        "short"=덜 찼음 · "bad"=사전에 없음 · "win" · "lose" · "go"
+        """
+        now = time.time() if now is None else now
+        if g is None or g.get("done"):
+            return "done"
+        cur = str(g.get("cur") or "")
+        if len(cur) < self.KK_N:
+            g["shake"] = now
+            return "short"
+        ans, jmap = self._kk_words()
+        if jmap is not None and cur not in jmap:
+            g["shake"] = now
+            self._kk_say(g, "bad", now)
+            return "bad"
+        answer = self._kk_jamo(self._kk_answer(g.get("day")))
+        mark = self._kk_judge(cur, answer)
+        rows = list(g.get("rows") or [])
+        rows.append({"j": cur, "m": mark})
+        rows[-1]["w"] = (jmap or {}).get(cur, "")
+        g["rows"] = rows
+        g["cur"] = ""
+        g["flip"] = now
+        g["t_move"] = now
+        if not g.get("t0"):
+            g["t0"] = now
+        if mark == "2" * self.KK_N:
+            g["done"] = 1
+            g["secs"] = max(1, int(now - float(g.get("t0") or now)))
+            g["at"] = time.strftime("%H:%M", time.localtime(now))
+            self._kk_finish(g, True, len(rows))
+            return "win"
+        if len(rows) >= self.KK_TRY:
+            g["done"] = 2
+            g["secs"] = max(1, int(now - float(g.get("t0") or now)))
+            g["at"] = time.strftime("%H:%M", time.localtime(now))
+            self._kk_finish(g, False, 0)
+            return "lose"
+        # 이번 줄에서 가장 좋은 결과로 한마디를 고른다
+        self._kk_say(g, "green" if "2" in mark else
+                     ("yellow" if "1" in mark else "gray"), now)
+        if len(rows) == self.KK_TRY - 1:
+            self._kk_say(g, "last", now)
+        return "go"
+
+    def _kk_finish(self, g, won, tries):
+        """하루치 마무리 — 연속 성공과 분포를 적는다 (한 번만)."""
+        day = str(g.get("day") or "")
+        if str(g.get("last") or "") == day:
+            return                       # 이미 셌다
+        prev = str(g.get("last") or "")
+        g["last"] = day
+        g["played"] = int(g.get("played") or 0) + 1
+        if won:
+            g["wins"] = int(g.get("wins") or 0) + 1
+            # 어제 풀었으면 이어지고, 아니면 1부터
+            g["streak"] = (int(g.get("streak") or 0) + 1
+                           if prev and self._kk_prev_day(day) == prev else 1)
+            d9 = list(g.get("dist") or [0] * self.KK_TRY)
+            if 1 <= tries <= len(d9):
+                d9[tries - 1] += 1
+            g["dist"] = d9
+        else:
+            g["streak"] = 0
+
+    @staticmethod
+    def _kk_prev_day(day):
+        try:
+            t = time.mktime(time.strptime(str(day), "%Y-%m-%d")) - 86400
+            return time.strftime("%Y-%m-%d", time.localtime(t))
+        except Exception:
+            return ""
+
+    def _kk_mine(self):
+        """오늘 내 결과 — 방 신호에 실을 꼴. 아직 안 풀었으면 None."""
+        g = self._kk if self._kk is not None else self._kk_load()
+        if not g.get("done"):
+            return None
+        return {"d": str(g.get("day") or ""),
+                "n": (len(g.get("rows") or []) if g.get("done") == 1 else 0),
+                "s": int(g.get("secs") or 0),
+                "t": str(g.get("at") or "")[:5],
+                "k": int(g.get("streak") or 0),
+                "g": "".join(str(q.get("m") or "")
+                             for q in (g.get("rows") or []))[:36]}
+
+    def _kk_share(self, g=None):
+        """공유 카드 글 — 낱말은 안 들어간다 (아직 안 푼 사람이 봐도 된다)."""
+        g = g or self._kk or self._kk_load()
+        rows = g.get("rows") or []
+        n = len(rows) if g.get("done") == 1 else "X"
+        head = "꼬들 %d %s/%d" % (self._kk_day_no(g.get("day")), n,
+                                  self.KK_TRY)
+        if int(g.get("streak") or 0) > 0:
+            head += "  \U0001f525%d" % int(g["streak"])
+        box = {"2": "\U0001f7e9", "1": "\U0001f7e8", "0": "⬜"}
+        body = "\n".join("".join(box.get(c, "⬜")
+                                 for c in str(q.get("m") or ""))
+                         for q in rows)
+        return head + "\n" + body
+
+    def _kk_board(self):
+        """오늘의 기록 — [(정렬키, 이름, 나인가, 결과 dict)] 차례대로.
+
+        차례는 **몇 번 만에 맞혔는가**로만 정한다 (요청 — 걸린 초로
+        정하지 않는다). 같은 횟수면 먼저 끝낸 사람이 위다. 그다음이
+        못 푼 사람, 아직 안 푼 사람.
+        낱말은 어디에도 안 담긴다.
+        """
+        day = self._my_workday()
+        rows = []
+
+        def add(slot, nm, mine, kd):
+            if isinstance(kd, dict) and str(kd.get("d") or "") == day:
+                n = int(kd.get("n") or 0)
+                at = str(kd.get("t") or "~")        # 없으면 맨 뒤로
+                key = (0, n, at) if n > 0 else (1, 0, at)
+            else:
+                kd, key = None, (2, 0, "")
+            rows.append((key, nm, mine, kd, slot))
+
+        nm0 = str(self._safe_str(self._room_nick) or
+                  self.ROOM_NAME.get(self.char) or "나")
+        add(self.char, nm0[:6], True, self._kk_mine())
+        try:
+            who = self._room_who_get() or {}
+        except Exception:
+            who = {}
+        seen = {self.char}
+        for q in (self.room_people or []):
+            slot = str(q.get("slot") or "")
+            if not slot or slot in seen:
+                continue
+            seen.add(slot)
+            w = who.get(slot) or {}
+            nm = (str(q.get("n") or "").strip()
+                  or str(w.get("n") or "").strip()
+                  or str(self.ROOM_NAME.get(slot) or slot))
+            add(slot, nm[:6], False, q.get("kd") or w.get("kd"))
+        for slot, w in list(who.items()):
+            if slot in seen or not isinstance(w, dict):
+                continue
+            seen.add(slot)
+            nm = (str(w.get("n") or "").strip()
+                  or str(self.ROOM_NAME.get(slot) or slot))
+            add(slot, nm[:6], False, w.get("kd"))
+        rows.sort(key=lambda r: (r[0], r[1]))
+        return rows
+
+    def _kk_win(self):
+        """꼬들 창 — 왼쪽에 판과 자판, 오른쪽에 오늘의 기록.
+
+        **이 창도 키보드를 쓴다** (2048과 같이). 열 때 포커스를 주고,
+        판을 누르면 다시 가져온다. 한/영 상태와 무관하게 영문 키를
+        두벌식으로 옮겨 받으므로 IME 조합 문제가 없다.
+        """
+        got = self._kk_winref
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    got.focus_force()
+                    return
+            except Exception:
+                pass
+        ans, _js = self._kk_words()
+        if not ans:
+            self._say("낱말 목록이 없어요 (words/kkodle.json)", 4.0)
+            return
+        g = self._kk_load()
+        self._kk = g
+        cd = self.card
+        k = self.ui_k * self.KK_ZOOM
+        bw0 = self.KK_N * self.KK_CELL + (self.KK_N - 1) * self.KK_GAP
+        try:                          # 화면 밖으로 나가면 들어갈 만큼만
+            l0, t0, r0, b0 = self._screen_box()
+            need = (86 + self.KK_TRY * (self.KK_CELL + self.KK_GAP)
+                    + 4 * 45 + 20) * k
+            room = (b0 - t0) * 0.94
+            if 0 < room < need:
+                k = max(self.ui_k * 0.62, k * room / need)
+            needw = (82 + bw0 + self.KK_SIDE) * k
+            roomw = (r0 - l0) * 0.96
+            if 0 < roomw < needw:
+                k = max(self.ui_k * 0.55, k * roomw / needw)
+        except Exception:
+            pass
+
+        def uf(size, bold=False):
+            n = max(7, int(round(size * k)))
+            return (UI_FONT, n, "bold") if bold else (UI_FONT, n)
+
+        cell = self.KK_CELL * k
+        gap = self.KK_GAP * k
+        bwid = self.KK_N * cell + (self.KK_N - 1) * gap
+        BX, BY = int(18 * k), int(66 * k)
+        board_h = self.KK_TRY * cell + (self.KK_TRY - 1) * gap
+        # 낸 줄 옆에 낱말을 적을 자리 (판과 기록 칸 사이의 여백)
+        WGUT = int(46 * k)
+        # **글쇠 폭은 판에서 나온다.** 줄마다 글쇠 수와 넓은 글쇠(⌫·↵)가
+        # 달라서, 그냥 정해 두면 어떤 줄이 판보다 넓어져 창 밖으로 나간다
+        # (실측: 첫 줄 504 · 넷째 줄 516 인데 판은 441 이었다).
+        KROWS = list(self.KK_ROWS) + ["".join(self.KK_ROWS2) + "⌫↵"]
+
+        def _units(row):
+            return sum(1.7 if c in "⌫↵" else 1.0 for c in row)
+        kgap = 5 * k
+        kw = min((bwid - (len(r9) - 1) * kgap) / max(1.0, _units(r9))
+                 for r9 in KROWS)
+        kw = max(18 * k, kw)
+        khi = min(kw * 1.12, 36 * k)
+        KBY = BY + board_h + int(20 * k)
+        kbh = len(KROWS) * khi + (len(KROWS) - 1) * kgap
+        CW = int(BX * 2 + bwid + WGUT + self.KK_SIDE * k)
+        CH = int(KBY + kbh + 14 * k)
+
+        win = tk.Toplevel(self.room_win or self.root)
+        self._kk_winref = win
+        win.title("꼬들")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=True)
+        cv = tk.Canvas(win, width=CW, height=CH,
+                       bg=self._tint(cd["fill"], 0.90),
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.55)
+        ink = self._shade(cd["text"], 0.12)
+        sub2 = self._shade(cd["fill"], 0.22)
+        edge = self._tint(cd["fill"], 0.66)
+        win._kk_dots = self._safe_str(self._room_dots_img, CW, CH,
+                                      int(15 * k),
+                                      self._tint(cd["fill"], 0.90),
+                                      self._tint(cd["fill"], 0.82)) or None
+        if win._kk_dots:
+            cv.create_image(0, 0, image=win._kk_dots, anchor="nw")
+        st = {"open": None, "down": None, "page": 0, "pgbtn": {}}
+        self._kk_st = st              # 검사가 누를 자리를 읽는다
+
+        # ── 색 — 초록·노랑은 그대로 둔다 ────────────────────────────
+        # 이 색은 친구들과 결과를 견주는 **공통 언어**다. 캐릭터 테마색으로
+        # 바꾸면 남의 색깔판을 못 읽는다. 채도만 살짝 낮춰 그림체에 맞춘다.
+        COL = {"2": ("#8ecb93", "#ffffff"), "1": ("#f0cf85", "#ffffff"),
+               "0": ("#cfc9d4", "#ffffff"), "": (self._tint(cd["fill"], 0.88),
+                                                 ink)}
+        KEYCOL = {"2": "#8ecb93", "1": "#f0cf85", "0": "#c2bcc7",
+                  "": "#ffffff"}
+
+        def rr(x0, y0, x1, y1, r, **kw):
+            return self._rr(cv, x0, y0, x1, y1, r, **kw)
+
+        # ── 머리 — 제목 · 날짜 · 연속 ───────────────────────────────
+        def draw_head():
+            cv.delete("kkhead")
+            g2 = self._kk
+            cv.create_text(BX, int(20 * k), anchor="w", text="꼬들",
+                           font=uf(15, True), fill=ink, tags="kkhead")
+            cv.create_text(BX + int(46 * k), int(22 * k), anchor="w",
+                           text="%d일차" % self._kk_day_no(g2.get("day")),
+                           font=uf(9, True), fill=sub2, tags="kkhead")
+            sk = int(g2.get("streak") or 0)
+            # 연속은 **둘째 줄 오른쪽**에 — 첫 줄 오른쪽은 브금 자리다.
+            tipw = bwid
+            if sk > 0:
+                sw9 = "연속 %d일째" % sk
+                cv.create_text(BX + bwid, int(45 * k), anchor="e",
+                               text=sw9, font=uf(8, True),
+                               fill=self._shade(cd["fill"], 0.3),
+                               tags="kkhead")
+                tipw = bwid - self._room_tw(cv, sw9, uf(8, True)) - int(12 * k)
+            tip = "두 글자 낱말을 자모 여섯 칸으로 — 여섯 번 안에!"
+            if g2.get("done") == 1:
+                tip = "오늘 건 %d번 만에 맞혔어요!" % len(g2.get("rows") or [])
+            elif g2.get("done") == 2:
+                tip = "오늘 답은 '%s' 였어요." % self._kk_answer(g2.get("day"))
+            cv.create_text(BX, int(44 * k), anchor="w",
+                           text=self._fit_text(cv, tip, uf(8, True), tipw),
+                           font=uf(8, True), fill=sub2, tags="kkhead")
+
+        # ── 브금 — 창이 떠 있는 동안만 (윈도우 전용, 2048 과 같은 결) ──
+        self._kk_bgm = None
+        kkb_dir = os.path.join(self.dir, "sounds", "kkodle_bgm")
+        if IS_WIN and os.path.isdir(kkb_dir):
+            try:
+                self._kk_bgm = AmbientSound(kkb_dir)
+            except Exception:
+                self._kk_bgm = None
+
+        def bgm_vol():
+            try:
+                return max(0, min(100, int(self.us.get("kk_bgm_vol", 8))))
+            except Exception:
+                return 8
+
+        def bgm_apply():
+            if self._kk_bgm is None:
+                return
+            on9 = bool(self.us.get("kk_bgm_on", True))
+            try:
+                for nm9 in self._kk_bgm.names:
+                    self._kk_bgm.set(nm9, on9, bgm_vol())
+            except Exception:
+                pass
+        bgm_apply()
+        draw_bgm = None
+        if self._kk_bgm is not None:
+            # 첫 줄 오른쪽 — 음표 하나와 **가로** 눈금 (머리 띠가 낮다)
+            br9 = int(13 * k)
+            vb_w, vb_h = int(54 * k), int(7 * k)
+            pcx, pcy = BX + bwid - br9, int(21 * k)
+            vb_x1 = pcx - br9 - int(8 * k)
+            vb_x0 = vb_x1 - vb_w
+            vb_y = pcy - vb_h / 2.0
+            st["bgm"] = (pcx - br9, pcy - br9, pcx + br9, pcy + br9)
+            st["volbar"] = (vb_x0 - int(4 * k), vb_y - int(7 * k),
+                            vb_x1 + int(4 * k), vb_y + vb_h + int(7 * k))
+
+            def draw_bgm():
+                cv.delete("kkbgm")
+                on9 = bool(self.us.get("kk_bgm_on", True))
+                self._safe("soft_btn", self._soft_dot, cv, pcx, pcy, br9,
+                           self._tint(cd["fill"], 0.55) if on9 else "#ffffff",
+                           outline=edge, width=2)
+                cv.create_text(pcx, pcy, text="♪", font=uf(10, True),
+                               fill=ink if on9 else self._tint(edge, 0.2),
+                               tags="kkbgm")
+                if not on9:
+                    cv.create_line(pcx - 6 * k, pcy + 6 * k,
+                                   pcx + 6 * k, pcy - 6 * k, fill="#e0455f",
+                                   width=max(2, int(2 * k)),
+                                   capstyle="round", tags="kkbgm")
+                rr(vb_x0, vb_y, vb_x1, vb_y + vb_h, vb_h / 2.0,
+                   fill="#ffffff", outline=edge, width=1, tags="kkbgm")
+                fr9 = bgm_vol() / 100.0
+                if fr9 > 0.02:
+                    fx9 = vb_x0 + 1.5 + (vb_x1 - vb_x0 - 3) * fr9
+                    rr(vb_x0 + 1.5, vb_y + 1.5, fx9, vb_y + vb_h - 1.5,
+                       (vb_h - 3) / 2.0,
+                       fill=(self._tint(cd["fill"], 0.30) if on9
+                             else self._tint(cd["fill"], 0.70)),
+                       width=0, tags="kkbgm")
+                cv.tag_raise("kkbgm")
+
+            def vol_from_x(xx):
+                fr9 = (xx - vb_x0) / max(1.0, vb_x1 - vb_x0)
+                self.us["kk_bgm_vol"] = int(max(0, min(100,
+                                                       round(fr9 * 100))))
+                bgm_apply()
+                self._safe("bgm_ui", draw_bgm)
+            st["volfn"] = vol_from_x
+
+        # ── 판 ─────────────────────────────────────────────────────
+        def cellxy(c, r):
+            return BX + c * (cell + gap), BY + r * (cell + gap)
+
+        # 판 밑에 부드러운 그림자 — 다른 게임 카드와 같은 결
+        self._safe("soft_btn", self._card_shadow, cv, BX - int(7 * k),
+                   BY - int(7 * k), BX + bwid + int(7 * k),
+                   BY + board_h + int(7 * k), int(16 * k))
+        self._rr(cv, BX - int(7 * k), BY - int(7 * k), BX + bwid + int(7 * k),
+                 BY + board_h + int(7 * k), int(16 * k), fill="#fffdfe",
+                 outline=edge, width=2)
+
+        def draw_board(now=None):
+            now = time.time() if now is None else now
+            cv.delete("kktile")
+            g2 = self._kk
+            rows = g2.get("rows") or []
+            cur = str(g2.get("cur") or "")
+            shake = 0.0
+            if now - float(g2.get("shake") or 0) < 0.36:
+                t9 = (now - float(g2["shake"])) / 0.36
+                shake = math.sin(t9 * math.pi * 4) * 7 * k * (1 - t9)
+            for r in range(self.KK_TRY):
+                filled = r < len(rows)
+                for c in range(self.KK_N):
+                    x, y = cellxy(c, r)
+                    ch9, mk = "", ""
+                    if filled:
+                        q = rows[r]
+                        ch9 = str(q.get("j") or "")[c:c + 1]
+                        mk = str(q.get("m") or "")[c:c + 1]
+                        # 마지막 줄은 한 칸씩 뒤집힌다
+                        if r == len(rows) - 1:
+                            age = now - float(g2.get("flip") or 0)
+                            if age < c * self.KK_STEP:
+                                mk = ""
+                    elif r == len(rows):
+                        ch9 = cur[c:c + 1]
+                        x += shake
+                    bg, fg = COL.get(mk, COL[""])
+                    ow = line if (not mk and ch9) else (
+                        edge if not mk else bg)
+                    rr(x, y, x + cell, y + cell, int(7 * k), fill=bg,
+                       outline=ow, width=2, tags="kktile")
+                    if ch9:
+                        cv.create_text(x + cell / 2, y + cell / 2, text=ch9,
+                                       font=uf(19, True), fill=fg,
+                                       tags="kktile")
+                # 낸 줄 옆에 낱말을 조그맣게 (내가 낸 것이라 안전).
+                # **여백(WGUT) 안에만** 적는다 — 기록 칸을 파고들면 안 된다.
+                if filled and rows[r].get("w"):
+                    cv.create_text(BX + bwid + WGUT / 2,
+                                   BY + r * (cell + gap) + cell / 2,
+                                   text=self._fit_text(
+                                       cv, str(rows[r]["w"]), uf(9, True),
+                                       WGUT - int(8 * k)),
+                                   font=uf(9, True),
+                                   fill=self._shade(cd["fill"], 0.22),
+                                   tags="kktile")
+
+        # ── 자판 ───────────────────────────────────────────────────
+        def key_state():
+            """자모마다 지금까지 나온 가장 좋은 결과."""
+            best = {}
+            rank = {"0": 1, "1": 2, "2": 3}
+            for q in (self._kk.get("rows") or []):
+                j9, m9 = str(q.get("j") or ""), str(q.get("m") or "")
+                for i9 in range(min(len(j9), len(m9))):
+                    c9, v9 = j9[i9], m9[i9]
+                    if rank.get(v9, 0) > rank.get(best.get(c9, ""), 0):
+                        best[c9] = v9
+            return best
+
+        def draw_keys():
+            cv.delete("kkkey")
+            st["keys"] = []
+            best = key_state()
+            y = KBY
+            for ri, row in enumerate(KROWS):
+                last = (ri == len(KROWS) - 1)
+                ws = [kw * (1.7 if c9 in "⌫↵" else 1.0) for c9 in row]
+                tot = sum(ws) + kgap * (len(row) - 1)
+                x = BX + (bwid - tot) / 2.0     # 판 안에서 가운데
+                for i9, ch9 in enumerate(row):
+                    w9 = ws[i9]
+                    fill = KEYCOL.get(best.get(ch9, ""), "#ffffff")
+                    fg = "#ffffff" if best.get(ch9) in ("2", "1", "0") else ink
+                    if ch9 == "⌫":
+                        fill, fg = self._tint(cd["fill"], 0.80), ink
+                    elif ch9 == "↵":
+                        fill, fg = self._tint(cd["fill"], 0.44), "#ffffff"
+                    rr(x, y, x + w9, y + khi, int(7 * k), fill=fill,
+                       outline=edge, width=1, tags="kkkey")
+                    cv.create_text(x + w9 / 2, y + khi / 2, text=ch9,
+                                   font=uf(11 if not last else 10, True),
+                                   fill=fg, tags="kkkey")
+                    st["keys"].append((x, y, x + w9, y + khi, ch9))
+                    x += w9 + kgap
+                y += khi + kgap
+
+        # ── 오른쪽 — 오늘의 기록 ────────────────────────────────────
+        RX = BX + bwid + WGUT
+        RW = int(self.KK_SIDE * k) - int(18 * k)
+        RY0 = int(14 * k)
+        RY1 = CH - int(14 * k)
+        FOOT = int(96 * k)          # 칸 아래 — 캐릭터와 복사 단추 자리
+
+        def draw_rank():
+            cv.delete("kkrank")
+            st["rank"] = []
+            st["pen"] = None
+            rows = self._kk_board()
+            self._safe("soft_btn", self._card_shadow, cv, RX, RY0,
+                       RX + RW, RY1, int(18 * k))
+            rr(RX, RY0, RX + RW, RY1, int(18 * k),
+               fill="#fffdfe", outline=edge, width=2, tags="kkrank")
+            cv.create_text(RX + int(18 * k), RY0 + int(20 * k), anchor="w",
+                           text="오늘의 기록", font=uf(11, True),
+                           fill=self._shade(cd["fill"], 0.2), tags="kkrank")
+            done9 = sum(1 for q in rows if q[3] and int(q[3].get("n") or 0))
+            cv.create_text(RX + RW - int(16 * k), RY0 + int(20 * k),
+                           anchor="e", text="%d명 맞힘" % done9,
+                           font=uf(8, True), fill=sub2, tags="kkrank")
+            yy = RY0 + int(38 * k)
+            rh = 23 * k
+            # ── 쪽 나누기 — **다 보여야 한다** (요청). 넘치면 '외 N명'
+            # 으로 감추지 말고 아래 < > 로 넘긴다.
+            top9 = RY0 + int(38 * k)
+            step9 = rh + int(3 * k)
+            # 쪽 넘김 띠는 **말풍선 위**에 둔다. 말풍선 꼭대기가
+            # RY1-FOOT-13k 라, 그보다 위가 아니면 › 가 가려져 안 눌린다
+            # (찍어서 확인 — 좌표 검사로는 안 잡힌다).
+            PGY = RY1 - FOOT - int(30 * k)
+            per_full = max(1, int((RY1 - FOOT - int(6 * k) - top9) // step9))
+            if len(rows) <= per_full:
+                per9 = per_full
+            else:
+                per9 = max(1, int((PGY - int(16 * k) - top9) // step9))
+            pgs9 = max(1, (len(rows) + per9 - 1) // per9)
+            # 줄이 내려갈 수 있는 끝 — 쪽 넘김 띠를 침범하면 안 된다
+            # (카드를 펼치면 줄이 밀려 내려간다)
+            LIMY = ((PGY - int(16 * k)) if pgs9 > 1
+                    else (RY1 - FOOT - int(6 * k)))
+            pg9 = min(max(0, int(st.get("page") or 0)), pgs9 - 1)
+            st["page"] = pg9
+            st["pages"] = pgs9
+            # 펼쳐 둔 카드가 이 쪽에 없으면 접는다 (안 보이는 것이 열려
+            # 있으면 다음에 그 쪽으로 갔을 때 갑자기 튀어나온다)
+            page_rows = rows[pg9 * per9:(pg9 + 1) * per9]
+            if st.get("open") and st["open"] not in [q[4] for q in page_rows]:
+                st["open"] = None
+            place = sum(1 for q in rows[:pg9 * per9]
+                        if q[3] and int(q[3].get("n") or 0))
+            for key, nm, mine, kd, slot in page_rows:
+                if yy + rh > LIMY:
+                    break               # 카드를 펼쳐 넘친 것 — 접으면 보인다
+                solved = bool(kd and int(kd.get("n") or 0) > 0)
+                if solved:
+                    place += 1
+                open9 = (st.get("open") == slot and kd)
+                bg = (self._tint(cd["fill"], 0.80) if mine else "#ffffff")
+                if open9:
+                    bg = self._tint(cd["fill"], 0.88)
+                rr(RX + int(8 * k), yy, RX + RW - int(8 * k), yy + rh,
+                   int(8 * k), fill=bg,
+                   outline=(edge if (mine or open9) else "#ffffff"),
+                   width=1, tags="kkrank")
+                # 등수는 다른 랭킹과 같은 알약으로 (이모지는 Tk 가 못 그린다)
+                if solved:
+                    pf, pi, pm = self._rank_style(place - 1)
+                    cx9, cy9 = RX + int(22 * k), yy + rh / 2
+                    r9 = 8 * k
+                    if pf:
+                        cv.create_oval(cx9 - r9, cy9 - r9, cx9 + r9, cy9 + r9,
+                                       fill=pf, outline="", tags="kkrank")
+                    cv.create_text(cx9, cy9, text=pm, font=uf(8, True),
+                                   fill=(pi or sub2), tags="kkrank")
+                # 이름은 꼬리 글자와 안 부딪히게 잘라 둔다
+                nx = RX + int(36 * k)
+                cv.create_text(nx, yy + rh / 2, anchor="w",
+                               text=self._fit_text(
+                                   cv, nm + ("·나" if mine else ""),
+                                   uf(9, True), RW - int(120 * k)),
+                               font=uf(9, True), fill=ink, tags="kkrank")
+                if solved:
+                    s9 = int(kd.get("s") or 0)
+                    tail = "%d/%d · %s" % (
+                        int(kd["n"]), self.KK_TRY,
+                        ("%d분%02d초" % (s9 // 60, s9 % 60)) if s9 >= 60
+                        else "%d초" % s9)
+                elif kd:
+                    tail = "실패"
+                else:
+                    tail = "아직"
+                cv.create_text(RX + RW - int(14 * k), yy + rh / 2,
+                               anchor="e", text=tail, font=uf(8, True),
+                               fill=(ink if solved else sub2), tags="kkrank")
+                st["rank"].append((RX, yy, RX + RW, yy + rh, slot, bool(kd)))
+                yy += rh + int(3 * k)
+                if open9:
+                    yy = draw_card(kd, nm, mine, yy) + int(3 * k)
+            # 쪽 넘김 — 여럿일 때만 (자리를 헛되이 안 쓴다)
+            st["pgbtn"] = {}
+            if pgs9 > 1:
+                py9 = PGY
+                cv.create_text(RX + RW / 2, py9, text="%d / %d"
+                               % (pg9 + 1, pgs9), font=uf(8, True),
+                               fill=sub2, tags="kkrank")
+                for lab9, act9, dx9 in (("‹", "prev", -int(34 * k)),
+                                        ("›", "next", int(34 * k))):
+                    on9 = (pg9 > 0) if act9 == "prev" else (pg9 < pgs9 - 1)
+                    cx8 = RX + RW / 2 + dx9
+                    self._safe("soft_btn", self._soft_dot, cv, cx8, py9,
+                               int(11 * k),
+                               self._tint(cd["fill"], 0.80) if on9
+                               else "#ffffff",
+                               outline=edge, width=1)
+                    cv.create_text(cx8, py9 - int(1 * k), text=lab9,
+                                   font=uf(12, True),
+                                   fill=(ink if on9 else
+                                         self._tint(edge, 0.35)),
+                                   tags="kkrank")
+                    if on9:
+                        st["pgbtn"][act9] = (cx8 - int(13 * k),
+                                             py9 - int(13 * k),
+                                             cx8 + int(13 * k),
+                                             py9 + int(13 * k))
+            # 내 기록 한 줄 — 연속·푼 날·맞힌 날 (빈 자리를 채운다)
+            g9 = self._kk
+            sy9 = RY1 - FOOT + int(6 * k)
+            cv.create_line(RX + int(16 * k), sy9, RX + RW - int(16 * k), sy9,
+                           fill=self._tint(cd["fill"], 0.72), tags="kkrank")
+            pl9 = int(g9.get("played") or 0)
+            wn9 = int(g9.get("wins") or 0)
+            bits = ["연속 %d일" % int(g9.get("streak") or 0)]
+            if pl9 > 0:
+                bits.append("%d판 %d맞힘" % (pl9, wn9))
+                bits.append("%d%%" % int(round(wn9 * 100.0 / pl9)))
+            cv.create_text(RX + RW / 2, sy9 + int(16 * k),
+                           text=self._fit_text(cv, "  ·  ".join(bits),
+                                               uf(8, True), RW - int(28 * k)),
+                           font=uf(8, True), fill=self._shade(cd["fill"], 0.28),
+                           tags="kkrank")
+            # 아래 띠 — 왼쪽에 복사 단추, 오른쪽에 캐릭터가 앉는다
+            if self._kk_mine():
+                bx0 = RX + int(14 * k)
+                by0 = RY1 - int(34 * k)
+                bx1 = RX + RW * 0.56
+                rr(bx0, by0, bx1, by0 + int(26 * k), int(13 * k),
+                   fill=self._tint(cd["fill"], 0.5), outline=edge, width=1,
+                   tags="kkrank")
+                cv.create_text((bx0 + bx1) / 2, by0 + int(13 * k),
+                               text="결과 복사", font=uf(9, True),
+                               fill="#ffffff", tags="kkrank")
+                st["copy"] = (bx0, by0, bx1, by0 + int(26 * k))
+            else:
+                st["copy"] = None
+
+        def draw_card(kd, nm, mine, yy):
+            """펼친 카드 — 몇 번 만에·언제, 그리고 한마디.
+
+            색깔판(작은 그리드)은 **일부러 없다** (요청). 칸이 작아 무슨
+            뜻인지 안 읽히고, 홈에서 이미 좁은 자리를 더 좁혔다.
+            """
+            hh = int(20 * k) + int(24 * k)
+            rr(RX + int(14 * k), yy, RX + RW - int(14 * k), yy + hh,
+               int(8 * k), fill=self._tint(cd["fill"], 0.94),
+               outline=edge, width=1, tags="kkrank")
+            solv9 = int(kd.get("n") or 0) > 0
+            head = "꼬들 %d  %s/%d" % (
+                self._kk_day_no(), int(kd.get("n") or 0) or "X", self.KK_TRY)
+            if int(kd.get("k") or 0) > 0:
+                head += "  연속 %d" % int(kd["k"])
+            cv.create_text(RX + int(24 * k), yy + int(12 * k), anchor="w",
+                           text=head, font=uf(8, True), fill=sub2,
+                           tags="kkrank")
+            if kd.get("t"):
+                cv.create_text(RX + RW - int(24 * k), yy + int(12 * k),
+                               anchor="e",
+                               text=str(kd["t"]) + ("에 맞힘" if solv9
+                                                    else "에 끝남"),
+                               font=uf(8, True), fill=sub2, tags="kkrank")
+            gy = yy + int(18 * k)
+            msg = (self._rank_msg_get("kkd") if mine
+                   else self._who_msg(self._room_who_get().get(
+                       st.get("open")) or {}, "kkd"))
+            cv.create_text(RX + int(24 * k), gy + int(9 * k), anchor="w",
+                           text=self._fit_text(
+                               cv, (str(msg) if msg
+                                    else ("한마디 남기기" if mine else "")),
+                               uf(8, True), RW - int(64 * k)),
+                           font=uf(8, True),
+                           fill=(self._shade(cd["fill"], 0.25) if msg
+                                 else sub2), tags="kkrank")
+            if mine:
+                px = RX + RW - int(26 * k)
+                cv.create_text(px, gy + int(9 * k), text="✎",
+                               font=uf(11), fill=sub2, tags="kkrank")
+                st["pen"] = (px - int(10 * k), gy, px + int(10 * k),
+                             gy + int(18 * k))
+            return yy + hh
+
+        # ── 캐릭터 ─────────────────────────────────────────────────
+        def draw_char(now):
+            cv.delete("kkch")
+            cv.delete("kksay")
+            g2 = self._kk
+            px = int(72 * k)
+            pose = "sit"
+            if now - float(g2.get("t_move") or 0) < 1.4:
+                pose = "type"
+            elif now - float(g2.get("t_move") or 0) > 90:
+                pose = "sleep"
+            # 앉은 그림은 2048 것을 그대로 쓴다 (같은 seat*.png · 같은 캐시)
+            im = self._safe_str(self._g2_seat_img, px, pose)
+            cx = RX + RW - int(50 * k)          # 기록 칸 안 오른쪽 아래
+            cy = RY1 - int(10 * k)
+            if im:
+                win._kk_seat = im
+                hop = 0.0
+                if g2.get("done") == 1 and now - float(g2.get("flip") or 0) < 3:
+                    hop = abs(math.sin((now - g2["flip"]) * 7)) * 7 * k
+                cv.create_image(cx, cy - hop, image=im, anchor="s",
+                                tags="kkch")
+            say = g2.get("say") or ("", 0)
+            if say[0] and now - float(say[1]) < 4.2:
+                txt9 = self._fit_text(cv, say[0], uf(8, True),
+                                      RW - int(28 * k))
+                tw = self._room_tw(cv, txt9, uf(8, True)) + int(20 * k)
+                sy = cy - px - int(14 * k)
+                cx = min(cx, RX + RW - tw / 2 - int(10 * k))
+                cx = max(cx, RX + tw / 2 + int(10 * k))
+                self._rr_soft(cv, cx - tw / 2, sy - int(13 * k),
+                              cx + tw / 2, sy + int(13 * k), int(13 * k),
+                              fill="#ffffff", outline=edge, width=2,
+                              tail=(cx + int(8 * k), int(7 * k)),
+                              tags="kksay")
+                cv.create_text(cx, sy, text=txt9, font=uf(8, True),
+                               fill=ink, tags="kksay")
+
+        # ── 입력 ───────────────────────────────────────────────────
+        def put(ch9):
+            g2 = self._kk
+            if g2.get("done"):
+                self._kk_say(g2, "done")
+                return
+            now = time.time()
+            g2["t_move"] = now
+            if ch9 == "⌫":
+                if str(g2.get("cur") or ""):
+                    self._kk_snd("key")
+                g2["cur"] = str(g2.get("cur") or "")[:-1]
+            elif ch9 == "↵":
+                r9 = self._safe_str(self._kk_submit, g2) or ""
+                if r9 == "win":
+                    self._kk_say(g2, "win")
+                    self._safe("kk_fx", self._burst, 26)
+                    self._kk_snd("win")
+                    self.hat_until = max(self.hat_until, time.time() + 8.0)
+                elif r9 == "lose":
+                    self._kk_say(g2, "lose")
+                    self._kk_snd("bad")
+                elif r9 in ("bad", "short"):
+                    self._kk_snd("bad")
+                if r9 in ("win", "lose"):
+                    self._safe("kk_push", self._kk_push)
+                self._safe("kk_save", self._kk_save, g2)
+                self._safe("kk_rank", draw_rank)
+                self._safe("kk_head", draw_head)
+                self._safe("kk_keys", draw_keys)
+                return
+            elif len(str(g2.get("cur") or "")) < self.KK_N:
+                g2["cur"] = str(g2.get("cur") or "") + ch9
+                self._kk_snd("key")
+            self._safe("kk_board", draw_board)
+
+        def on_key(e):
+            ks = str(getattr(e, "keysym", "") or "")
+            ch9 = str(getattr(e, "char", "") or "")
+            if ks in ("Return", "KP_Enter"):
+                put("↵")
+                return "break"
+            if ks == "BackSpace":
+                put("⌫")
+                return "break"
+            if ks == "Escape":
+                gone()
+                return "break"
+            j9 = self.KK_KEYMAP.get(ch9) or self.KK_KEYMAP.get(ks)
+            if j9:
+                put(j9)
+                return "break"
+            return None
+
+        def on_click(e):
+            try:
+                win.focus_force()
+            except Exception:
+                pass
+            bb9 = st.get("bgm")
+            if bb9 and bb9[0] <= e.x <= bb9[2] and bb9[1] <= e.y <= bb9[3]:
+                self._safe("ui_click", self._ui_click)
+                self.us["kk_bgm_on"] = not bool(self.us.get("kk_bgm_on", True))
+                self._save_settings()
+                bgm_apply()
+                if draw_bgm:
+                    self._safe("bgm_ui", draw_bgm)
+                return
+            vb9 = st.get("volbar")
+            if vb9 and vb9[0] <= e.x <= vb9[2] and vb9[1] <= e.y <= vb9[3]:
+                fn9 = st.get("volfn")
+                if fn9:
+                    st["voldrag"] = True
+                    fn9(e.x)
+                    self._save_settings()
+                return
+            for x0, y0, x1, y1, ch9 in (st.get("keys") or []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    put(ch9)
+                    return
+            pen = st.get("pen")
+            if pen and pen[0] <= e.x <= pen[2] and pen[1] <= e.y <= pen[3]:
+                self._safe("ui_click", self._ui_click)
+                self._safe("rank_msg", self._rank_msg_win, draw_rank, "kkd")
+                return
+            cp = st.get("copy")
+            if cp and cp[0] <= e.x <= cp[2] and cp[1] <= e.y <= cp[3]:
+                self._safe("ui_click", self._ui_click)
+                try:
+                    win.clipboard_clear()
+                    win.clipboard_append(self._kk_share())
+                    self._room_toast = ("결과를 복사했어요", time.time())
+                    self._kk_say(self._kk, "win")
+                except Exception:
+                    pass
+                self._safe("kk_rank", draw_rank)
+                return
+            for act9, bb8 in (st.get("pgbtn") or {}).items():
+                if bb8[0] <= e.x <= bb8[2] and bb8[1] <= e.y <= bb8[3]:
+                    st["page"] = max(0, int(st.get("page") or 0)
+                                     + (1 if act9 == "next" else -1))
+                    st["open"] = None
+                    self._safe("ui_click", self._ui_click)
+                    self._safe("kk_rank", draw_rank)
+                    return
+            for x0, y0, x1, y1, slot, has in (st.get("rank") or []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    if not has:
+                        return
+                    st["open"] = None if st.get("open") == slot else slot
+                    self._safe("ui_click", self._ui_click)
+                    self._safe("kk_rank", draw_rank)
+                    return
+            hb = st.get("help")
+            if hb and hb[0] <= e.x <= hb[2] and hb[1] <= e.y <= hb[3]:
+                self._safe("ui_click", self._ui_click)
+                self._safe("kk_help", self._kk_help)
+                return
+
+        # ── 도움말 단추 ────────────────────────────────────────────
+        hx = BX + bwid + WGUT / 2
+        hy = int(30 * k)
+        self._safe("soft_btn", self._soft_dot, cv, hx, hy, int(10 * k),
+                   "#ffffff", outline=edge, width=2)
+        cv.create_text(hx, hy, text="?", font=uf(9, True), fill=sub2)
+        st["help"] = (hx - int(11 * k), hy - int(11 * k),
+                      hx + int(11 * k), hy + int(11 * k))
+
+        def on_drag9(e):
+            fn9 = st.get("volfn")
+            if st.get("voldrag") and fn9:
+                fn9(e.x)
+
+        def on_up9(_e):
+            if st.get("voldrag"):
+                st["voldrag"] = False
+                self._save_settings()
+
+        cv.bind("<Button-1>", lambda e: self._safe("kk_click", on_click, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe("kk_drag", on_drag9, e))
+        cv.bind("<ButtonRelease-1>", lambda e: self._safe("kk_up", on_up9, e))
+        win.bind("<Key>", lambda e: self._safe_str(on_key, e))
+
+        # ── 프레임 ─────────────────────────────────────────────────
+        def sig(now):
+            g2 = self._kk
+            busy = (now - float(g2.get("flip") or 0) < 1.4
+                    or now - float(g2.get("shake") or 0) < 0.4
+                    or now - float((g2.get("say") or ("", 0))[1]) < 4.4
+                    or now - float(g2.get("t_move") or 0) < 1.6)
+            return (len(g2.get("rows") or []), str(g2.get("cur") or ""),
+                    int(g2.get("done") or 0), st.get("open"), busy)
+
+        def tick():
+            self._kk_after = None
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            self._kk_after = win.after(33, tick)      # 먼저 예약 (지뢰 20)
+            self._safe("kkodle", frame)
+
+        def rank_sig():
+            """기록 칸이 바뀌었는가 — 친구가 방금 풀면 바로 보여야 한다.
+
+            매 프레임 보면 사람이 많을 때 아깝다. 1초에 한 번만 센다.
+            """
+            return tuple((q[4], q[1], (q[3] or {}).get("n"),
+                          (q[3] or {}).get("s"), (q[3] or {}).get("t"),
+                          self._who_msg(self._room_who_get().get(q[4]) or {},
+                                        "kkd") if not q[2]
+                          else self._rank_msg_get("kkd"))
+                         for q in self._kk_board())
+
+        def frame():
+            now = time.time()
+            self._kk_tick(self._kk, now)
+            if now - float(st.get("rank_at") or 0) > 1.0:
+                st["rank_at"] = now
+                r9 = self._safe_str(rank_sig)
+                if r9 and r9 != st.get("rsig"):
+                    st["rsig"] = r9
+                    self._safe("kk_rank", draw_rank)
+            s9 = sig(now)
+            if s9 == st.get("sig") and not s9[4] and not st.get("was"):
+                return
+            st["sig"], st["was"] = s9, s9[4]
+            draw_board(now)
+            draw_char(now)
+
+        def gone(*_a):
+            try:
+                if self._kk_after is not None:
+                    win.after_cancel(self._kk_after)     # 지뢰 20
+            except Exception:
+                pass
+            self._kk_after = None
+            self._safe("kk_save", self._kk_save, self._kk)
+            self._kk_winref = None
+            self._kk_imgs.clear()
+            got9 = self._kk_bgm             # 브금도 창과 함께 끈다
+            self._kk_bgm = None
+            if got9 is not None:
+                try:
+                    got9.close()
+                except Exception:
+                    pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", gone)
+        self._dialog_keep(win, "꼬들")
+        if draw_bgm:
+            draw_bgm()
+        draw_head()
+        draw_board()
+        draw_keys()
+        draw_rank()
+        draw_char(time.time())
+        if not (self._kk.get("rows") or self._kk.get("done")):
+            self._kk_say(self._kk, "start")
+        else:
+            self._kk_say(self._kk, "done" if self._kk.get("done") else "idle")
+        self._place_near(win, int(60 * k), int(90 * k))
+        tick()
+        try:
+            win.focus_force()
+        except Exception:
+            pass
+
+    def _kk_push(self):
+        """오늘 결과가 정해졌다 — 그 자리에서 방에 알린다."""
+        try:
+            self.room_net.push(self._room_state_now(for_net=True))
+            self.room_net.wake()
+        except Exception:
+            pass
+        self._room_key_last = None
+
+    def _kk_help(self):
+        """꼬들 도움말 창."""
+        got = getattr(self, "_kk_help_win", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        cd, u = self.card, self._ui
+        W = u(360)
+        win = tk.Toplevel(self._kk_winref or self.room_win or self.root)
+        self._kk_help_win = win
+        win.title("꼬들 — 하는 법")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=u(20), bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        y = u(24)
+        cv.create_text(W / 2, y, text="꼬들 — 하는 법",
+                       font=self._uf(12, True), fill=cd["text"])
+        y += u(24)
+        for head, body in self.KK_HELP:
+            cv.create_text(u(22), y, anchor="nw", text=head,
+                           font=self._uf(9, True),
+                           fill=self._shade(cd["fill"], 0.25))
+            y += u(19)
+            # 줄바꿈은 Tk 에 맡긴다 (width=) — 손으로 자르면 글꼴마다 어긋난다
+            it = cv.create_text(u(22), y, anchor="nw",
+                                text=body.replace("**", ""),
+                                font=self._uf(8), fill=cd["sub"],
+                                width=W - u(44))
+            bb = cv.bbox(it)
+            y += (bb[3] - bb[1] if bb else u(15)) + u(12)
+        cv.configure(height=int(y + u(10)))
+
+        def gone(*_a):
+            self._kk_help_win = None
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        win.protocol("WM_DELETE_WINDOW", gone)
+        win.bind("<Escape>", gone)
+        self._place_near(win, u(80), u(60))
+
     def _room_game_list(self):
         """켜 둔 미니게임들 — (이름, 무엇, 바탕색, 글자색).
 
@@ -28947,11 +30280,15 @@ class Mascot:
         """
         got = []
         if self.cfg.get("wgame"):
-            got.append(("수박\n게임", "game", "#eaf6df", "#5f8352"))
+            # '미니게임' 단추가 연두라, 수박은 **속살 분홍**으로 갈랐다
+            # (같은 색이면 어느 것이 무엇인지 안 갈린다 — 제보)
+            got.append(("수박\n게임", "game", "#fbdfe2", "#a4535f"))
         if self.cfg.get("ctile"):
             got.append(("컬러\n타일", "ctile", "#dfeefa", "#4f7590"))
         if self.cfg.get("g2048"):
             got.append(("2048", "g2048", "#faeedf", "#8a6440"))
+        if self.cfg.get("kkodle"):
+            got.append(("꼬들", "kkodle", "#efe6f7", "#6d5a8c"))
         return got
 
     POKE_BURST = 5           # 10초 안에 이 횟수째부터 막는다
@@ -30166,11 +31503,13 @@ class Mascot:
         self._safe("room_draw", self._room_draw)
 
     def _room_leave(self):
-        """커서가 홈 창 밖으로 나갔다 — 펼쳐 둔 미니게임을 접는다."""
-        if self._room_games_open:
-            self._room_games_open = False
-            self._room_key_last = None
-            self._safe("room_draw", self._room_draw)
+        """커서가 홈 창 밖으로 나갔다.
+
+        예전에는 여기서 펼쳐 둔 미니게임을 접었는데, 게임이 늘어 칸이
+        길어지자 **겨냥하다 조금만 벗어나도 접혀** 누를 수가 없었다
+        (제보). 지금은 클릭할 때만 접는다 — 메뉴가 닫히면 같이 닫힌다.
+        """
+        return
 
     def _room_game_open(self, act):
         """미니게임 창을 연다 (이름 → 창). 부르는 곳이 둘이라 한데 모은다."""
@@ -30180,6 +31519,8 @@ class Mascot:
             self._safe("ctile_win", self._ct_win)
         elif act == "g2048":
             self._safe("g2048_win", self._g2_win)
+        elif act == "kkodle":
+            self._safe("kkodle_win", self._kk_win)
 
     def _room_mute_toggle(self):
         """알림 끄기 — 켜 둔 동안 남이 보낸 반응을 안 받는다.
@@ -30248,19 +31589,15 @@ class Mascot:
         # '미니게임' 에 커서를 올리면 왼쪽으로 펼친다 (요청). 펼친 게임
         # 위에 있는 동안에도 열어 둬야 누를 수 있다 — 벗어나야 접는다.
         if self._room_menu_open:
-            want9 = False
+            # **한 번 펼치면 클릭할 때까지 그대로 둔다** (요청). 게임이
+            # 늘면서 칸이 길어져, 겨냥하다 살짝 벗어나기만 해도 접혀서
+            # 누를 수가 없었다. 접는 것은 클릭이 맡는다.
+            want9 = bool(self._room_games_open)
             for box9, act9 in list(getattr(self, "_room_menu_items", [])):
                 if act9 == "games" and box9[0] <= e.x <= box9[2] \
                         and box9[1] <= e.y <= box9[3]:
                     want9 = True
                     break
-            if not want9 and self._room_games_open:
-                for box8, _a8 in list(getattr(self, "_room_game_items", [])):
-                    # 칸 사이의 틈에서 깜빡이지 않게 조금 넉넉히 본다
-                    if box8[0] - 10 <= e.x <= box8[2] + 10 \
-                            and box8[1] - 10 <= e.y <= box8[3] + 10:
-                        want9 = True
-                        break
             if want9 != self._room_games_open:
                 self._room_games_open = want9
                 self._room_key_last = None
