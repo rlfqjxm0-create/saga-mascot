@@ -1,7 +1,7 @@
 {
- "version": 1787262957,
+ "version": 1787289146,
  "files": {
-  "mascot.py": "64067b8cf53698e7e9380c6d732da53b20ec8e170c557bd91a586b7b1d1f680f",
+  "mascot.py": "9996f052b0a1789a44d7d88f8595c4c283e922e4a133c30bf14a3eb3d95cbf5c",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -65,6 +65,7 @@
   "parts_saga/snacks/drink.png": "4e60ebf4242dc915d11069db76476e4eaca8b9ecd15d0d342a6b29128ababdd0",
   "parts_saga/snacks/durian-fruit.png": "c91ff402765f922ba6142b5bac62ec8cfb65cb38c6e3d1b0eb5291d974e1eaab",
   "parts_saga/snacks/fish.png": "752cae9a76499cb82194b68d0db6c784dabb4ebccb21b44549bf78f27e2c286c",
+  "parts_saga/snacks/fortune.png": "6cb9f601180590ac2612648a3f5582146fa643f0426de29bdf39a508d4fc22f6",
   "parts_saga/snacks/hamburger.png": "9def17e750f7d3799170a059a287a91c2dd94f6308785b649ca44d709308daf7",
   "parts_saga/snacks/hotdog.png": "9b129cd4624d26066ed1ecbcecd1560df74c597f2b3ede795c10b9fa08d4a1eb",
   "parts_saga/snacks/ice-cream.png": "dbaf5c3c4af3ad13bfa23f5df712b21f5124ef0203425855c6a76ee63af11c65",
@@ -441,10 +442,17 @@
   "parts_saga/sounds/wgame/merge/merge6.wav": "19aca917bab5520472c1572f9a9454d3ebcf6d58f128dbe7c0c27afaa294f557",
   "parts_saga/sounds/wgame/merge/merge7.wav": "1a0fa10342c6082de3759b725418c654b4a2359fb49caa33ab621a720c3c1453",
   "parts_saga/sounds/wgame_bgm/bgm.wav": "a868a90ed84914d20e4bc27991db01f77e4bac8fb5f20da87f78c3076543ebb4",
+  "parts_saga/sounds/whip/whip1.wav": "31c6ef2b789e3713eda0e61ba532246be05c5144affc53e64fe0f06795b7b528",
   "parts_saga/stamps/bud.png": "6b2b3f6c5b57f26e6b80123d766f8e2e391ade3668f3fd0f7b1686723e67ae8c",
   "parts_saga/stamps/flower.png": "ed5b9ece5130a07c400974ede9f79a0d1ba23a61621f9b0a105d3d59279bc2fe",
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "**깜빡하고 '작업 종료'를 안 눌러도 하루가 남습니다.** 새벽 6시가 지나면 스스로 어제를 마무리해서, 브리핑을 띄우고 **도장판에 어제 날짜로** 남겨 둬요. 이제 종료 버튼을 잊어도 그날 기록이 통째로 비지 않습니다 (10분 넘게 일한 날만 띄워요)",
+  "**홈 아래 '메뉴'가 정리됐어요.** 위에서부터 **미니게임 · 꾸미기 · 알림 끄기** 순서입니다. 미니게임에 마우스를 올리면 수박게임·컬러타일·2048이 **왼쪽으로** 펼쳐져요. '알림 끄기'는 환경설정에 있던 '반응 받지 않기'를 홈으로 옮긴 것으로, 켜 둔 동안에는 남이 보낸 콕·응원·간식이 안 오고 **끄면 그 자리에서 다시** 옵니다",
+  "**날이 바뀌고 처음 받는 간식은 포춘쿠키 모양이에요.** 운세 쪽지가 그날 첫 간식에서만 나오니 모양도 맞췄습니다. 그리고 **'채찍질'을 받으면 채찍 소리**가 나요 — 놀라지 않게 다른 효과음보다 작게 맞춰 두었습니다",
+  "**말풍선에 마우스를 올렸을 때가 자연스러워졌어요.** 예전에는 글자가 커지고 굵어지면서 다른 말풍선이 새로 뜨는 것처럼 보였는데, 이제 **원래 말풍선 그대로** 글자만 옆으로 흘러갑니다. 흐르는 동안 화면도 더 부드럽게 돌아요",
+  "**업데이트 노트가 타이머 뒤로 숨지 않습니다.** 빨간 점을 눌러 소식을 볼 때 창이 캐릭터에 가려지던 것을 고쳤어요. 대화 창 전체가 같이 좋아져서, 마우스를 올리거나 누르면 그 자리에서 앞으로 나옵니다",
+  "그 밖에 — '오늘의 노래' 칸에 **붙여넣기 단추**를 되살렸습니다 (맥에서 Cmd+V 가 안 먹는 경우가 있었어요). 그리고 젖소 교사님의 **젖소 도로롱 그림이 새로 그린 것으로** 바뀌었습니다"
+ ]
 }

@@ -469,6 +469,7 @@ DEFAULT_SETTINGS = {
     # (카드를 줄여 전원을 한 화면에). None 이면 옛 room_all 에서 옮겨 온다.
     "room_view": None,
     "fortune_day": "",       # 오늘의 운세를 보여 준 작업일 (하루 한 번)
+    "end_day": "",           # '작업 종료'로 마무리한 작업일 (06시 자동 마무리와 겹치지 않게)
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
     "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
     "wg_bgm_on": True,       # 수박게임 브금 재생 여부
@@ -2378,8 +2379,11 @@ CHARS = [
      "tint": "#7f9ce0"},
     {"slot": "parts_seongsil", "repo": "seongsil-mascot", "name": "성실이",
      "tint": "#f0c03c"},
+    # 제리만 홈 띠 색이 제 테마색(#43444b)보다 **일부러 연하다** (요청 —
+    # "준사보다 더 연한 회색"). tint_custom 이 그 뜻이고, config 와
+    # 어긋났는지 보는 검사가 이 자리를 건너뛴다.
     {"slot": "parts_jerry", "repo": "jerry-mascot", "name": "제리",
-     "tint": "#9a9ba3"},
+     "tint": "#9a9ba3", "tint_custom": True},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False},
@@ -4708,6 +4712,7 @@ class Mascot:
         self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
         self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
         self._fortune_at = 0.0       # 이 시각이 되면 운세를 말한다 (0=없음)
+        self._brief_key = None       # 브리핑을 어느 날짜로 찍을지 (지뢰 14)
         self.particles = []          # 폭죽 조각 [x, y, vx, vy, 색, 수명]
         self.hat_until = 0.0         # 고깔모자 표시 종료 시각
         self.smile_until = 0.0       # 웃는 표정 종료 시각
@@ -4971,6 +4976,7 @@ class Mascot:
         self.pensnd = None
         self.pokesnd = None
         self.roomsnd = None          # 홈에서 남이 눌러 줬을 때 (평소와 다른 소리)
+        self.whipsnd = None          # 채찍질을 받았을 때만 (놀라지 않게 작게)
         self.uisnd = None            # 조작할 때 나는 '똑' (메뉴·단추)
         self._ui_snd_at = 0.0        # 마지막으로 낸 시각 (연타 방지)
         self.pomosnd = None         # 뽀모도로 시작음·종료음 {"start":…, "end":…}
@@ -5214,6 +5220,8 @@ class Mascot:
         self._room_last_p = {}       # slot → (마지막으로 본 시각, 그때 모습)
         self._room_menu_open = False # 아래 '메뉴' 단추가 펼쳐져 있는가
         self._room_menu_items = []   # 펼친 항목들의 자리
+        self._room_games_open = False  # '미니게임' 에 커서가 올라가 있는가
+        self._room_game_items = []   # 왼쪽으로 펼친 게임들의 자리
         self._fx_scale = 1.0         # zzZ·콧방울 배율 (앉은 모습 구울 때 확대)
         self._sky_img = None         # 타이틀 하늘 그림 (시간대별로 구워 둠)
         self._sky_key = None
@@ -6383,6 +6391,12 @@ class Mascot:
             except Exception:
                 pass
             self.roomsnd = None
+        if self.whipsnd is not None:
+            try:
+                self.whipsnd.close()
+            except Exception:
+                pass
+            self.whipsnd = None
         if self._slime_snd is not None:
             try:
                 self._slime_snd.close()
@@ -6433,6 +6447,16 @@ class Mascot:
                     room_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.roomsnd = None
+        # 채찍질만 제 소리를 낸다. 채찍 소리는 깜짝 놀랄 수 있어서
+        # 다른 반응보다 작게 낸다 (간식과 같은 0.7 배).
+        whip_dir = os.path.join(self.dir, "sounds", "whip")
+        if os.path.isdir(whip_dir):
+            try:
+                self.whipsnd = PokeSound(
+                    whip_dir,
+                    volume=float(self.us.get("poke_volume", 40)) * 0.7)
+            except Exception:
+                self.whipsnd = None
         # 조작 소리 — 메뉴를 열거나 단추를 누를 때 '똑'. 이미 제 소리가
         # 있는 곳(콕·간식·홈 반응·펜)에는 안 넣는다. 겹치면 시끄럽다.
         ui_dir = os.path.join(self.dir, "sounds", "ui")
@@ -6841,6 +6865,9 @@ class Mascot:
             self.todos = []
 
     def _todo_save(self):
+        if _load_failed(self.todo_path):
+            self._log_error("todo_locked")   # 못 읽은 파일은 안 덮는다
+            return
         try:
             _save_json(self.todo_path,
                        {"items": self.todos, "pos": self.todo_pos,
@@ -7319,7 +7346,7 @@ class Mascot:
             # 오류 기록도 안 남아서, 사람에게는 '그냥 꺼졌다'로만 보인다.
             # 거두는 이름이 클래스마다 다르다 — PenSound 는 stop(),
             # 나머지는 close(). 있는 쪽을 부른다.
-            for _nm in ("pensnd", "pokesnd", "roomsnd", "sparksnd",
+            for _nm in ("pensnd", "pokesnd", "roomsnd", "whipsnd", "sparksnd",
                         "snacksnd", "snd", "_slime_snd", "pomosnd",
                         "uisnd", "wgsnd", "ctsnd", "oversnd", "g2snd"):
                 _s = getattr(self, _nm, None)
@@ -7426,6 +7453,13 @@ class Mascot:
         self._lv_ready = True        # 이제부터 방 신호에 lv 를 실어도 된다
 
     def _timer_save(self):
+        if _load_failed(self.state_path) and not getattr(
+                self, "_ts_lost_logged", False):
+            # 원본을 못 읽은 채 시작했다 — 지금 일하는 몫은 계속 저장해야
+            # 하므로 막지는 않는다. 옛 내용은 .bad 사본으로 남아 있다
+            # (_load_json 이 남긴다). 제보가 오면 그 파일부터 볼 것.
+            self._ts_lost_logged = True
+            self._log_error("timer_state_lost")
         try:
             self.stat["mins"] = sorted(self._act)
             _save_json(self.state_path,
@@ -7679,6 +7713,9 @@ class Mascot:
             self.dues = []
 
     def _due_save(self):
+        if _load_failed(os.path.join(self.state_dir, ".dues.json")):
+            self._log_error("due_locked")   # 못 읽은 파일은 안 덮는다
+            return
         try:
             _save_json(os.path.join(self.state_dir, ".dues.json"),
                        {"items": self.dues, "pos": self.due_pos,
@@ -8972,6 +9009,34 @@ class Mascot:
         except Exception:
             return False
 
+    def _win_top(self, win):
+        """그 창을 맨 앞으로. 이미 '항상 위'인 창끼리는 HWND_TOP 이라야 한다.
+
+        이름이 `_to_front` 가 아닌 것은 그 이름이 **이미 있어서**다 —
+        트레이에서 창을 앞으로 가져오는 정적 메서드(`_to_front(u, hwnd)`).
+        같은 이름을 두면 뒤에 쓴 쪽이 앞을 덮어 엉뚱한 데서 터진다
+        (지뢰 85 — 새 이름은 반드시 grep 하고 정할 것).
+
+        `lift()` 는 Tk 가 알아서 고르는데, 항상 위 창 사이에서는 순서를
+        못 되돌리는 경우가 있다 (지뢰 23).
+
+        메서드로 빼 둔 것은 **검사가 붙들 자리**가 필요해서다 — 안에
+        숨겨 두면 '몇 번 올렸나'를 잴 길이 없어 lift 를 세는 낡은 검사가
+        조용히 통과해 버린다 (지뢰 24 와 같은 이야기).
+        """
+        try:
+            if IS_WIN:
+                ctypes.windll.user32.SetWindowPos(
+                    int(win.wm_frame(), 16), 0, 0, 0, 0, 0,
+                    0x1 | 0x2 | 0x10)       # NOSIZE|NOMOVE|NOACTIVATE
+            else:
+                win.lift()
+        except Exception:
+            try:
+                win.lift()
+            except Exception:
+                pass
+
     def _keep_front(self, win, focus=True):
         """창이 살아 있는 동안 타이머(항상 위)보다 앞을 지킨다.
 
@@ -9033,17 +9098,48 @@ class Mascot:
                 return False
             return False
 
+        def to_front():
+            self._win_top(win)
+
         def raise_loop():
             try:
                 if not win.winfo_exists():
                     return
                 if not IS_WIN or covered():
-                    win.lift()
-                win.after(400 if IS_WIN else 700, raise_loop)
+                    to_front()
+                win.after(150 if IS_WIN else 700, raise_loop)
             except Exception:
                 pass
 
-        win.after(150, raise_loop)
+        last9 = [0.0]
+
+        def now_front(_e=None):
+            """마우스가 들어오거나 눌렀으면 **기다리지 말고** 올린다.
+
+            주기만으로는 누르고 나서 한 박자 뒤에 올라와, 그 사이가
+            '창이 뒤로 숨었다'로 보인다. 밀렸을 때만 올리므로 여기서도
+            깜빡이지 않는다 (지뢰 15).
+
+            `covered()` 는 화면의 창을 전부 훑으므로 마우스가 움직일
+            때마다 부르면 안 된다 — 0.25초에 한 번으로 묶는다.
+            """
+            try:
+                now9 = time.time()
+                if now9 - last9[0] < 0.25:
+                    return
+                last9[0] = now9
+                if win.winfo_exists() and (not IS_WIN or covered()):
+                    to_front()
+            except Exception:
+                pass
+
+        for _ev in ("<Enter>", "<Button-1>", "<FocusIn>", "<Motion>"):
+            try:
+                win.bind(_ev, now_front, add="+")
+            except Exception:
+                pass
+
+        win.after(60, raise_loop)
         if focus:
             win.after(80, lambda: win.focus_force()
                       if win.winfo_exists() else None)
@@ -9469,9 +9565,18 @@ class Mascot:
         key = self._my_workday()
         if key == self.day_key:
             return
-        if self.day_key and self._today_secs() >= 60:
+        prev9 = self.day_key
+        auto9 = None
+        if prev9 and self._today_secs() >= 60:
+            # 깜빡하고 '작업 종료'를 안 누른 채 06시를 넘겼다 — 브리핑을
+            # 대신 띄우고 어제 날짜로 도장판에 남긴다 (요청).
+            # **기록에 넣기 전에** 값을 찍어야 한다 (지뢰 28) — _hist_add 가
+            # 이번 세션 몫을 0 으로 되돌린다.
+            if (self._today_secs() >= self.AUTO_BRIEF_MIN
+                    and str(self.us.get("end_day") or "") != prev9):
+                auto9 = self._safe_str(self._brief_data, prev9) or None
             # 지난 하루를 그 날짜로 남긴다 (기록은 덮어쓰기라 겹치지 않는다)
-            self._safe("history", self._hist_add, self.day_key)
+            self._safe("history", self._hist_add, prev9)
         self.day_key = key
         self.day_base = self.work_secs
         self.zero_at = self.work_secs       # 카드도 오늘치부터
@@ -9488,6 +9593,20 @@ class Mascot:
                    "best", "runs", "_run", "first", "last"):
             self.stat[k2] = 0 if isinstance(self.stat.get(k2), int) else 0.0
         self._safe("timer_save", self._timer_save)
+        if auto9:
+            # 두 번 뜨지 않게 먼저 적는다 — 창이 못 떠도 다음 바퀴에
+            # 다시 시도하지 않는다 (자리를 비운 사이에 떴을 수도 있다).
+            self.us["end_day"] = prev9
+            self._safe("settings", self._save_settings)
+            self._reset_records()          # 작업 종료와 같은 마무리
+            # 그리는 도중에 창을 만들지 않는다 — 다음 프레임에 띄운다
+            # (작업 종료도 같은 길로 연다).
+            self.root.after(1200, lambda: self._safe(
+                "auto_brief", self._open_briefing, prev9, auto9))
+            self._say("새 작업일이 시작됐어요. 어제 브리핑을 남겨 둘게요",
+                      6.0)
+
+    AUTO_BRIEF_MIN = 600     # 이만큼(초)은 일한 날만 스스로 브리핑을 띄운다
 
     def _reset_records(self):
         """새 세션 — 기록 갱신 축하를 처음부터 다시 센다."""
@@ -11480,6 +11599,10 @@ class Mascot:
             self._brief = None
             self._log_error("brief_data")
         self._safe("history", self._hist_add)
+        # 이 작업일은 사람이 직접 마무리했다 — 06시 자동 마무리가 겹쳐
+        # 브리핑을 두 번 띄우지 않게 적어 둔다.
+        self.us["end_day"] = self.day_key or self._my_workday()
+        self._safe("settings", self._save_settings)
         if self.cfg.get("reset_on_end"):  # 시간을 0으로 되돌린다
             # 기준점은 **'오늘' 눈금으로** 잡는다. 연동 시계(work_secs)로
             # 잡으면, 에이전트가 다시 켜져 그 값이 줄어든 뒤에는 오늘치에서
@@ -11543,13 +11666,18 @@ class Mascot:
             prev = name
         return self.MILESTONES[-1][1], None, self.MILESTONES[-1][0], 1.0
 
-    def _brief_data(self):
-        """브리핑에 그릴 값 한 벌. 기록에 넣기 전에 찍어 둔다."""
+    def _brief_data(self, day=None):
+        """브리핑에 그릴 값 한 벌. 기록에 넣기 전에 찍어 둔다.
+
+        `day` 를 주면 그 작업일 기준으로 뽑는다 — 06시를 넘겨 스스로
+        마무리할 때는 **어제**가 기준이라야 최근 7일이 한 칸씩 밀리지
+        않는다.
+        """
         s = self.stat
         total = int(self._today_secs())     # 카드의 누적이 아니라 '오늘'
         goal = max(float(self.us.get("goal_hours", 6)), 0.5) * 3600
         days = self._hist_load() if self.cfg.get("history") else {}
-        today = self._session_day()
+        today = str(day or "") or self._session_day()
 
         def shift(key, n):
             t = time.mktime(time.strptime(key, "%Y-%m-%d")) + n * 86400
@@ -11583,14 +11711,19 @@ class Mascot:
             "traced": self._kb is not None,   # 클릭·거리를 잴 수 있는 환경인가
         }
 
-    def _open_briefing(self):
-        """오늘의 작업 브리핑 — 시계·구성·흔적·마일스톤·최근 7일."""
+    def _open_briefing(self, day_key=None, data=None):
+        """오늘의 작업 브리핑 — 시계·구성·흔적·마일스톤·최근 7일.
+
+        `day_key`·`data` 는 06시를 넘겨 스스로 마무리할 때 쓴다 —
+        어제 값으로 그리고 어제 날짜로 도장판에 남긴다.
+        """
         if getattr(self, "_brief_win", None) is not None \
                 and self._brief_win.winfo_exists():
             self._brief_win.lift()
             return
-        d = getattr(self, "_brief", None) or self._brief_data()
+        d = data or getattr(self, "_brief", None) or self._brief_data()
         self._brief = None
+        self._brief_key = str(day_key or "") or None
         cd = self.card
 
         # ── 색: 큰 면은 옅게, 글자·테두리는 진하게 ──────────────────────
@@ -11937,7 +12070,8 @@ class Mascot:
         # 오늘의 브리핑을 도장판에 남긴다 — 창이 자리 잡은 뒤 한 장 찍는다.
         # 도장판에서 그 날짜를 누르면 아래로 펼쳐 보여 준다. ImageGrab이
         # 없는 굳힌 앱(맥 등)에서는 조용히 건너뛴다 — 기록만 안 남는다.
-        day_key = self._my_workday()
+        day_key = getattr(self, "_brief_key", None) or self._my_workday()
+        self._brief_key = None
 
         def snap():
             try:
@@ -12364,9 +12498,9 @@ class Mascot:
         page = [len(pages) - 1]          # 처음에는 가장 최근 것
 
         win = tk.Toplevel(self.root)
+        win.title("업데이트")            # 자리를 기억하는 열쇠 (먼저 정한다)
         self._keep_front(win, focus=False)
         self._update_win = win
-        win.title("업데이트")
         win.attributes("-topmost", True)
         win.resizable(False, True)       # 세로만 조절 (가로는 글줄이 흐트러진다)
         win.configure(bg=cd["panel"])
@@ -16322,8 +16456,8 @@ class Mascot:
                 lambda ry: toggle(ry, "친구들과 같이 보기", "room_on"),
                 lambda ry: toggle(ry, "홈에서 내 캐릭터를 비활성화",
                                   "room_hide_me"),
-                lambda ry: toggle(ry, "반응 받지 않기 (콕·응원·간식 등)",
-                                  "room_mute"),
+                # '반응 받지 않기' 는 홈 화면의 '알림 끄기' 로 옮겼다 (요청)
+                # — 켜고 끄는 곳이 둘이면 어느 쪽이 참인지 헷갈린다.
             ])
             y -= 12
             cv.create_text(LX, y, anchor="w",
@@ -16954,11 +17088,35 @@ class Mascot:
         if self.room_win is not None:
             self._safe("room_draw", self._room_draw)
 
+    def _clip_text(self):
+        """붙임쪽의 글자. 없으면 빈 글자.
+
+        굳힌 맥 앱에서 `clipboard_get()` 이 비어 오는 경우가 있어
+        AppKit 을 먼저 본다 (그림 붙여넣기가 이미 쓰는 길 — 허용
+        목록에 있다). AppKit 이 없으면 Tk 로 물러난다.
+        """
+        if IS_MAC:
+            try:
+                from AppKit import NSPasteboard
+                pb = NSPasteboard.generalPasteboard()
+                got = pb.stringForType_("public.utf8-plain-text")
+                if got:
+                    return str(got)
+            except Exception:
+                pass
+        for kw in ({}, {"type": "STRING"}, {"type": "UTF8_STRING"}):
+            try:
+                got = self.root.clipboard_get(**kw)
+                if got:
+                    return str(got)
+            except Exception:
+                continue
+        return ""
+
     def _paste_into(self, ent, clear=False):
         """클립보드를 입력칸에 직접 넣는다 — Tk 기본 바인딩에 안 기댄다."""
-        try:
-            txt = str(self.root.clipboard_get())
-        except Exception:
+        txt = self._safe_str(self._clip_text)
+        if not txt:
             return "break"
         try:
             if clear:
@@ -17018,6 +17176,7 @@ class Mascot:
 
         var = {}
         ents = {}
+        paste_hit = []           # 붙여넣기 단추 자리 (노래 칸에만 있다)
         cur = {"msg": self._room_msg(), "goal": self._my_goal(),
                "due": self._my_due(), "song": self._room_song()[0]}
         y = u(78)
@@ -17032,7 +17191,11 @@ class Mascot:
             if key == "due":
                 due_y = y
             by = y + u(14)
-            self._rr_soft(cv, u(20), by, W - u(20), by + u(38), u(19),
+            # 노래 칸에만 붙여넣기 단추를 둔다. 맥에서는 Cmd+V 가 안 먹는
+            # Tk 판이 있어(제보) 단추가 없으면 주소를 넣을 길이 없다.
+            pw = u(66) if key == "song" else 0
+            fx1 = W - u(20) - pw           # 흰 칸의 오른쪽 끝
+            self._rr_soft(cv, u(20), by, fx1, by + u(38), u(19),
                           fill="#ffffff", outline=edge, width=2)
             var[key] = tk.StringVar(value=cur.get(key) or "")
             # **부모는 캔버스** (지뢰 22)
@@ -17041,8 +17204,16 @@ class Mascot:
                           justify="center", highlightthickness=0,
                           insertbackground=ink)
             ents[key] = e9
-            cv.create_window(W / 2, by + u(19), window=e9,
-                             width=W - u(58), height=u(24))
+            cv.create_window((u(20) + fx1) / 2, by + u(19), window=e9,
+                             width=fx1 - u(20) - u(18), height=u(24))
+            if pw:
+                bx0 = fx1 + u(8)
+                self._rr_soft(cv, bx0, by, W - u(20), by + u(38), u(19),
+                              fill=cd["soft"], outline=edge, width=2)
+                cv.create_text((bx0 + W - u(20)) / 2, by + u(19),
+                               text="붙여넣기", font=self._uf(7, True),
+                               fill=self._shade(cd["fill"], 0.28))
+                paste_hit.append((bx0, by, W - u(20), by + u(38), key))
             y += rowh
 
         # 마감 옆에 남은 날을 바로 보여 준다 — 잘못 썼는지 그 자리에서 보인다
@@ -17111,6 +17282,18 @@ class Mascot:
             hits.append((x0, byy - u(18), x0 + bw9, byy + u(18), kind))
 
         def on_click(ev):
+            # 붙여넣기가 먼저다 — 뒤에 두면 저장 단추 검사에 안 걸리지만,
+            # 새 자리를 넣을 때는 늘 앞쪽에 두는 것이 이 프로젝트의 규칙이다
+            # (지뢰 87).
+            for x0, y0, x1, y1, key9 in paste_hit:
+                if x0 <= ev.x <= x1 and y0 <= ev.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    got9 = self._safe_str(self._clip_text)
+                    if got9:
+                        self._safe("paste", self._paste_into, ents[key9], True)
+                    else:
+                        self._say("붙임쪽에 주소가 없어요", 3.0)
+                    return
             for x0, y0, x1, y1, kind in hits:
                 if x0 <= ev.x <= x1 and y0 <= ev.y <= y1:
                     if kind == "clear":
@@ -17225,15 +17408,19 @@ class Mascot:
             # lv 없는 신호는 받는 쪽이 원래 건너뛴다 (옛 판 포함).
             out["lv"] = self._level()
             out["ti"] = self._title()[:14]
-        wgb = self._wg_best()
-        if wgb > 0:
-            out["wgb"] = wgb        # 수박게임 최고 — 모두의 랭킹감
-        ctb = self._ct_best()
-        if ctb > 0:
-            out["ctb"] = ctb        # 컬러타일 최고 — 모두의 랭킹감
-        g2b = self._g2_best()
-        if g2b > 0:
-            out["g2b"] = g2b        # 2048 최고 — 모두의 랭킹감
+        # 게임 최고 — **읽기 실패면 키를 아예 뺀다.** 그때 0 을 실으면
+        # 받는 쪽이 '본인이 지웠다'로 알아듣고 캐시에서 남의 기록을
+        # 지운다 (락스 최고점 소실과 같은 꼴). 키가 없으면 받는 쪽은
+        # 유지한다.
+        # 반대로 **제대로 읽었는데 0** 이면 그건 정말 지운 것이므로 0 을
+        # 싣는다 — 안 실으면 본인이 지운 기록이 남의 화면에 영영 남는다
+        # (지뢰 77). 둘을 가르는 것은 `_load_failed` 하나뿐이다.
+        if not _load_failed(self._wg_path()):
+            out["wgb"] = self._wg_best()   # 수박게임 최고 (0 = 지웠다)
+        if not _load_failed(self._ct_path()):
+            out["ctb"] = self._ct_best()   # 컬러타일 최고 (0 = 지웠다)
+        if not _load_failed(self._g2_path()):
+            out["g2b"] = self._g2_best()   # 2048 최고 (0 = 지웠다)
         gm9 = self._my_goal()
         if gm9:
             out["gm"] = gm9         # 오늘 목표 (있을 때만 — 없으면 열쇠도 뺀다)
@@ -17573,20 +17760,24 @@ class Mascot:
                     ti = str(cur.get("ti") or ti)[:14]
                 else:
                     lvd = 0.0        # 30분을 버텼다 — 진짜로 받아들인다
+            # 수박게임 최고 — **키가 있으면** 본인이 보낸 최신 값을 그대로
+            # 따른다 ('큰 쪽만'으로 두면 본인이 지운 기록이 남의 화면에
+            # 영영 남는다). **키가 없으면 기존 것을 지킨다** — 보내는 쪽이
+            # 기록 파일을 못 읽은 순간이거나 옛 판이다. 없다고 지우면
+            # 읽기 실패 한 번에 남의 최고점이 모두의 캐시에서 사라진다.
             try:
-                # 수박게임 최고 — **본인이 보낸 최신 값을 그대로 따른다.**
-                # '큰 쪽만'으로 두면 본인이 기록을 지워도(테스트 점수)
-                # 남의 화면에 영영 남는다. 이 값은 본인 최고라 원래
-                # 줄지 않고, 줄었다면 본인이 지운 것이다.
-                wb = int(q.get("wgb") or 0)
+                wb = (int(q.get("wgb") or 0) if "wgb" in q
+                      else int(cur.get("wgb") or 0))
             except Exception:
                 wb = 0
             try:
-                cb = int(q.get("ctb") or 0)      # 컬러타일도 같은 규칙
+                cb = (int(q.get("ctb") or 0) if "ctb" in q
+                      else int(cur.get("ctb") or 0))
             except Exception:
                 cb = 0
             try:
-                gb2 = int(q.get("g2b") or 0)     # 2048 도 같은 규칙
+                gb2 = (int(q.get("g2b") or 0) if "g2b" in q
+                       else int(cur.get("g2b") or 0))
             except Exception:
                 gb2 = 0
             # 마감만 캐시에 담는다. 목표·체크는 '오늘치'라 담으면 어제
@@ -18068,6 +18259,27 @@ class Mascot:
             self._snack_on = got if isinstance(got, dict) else False
         return self._snack_on or None
 
+    def _snack_first_of_day(self):
+        """오늘 아직 운세를 못 봤다 — 그날 처음 받는 간식이라는 뜻."""
+        return str(self.us.get("fortune_day") or "") != self._my_workday()
+
+    def _snack_name_for(self, x):
+        """받은 간식의 실제 모양. **그날 처음 받는 것은 포춘쿠키**로 (요청).
+
+        쪽지(운세)가 그날 첫 간식에서만 나오므로 모양도 맞춰 준다.
+        정하는 것은 **받는 쪽**이다 — 보낸 사람의 날짜가 아니라 내
+        작업일이 기준이라야 새벽 06시 경계에서 어긋나지 않는다.
+        컵케이크는 그대로 둔다 (스페셜은 스페셜이다). 그림이 없는 옛
+        파츠에서는 보낸 쪽이 고른 것을 그대로 쓴다 (지뢰 76).
+        """
+        name = str(x or "") or self._snack_pick(time.time() * 1000)
+        if name.startswith("cup_"):
+            return name
+        if (self._snack_first_of_day() and os.path.isfile(
+                os.path.join(self.dir, "snacks", "fortune.png"))):
+            return "fortune"
+        return name
+
     def _snack_place(self, name):
         """간식을 책상에 놓는다. 이미 있으면 최신 것으로 바꾼다."""
         self._snack_on = {"k": str(name or ""), "t": time.time()}
@@ -18080,7 +18292,7 @@ class Mascot:
                  "chocolate-chip-cookies": "crunch", "cartoon-cat": "crunch",
                  "coconut": "crunch", "kiwi": "crunch",
                  "carrot": "crunch", "cucumber": "crunch",
-                 "tonkatsu": "crunch",
+                 "tonkatsu": "crunch", "fortune": "crunch",
                  "drink": "drink"}
 
     SNACK_CUP_RATE = 0.25    # 간식을 줄 때 스페셜 컵케이크가 나올 확률
@@ -18306,10 +18518,13 @@ class Mascot:
                        "blanket": "혼자 쓰담쓰담 했어요",
                        "snack": "간식을 먹었어요"}.get(k, "…"), 3.0)
             self._room_flash[self.char] = time.time()
+            x9 = str(ev.get("x") or "")
             if k == "snack":
-                self._safe("snack_place", self._snack_place,
-                           ev.get("x") or self._snack_pick(time.time() * 1000))
-            self._char_fx_add(k, ev.get("x") or "")
+                # 떨어지는 그림과 책상에 남는 것이 같아야 한다 — 이름을
+                # 한 번만 정해서 둘 다에 쓴다.
+                x9 = self._safe_str(self._snack_name_for, x9) or x9
+                self._safe("snack_place", self._snack_place, x9)
+            self._char_fx_add(k, x9)
             if cup:                      # 혼자 뽑아도 반짝인다
                 self.smile_until = max(self.smile_until, time.time() + 6.0)
                 self._char_fx_add("praise", "")
@@ -18332,10 +18547,13 @@ class Mascot:
         kind = ev.get("k")
         now = time.time()
         self._safe("inbox_add", self._inbox_add, ev.get("f"), who, kind)
+        x9 = str(ev.get("x") or "")
         if kind == "snack":
             # 간식은 책상에 남는다 — 눌러야 없어지고, 또 받으면 최신 것으로.
-            self._safe("snack_place", self._snack_place,
-                       ev.get("x") or self._snack_pick(time.time() * 1000))
+            # 떨어지는 그림과 책상에 남는 것이 같아야 하므로 이름을 한 번만
+            # 정해서 아래 연출에도 그대로 넘긴다.
+            x9 = self._safe_str(self._snack_name_for, x9) or x9
+            self._safe("snack_place", self._snack_place, x9)
         # 자리를 비운 사이에 온 것은 따로 적어 둔다 (돌아오면 알려 준다)
         last = max(getattr(self, "last_key", 0.0),
                    getattr(self, "last_pointer", 0.0))
@@ -18344,15 +18562,15 @@ class Mascot:
             del self._away_got[:-20]
         # 타이머 화면에서 터진다. 칭찬은 금별 대신 쓰담 손이 나온다 —
         # 아래 칭찬 분기에서 고깔·폭죽과 한 묶음으로 연출한다.
-        self._char_fx_add("blanket" if kind == "praise" else kind,
-                          ev.get("x") or "")
+        self._char_fx_add("blanket" if kind == "praise" else kind, x9)
         if cup:
             # 스페셜 컵케이크 — 샤라랑 + 반짝임 + 한참 웃는 얼굴
             self.smile_until = max(self.smile_until, now + 6.0)
             self._char_fx_add("praise", "")
             self._safe("sparkle_snd", self._sparkle_sound)
         else:
-            self._safe("room_poke_snd", self._room_sound)  # 띠링 (평소와 다르게)
+            # 띠링 (평소와 다르게). 채찍질만 제 소리로 갈린다.
+            self._safe("room_poke_snd", self._room_sound, kind)
         if self.stretch_pending:
             # 스트레칭 알림이 말풍선을 붙잡고 기지개를 되풀이하는 동안에는
             # 반응이 3초 만에 도로 덮이고, 기울인 머리가 연출을 가린다.
@@ -18447,9 +18665,18 @@ class Mascot:
         if snd is not None:
             snd.play()
 
-    def _room_sound(self):
-        """홈에서 남이 눌러 줬을 때. 파일이 없는 옛 파츠면 평소 소리로."""
-        snd = getattr(self, "roomsnd", None) or getattr(self, "pokesnd", None)
+    def _room_sound(self, kind=""):
+        """홈에서 남이 눌러 줬을 때. 파일이 없는 옛 파츠면 평소 소리로.
+
+        채찍질만 제 소리(sounds/whip)를 낸다. 그 폴더가 없는 옛 파츠는
+        여느 반응과 같은 '띠링'으로 물러난다 (지뢰 76 — 코드가 먼저 가고
+        파일이 나중에 따라오는 동안에도 조용히 넘어가야 한다).
+        """
+        snd = None
+        if kind == "gwhip":
+            snd = getattr(self, "whipsnd", None)
+        snd = snd or getattr(self, "roomsnd", None) or getattr(
+            self, "pokesnd", None)
         if snd is not None:
             snd.play()
 
@@ -19057,6 +19284,10 @@ class Mascot:
                 lambda e: self._safe("deco_drop", self._deco_drop, e))
         cv.bind("<Motion>", lambda e: self._safe("room_hover",
                                                  self._room_hover, e))
+        # 창 밖으로 나가면 펼쳐 둔 미니게임을 접는다 — Motion 이 안 오면
+        # 스스로 못 접혀서 펼친 채로 남는다.
+        cv.bind("<Leave>", lambda e: self._safe("room_leave",
+                                                self._room_leave))
         cv.bind("<Configure>", lambda e: self._safe("room_size",
                                                     self._room_relayout))
         cv.bind("<MouseWheel>", lambda e: self._safe("room_wheel",
@@ -19083,7 +19314,11 @@ class Mascot:
         self._room_job = None
         if self.room_win is None:
             return
-        self._room_job = self.root.after(100, self._room_loop)   # 먼저 예약
+        # 말풍선이 흐르는 동안에만 빨리 돈다. 100ms(10fps)로 흘리면
+        # 한 프레임에 5px 씩 뛰어 뚝뚝 끊겨 보인다 (제보). 흐를 때만
+        # 40ms(25fps)로 올린다 — 실측 한 프레임 4.7ms 라 잠깐이면 싸다.
+        ms9 = 40 if (self._song_hover or self._msg_hover) else 100
+        self._room_job = self.root.after(ms9, self._room_loop)   # 먼저 예약
         self._safe("room_frame", self._room_frame)
 
     def _room_key(self):
@@ -19103,6 +19338,7 @@ class Mascot:
         ts = self._room_toast
         return (tuple(who), self._room_pick, self._room_page,
                 self._room_view(), bool(self._room_menu_open),
+                bool(self._room_games_open), bool(self.us.get("room_mute")),
                 tuple(sorted(fresh)),
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
@@ -19373,10 +19609,13 @@ class Mascot:
         # 노래 말풍선 마퀴 — 커서를 올리면 긴 제목이 옆으로 천천히 흐른다
         hov = self._song_hover
         if hov and hov in self._room_song_box:
-            bx0, by0, bx1, by1, title2, col2 = self._room_song_box[hov]
+            sb9 = self._room_song_box[hov]
+            bx0, by0, bx1, by1, title2, col2 = sb9[:6]
             got_mq = self._safe_str(self._song_marquee, hov, title2,
                                     int(bx1 - bx0), int(by1 - by0),
-                                    col2, now)
+                                    col2, now,
+                                    int(sb9[6]) if len(sb9) > 6 else 0,
+                                    bool(sb9[7]) if len(sb9) > 7 else True)
             cv.delete("songmq")
             if got_mq is not None:
                 cv.create_image(int(bx0), int(by0), image=got_mq,
@@ -19387,9 +19626,12 @@ class Mascot:
             hovm = None
         if hovm and hovm in getattr(self, "_room_msg_boxes", {}):
             mb = self._room_msg_boxes[hovm]
-            got_mm = self._safe_str(self._mq_bubble, mb[4],
-                                    int(mb[2] - mb[0]), int(mb[3] - mb[1]),
-                                    mb[5], now)
+            got_mm = self._safe_str(
+                lambda: self._mq_bubble(
+                    mb[4], int(mb[2] - mb[0]), int(mb[3] - mb[1]), mb[5],
+                    now, pt=int(mb[6]) if len(mb) > 6 else 0, body=False,
+                    bold=bool(mb[7]) if len(mb) > 7 else True,
+                    padl=int(mb[8]) if len(mb) > 8 else 0))
             cv.delete("msgmq")
             if got_mm:
                 cv.create_image(int(mb[0]), int(mb[1]), image=got_mm,
@@ -20430,9 +20672,10 @@ class Mascot:
                                    bx0 - 8 * k, cyc - 16 * k, k, col, slot,
                                    done9)
                     # 잘렸으면 호버 마퀴가 원문을 흘려 보여 준다
-                    self._room_msg_boxes[slot] = (bx0, cyc - 28 * k,
-                                                  bx1, cyc - 4 * k,
-                                                  full_msg, col)
+                    self._room_msg_boxes[slot] = (
+                        bx0, cyc - 28 * k, bx1, cyc - 4 * k, full_msg, col,
+                        f_msg[1], len(f_msg) > 2 and f_msg[2] == "bold",
+                        max(0, gx9 - bx0))
             # 게이지 (테마색 그라데이션) — 시간 칸 앞까지
             pr = max(0.0, min(1.0, float(p.get("p") or 0)))
             raw = self._tint(self._room_raw(slot), 0.5) if off                 else self._room_raw(slot)
@@ -21012,7 +21255,9 @@ class Mascot:
             if len(line) < len(msg):
                 self._room_msg_boxes[slot] = (
                     bub - half - 14 * k, ny - 15 * k,
-                    bub + half + 14 * k, ny + 15 * k, msg, col)
+                    bub + half + 14 * k, ny + 15 * k, msg, col, f3[1],
+                    len(f3) > 2 and f3[2] == "bold",
+                    max(0, gx9 - (bub - half - 14 * k)))
         # 안 켰어도 레벨을 보여 준다 — 명단에 마지막으로 본 값이 실려
         # 온다(꺼진 사람의 작업 시간이 합계에 남는 것과 같은 이유).
         lab = "Lv.%d  %s" % (int(p.get("lv") or 1),
@@ -21142,29 +21387,59 @@ class Mascot:
         self._room_inbox_hit = (x0 - 5 * k, y0 - 5 * k,
                                 x0 + w + 6 * k, y0 + h + 5 * k)
 
-    def _song_marquee(self, slot, title, w, h, col, now):
+    def _song_marquee(self, slot, title, w, h, col, now, pt=0, bold=True):
         """호버 중인 노래 말풍선 — 제목이 흐른다 (범용 _mq_bubble 위임)."""
         return self._mq_bubble("♪ " + str(title or "노래 들으러 가기"),
-                               w, h, col, now)
+                               w, h, col, now, pt=pt, body=False, bold=bold)
 
-    def _mq_bubble(self, title, w, h, col, now):
+    def _tk_ppp(self):
+        """1 포인트가 몇 픽셀인가 (Tk 의 scaling). 한 번만 묻고 들고 있는다.
+
+        원래 글자는 Tk 글꼴(포인트)로 그려지고 마퀴는 PIL(픽셀)로 그린다.
+        이 값을 안 쓰면 커서를 올릴 때 글씨 크기가 달라진다 (제보 —
+        '글씨가 커지면서').
+        """
+        got = getattr(self, "_tk_ppp_v", None)
+        if got is None:
+            try:
+                got = float(self.root.tk.call("tk", "scaling"))
+            except Exception:
+                got = 96.0 / 72.0
+            if not (0.5 < got < 6.0):
+                got = 96.0 / 72.0
+            self._tk_ppp_v = got
+        return got
+
+    def _mq_bubble(self, title, w, h, col, now, pt=0, body=True, bold=True,
+                   padl=0):
         """호버 중인 말풍선 — 글이 옆으로 천천히 흐르는 그림 한 장.
 
         글이 짧아 다 보이면 None (기존 말풍선 그대로). 글자 띠는 글마다
         한 번만 그려 두고, 프레임마다 잘라 붙이기만 한다.
+
+        `body=False` 면 **말풍선을 다시 그리지 않는다** — 글자가 지나갈
+        띠만 흰색으로 칠하고 나머지는 투명이라, 원래 말풍선의 테두리와
+        꼬리가 그대로 비쳐 보인다 (요청). `pt` 는 원래 글자의 글꼴
+        포인트 크기 — 주면 크기가 정확히 같아진다.
         """
         title = str(title or "")
         S = 4
-        fpx = max(10, int(h * 0.56)) * S
-        key = ("strip", title, fpx)
+        if pt:
+            fpx = max(8, int(round(float(pt) * self._tk_ppp()))) * S
+        else:
+            fpx = max(10, int(h * 0.56)) * S
+        key = ("strip", title, fpx, bool(bold))
         strip = self._mq_cache.get(key)
         if strip is None:
             try:
                 from PIL import ImageDraw, ImageFont
                 try:
+                    # 원래 글자가 보통 굵기면 보통 판을 쓴다 — 늘 굵은 판을
+                    # 쓰면 커서를 올릴 때 글씨가 굵어진다 (제보).
                     font = ImageFont.truetype(
                         os.path.join(self.dir, "fonts",
-                                     "Pretendard-Bold.otf"), fpx)
+                                     "Pretendard-Bold.otf" if bold
+                                     else "Pretendard-Regular.otf"), fpx)
                 except Exception:
                     font = ImageFont.load_default()
                 probe = Image.new("RGBA", (4, 4))
@@ -21177,25 +21452,42 @@ class Mascot:
                     fill=self._shade(col, 0.15))
             except Exception:
                 strip = False
-            if len(self._mq_cache) > 12:
-                for old4 in list(self._mq_cache)[:6]:
+            if len(self._mq_cache) > 24:      # 열쇠가 여러 갈래다 (지뢰 18)
+                for old4 in list(self._mq_cache)[:12]:
                     self._mq_cache.pop(old4, None)
             self._mq_cache[key] = strip
         if strip is False or strip is None:
             return None
-        inner = (w - 18) * S
-        if strip.width <= inner:
+        # 글자가 지나갈 띠. 말풍선을 안 그릴 때는 알약 안에 확실히 들어가는
+        # 만큼만 칠한다 — 반지름 h/2 인 알약에서 높이 0.66h 인 띠는
+        # 가로로 0.125h 만 들어가면 모서리를 안 넘는다 (계산해서 잡았다).
+        pad = (max(2, int(h * 0.14) + 1) if not body else 9)
+        # 말풍선 앞에 ○ · ✔ · D-n 이 붙어 있으면 그 뒤에서 시작한다 —
+        # 안 그러면 띠가 아이콘을 덮어 버린다.
+        pl = max(pad, int(padl or 0))
+        if pl > w - pad - 8:
+            pl = pad                     # 자리가 없으면 그냥 처음부터
+        inner = (w - pl - pad) * S
+        if inner < 8 * S or strip.width <= inner:
             return None                  # 짧으면 흐를 필요가 없다
-        # 말풍선 몸통 (꼬리 없이 — 원래 말풍선 위에 겹쳐 그린다)
-        tkey = ("tpl", w, h, col)
+        tkey = ("tpl", w, h, col, bool(body), pad, pl)
         tpl = self._mq_cache.get(tkey)
         if tpl is None:
             from PIL import ImageDraw
             tpl = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
-            ImageDraw.Draw(tpl).rounded_rectangle(
-                [S // 2, S // 2, w * S - 1 - S, h * S - 1 - S],
-                radius=(h * S) // 2, fill="#ffffff",
-                outline=self._tint(col, 0.35), width=S)
+            if body:
+                # 옛 길 — 말풍선 몸통까지 새로 그린다 (게임 랭킹 한마디처럼
+                # 원래 말풍선이 없는 자리에서 쓴다).
+                ImageDraw.Draw(tpl).rounded_rectangle(
+                    [S // 2, S // 2, w * S - 1 - S, h * S - 1 - S],
+                    radius=(h * S) // 2, fill="#ffffff",
+                    outline=self._tint(col, 0.35), width=S)
+            else:
+                bh = max(6, int(h * 0.66))
+                y0b = (h - bh) // 2
+                ImageDraw.Draw(tpl).rectangle(
+                    [pl * S, y0b * S, (w - pad) * S - 1,
+                     (y0b + bh) * S - 1], fill="#ffffff")
             self._mq_cache[tkey] = tpl
         # 끝까지 흐르면 **처음으로 되돌아가** 다시 흐른다 (제보).
         # 예전에는 띠를 이어 붙여 무한히 옆으로 흘렸는데, 그러면 끝과
@@ -21223,7 +21515,7 @@ class Mascot:
             strip.crop((off, 0, min(strip.width, off + inner), strip.height)),
             (0, 0))
         y2 = (h * S - strip.height) // 2
-        im.alpha_composite(win, (9 * S, max(0, y2)))
+        im.alpha_composite(win, (pl * S, max(0, y2)))
         im = im.resize((w, h), Image.LANCZOS)
         self._mq_img = ImageTk.PhotoImage(im)
         return self._mq_img
@@ -21303,6 +21595,13 @@ class Mascot:
         if line:
             cv.create_text(gx9, ny, text=line, font=f3, anchor="w",
                            fill=self._shade(col, 0.25), tags="dyn")
+        # 잘렸으면 커서를 올렸을 때 원문이 옆으로 흐르게 (마퀴).
+        # 한마디·노래와 같은 표를 쓰되 열쇠를 갈라 둔다 — 한 칸에
+        # 말풍선이 둘이라 slot 하나로는 서로를 덮는다.
+        if goal9 and len(line) < len(goal9):
+            self._room_msg_boxes[(slot, "goal")] = (
+                x0, ny - 15 * k, x1, ny + 15 * k, goal9, col, f3[1],
+                len(f3) > 2 and f3[2] == "bold", max(0, gx9 - x0))
         # 남의 목표를 눌렀으면 그 아래에 '보낼까요?' 단추를 띄운다
         if self._goal_open == slot and slot != self.char and goal9 \
                 and not self._goal_due:
@@ -21387,7 +21686,8 @@ class Mascot:
                                        x1 + 3 * k, y0 + h + 3 * k),
                                       str(sg.get("u")))
         self._room_song_box[slot] = (x0, y0, x1, y0 + h,
-                                     str(sg.get("t") or ""), col)
+                                     str(sg.get("t") or ""), col, f[1],
+                                     len(f) > 2 and f[2] == "bold")
         self._room_song_slots.add(slot)
 
     CAL_TAGS = ("dyn", "ui")     # 아이콘은 스티커 위로 (제보)
@@ -21552,14 +21852,19 @@ class Mascot:
         return os.path.join(self.state_dir, ".stamp_diary.json")
 
     def _stamp_diary(self):
-        try:
-            with open(self._stamp_diary_path(), encoding="utf-8") as fp:
-                d = json.load(fp)
-            return d if isinstance(d, dict) else {}
-        except Exception:
-            return {}
+        # 사용자가 직접 쓴 글이다 — 읽기 한 번 실패한 채 저장하면 일기
+        # 전체가 한 줄로 덮이고 .bak 까지 오염된다 (지뢰 92 유형).
+        d = _load_json(self._stamp_diary_path(), {})
+        return d if isinstance(d, dict) else {}
 
     def _stamp_diary_set(self, key, text):
+        if _load_failed(self._stamp_diary_path()):
+            # 원본을 못 읽은 채 저장하면 일기 전체를 잃는다 — 이번만
+            # 건너뛰고 알린다. 재시작하면 대개 되읽힌다.
+            self._log_error("diary_locked")
+            self._safe("say", self._say,
+                       "일기 파일을 읽지 못해 저장을 잠시 멈췄어요", 6.0)
+            return
         d = self._stamp_diary()
         text = str(text).strip()[:300]
         if text:
@@ -22566,8 +22871,9 @@ class Mascot:
             return got
         d = {"room": [], "pomo": []}
         try:
-            with open(self._stk_file(), encoding="utf-8") as fp:
-                raw = json.load(fp)
+            raw = _load_json(self._stk_file())
+            if not isinstance(raw, dict):
+                raise ValueError("기록 없음")
             for k in ("room", "pomo"):
                 v = raw.get(k)
                 if isinstance(v, list):
@@ -22583,6 +22889,9 @@ class Mascot:
         return self._stk_all()["pomo" if where == "pomo" else "room"]
 
     def _stk_save(self):
+        if _load_failed(self._stk_file()):
+            self._log_error("stk_locked")   # 못 읽은 파일은 안 덮는다
+            return
         try:
             _save_json(self._stk_file(), self._stk_all())   # 지뢰 35
         except Exception:
@@ -24532,8 +24841,9 @@ class Mascot:
             return self._wg
         g = self._wg_default()
         try:
-            with open(self._wg_path(), encoding="utf-8") as fp:
-                raw = json.load(fp)
+            raw = _load_json(self._wg_path())
+            if not isinstance(raw, dict):
+                raise ValueError("기록 없음")
             # 판(공 자리·점수)은 안 읽는다 — 단판제라 늘 새 판으로 연다
             g["best"] = max(0, int(raw.get("best") or 0))
             if isinstance(raw.get("rank"), list):
@@ -24552,6 +24862,9 @@ class Mascot:
         """
         g = self._wg
         if g is None:
+            return
+        if _load_failed(self._wg_path()):
+            self._log_error("wg_locked")   # 못 읽은 파일은 안 덮는다
             return
         try:
             _save_json(self._wg_path(), {           # 지뢰 35
@@ -25571,8 +25884,9 @@ class Mascot:
     def _ct_store(self):
         """남기는 것은 최고 기록과 랭킹뿐 (수박게임과 같은 단판제)."""
         try:
-            with open(self._ct_path(), encoding="utf-8") as fp:
-                raw = json.load(fp)
+            raw = _load_json(self._ct_path())
+            if not isinstance(raw, dict):
+                raise ValueError("기록 없음")
             best = max(0, int(raw.get("best") or 0))
             rank = [r for r in (raw.get("rank") or [])
                     if isinstance(r, list)][:self.CT_RANK_N]
@@ -25581,6 +25895,9 @@ class Mascot:
         return best, rank
 
     def _ct_save(self, best, rank):
+        if _load_failed(self._ct_path()):
+            self._log_error("ct_locked")   # 못 읽은 파일은 안 덮는다
+            return
         try:
             _save_json(self._ct_path(), {          # 지뢰 35
                 "best": int(best), "rank": list(rank)[:self.CT_RANK_N]})
@@ -26999,10 +27316,8 @@ class Mascot:
         수박게임·컬러타일은 켤 때마다 처음부터지만, 2048 은 한 판이
         길어서 창을 닫으면 아까운 판이 날아간다 (원작도 판을 저장한다).
         """
-        try:
-            with open(self._g2_path(), encoding="utf-8") as fp:
-                raw = json.load(fp)
-        except Exception:
+        raw = _load_json(self._g2_path(), {})
+        if not isinstance(raw, dict):
             raw = {}
         cells = {}
         for row in (raw.get("cells") or []):
@@ -27027,6 +27342,9 @@ class Mascot:
     def _g2_save(self, g):
         """하던 판까지 남긴다 (지뢰 35 — _save_json 으로)."""
         if g is None:
+            return
+        if _load_failed(self._g2_path()):
+            self._log_error("g2_locked")   # 못 읽은 파일은 안 덮는다
             return
         try:
             _save_json(self._g2_path(), {
@@ -28432,6 +28750,7 @@ class Mascot:
         self._room_game_btn = None
         self._room_deco_btn = None
         self._room_menu_items = []
+        self._room_game_items = []
         # 오른쪽 끝 — '카드 보기(보기 방식)' 단추의 딱 반대 자리 (요청)
         gx0 = W - 20 * k - bw
         open9 = bool(self._room_menu_open)
@@ -28447,16 +28766,18 @@ class Mascot:
                        tags=("dyn", "ui"))
         self._room_menu_btn = (gx0, by, gx0 + bw, by + bw)
         if open9:
+            games9 = self._room_game_list()
+            mute9 = bool(self.us.get("room_mute"))
             rows9 = []
-            if self.cfg.get("wgame"):
-                rows9.append(("수박\n게임", "game", "#eaf6df", "#5f8352"))
-            if self.cfg.get("ctile"):
-                rows9.append(("컬러\n타일", "ctile", "#dfeefa", "#4f7590"))
-            if self.cfg.get("g2048"):
-                rows9.append(("2048", "g2048", "#faeedf", "#8a6440"))
+            if games9:
+                rows9.append(("미니\n게임", "games", "#eaf6df", "#5f8352"))
             rows9.append(("꾸미기", "deco", cust or "#f6f0f8", P["sub"]))
+            # 알림 끄기 — 켜 두면 눈에 띄게 (지금 막고 있다는 뜻이다)
+            rows9.append((("알림\n켜기" if mute9 else "알림\n끄기"), "mute",
+                          "#f3c9cf" if mute9 else "#f7f2ee",
+                          "#8c4351" if mute9 else P["sub"]))
             # 위로 펼쳐지므로 **거꾸로** 그린다 — 그래야 화면에서 위에서
-            # 아래로 목록 차례(수박게임 → 컬러타일 → 꾸미기)가 된다
+            # 아래로 목록 차례(미니게임 → 꾸미기 → 알림 끄기)가 된다
             yy9 = by
             for label9, act9, col9, ink9 in reversed(rows9):
                 yy9 -= bw + 8 * k
@@ -28469,6 +28790,37 @@ class Mascot:
                                fill=ink9, tags=("dyn", "ui"))
                 self._room_menu_items.append(
                     ((gx0, yy9, gx0 + bw, yy9 + bw), act9))
+                if act9 == "games" and self._room_games_open:
+                    # 게임 종류는 **왼쪽으로** 펼친다 (요청). 세로로 쌓으면
+                    # 게임이 늘 때마다 창 위로 넘친다.
+                    xx9 = gx0
+                    for lab8, act8, col8, ink8 in games9:
+                        xx9 -= bw + 8 * k
+                        self._safe("soft_btn", self._soft_dot, cv,
+                                   xx9 + bw / 2, yy9 + bw / 2, bw / 2, col8,
+                                   outline="#ffffff", width=3.5, shadow=True,
+                                   tags=("dyn", "ui"))
+                        cv.create_text(xx9 + bw / 2, yy9 + bw / 2, text=lab8,
+                                       justify="center",
+                                       font=self._uf(7, True), fill=ink8,
+                                       tags=("dyn", "ui"))
+                        self._room_game_items.append(
+                            ((xx9, yy9, xx9 + bw, yy9 + bw), act8))
+
+    def _room_game_list(self):
+        """켜 둔 미니게임들 — (이름, 무엇, 바탕색, 글자색).
+
+        목록이 둘이면 반드시 어긋난다 (지뢰 55). 그리는 쪽과 누르는 쪽이
+        같은 것을 본다.
+        """
+        got = []
+        if self.cfg.get("wgame"):
+            got.append(("수박\n게임", "game", "#eaf6df", "#5f8352"))
+        if self.cfg.get("ctile"):
+            got.append(("컬러\n타일", "ctile", "#dfeefa", "#4f7590"))
+        if self.cfg.get("g2048"):
+            got.append(("2048", "g2048", "#faeedf", "#8a6440"))
+        return got
 
     POKE_BURST = 5           # 10초 안에 이 횟수째부터 막는다
     POKE_WINDOW = 10.0
@@ -28738,6 +29090,14 @@ class Mascot:
                 try:                       # 어제 것이어도 그대로 (요청)
                     st = max(0, int(row[0]))
                     sp = max(0.0, min(1.0, float(row[1])))
+                    # **오늘 날짜인데 걸러진 줄은 오염이다** — 06시 경계에서
+                    # 굳은 값이 꺼진 칸으로 새어 들어와 '400분'이 뜬다
+                    # (지뢰 60). 지난 날의 줄은 '마지막으로 끈 상태'라
+                    # 그대로 두고, 오늘 것만 상한으로 누른다.
+                    if len(row) >= 3 and row[2] == self._my_workday() \
+                            and st > cap:
+                        sp = sp * (cap / max(st, 1))
+                        st = int(cap)
                 except Exception:
                     st, sp = 0, 0
             # 레벨·칭호는 마지막으로 본 값을 그대로 (없으면 Lv.1)
@@ -28808,8 +29168,11 @@ class Mascot:
             got = []
             try:
                 d = os.path.join(self.dir, "snacks")
+                # 포춘쿠키는 뽑기에서 뺀다 — 그날 첫 간식에만 나와야
+                # 쪽지와 짝이 맞는다 (_snack_name_for 가 골라 준다).
                 got = sorted(f[:-4] for f in os.listdir(d)
-                             if f.lower().endswith(".png"))
+                             if f.lower().endswith(".png")
+                             and f[:-4] != "fortune")
             except Exception:
                 got = []
             self._snack_list = got
@@ -29663,6 +30026,35 @@ class Mascot:
         self._room_body = []
         self._safe("room_draw", self._room_draw)
 
+    def _room_leave(self):
+        """커서가 홈 창 밖으로 나갔다 — 펼쳐 둔 미니게임을 접는다."""
+        if self._room_games_open:
+            self._room_games_open = False
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
+
+    def _room_game_open(self, act):
+        """미니게임 창을 연다 (이름 → 창). 부르는 곳이 둘이라 한데 모은다."""
+        if act == "game":
+            self._safe("wgame_win", self._wg_win)
+        elif act == "ctile":
+            self._safe("ctile_win", self._ct_win)
+        elif act == "g2048":
+            self._safe("g2048_win", self._g2_win)
+
+    def _room_mute_toggle(self):
+        """알림 끄기 — 켜 둔 동안 남이 보낸 반응을 안 받는다.
+
+        환경설정에 있던 것을 홈으로 옮겼다 (요청). 끄면 **그때부터**
+        다시 받는다 — 꺼져 있던 동안 온 것이 한꺼번에 쏟아지지는 않는다
+        (신호 번호를 그대로 소비하기 때문이다).
+        """
+        on = not bool(self.us.get("room_mute"))
+        self.us["room_mute"] = on
+        self._save_settings()
+        self._room_toast = (("알림을 껐어요 — 반응이 안 와요" if on
+                             else "알림을 다시 켰어요"), time.time())
+
     def _room_hover(self, e):
         """누를 수 있는 것 위에서는 손 모양 커서로 — 눌리는지 알 수 있게.
 
@@ -29714,9 +30106,36 @@ class Mascot:
         if not hot and self._pl_open:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _a in self._pl_hits)
+        # '미니게임' 에 커서를 올리면 왼쪽으로 펼친다 (요청). 펼친 게임
+        # 위에 있는 동안에도 열어 둬야 누를 수 있다 — 벗어나야 접는다.
+        if self._room_menu_open:
+            want9 = False
+            for box9, act9 in list(getattr(self, "_room_menu_items", [])):
+                if act9 == "games" and box9[0] <= e.x <= box9[2] \
+                        and box9[1] <= e.y <= box9[3]:
+                    want9 = True
+                    break
+            if not want9 and self._room_games_open:
+                for box8, _a8 in list(getattr(self, "_room_game_items", [])):
+                    # 칸 사이의 틈에서 깜빡이지 않게 조금 넉넉히 본다
+                    if box8[0] - 10 <= e.x <= box8[2] + 10 \
+                            and box8[1] - 10 <= e.y <= box8[3] + 10:
+                        want9 = True
+                        break
+            if want9 != self._room_games_open:
+                self._room_games_open = want9
+                self._room_key_last = None
+                self._safe("room_draw", self._room_draw)
+        elif self._room_games_open:
+            self._room_games_open = False
         if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _k in self._room_btn_hit)
+        if not hot:
+            hot = any(box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]
+                      for box9, _a9 in
+                      (list(getattr(self, "_room_menu_items", []))
+                       + list(getattr(self, "_room_game_items", []))))
         if not hot:
             hot = any(x0 <= e.x <= x1 and y0 <= e.y <= y1
                       for x0, y0, x1, y1, _s, _z in self._room_hit)
@@ -29816,22 +30235,44 @@ class Mascot:
             self._safe("room_draw", self._room_draw)
             return
         if self._room_menu_open:
-            for box9, act9 in list(getattr(self, "_room_menu_items", [])):
-                if box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]:
+            # 왼쪽으로 펼친 게임이 먼저다 — '미니게임' 칸과 자리가 안
+            # 겹치지만, 새 자리는 늘 앞쪽에 두는 것이 규칙이다 (지뢰 87).
+            for box8, act8 in list(getattr(self, "_room_game_items", [])):
+                if box8[0] <= e.x <= box8[2] and box8[1] <= e.y <= box8[3]:
                     self._room_menu_open = False
+                    self._room_games_open = False
                     self._room_key_last = None
                     self._safe("room_draw", self._room_draw)
-                    if act9 == "game":
-                        self._safe("wgame_win", self._wg_win)
-                    elif act9 == "ctile":
-                        self._safe("ctile_win", self._ct_win)
-                    elif act9 == "g2048":
-                        self._safe("g2048_win", self._g2_win)
-                    else:
+                    self._safe("ui_click", self._ui_click)
+                    self._room_game_open(act8)
+                    return
+            for box9, act9 in list(getattr(self, "_room_menu_items", [])):
+                if box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]:
+                    if act9 == "games":
+                        # 맥·터치처럼 커서가 안 머무는 데서도 열리게,
+                        # 눌러도 펼쳐진다 (메뉴는 열어 둔다).
+                        self._room_games_open = not self._room_games_open
+                        self._room_key_last = None
+                        self._safe("ui_click", self._ui_click)
+                        self._safe("room_draw", self._room_draw)
+                        return
+                    self._room_menu_open = False
+                    self._room_games_open = False
+                    self._room_key_last = None
+                    if act9 == "mute":
+                        self._safe("ui_click", self._ui_click)
+                        self._safe("room_mute", self._room_mute_toggle)
+                        self._safe("room_draw", self._room_draw)
+                        return
+                    self._safe("room_draw", self._room_draw)
+                    if act9 == "deco":
                         self._safe("room_deco", self._room_deco_win)
+                    else:
+                        self._room_game_open(act9)
                     return
             # 딴 곳을 누르면 접는다 (그 클릭 자체는 그대로 이어진다)
             self._room_menu_open = False
+            self._room_games_open = False
             self._room_key_last = None
             self._safe("room_draw", self._room_draw)
         ab2 = getattr(self, "_room_all_btn", None)
