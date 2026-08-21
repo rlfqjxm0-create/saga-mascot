@@ -1,7 +1,7 @@
 {
- "version": 1787306490,
+ "version": 1787311838,
  "files": {
-  "mascot.py": "ce852860d342ced5f82de6bfd63762ae6ab870cc880da38ea6611bbf5b2eeb60",
+  "mascot.py": "9555474c2fa9e545b17341a282ec65f2ce898f96568a23d2ef594a74f6a45acc",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -65,7 +65,8 @@
   "parts_saga/snacks/drink.png": "4e60ebf4242dc915d11069db76476e4eaca8b9ecd15d0d342a6b29128ababdd0",
   "parts_saga/snacks/durian-fruit.png": "c91ff402765f922ba6142b5bac62ec8cfb65cb38c6e3d1b0eb5291d974e1eaab",
   "parts_saga/snacks/fish.png": "752cae9a76499cb82194b68d0db6c784dabb4ebccb21b44549bf78f27e2c286c",
-  "parts_saga/snacks/fortune.png": "6cb9f601180590ac2612648a3f5582146fa643f0426de29bdf39a508d4fc22f6",
+  "parts_saga/snacks/fortune.png": "18caa650cbbfa660cf3b42797fb6ed9656a64e03ffe2442f9f472cc44452ee67",
+  "parts_saga/snacks/fortune_open.png": "6cb9f601180590ac2612648a3f5582146fa643f0426de29bdf39a508d4fc22f6",
   "parts_saga/snacks/hamburger.png": "9def17e750f7d3799170a059a287a91c2dd94f6308785b649ca44d709308daf7",
   "parts_saga/snacks/hotdog.png": "9b129cd4624d26066ed1ecbcecd1560df74c597f2b3ede795c10b9fa08d4a1eb",
   "parts_saga/snacks/ice-cream.png": "dbaf5c3c4af3ad13bfa23f5df712b21f5124ef0203425855c6a76ee63af11c65",
@@ -455,8 +456,11 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "**꼬들 기록에서 이름을 누르면 그 사람의 색깔판이 펼쳐집니다.** 등수와 상관없이 판을 낸 사람은 모두 볼 수 있어요 (못 맞힌 사람 것도요). 제 줄에서는 한마디를 남길 수 있습니다",
-  "**꼬들은 걸린 시간을 안 적습니다.** 빨리 푸는 놀이가 아니니까요 — 차례도 몇 번 만에 맞혔는지로만 정해집니다",
-  "**홈에서 '환경음검사'·'슬라임검사'·'까만 고양이'가 사라집니다.** 제가 프로그램을 확인할 때 쓰는 임시 캐릭터가 여러분 방에 앉아 있었어요. 검사가 쓰는 방을 따로 갈라 두었고, 이미 목록에 남은 자리도 켜면 스스로 지워집니다"
+  "**포춘쿠키가 두 모습이 됐어요.** 날이 바뀌고 처음 받는 간식은 통짜 쿠키로 놓이고, 먹으면 책상 위에 쪽지가 나온 쿠키가 남습니다. 오늘의 운세 말풍선을 눌러 끄면 쿠키도 같이 치워져요",
+  "**우클릭 메뉴를 묶었습니다.** 작업 종료 / 할 일·마감·뽀모도로 / BGM·슬라임·소품 새로고침 / 홈·환경설정·업데이트 소식 / 종료 순서예요",
+  "**'소품 새로고침'이 생겼습니다** (건의 주신 기능이에요). 원래는 껐다 켤 때마다 소품이 무작위로 바뀌었는데, 이제 켜 둔 채로 우클릭 메뉴에서 누르면 다른 소품으로 바뀝니다",
+  "**홈 메뉴에 '?' 가 생겼습니다.** 알림 끄기 아래에 있어요. 반응 보내는 법, 칭찬·채찍질, 노래 좋아요, 칸 꾸미기, 보기 방식, 방 코드까지 열 단락으로 적어 두었습니다",
+  "**미니게임 랭킹의 금·은·동이 순위 숫자만 동그랗게 감쌉니다.** 줄 전체를 덮던 긴 알약을 걷어 이름이 잘 읽혀요. 2048 은 이름과 점수를 가로 가운데로 모았습니다",
+  "**컬러타일에서 틀린 자리를 짚으면 꼬들 오답 소리가 납니다**"
  ]
 }
