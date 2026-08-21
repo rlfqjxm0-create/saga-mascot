@@ -471,6 +471,7 @@ DEFAULT_SETTINGS = {
     "fortune_day": "",       # 오늘의 운세를 보여 준 작업일 (하루 한 번)
     "end_day": "",           # '작업 종료'로 마무리한 작업일 (06시 자동 마무리와 겹치지 않게)
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
+    "lv_cut": 0,             # 레벨을 하루 기록으로 되돌린 판 번호 (config.lv_cut)
     "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
     "wg_bgm_on": True,       # 수박게임 브금 재생 여부
     "wg_bgm_vol": 18,        # 수박게임 브금 볼륨 (0~100, 원본보다 훨씬 작게)
@@ -5248,6 +5249,8 @@ class Mascot:
         self._pl_open = False        # 모두의 플레이리스트 패널 펼침
         self._pl_on = False          # 플레이리스트로 재생 중인가
         self._pl_i = -1              # 지금 트는 곡 번호
+        self._yt_want_vid = ""       # 틀어 달라고 청해 둔 영상 (지뢰 14)
+        self._pl_stuck_at = 0.0      # 다시 청한 시각
         self._pl_url = ""            # 지금 트는 곡 주소
         self._pl_skip = 0            # 연속으로 건너뛴 곡 수 (전곡 막힘 방지)
         self._pl_adv_at = 0.0        # 마지막으로 곡을 넘긴 시각
@@ -7450,6 +7453,7 @@ class Mascot:
             pass
         # 상태 파일이 없거나 깨져도 예비 저장소로 레벨은 되살린다
         self.lv_secs = self._lv_guard(self.lv_secs)
+        self._safe("lv_cut", self._lv_cut_once)
         self._lv_ready = True        # 이제부터 방 신호에 lv 를 실어도 된다
 
     def _timer_save(self):
@@ -7587,6 +7591,67 @@ class Mascot:
                 pass
         return best
 
+    def _lv_hist_secs(self):
+        """하루 기록에서 다시 센 '레벨용 시간' — 가장 정직한 값.
+
+        상태 파일이 부풀려졌는지 견줄 때와, 잃었을 때 되살릴 때 둘 다 쓴다.
+        """
+        # **'기록이 없다(0)' 와 '못 읽었다(-1)' 를 갈라야 한다.** 안 가르면
+        # 파일이 깨진 사람의 레벨을 0 으로 깎는다 — 훨씬 나쁜 일이다.
+        path = self._hist_path()
+        got = _load_json(path)
+        if got is None or _load_failed(path):
+            return -1.0
+        try:
+            days = (got or {}).get("days") or {}
+            return float(sum(float((v or {}).get("work") or 0)
+                             for d2, v in days.items()
+                             if str(d2) >= LV_EPOCH_DAY))
+        except Exception:
+            return -1.0
+
+    def _lv_cut_once(self):
+        """config 의 `lv_cut` 번호가 새것이면 **한 번만** 레벨을 되돌린다.
+
+        새 캐릭터 config 를 기존 것에서 본떠 만들다 남의 `lv_floor` 가
+        딸려 들어가, 받자마자 Lv.12 로 시작한 일이 있었다 (제리 제보).
+        바닥을 지워도 이미 저장된 값은 안 내려가므로 여기서 한 번 맞춘다.
+
+        **실제로 일한 기록(하루 기록)보다 낮추지는 않는다.** 기록을
+        못 읽으면 아무것도 안 한다 — 멀쩡한 레벨을 깎는 것이 더 나쁘다.
+        """
+        try:
+            want = int((self.cfg.get("lv_cut") or {}).get("n") or 0)
+        except Exception:
+            want = 0
+        if want <= 0:
+            return
+        try:
+            done = int(self.us.get("lv_cut") or 0)
+        except Exception:
+            done = 0
+        if done >= want:
+            return
+        self.us["lv_cut"] = want
+        self._safe("settings", self._save_settings)
+        hist = self._lv_hist_secs()
+        if hist < 0 or hist >= self.lv_secs:
+            return                 # 못 읽었거나 이미 기록 쪽이 크다
+        try:
+            self._log_error("lv_cut %d -> %d"
+                            % (int(self.lv_secs), int(hist)))
+        except Exception:
+            pass
+        self.lv_secs = hist
+        self._lv_seen = self._level()
+        self._lv_keep_at = hist
+        try:                       # 예비 저장소도 같이 낮춘다 (안 그러면 되살아난다)
+            _save_json(self._lv_keep_path(),
+                       {"lv_secs": round(hist), "lv_epoch": LV_EPOCH})
+        except Exception:
+            pass
+        self._safe("timer_save", self._timer_save)
+
     def _lv_keep_save(self):
         """늘어난 만큼만 가끔 적는다 (1분 이상 벌 때마다)."""
         if self.lv_secs - self._lv_keep_at < 60.0:
@@ -7606,6 +7671,7 @@ class Mascot:
         except Exception:
             pass
         self.lv_secs = self._lv_guard(self.lv_secs)
+        self._safe("lv_cut", self._lv_cut_once)
         self._lv_ready = True
 
     def _lv_tick(self, now):
@@ -10344,9 +10410,11 @@ class Mascot:
         """
         if not self._update_msg or sleeping or self.bubble is not None:
             return
-        # **눌러야 꺼진다** (요청). 자리를 비운 사이에 12초가 지나면
-        # 새 소식이 있다는 것을 아예 못 보고 지나쳤다.
-        self._say(self._update_msg, 12.0, big=True, hold=True)
+        # 업데이트가 **끝난 뒤**의 말풍선이다. 이때는 이미 바뀐 점 팝업이
+        # 같이 뜨므로 시간이 지나면 그냥 꺼진다. 눌러야 꺼지는 것은
+        # **업데이트 전**, 빨간 점이 켜질 때의 '새 소식이 있어요' 쪽이다
+        # (요청) — 그것을 놓치면 껐다 켜야 한다는 것을 모르고 지나친다.
+        self._say(self._update_msg, 12.0, big=True)
         self._update_msg = None
         self.next_talk = now + 120
         self.smile_until = max(self.smile_until, now + 4.0)
@@ -12373,7 +12441,9 @@ class Mascot:
         # 지금 도는 코드는 아직 옛 것이다. 받는 것은 다음에 켤 때 런처가 한다.
         self._upd_restart = True
         if self.can_talk:
-            self._say("새 소식이 있어요! 껐다 켜면 반영돼요", 6.0)
+            # **눌러야 꺼진다** (요청). 자리를 비운 사이에 6초가 지나면
+            # '껐다 켜야 반영된다'는 것을 아예 못 보고 지나쳤다.
+            self._say("새 소식이 있어요! 껐다 켜면 반영돼요", 6.0, hold=True)
 
     def _update_latest(self, pages=None):
         """기록에 있는 가장 최신 안내 번호. 없으면 0."""
@@ -13397,6 +13467,7 @@ class Mascot:
         # 음악 재생기가 보낸 상태 (재생기를 띄운 적 있을 때만)
         if self._yt_q or self._yt_proc is not None:
             self._safe("yt", self._yt_tick, now)
+            self._safe("pl_nudge", self._pl_nudge, now)
 
         # 끝난 타자 소리 장치 정리
         if self.sndpack is not None and now - getattr(self, "_snd_reap", 0) > 2.0:
@@ -17555,6 +17626,11 @@ class Mascot:
         people, events = self.room_net.drain()
         if people:
             self.room_people = people
+            # **그림은 도착한 자리에서 받아 둔다.** 그리기에 매달면 안 된다 —
+            # 다시 그리기 열쇠에는 해시만 있어서, 해시가 그대로인 채 그림만
+            # 실려 온 신호는 통째로 버려졌다 (제보 '방 칸 그림이 바로 안
+            # 바뀐다'). 청해서 받아 낸 그림이 바로 그런 신호다.
+            self._safe("deco_take", self._room_deco_take, people)
             for q in people:              # 깜빡임 완충용 — 마지막 모습
                 sl9 = q.get("slot") or ""
                 if sl9 and not q.get("off"):
@@ -20891,13 +20967,45 @@ class Mascot:
             self._yt_err = 0
             self._yt_want = True
             self._yt_send(c="vol", v=int(self.us.get("yt_volume", 55)))
-            self._yt_send(c="load", v=vid, list=lst)
+            # **목록으로 트는 동안에는 자식이 되감지 않게 한다** (loop=0).
+            # 둘이 같이 다음을 정하면 자식이 0.4초 루프에서 먼저 되감아,
+            # 부모가 'ended' 를 못 보고 같은 곡이 영영 반복된다 (제보).
+            self._yt_want_vid = vid
+            self._yt_send(c="load", v=vid, list=lst, loop=0)
             self._room_toast = ("♪ " + songs[j]["t"][:18], time.time())
             return
         self._room_toast = ("틀 수 있는 노래가 없어요", time.time())
 
+    PL_STUCK = 6.0        # 청한 곡이 이만큼 지나도 안 걸리면 다시 청한다
+
+    def _pl_nudge(self, now):
+        """목록 재생 중인데 **다른 영상**을 들고 있으면 다시 청한다.
+
+        명령이 한 번 새거나 자식이 스스로 되감아 버렸을 때 스스로
+        돌아오게 하는 그물이다. 같은 곡을 두 번 청해도 해가 없다.
+        """
+        if not getattr(self, "_pl_on", False):
+            return
+        want = str(getattr(self, "_yt_want_vid", "") or "")
+        if not want:
+            return
+        yt = self._yt or {}
+        got = str(yt.get("vid") or "")
+        if not got or got == want:
+            self._pl_stuck_at = 0.0
+            return
+        if not yt.get("ready"):
+            return
+        if now - float(getattr(self, "_pl_adv_at", 0.0)) < self.PL_STUCK:
+            return
+        if now - float(getattr(self, "_pl_stuck_at", 0.0)) < self.PL_STUCK:
+            return
+        self._pl_stuck_at = now
+        self._yt_send(c="load", v=want, list="", loop=0)
+
     def _pl_stop(self):
         self._pl_on = False
+        self._yt_want_vid = ""
         self._safe("card", self._relayout_card)
         self._yt_want = False
         self._yt_send(c="pause")
@@ -22587,6 +22695,30 @@ class Mascot:
             self.room_net.send(slot, "cdq")
         except Exception:
             pass
+
+    def _room_deco_take(self, people):
+        """신호에 실려 온 방 칸 그림을 받아 둔다 (그리기와 무관하게).
+
+        새로 받은 것이 있으면 다시 그리기를 한 번 시킨다 — 안 그러면
+        파일만 바뀌고 화면은 그대로다 (열쇠가 안 바뀌므로).
+        """
+        got = False
+        for q in people or []:
+            if not isinstance(q, dict):
+                continue
+            slot = str(q.get("slot") or "")
+            cdh = str(q.get("cdh") or "")
+            b64 = q.get("cd")
+            if not (slot and cdh and b64):
+                continue
+            if self._room_peer_hashes().get(slot) == cdh:
+                continue                  # 이미 받아 둔 것
+            self._safe("deco_peer", self._room_peer_save, slot, cdh, b64)
+            got = got or (self._room_peer_hashes().get(slot) == cdh)
+        if got:
+            self._room_key_last = None    # 새 그림을 화면에 올린다
+            if self.room_win is not None:
+                self._safe("room_draw", self._room_draw)
 
     def _room_peer_save(self, slot, cdh, b64):
         """남이 보낸 방 칸 그림을 받아 둔다 (해시가 바뀌었을 때만)."""
@@ -28831,13 +28963,17 @@ class Mascot:
                   "poke": (5, 10.0), "cheer": (5, 10.0),
                   "blanket": (5, 10.0), "snack": (3, 30.0),
                   "praise": (3, 30.0),
-                  # 남의 목표를 눌러 보내는 것 — **10분에 한 번** (요청).
+                  # 남의 목표를 눌러 보내는 것 — 칭찬은 10분, 채찍질은
+                  # **5분**에 한 번 (요청).
                   # 표의 수는 '몇 번까지'가 아니라 **n-1 번까지**다
                   # (`len(keep) >= n - 1` 로 막는다). 그래서 한 번은 2 다.
                   # 1 로 두면 `len >= 0` 이라 아예 못 보낸다 — 함정.
-                  "gpraise": (2, 600.0), "gwhip": (2, 600.0)}
+                  "gpraise": (2, 600.0), "gwhip": (2, 300.0)}
     GOAL_KINDS = ("gpraise", "gwhip")   # 목표에 붙는 반응 (칭찬·채찍질)
-    GOAL_RECV_GAP = 600.0               # 받는 쪽 — 보낸 사람과 무관하게
+    # 받는 쪽 — 보낸 사람과 무관하게 이 간격 안에는 한 번만 받는다.
+    # **보내는 쪽(SEND_LIMIT)과 같은 수라야 한다.** 받는 쪽만 길면
+    # 보내진 것이 조용히 사라져 '눌렀는데 아무 일도 안 일어난다'가 된다.
+    GOAL_RECV_GAP = {"gpraise": 600.0, "gwhip": 300.0}
     SEND_ALL = (10, 10.0)    # 한 사람에게 종류를 바꿔 가며 쏟아붓는 것도 막는다
 
     def _send_ok(self, kind, to=None):
@@ -28922,7 +29058,10 @@ class Mascot:
             at = getattr(self, "_goal_recv_at", None)
             if not isinstance(at, dict):
                 at = self._goal_recv_at = {}
-            if now - float(at.get(kind, 0.0)) < self.GOAL_RECV_GAP:
+            gap9 = self.GOAL_RECV_GAP
+            gap9 = (gap9.get(kind, 600.0) if isinstance(gap9, dict)
+                    else float(gap9))
+            if now - float(at.get(kind, 0.0)) < gap9:
                 return False
             at[kind] = now
         keep.append(now)
