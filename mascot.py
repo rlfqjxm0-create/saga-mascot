@@ -252,16 +252,25 @@ class _MacChromaKey:
         return [self._msg(arr, "objectAtIndex:", i, argtypes=(ctypes.c_ulong,))
                 for i in range(n)]
 
-    def apply_all(self):
-        """이 앱의 모든 창에 필터를 건다.
+    def apply_all(self, want=None):
+        """색상키를 칠하는 창에만 필터를 건다.
 
         말풍선·할 일 패널은 나중에 생기므로 주기적으로 다시 부른다. 이미 걸린 창은
-        건너뛰므로 반복 호출이 싸다. 키 색만 지우는 필터라 다른 창에 걸려도 무해하다.
+        건너뛰므로 반복 호출이 싸다.
+
+        **모든 창에 걸면 안 된다.** 예전에는 '키 색만 지우는 필터라 다른 창에
+        걸려도 무해하다'고 두었는데, 그건 보이는 모습 이야기였다. 이 필터는
+        레이어 합성 단계의 CIColorCube 라, 걸린 창은 **다시 그릴 때마다**
+        64^3 색 큐브를 지난다. 60fps 로 도는 수박게임 창에 걸리니 맥에서
+        앱이 멈춘 것처럼 느려졌다 (사가·퀸시 제보). `want` 를 주면 그 창들만
+        건드린다 — 못 고르면(빈 값) 예전처럼 전부 건다.
         """
         if not self.filter:
             return 0
         done = 0
         for w in self.windows():
+            if want and w not in want:
+                continue
             try:
                 # 우클릭 메뉴·풍선도움말 창에 필터가 걸리면 배경 재질이
                 # 지워져 메뉴가 투명하게 보인다 (사가 제보). 건너뛴다.
@@ -24140,17 +24149,24 @@ class Mascot:
             except Exception:
                 pass
         if IS_MAC:
+            # **AppKit 모달을 Tk 콜백 안에서 열면 앱이 죽는다.**
+            # 크래시 리포트 두 건이 같은 자리를 가리켰다 —
+            #   Tk 단추 콜백 → NSOpenPanel(=NSSavePanel) runModal
+            #   → 그 모달 루프가 Tk 이벤트를 계속 돌림
+            #   → 창 이동 알림이 Tk 바인딩을 다시 부름(재진입)
+            #   → PyEval_RestoreThread 에서 fatal_error → Abort trap 6
+            # 그래서 고르기는 **다른 프로세스**에 맡긴다. 모달 루프가 이
+            # 프로세스 안에 없으니 재진입 자체가 없다.
             try:
-                from AppKit import NSOpenPanel
-                pan = NSOpenPanel.openPanel()
-                pan.setCanChooseFiles_(True)
-                pan.setCanChooseDirectories_(False)
-                pan.setAllowsMultipleSelection_(False)
-                if pan.runModal():
-                    return str(pan.URLs()[0].path())
-                return ""
+                import subprocess
+                scr = ('POSIX path of (choose file with prompt "그림 고르기" '
+                       'of type {"png","jpg","jpeg","webp","bmp"})')
+                r = subprocess.run(["osascript", "-e", scr],
+                                   capture_output=True, text=True,
+                                   timeout=600)
+                return (r.stdout or "").strip()      # 취소하면 빈 글자
             except Exception:
-                pass
+                return ""
         try:
             from tkinter import filedialog
             return filedialog.askopenfilename(
@@ -33453,7 +33469,39 @@ class Mascot:
             else:
                 self._mac_log(f"색상키 준비됨: {MAC_KEY} 격자={ck.key_idx} "
                               f"큐브={ck.N}^3 반경={ck.RAD}")
-        return ck.apply_all()
+        return ck.apply_all(self._mac_key_windows(ck))
+
+    def _mac_key_windows(self, ck):
+        """색상키를 실제로 칠하는 창들 (NSWindow 포인터).
+
+        캐릭터 창과 말풍선 패널뿐이다. 게임·홈·환경설정 창은 색상키를 안
+        쓰므로 필터를 걸 이유가 없고, 걸면 그 창이 다시 그려질 때마다 색
+        큐브 합성을 지나 느려진다 (지뢰 — 수박게임 멈춤).
+
+        Tk 창에서 NSWindow 를 못 찾으면 **빈 값**을 준다 — 그때는 예전처럼
+        전부 걸어 캐릭터가 검은 상자로 남는 일만은 막는다.
+        """
+        out = set()
+        try:
+            wins = [self.root]
+            for holder in (getattr(self, "todo_panel", None),
+                           getattr(self, "due_panel", None)):
+                top = getattr(holder, "top", None)
+                if top is not None:
+                    wins.append(top)
+            for w in wins:
+                try:
+                    vid = w.winfo_id()
+                except Exception:
+                    continue
+                if not vid:
+                    continue
+                nsw = ck._msg(ctypes.c_void_p(vid), "window")
+                if nsw:
+                    out.add(nsw)
+        except Exception:
+            return set()
+        return out
 
     def _mac_keep_transparent(self):
         """투명 설정을 다시 못 박는다. 창이 나중에 더 생기므로 주기적으로 돈다."""
