@@ -37,7 +37,7 @@ jobs:
           # 굳힐 때 아무도 안 부르면 번들에서 빠진다 (지뢰 21) —
           # 그러면 '부드러운 가장자리'가 맥에서 조용히 꺼진다.
           find dist/Saga.app -path "*Quartz*" | head -5
-          test -n "$(find dist/Saga.app -path '*Quartz*' | head -1)" \n            || { echo "Quartz 가 번들에 없습니다 — 빌드를 멈춥니다"; exit 1; }
+          if [ -z "$(find dist/Saga.app -path '*Quartz*' -print -quit)" ]; then echo "Quartz 가 번들에 없습니다 — 빌드를 멈춥니다"; exit 1; fi
 
       - name: 앱 압축 후 build 브랜치에 올리기
         run: |
