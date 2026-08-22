@@ -133,6 +133,7 @@ class _MacChromaKey:
     def __init__(self, key_hex):
         self.err = None
         self.filter = None
+        self._srgb_done = set()      # 색공간을 이미 못박은 창
         self._srgb = None        # 창 색공간 고정용 (아래 apply_all 참고)
         self._keep = []          # 해제되면 안 되는 ObjC 객체를 붙잡아 둔다
         try:
@@ -286,9 +287,12 @@ class _MacChromaKey:
                 if self._srgb is None:
                     self._srgb = self._hold(self._msg(
                         self._cls("NSColorSpace"), "sRGBColorSpace"))
-                if self._srgb:
+                # 창마다 **한 번만** — 다시 걸면 그 창을 통째로 다시
+                # 그리게 된다 (2초마다 걸리던 값, 맥 '무겁다' 제보)
+                if self._srgb and w not in self._srgb_done:
                     self._msg(w, "setColorSpace:", self._srgb,
                               argtypes=(ctypes.c_void_p,))
+                    self._srgb_done.add(w)
                 cv = self._msg(w, "contentView")
                 if not cv:
                     continue
@@ -33441,6 +33445,12 @@ class Mascot:
             clear = NSColor.clearColor()
             for w in self._mac_windows():
                 try:
+                    # **이미 투명하면 건너뛴다.** 2초마다 다시 걸면 그때마다
+                    # 창을 통째로 다시 그리게 되어 눈에 띄게 걸린다 (맥
+                    # '무겁다' 제보). 시스템이 되돌리면 isOpaque 가 참으로
+                    # 돌아오므로 그때 다시 걸린다 — 스스로 낫는다.
+                    if not w.isOpaque():
+                        continue
                     w.setOpaque_(False)
                     w.setBackgroundColor_(clear)
                     # 창을 투명하게 해도 그 위를 덮는 뷰가 스스로 배경을 칠하면
