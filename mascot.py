@@ -5631,6 +5631,11 @@ class Mascot:
             menu.add_command(label="타이머 복구",
                              command=lambda: self._safe(
                                  "unreset", self._timer_unreset))
+        # 뭔가 안 될 때 보내 줄 파일이 있는 폴더. 경로를 말로 알려 주면
+        # 못 찾는다 — 눌러서 열게 한다.
+        menu.add_command(label="오류 기록 폴더 열기",
+                         command=lambda: self._safe(
+                             "open_state", self._open_state_dir))
         menu.add_separator()
         menu.add_command(label="종료", command=self.close)
         self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
@@ -33450,6 +33455,44 @@ class Mascot:
             webbrowser.open(url)
         except Exception:
             pass
+
+    def _open_state_dir(self):
+        """오류 기록이 쌓이는 폴더를 탐색기/파인더로 연다.
+
+        문제가 생겼을 때 친구에게 파일 하나만 받으면 갈리는 것들이
+        여기 모여 있다 (.error.log · .health.txt · .yt_err.txt ·
+        .room_diag.txt). 그런데 '%APPDATA%\\<이름>Mascot 을 여세요'가
+        전달이 안 됐다 — 어느 폴더인지 몰라 헤맨다는 말을 들었다.
+        메뉴에서 눌러 열게 하면 물어볼 것이 없다.
+
+        새 모듈을 import 하지 않는다 — os 는 어디에나 있고 AppKit 은
+        맥 번들에 반드시 있다 (지뢰 21·57). _open_url 이 http 만
+        받으므로 폴더는 이 길로 연다.
+        """
+        path = self.state_dir
+        if IS_WIN:
+            try:
+                os.startfile(path)
+                return True
+            except Exception:
+                pass
+        if IS_MAC:
+            try:
+                from AppKit import NSURL, NSWorkspace
+                NSWorkspace.sharedWorkspace().openURL_(
+                    NSURL.fileURLWithPath_(path))
+                return True
+            except Exception:
+                pass
+            try:
+                import subprocess           # _open_url 도 이 폴백을 쓴다
+                subprocess.Popen(["open", path])
+                return True
+            except Exception:
+                pass
+        # 못 열었으면 적어도 어디인지는 말해 준다
+        self._say("기록은 여기 있어요: " + path, 8.0)
+        return False
 
     def _room_rclick(self, e):
         """우클릭 — 남의 노래 말풍선이면 좋아요를 보낸다."""
