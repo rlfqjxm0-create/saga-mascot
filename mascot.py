@@ -5488,6 +5488,22 @@ class Mascot:
         # 정한 값을 설정에 적어 둔다 — 환경설정 창이 이 값을 그대로 보여야
         # '켜져 있는데 꺼짐으로 보이고, 저장하면 꺼지는' 일이 안 생긴다.
         self.us[_key] = bool(_sb)
+        # **config 로 한 번만 켜 주는 길.** 위에서 설정값이 config 를 이기는데
+        # 그 값은 켤 때마다 저장되므로, 한 번이라도 돈 사람은 config 를 바꿔도
+        # 안 바뀐다 — 새 맥 앱을 받은 사람에게 '환경설정에서 손으로 켜라'고
+        # 해야 했다. config 의 번호가 올라간 그때 **한 번만** config 를 따른다
+        # (lv_cut·FLOOR_FIX 와 같은 꼴). 사람이 나중에 끈 것은 그대로 지켜진다.
+        _cut = self.cfg.get("smooth_cut")
+        if _cut is not None and self.us.get("smooth_cut_at") != _cut:
+            self.us["smooth_cut_at"] = _cut
+            _sb = bool(self.cfg.get(_key, False))
+            self.us[_key] = _sb
+            if _sb:
+                # 지난 시도 표시가 남아 있으면 켜자마자 도로 꺼진다 — 깨끗이.
+                try:
+                    os.remove(os.path.join(self.state_dir, ".smooth_try"))
+                except Exception:
+                    pass
         self._smooth_key = _key
         # **켜다 죽으면 다음에 스스로 꺼진다.** 첫 프레임을 올리기 전에
         # 표시를 남기고, 한 번 성공하면 지운다. 표시가 남은 채로 켜졌다는
@@ -5671,6 +5687,8 @@ class Mascot:
         self._yt = {}                # 마지막 상태 (재생 중인지·제목)
         self._yt_want = False        # 사람이 재생을 원하는가
         self._yt_err = 0             # 마지막으로 알린 오류 (같은 말 반복 방지)
+        self._yt_fatal = ""          # 재생기가 못 뜬 이유 (자식이 보내 준다)
+        self._yt_unblocked = False   # 차단 표식 풀기를 이미 해 봤는가
         self._yt_idle = 0.0          # 멈춘 채로 지낸 시각
         self._yt_btn = None          # 버튼 자리 (x, y, 반지름)
         self._amb_btn = None         # 환경음 알약 자리 (x0,y0,x1,y1)
@@ -9347,6 +9365,75 @@ class Mascot:
         except Exception:
             pass
 
+    def _yt_unblock(self, root=None):
+        """우리 프로그램 폴더의 '차단 표식'을 지운다. 지운 개수를 돌려준다.
+
+        인터넷에서 받은 zip 을 풀면 윈도우가 파일마다
+        `Zone.Identifier` 라는 딸린 흐름을 붙인다. 그러면 .NET 이
+        `Python.Runtime.dll` 을 안 읽어 주고 음악 재생기가 그 자리에서
+        죽는다 (지뢰 61·131). 멸종과 젖소 도로롱이 같은 오류였다 —
+        한 사람은 원드라이브, 한 사람은 다운로드 폴더라 공통점은
+        '받은 zip 을 그냥 풀었다' 하나뿐이었다.
+
+        사람에게 '우클릭 → 속성 → 차단 해제' 를 시키는 대신 우리가
+        지운다. **범위를 좁게 잡는 것이 핵심이다** —
+          · 굳힌 배포본에서만 (소스로 도는 내 것은 표식이 없다)
+          · 우리 exe 가 있는 폴더 **안**만
+          · 프로그램 부품(.dll/.exe/.pyd)만
+        표식만 지우고 파일은 건드리지 않는다.
+        """
+        if root is None:
+            if not (IS_WIN and getattr(sys, "frozen", False)):
+                return 0
+            root = os.path.dirname(os.path.abspath(sys.executable))
+        n = 0
+        try:
+            for dirpath, _dirs, files in os.walk(root):
+                for f in files:
+                    if not f.lower().endswith((".dll", ".exe", ".pyd")):
+                        continue
+                    try:
+                        os.remove(os.path.join(dirpath, f)
+                                  + ":Zone.Identifier")
+                        n += 1
+                    except OSError:
+                        pass          # 표식이 없거나 권한이 없으면 넘어간다
+        except Exception:
+            pass
+        return n
+
+    def _yt_advice(self, fatal):
+        """재생기가 못 뜬 이유 → 사람이 할 수 있는 일. (짧게, 길게, 갈래)
+
+        멸종의 기록에서 실제로 받은 문장이 판정의 근거다 —
+            RuntimeError: Failed to resolve Python.Runtime.Loader.Initialize
+            from ...\\_internal\\pythonnet\\runtime\\Python.Runtime.dll
+        인터넷에서 받은 zip 에 윈도우가 붙인 차단 표식 때문에 .NET 이
+        그 어셈블리를 안 읽어 준다 (지뢰 61). 게다가 그 폴더가
+        원드라이브 안이라 파일이 실제로 안 내려와 있을 수도 있다.
+
+        짐작으로 늘리지 말 것 — **기록에서 본 문장에만** 길을 단다.
+        모르는 이유면 예전처럼 파일을 보라고만 한다.
+        """
+        s = str(fatal or "").lower()
+        if not s:
+            return ("음악을 켤 수 없어요 — 자세한 건 .yt_err.txt",
+                    "음악을 켤 수 없어요.", "")
+        if any(k in s for k in ("python.runtime", "pythonnet", "clr_loader",
+                                "assembly", "winerror 126")):
+            long = ("음악 프로그램이 윈도우에 막혔어요. 받은 zip 을 "
+                    "우클릭 → 속성 → '차단 해제'를 체크하고 새 폴더에 "
+                    "다시 풀어 주세요.")
+            if "onedrive" in s:
+                long += " 원드라이브 밖 폴더에 두는 게 좋아요."
+            return ("zip 을 '차단 해제'하고 다시 풀어 주세요", long, "block")
+        if any(k in s for k in ("webview2", "edge", "runtime not found")):
+            return ("WebView2 런타임을 설치해 주세요",
+                    "음악을 켜려면 마이크로소프트 WebView2 런타임이 "
+                    "필요해요. 무료로 받을 수 있어요.", "webview2")
+        return ("음악을 켤 수 없어요 — 자세한 건 .yt_err.txt",
+                "음악을 켤 수 없어요.", "")
+
     def _yt_bar(self):
         """카드 위 줄(음악·환경음)이 요구하는 여백. 아무것도 없으면 0.
 
@@ -9474,6 +9561,7 @@ class Mascot:
         self._yt_born = time.time()
         self._yt = {}
         self._yt_err = 0
+        self._yt_fatal = ""          # 지난번 이유가 남아 딴소리하지 않게
         self._yt_idle = 0.0
         q = self._yt_q = []
         threading.Thread(target=self._yt_reader, args=(self._yt_proc, q),
@@ -9615,20 +9703,50 @@ class Mascot:
                 # 한 번도 준비되지 못하고 죽었으면 사람에게 알린다.
                 # (WebView2 런타임이 없는 컴퓨터 등)
                 if self._yt_want and not self._yt.get("ready"):
-                    self._say("음악을 켤 수 없어요.", 4.0)
+                    # 이유를 알면 **무엇을 하면 되는지** 말해 준다.
+                    # '음악을 켤 수 없어요' 만으로는 사람이 할 수 있는
+                    # 일이 없다 (멸종은 그 말만 보고 스물세 번 눌렀다).
+                    short, long, kind = self._yt_advice(
+                        getattr(self, "_yt_fatal", ""))
+                    # 막힌 것이면 사람에게 시키지 말고 우리가 풀어 본다.
+                    # 한 번만 — 안 풀리면 안내로 물러난다.
+                    if kind == "block" and not self._yt_unblocked:
+                        self._yt_unblocked = True
+                        n = 0
+                        try:
+                            n = self._yt_unblock()
+                        except Exception:
+                            self._log_error("yt_unblock")
+                        self._safe("yt_unblock_log", self._yt_log,
+                                   "차단 표식 지움: %d개" % n)
+                        if n:
+                            short = "막힌 것을 풀었어요 — 다시 눌러 주세요"
+                            long = ("음악 프로그램이 윈도우에 막혀 있어서 "
+                                    "풀어 봤어요. 한 번 더 눌러 주세요.")
+                    self._say(long, 10.0 if kind else 4.0)
                     # **홈 창에도 띄운다.** 플레이리스트는 홈에서 누르는데
                     # 캐릭터 말풍선만 뜨면 못 본다 — '눌러도 아무 일이
                     # 없다'로 보인다 (멸종 제보).
-                    self._room_toast = ("음악을 켤 수 없어요 — 자세한 건 "
-                                        ".yt_err.txt", time.time())
+                    self._room_toast = (short, time.time())
                     self._safe("yt_dead_log", self._yt_log,
-                               "재생기가 준비 못 하고 죽음")
+                               "재생기가 준비 못 하고 죽음"
+                               + (" — " + self._yt_fatal
+                                  if getattr(self, "_yt_fatal", "") else ""))
                 self._yt_forget()
                 return
             try:
                 s = json.loads(line)
             except ValueError:
                 continue
+            if s.get("fatal"):
+                # **자식이 왜 못 떴는지 보내 온 것.** 예전에는 이 값을
+                # 아무도 안 읽어서 .yt_err.txt 에 '준비 못 하고 죽음'
+                # 한 줄만 남고 이유가 없었다 — 멸종·젖소 도로롱의 기록
+                # 둘 다 자식 자국이 0줄이었다. 답은 오고 있었는데 받는
+                # 쪽에서 버리고 있던 것이다 (지뢰 51 과 같은 이야기).
+                self._yt_fatal = str(s.get("fatal"))[:300]
+                self._safe("yt_fatal", self._yt_log,
+                           "재생기가 못 떴어요: " + self._yt_fatal)
             was = self._yt.get("title", "")
             self._yt = s
             if s.get("signed") and not self.us.get("yt_signed"):
@@ -9643,11 +9761,30 @@ class Mascot:
                     # 플레이리스트 중 막힌 곡(임베드 금지 등)은 건너뛴다.
                     # 전부 막혀 있으면 한 바퀴 돌고 멈춘다 (무한 넘김 방지).
                     self._pl_skip += 1
-                    if self._pl_skip >= max(1, len(self._room_pl_songs())):
+                    songs = self._room_pl_songs()
+                    t = (songs[self._pl_i]["t"]
+                         if 0 <= self._pl_i < len(songs) else "")
+                    # **어느 곡이 왜 막혔는지 남긴다.** 예전에는 번호도
+                    # 곡도 안 남겨서, '누굴 눌러도 딴 사람 노래가 나온다'
+                    # 는 제보가 와도 임베드 금지인지 다른 오류인지 가를
+                    # 길이 없었다 (지뢰 131 과 같은 이야기).
+                    self._safe("pl_err_log", self._yt_log,
+                               "곡을 못 틀었어요 (오류 %d) %s · %s"
+                               % (err, str(t)[:60],
+                                  str(getattr(self, "_pl_url", ""))[:120]))
+                    # **홈 창에도 띄운다.** 플레이리스트는 홈에서 누르는데
+                    # 캐릭터 말풍선만 뜨면 못 본다 — 곡이 저절로 넘어간
+                    # 것처럼만 보인다 (젖소 도로롱·멸종 제보).
+                    why = ("막아 둔 영상" if err in (101, 150)
+                           else self.YT_ERRS.get(err, "오류 %d" % err))
+                    if self._pl_skip >= max(1, len(songs)):
                         self._pl_stop()
                         self._say("틀 수 있는 노래가 없네요.", 4.0)
+                        self._room_toast = ("틀 수 있는 노래가 없어요 (%s)"
+                                            % why, time.time())
                     else:
                         self._say("이 노래는 막혀 있어요 — 다음 곡!", 3.0)
+                        self._room_toast = ("건너뜀 — %s" % why, time.time())
                         self._safe("pl_next", self._pl_play, self._pl_i + 1)
                 else:
                     self._yt_want = False

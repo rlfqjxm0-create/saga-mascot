@@ -23,6 +23,8 @@
  "trail_color": "#f086c0",
  "hard_alpha": true,
  "smooth_body": true,
+ "smooth_body_mac": true,
+ "smooth_cut": 1,
  "timer": {
   "enabled": true,
   "idle_sec": 15

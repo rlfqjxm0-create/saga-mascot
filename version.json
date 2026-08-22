@@ -1,14 +1,14 @@
 {
- "version": 1787429504,
+ "version": 1787441741,
  "files": {
-  "mascot.py": "f6ca06488290a5b56ded35d11c1e406e57f83ed23f43322ba2a03452f8c427f4",
+  "mascot.py": "da2f14988061f48c89194f567ae0cd2456b06bc226cf879b87c6d220dfa6c536",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
   "parts_saga/arm_right_typing.png": "8e2744dd074d326146bd1ea39d0a36490125f9918e466f153be74090638d517b",
   "parts_saga/back.png": "be4f06d5687474c90299d598141a8970c86b8965597343611a098660b6103b62",
   "parts_saga/body_open.png": "65378a26603924fb58d7a015758c831f25af0a025ee5df4e483ec5d2124eef2f",
-  "parts_saga/config.json": "9ceab625d020841e3ad0f9692dcc0308fb14c6b23e3893774e2b483e7a69f47a",
+  "parts_saga/config.json": "4c66a5b3114a5e01b25d1b36fb3a8eb491850ceed8795207d0c26148c18413fd",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "6c54dfa18470e2a17e6080f2b4830a36e3dd49ff751a5c79403c1daa8cb5e5f1",
   "parts_saga/eyes_closed.png": "10b1932ea6dc355094a470d1b4bda98e181b98134986dc0827d9c63d6f2a9143",
