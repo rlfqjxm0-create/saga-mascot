@@ -261,13 +261,19 @@ class _MacChromaKey:
         **모든 창에 걸면 안 된다.** 예전에는 '키 색만 지우는 필터라 다른 창에
         걸려도 무해하다'고 두었는데, 그건 보이는 모습 이야기였다. 이 필터는
         레이어 합성 단계의 CIColorCube 라, 걸린 창은 **다시 그릴 때마다**
-        64^3 색 큐브를 지난다. 60fps 로 도는 수박게임 창에 걸리니 맥에서
-        앱이 멈춘 것처럼 느려졌다 (사가·퀸시 제보). `want` 를 주면 그 창들만
-        건드린다 — 못 고르면(빈 값) 예전처럼 전부 건다.
+        64^3 색 큐브를 지난다. 60fps 로 도는 수박게임 창에 걸려서 맥에서
+        앱이 벽돌이 됐다 (퀸시 렉 리포트).
+
+        고르는 방법이 중요하다. '걸 창을 고른다'가 아니라 **'안 걸 창만
+        건너뛴다'** 로 짠다 — 고르기가 어긋나면 캐릭터가 통째로 검은 상자가
+        되지만(실제로 한 번 그렇게 만들었다), 더 거는 쪽으로 틀리면 느릴
+        뿐이다. 제목 표시줄이 있는 창(미니게임·홈·환경설정)만 건너뛴다.
+        캐릭터와 말풍선 패널은 overrideredirect 라 제목이 없다.
         """
         if not self.filter:
             return 0
         done = 0
+        self.skipped = skipped = 0       # 건너뛴 창 수 (진단 기록에 남는다)
         for w in self.windows():
             try:
                 # 우클릭 메뉴·풍선도움말 창에 필터가 걸리면 배경 재질이
@@ -277,6 +283,17 @@ class _MacChromaKey:
                 if (b"Menu" in cls or b"Popover" in cls
                         or b"Tooltip" in cls or b"ToolTip" in cls):
                     continue
+                # 제목 표시줄이 있는 창은 색상키를 안 쓴다 — 미니게임·홈·
+                # 환경설정. 여기에 합성 필터를 걸면 그 창을 다시 그릴 때마다
+                # 색 큐브를 지나 60fps 게임에서 앱이 멈춘다.
+                # 못 읽으면 **거는 쪽**으로 둔다 (위 설명).
+                try:
+                    if int(self._msg(w, "styleMask",
+                                     restype=ctypes.c_ulong)) & 1:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
                 # 창 백킹 색공간을 sRGB로 못 박는다 — 색 큐브가 sRGB라,
                 # 프로필이 다른 화면(신티크)으로 옮기면 키 색이 다른 칸으로
                 # 밀려 안 지워지고 검은 덩어리로 남는다 (사가 제보:
@@ -304,6 +321,7 @@ class _MacChromaKey:
                 done += 1
             except Exception:
                 pass
+        self.skipped = skipped
         return done
 
     # ── 진단: 실제로 투명해졌는지 화면 합성 결과를 직접 읽는다 ──────────
@@ -33522,8 +33540,10 @@ class Mascot:
         try:
             self._mac_clear_bg()
             n = self._mac_chroma_key()
-            if n:
-                self._mac_log(f"색상키 적용한 창 수: {n}")
+            ck = getattr(self, "_mac_ck", None)
+            sk = int(getattr(ck, "skipped", 0) or 0)
+            if n or sk:
+                self._mac_log(f"색상키 적용한 창 수: {n} (건너뜀 {sk})")
         except Exception as e:
             self._mac_log(f"투명 유지 실패 → {e!r}")
         try:
