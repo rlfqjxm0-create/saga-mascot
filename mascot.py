@@ -1046,15 +1046,14 @@ class MacCharLayer:
         self.ok = False
         self.layer = None
         self._sz = None
-        # **Quartz 모듈이 맥 번들에 없다** (퀸시 로그 — ModuleNotFoundError).
-        # 클래스만 있으면 되므로 이미 올라와 있는 것을 이름으로 찾는다 —
-        # AppKit 이 QuartzCore 를 끌고 들어오므로 CALayer 는 등록돼 있다.
-        # 그래도 없으면 예외 → 부르는 쪽이 색상키로 되돌린다.
-        try:
-            from Quartz import CALayer
-        except Exception:
-            import objc
-            CALayer = objc.lookUpClass("CALayer")
+        # **Quartz 가 있어야 한다.** 맥 번들에 pyobjc-framework-Quartz 가
+        # 빠져 있으면 여기서 ImportError 로 깔끔하게 물러난다 — 부르는 쪽이
+        # 색상키로 되돌린다.
+        # 한때 'Quartz 없이도 되게' AppKit 의 NSBitmapImageRep 에 바이트를
+        # 채우는 길을 붙였다가 **퀸시의 앱이 통째로 죽었다.** 파이썬 예외가
+        # 아니라 프로세스가 사라지는 종류라 어떤 try 로도 못 잡는다.
+        # 맥에서 못 돌려 보는 코드에 그런 길을 붙이면 안 된다 (지뢰 130).
+        from Quartz import CALayer
         root.update_idletasks()
         # Tk 창 → NSView → 그 레이어. PyObjC 로만 다룬다 (ctypes 로 직접
         # 포인터를 만지면 잘못됐을 때 그 자리서 프로세스가 죽는다).
@@ -1096,30 +1095,6 @@ class MacCharLayer:
         self.view, self.host, self.layer = view, host, lay
         self.ok = True
 
-    @staticmethod
-    def _cg(im):
-        """PIL → CGImage. **Quartz 모듈 없이** 만든다.
-
-        맥 번들에 pyobjc-framework-Quartz 가 빠져 있어(퀸시 로그) CGImage*
-        C 함수를 못 쓴다. AppKit 의 NSBitmapImageRep 은 있으므로 거기에
-        바이트를 채우고 `.CGImage()` 로 받는다. 알파는 미리 곱한 상태로
-        넣는다 — NSBitmapImageRep 은 기본이 premultiplied 다 (지뢰 117).
-        """
-        from AppKit import NSBitmapImageRep, NSDeviceRGBColorSpace
-        w, h = im.size
-        raw = im.convert("RGBa").tobytes("raw", "RGBa")
-        rep = NSBitmapImageRep.alloc().            initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
-                None, w, h, 8, 4, True, False, NSDeviceRGBColorSpace,
-                w * 4, 32)
-        if rep is None:
-            raise RuntimeError("NSBitmapImageRep 못 만듦")
-        buf = rep.bitmapData()
-        buf[:len(raw)] = raw
-        got = rep.CGImage()
-        if got is None:
-            raise RuntimeError("CGImage 못 만듦")
-        return got
-
     def push(self, im, _x=None, _y=None):
         """합성한 그림을 덧레이어에 올린다 (알파는 미리 곱한다 — 지뢰 117).
 
@@ -1130,12 +1105,20 @@ class MacCharLayer:
             im = im.resize((max(1, int(round(im.width * self.scale))),
                             max(1, int(round(im.height * self.scale)))),
                            Image.LANCZOS)
-        try:
-            from Quartz import CATransaction
-        except Exception:
-            import objc
-            CATransaction = objc.lookUpClass("CATransaction")
-        img = self._cg(im)
+        from Foundation import NSData
+        from Quartz import (CATransaction, CGColorSpaceCreateDeviceRGB,
+                            CGDataProviderCreateWithCFData, CGImageCreate,
+                            kCGImageAlphaPremultipliedLast)
+        w, h = im.size
+        raw = im.convert("RGBa").tobytes("raw", "RGBa")
+        data = NSData.dataWithBytes_length_(raw, len(raw))
+        prov = CGDataProviderCreateWithCFData(data)
+        img = CGImageCreate(w, h, 8, 32, w * 4,
+                            CGColorSpaceCreateDeviceRGB(),
+                            kCGImageAlphaPremultipliedLast, prov, None,
+                            False, 0)
+        if img is None:
+            raise RuntimeError("CGImage 못 만듦")
         CATransaction.begin()
         CATransaction.setDisableActions_(True)
         try:
@@ -1150,11 +1133,7 @@ class MacCharLayer:
 
     def hide(self):
         try:
-            try:
-                from Quartz import CATransaction
-            except Exception:
-                import objc
-                CATransaction = objc.lookUpClass("CATransaction")
+            from Quartz import CATransaction
             CATransaction.begin()
             CATransaction.setDisableActions_(True)
             self.layer.setContents_(None)
@@ -5518,13 +5497,14 @@ class Mascot:
             except Exception:
                 pass
             self._smooth_tries = 0
-        elif _tries >= 2:
-            # 두 번 잇달아 켜다 멈췄다 — 이 컴퓨터에서는 안 되는 길이다.
-            # 표시를 **남겨 둔다**. 지우면 다음 실행에 또 해 보게 되어
+        elif _tries >= 1:
+            # **한 번이면 충분하다.** 여기서 잘못되면 앱이 통째로 죽어
+            # 다시 안 켜지는 종류라(퀸시), 두 번째를 기다릴 이유가 없다.
+            # 표시는 **남겨 둔다** — 지우면 다음 실행에 또 해 보게 되어
             # 켜졌다 죽었다를 오간다.
             _sb = False
             self.us[_key] = False
-            self._smooth_why = "두 번 켜다 멈춰서 꺼 뒀어요"
+            self._smooth_why = "켜다 멈춰서 꺼 뒀어요"
         self._smooth_on = bool((IS_WIN or IS_MAC) and _sb and not SMOOTH_OFF)
         self._load_parts()
 
