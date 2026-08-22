@@ -951,14 +951,19 @@ class CharLayer:
         u.ReleaseDC(0, hdc)
         return bool(got)
 
-    def place_behind(self, owner_hwnd):
-        """본체 창 바로 뒤 z순서로 끼운다 (자리는 안 건드린다)."""
+    def place_above(self, owner_hwnd):
+        """본체 창 바로 위 z순서로 올린다 (자리는 안 건드린다).
+
+        **올리는 게 아니라 본체를 내린다.** 이 창을 맨 앞(HWND_TOP)으로
+        올리면 그 위에 있어야 할 파티클 창까지 덮는다 — 대신 본체를 이
+        창 뒤로 보내면 파티클과의 순서는 그대로 남는다.
+        """
         u, _g = layer_api()
         if u is None or not owner_hwnd:
             return
         try:
             # 둘째 인자는 '이 창 뒤에 놓아라' 다 (지뢰 23)
-            u.SetWindowPos(self.hwnd, owner_hwnd, 0, 0, 0, 0,
+            u.SetWindowPos(owner_hwnd, self.hwnd, 0, 0, 0, 0,
                            0x1 | 0x2 | 0x10)     # NOSIZE|NOMOVE|NOACTIVATE
         except Exception:
             pass
@@ -998,8 +1003,9 @@ class _CharSheet:
     레이어보다 위에 그려진다(본체 창이 위이므로). 안 보이는 것보다 낫다.
     """
 
-    def __init__(self, real, w, h):
+    def __init__(self, real, w, h, owner=None):
         self.real = real
+        self.owner = owner        # Mascot — 글꼴·배율을 물어볼 곳
         self.im = Image.new("RGBA", (max(1, int(w)), max(1, int(h))),
                             (0, 0, 0, 0))
         self.spill = 0            # 진짜 캔버스로 넘어간 횟수 (검사용)
@@ -1140,6 +1146,72 @@ class _CharSheet:
             for px, py in (pts[0], pts[-1]):
                 self.dr.ellipse([px - r, py - r, px + r, py + r], fill=col)
         return 0
+
+    def bbox(self, *a):
+        """시트가 만든 항목(0)은 잴 수 없다 — None 을 준다.
+
+        진짜 캔버스로 0 을 넘기면 TclError 가 나고, 그 구역이 _safe 에
+        세 번 걸려 꺼진다 (지뢰 14).
+        """
+        if a and not a[0]:
+            return None
+        try:
+            return self.real.bbox(*a)
+        except Exception:
+            return None
+
+    def create_text(self, x, y, **kw):
+        """글자 — Tk 글꼴(포인트)을 PIL 픽셀로 바꿔 그린다 (지뢰 93).
+
+        Tk 는 포인트, PIL 은 픽셀이라 `tk scaling` 을 곱해야 크기가 같다.
+        굵기는 글꼴 튜플의 셋째 값으로 가른다. 못 그리면 진짜 캔버스로
+        넘긴다 — 자리는 맞고 층만 달라진다(안 보이는 것보다 낫다).
+        """
+        txt = str(kw.get("text", ""))
+        own = self.owner
+        if not txt or own is None:
+            return 0 if not txt else self._spill_text(x, y, **kw)
+        try:
+            f = kw.get("font") or ()
+            pt = 10.0
+            bold = False
+            if isinstance(f, (tuple, list)):
+                if len(f) > 1:
+                    pt = abs(float(f[1]))
+                bold = any(str(v).lower() == "bold" for v in f[2:])
+            px = max(6, int(round(pt * own._tk_ppp())))
+            font = own._pil_font(px, bold)
+            if font is None:
+                return self._spill_text(x, y, **kw)
+            d = self.dr
+            anc = str(kw.get("anchor", "center")).strip().lower()
+            # PIL 의 기준점 이름이 Tk 와 다르다 — 옮겨 준다.
+            # **'center' 를 먼저 걸러야 한다** — 그 글자 안에 'e' 가 들어
+            # 있어서 나침반 글자로 훑으면 오른쪽 정렬로 잡힌다 (실제로
+            # 말풍선 글자가 왼쪽으로 밀렸다).
+            if anc in ("", "c", "center"):
+                ax, ay = "m", "m"
+            else:
+                ax = "l" if "w" in anc else ("r" if "e" in anc else "m")
+                ay = "a" if "n" in anc else ("d" if "s" in anc else "m")
+            fill = self._col(kw.get("fill", "#000000")) or "#000000"
+            lines = txt.split("\n")
+            if len(lines) == 1:
+                d.text((x, y), txt, font=font, fill=fill, anchor=ax + ay)
+                return 0
+            lh = px * 1.25
+            y0 = y - (len(lines) - 1) * lh / 2.0 if ay == "m" else y
+            just = str(kw.get("justify", "center"))
+            for i, ln in enumerate(lines):
+                d.text((x, y0 + i * lh), ln, font=font, fill=fill,
+                       anchor=("m" if just == "center" else ax) + "m")
+            return 0
+        except Exception:
+            return self._spill_text(x, y, **kw)
+
+    def _spill_text(self, x, y, **kw):
+        self.spill += 1
+        return self.real.create_text(x, y, **kw)
 
     def create_polygon(self, *a, **kw):
         pts = self._flat(a)
@@ -5214,6 +5286,7 @@ class Mascot:
         self._smooth_why = ""        # 껐다면 왜 껐나 (진단)
         self._smooth_spill = 0       # 시트가 못 알아봐 캔버스로 넘어간 그림 수
         self._soft_cache = {}        # 매끈한 둥근 도형 그림 (카드·말풍선·단추)
+        self._pilfont_cache = {}     # 시트에 글자를 그릴 때 쓰는 글꼴
         _sb = self.us.get("smooth_body",
                           self.cfg.get("smooth_body", False))
         if isinstance(_sb, str):     # 손으로 고친 설정 파일 대비
@@ -10433,11 +10506,11 @@ class Mascot:
         self._safe("layer_order", self._layers_behind)
 
     def _layers_behind(self):
-        """몸·그림자·파티클을 캐릭터 창 뒤에 차례대로 끼운다 (윈도우만).
+        """창 순서를 다시 못박는다 (윈도우만).
 
-        차례가 뜻이 있다 — 본체(카드·말풍선) → 몸 → 그림자 → 파티클.
-        몸이 본체 뒤라야 말풍선·모자가 캐릭터 위에 오고, 그림자는 몸보다
-        더 뒤라야 몸에 가려진다.
+        차례가 뜻이 있다 — 몸 → 본체(카드) → 그림자.
+        몸이 본체 **위**라야 위로 솟는 소품이 타이머 카드에 안 가린다
+        (제보). 그림자는 본체보다 더 뒤라야 몸에 가려진다.
         """
         if not IS_WIN:
             return
@@ -10449,9 +10522,11 @@ class Mascot:
                                      ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int,
                                      ctypes.c_uint]
+        lay0 = getattr(self, "_char_lay", None)
+        if lay0 is not None:
+            lay0.place_above(main)          # 몸은 본체 **위**
         prev = main
-        for lay in (getattr(self, "_char_lay", None),
-                    getattr(self, "shadow", None), getattr(self, "_fx", None)):
+        for lay in (getattr(self, "shadow", None), getattr(self, "_fx", None)):
             h = getattr(lay, "hwnd", None)
             if not h:
                 continue
@@ -14144,19 +14219,34 @@ class Mascot:
             self._smooth_off("만들기 실패")
             return None
         self._char_lay = lay
-        lay.place_behind(self._main_hwnd)
+        lay.place_above(self._main_hwnd)
         self._safe("smooth_bind", self._bind_char_layer, lay)
         return lay
 
-    def _z_owner(self):
-        """그림자가 바로 뒤에 붙어야 할 창.
+    def _pil_font(self, px, bold=False):
+        """PIL 로 글자를 그릴 때 쓸 글꼴 (크기별 캐시).
 
-        몸 레이어가 있으면 그것이다 — 본체 바로 뒤에 붙이면 그림자가 몸보다
-        앞에 서서 캐릭터에 회색 그림자가 덮인다.
+        Tk 가 쓰는 것과 같은 파츠 속 프리텐다드를 쓴다 — 안 맞추면 시트에
+        그린 글자만 모양이 달라진다 (지뢰 93).
         """
-        lay = self._char_lay
-        h = getattr(lay, "hwnd", 0) if lay is not None else 0
-        return h or self._main_hwnd
+        key = (int(px), bool(bold))
+        got = self._pilfont_cache.get(key)
+        if got is None:
+            try:
+                got = ImageFont.truetype(
+                    os.path.join(self.dir, "fonts",
+                                 "Pretendard-Bold.otf" if bold
+                                 else "Pretendard-Regular.otf"), int(px))
+            except Exception:
+                try:
+                    got = ImageFont.load_default(int(px))
+                except Exception:
+                    got = False
+            if len(self._pilfont_cache) > 40:
+                for old in list(self._pilfont_cache)[:20]:
+                    self._pilfont_cache.pop(old, None)
+            self._pilfont_cache[key] = got
+        return got or None
 
     def _bind_char_layer(self, lay):
         """몸을 누른 클릭을 본체 핸들러로 넘긴다.
@@ -14177,7 +14267,7 @@ class Mascot:
         """몸 레이어를 누른 것 — 눌러서 앞으로 나왔을 수 있으니 되돌린다."""
         lay = self._char_lay
         if lay is not None:
-            lay.place_behind(self._main_hwnd)
+            lay.place_above(self._main_hwnd)
         return self._on_press(e)
 
     def _smooth_begin(self):
@@ -14193,7 +14283,7 @@ class Mascot:
         if self._smooth_layer() is None:
             return None
         try:
-            sheet = _CharSheet(self._real_canvas, self.W, self.H)
+            sheet = _CharSheet(self._real_canvas, self.W, self.H, self)
         except Exception:
             self._smooth_off("시트 만들기 실패")
             return None
@@ -14308,6 +14398,10 @@ class Mascot:
             im = bubble_img(int(round(w)), int(round(h)), r, tail,
                             fill, outline, lw, pad=pad)
             got = ImageTk.PhotoImage(flat_on_key(im, key2))
+            # 매끈 경로의 시트가 이 그림을 못 알아보면 진짜 캔버스로 넘어가
+            # 캐릭터 뒤에 그려진다 (말풍선 몸통만 뒤로 빠졌다). **키 색과
+            # 섞기 전의** 원본을 달아 둔다 — 레이어 창은 알파를 그대로 쓴다.
+            got._pil_src = im
         except Exception:
             return None
         if len(self._soft_cache) > self.SOFT_MAX:   # 오래된 절반만 (지뢰 18)
@@ -14507,9 +14601,9 @@ class Mascot:
                 # 몸 레이어는 자리를 매 프레임 스스로 잡는다(그림과 함께
                 # 한 번에 올린다) — 여기서는 z순서만 다시 못박는다.
                 if self._char_lay is not None:
-                    self._char_lay.place_behind(self._main_hwnd)
+                    self._char_lay.place_above(self._main_hwnd)
                 if self.shadow is not None:
-                    self.shadow.place(*pos, self._z_owner())
+                    self.shadow.place(*pos, self._main_hwnd)
                 if self.todo_panel is not None:
                     self.todo_panel.place(*pos)
             # 캐릭터를 누르면 그 창이 맨 앞으로 올라와 말풍선을 덮는다.
@@ -14527,9 +14621,9 @@ class Mascot:
                     and now - self._z_check > 8.0):
                 self._z_check = now          # z순서만 가끔 재고정
                 if self._char_lay is not None:
-                    self._char_lay.place_behind(self._main_hwnd)
+                    self._char_lay.place_above(self._main_hwnd)
                 if self.shadow is not None:
-                    self.shadow.place(*pos, self._z_owner())
+                    self.shadow.place(*pos, self._main_hwnd)
         # 기존 타이머(에이전트)에게 '캐릭터 타이머가 살아 있다'고 알린다.
         # 이게 없으면 에이전트가 자기 자식 프로세스만 보고 판단해, 따로 띄운
         # 캐릭터가 있어도 창을 다시 띄워 둘이 같이 보인다.
@@ -16501,13 +16595,6 @@ class Mascot:
         if self._g_hands is not None:        # 제스처 손 — 머리보다 위
             self._safe("gesture_arms", self._draw_gesture_arms, yo)
 
-        # 여기까지가 캐릭터다 — 시트를 레이어 창에 올리고 캔버스를 되돌린다.
-        # 아래(zzZ·음표·모자·말풍선·연출)는 캔버스에 남는다. 레이어가 본체
-        # 창 뒤에 있으므로 그것들이 저절로 캐릭터 위에 온다.
-        if _sheet is not None:
-            self._smooth_end()
-            c = self.canvas
-
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
             fs = self._fx_scale          # 앉은 모습을 구울 때는 크게 (홈 카드용)
@@ -16544,6 +16631,13 @@ class Mascot:
         self._safe("snack_on", self._draw_snack_on, now)
         self._safe("fortune_open", self._draw_fortune_open, now)
         self._safe("char_fx", self._draw_char_fx, now)
+        # 여기까지가 시트다 — 캐릭터와 **그 위에 얹는 것들**(zzZ·모자·간식·
+        # 말풍선·반응)을 한 장에 모아 레이어 창에 올린다. 레이어는 본체 창
+        # **위**에 있으므로, 위로 솟는 소품이 타이머 카드에 안 가린다(제보).
+        # 카드·단추만 캔버스에 남아 그 아래에 깔린다.
+        if _sheet is not None:
+            self._smooth_end()
+            c = self.canvas
         self._safe("pet_shadow", self._update_pet_shadow)
 
     AUTO_MON = "자동 (커서가 있는 화면)"
