@@ -1085,6 +1085,16 @@ class MacCharLayer:
                 self.scale = sc
         except Exception:
             pass
+        # 진단용 — 맥에서 처음 도는 길이라, 어긋났을 때 이 값들로 한 번에
+        # 갈린다. 뷰가 뒤집혀 있는지(그림이 거꾸로 나오는지)가 특히 중요하다.
+        self.diag = ""
+        try:
+            b0 = view.bounds()
+            self.diag = ("배율 %.2f · 뷰 %.0fx%.0f · flipped=%s"
+                         % (self.scale, b0.size.width, b0.size.height,
+                            bool(view.isFlipped())))
+        except Exception:
+            pass
         lay = CALayer.layer()
         lay.setContentsScale_(self.scale)
         lay.setContentsGravity_("topLeft")
@@ -9301,7 +9311,36 @@ class Mascot:
                 except Exception:
                     got = False
             self._yt_avail = got
+            if not got:
+                # **왜 없는지 남긴다.** 단추가 아예 안 뜨면 사람은 이유를
+                # 알 길이 없다 (젖소 도로롱 제보 — 그 exe 에 재생기가
+                # 안 들어 있다). 굳힌 exe 는 자동 갱신이 안 되므로
+                # 새 exe 를 전달해야 하는 상황인지 이 줄로 갈린다.
+                why = []
+                if not IS_WIN:
+                    why.append("맥")
+                if not self.cfg.get("youtube"):
+                    why.append("config 에 youtube 없음")
+                if not has_file:
+                    why.append("youtube_player.py 없음")
+                if IS_WIN and self.cfg.get("youtube") and has_file:
+                    why.append("webview(pywebview) 가 이 프로그램에 없음 "
+                               "— 새 exe 가 필요합니다")
+                self._safe("yt_why", self._yt_log,
+                           "재생기 없음: " + (", ".join(why) or "알 수 없음"))
         return got
+
+    def _yt_log(self, msg):
+        """재생기 진단 한 줄 — 친구에게 파일 하나만 받으면 갈린다."""
+        try:
+            ep = os.path.join(self.state_dir, ".yt_err.txt")
+            if os.path.exists(ep) and os.path.getsize(ep) > 200 * 1024:
+                os.remove(ep)
+            with open(ep, "a", encoding="utf-8", errors="replace") as fp:
+                fp.write("%s %s\n"
+                         % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+        except Exception:
+            pass
 
     def _yt_bar(self):
         """카드 위 줄(음악·환경음)이 요구하는 여백. 아무것도 없으면 0.
@@ -9400,16 +9439,34 @@ class Mascot:
         # 브라우저 자료(로그인 쿠키)를 남길 폴더. 점으로 시작해 배포 payload에
         # 안 들어가고, .gitignore에도 넣어 두었다 — 구글 세션이 들어 있다.
         prof = os.path.join(self.state_dir, ".ytprofile")
+        # **자식의 오류를 버리지 말 것.** 예전에는 stderr 를 DEVNULL 로
+        # 흘려서, 재생기가 뜨자마자 죽어도(WebView2 없음·차단 표식으로
+        # .NET 막힘 — 지뢰 61) 아무 자국이 안 남았다. 사람에게는 '눌러도
+        # 아무 일이 없다'로만 보인다 (멸종 제보). 파일로 받아 둔다.
+        errf = None
+        try:
+            ep = os.path.join(self.state_dir, ".yt_err.txt")
+            if os.path.exists(ep) and os.path.getsize(ep) > 200 * 1024:
+                os.remove(ep)            # 너무 커지면 새로 쓴다
+            errf = open(ep, "a", encoding="utf-8", errors="replace")
+            errf.write("\n===== %s 재생기 시작\n"
+                       % time.strftime("%Y-%m-%d %H:%M:%S"))
+            errf.flush()
+        except Exception:
+            errf = None
         try:
             self._yt_proc = subprocess.Popen(
                 cmd + ["--profile", prof],
                 cwd=HERE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+                stderr=(errf or subprocess.DEVNULL),
+                encoding="utf-8", errors="replace",
                 creationflags=0x08000000)          # CREATE_NO_WINDOW
         except Exception:
             self._yt_proc = None
             self._log_error("yt_spawn")
             return False
+        self._yt_errf = errf
+        self._yt_born = time.time()
         self._yt = {}
         self._yt_err = 0
         self._yt_idle = 0.0
@@ -9554,6 +9611,13 @@ class Mascot:
                 # (WebView2 런타임이 없는 컴퓨터 등)
                 if self._yt_want and not self._yt.get("ready"):
                     self._say("음악을 켤 수 없어요.", 4.0)
+                    # **홈 창에도 띄운다.** 플레이리스트는 홈에서 누르는데
+                    # 캐릭터 말풍선만 뜨면 못 본다 — '눌러도 아무 일이
+                    # 없다'로 보인다 (멸종 제보).
+                    self._room_toast = ("음악을 켤 수 없어요 — 자세한 건 "
+                                        ".yt_err.txt", time.time())
+                    self._safe("yt_dead_log", self._yt_log,
+                               "재생기가 준비 못 하고 죽음")
                 self._yt_forget()
                 return
             try:
@@ -14586,8 +14650,8 @@ class Mascot:
                 self._smooth_try_path = None
                 if IS_MAC:
                     self._safe("mac_smooth_log", self._mac_log,
-                               "매끈 덧레이어 켜짐 — 화면배율 %.2f · 그림 %dx%d"
-                               % (getattr(lay, "scale", 1.0),
+                               "매끈 덧레이어 켜짐 — %s · 그림 %dx%d"
+                               % (getattr(lay, "diag", "?"),
                                   sheet.im.width, sheet.im.height))
         except Exception:
             ok, _ = False, self._log_error("smooth_push")
