@@ -6253,7 +6253,7 @@ class Mascot:
                                  Image.LANCZOS)
             self.layout[nm9] = self._prop_at(key9)
             pil_cache[nm9] = im9
-            self.im[nm9] = ImageTk.PhotoImage(self._hard(im9))
+            self.im[nm9] = self._tkimg(self._hard(im9), im9)
             self.has[nm9] = True
             self._prop_bits.append(nm9)
             self._prop_bit_cfg[nm9] = mo_all.get(nm9) or {}
@@ -6290,7 +6290,7 @@ class Mascot:
                             max(1, round(im.height * s))), Image.LANCZOS)
         self.layout["prop_back"] = self._prop_at(name)
         pil_cache["prop_back"] = im
-        self.im["prop_back"] = ImageTk.PhotoImage(self._hard(im))
+        self.im["prop_back"] = self._tkimg(self._hard(im), im)
         self.has["prop_back"] = True
         # 기본 몸 뒤 파츠를 숨길지는 **캐릭터가 정한다.**
         # back.png 는 캐릭터마다 뜻이 다르다 — 기뽀는 요정 날개지만
@@ -6453,7 +6453,8 @@ class Mascot:
                               and name in self.layout)
             if self.has[name]:
                 pil_cache[name] = load_pil(name)
-                self.im[name] = ImageTk.PhotoImage(firm(name, pil_cache[name]))
+                self.im[name] = self._tkimg(firm(name, pil_cache[name]),
+                                            pil_cache[name])
 
         # 소품(prop1..N) — 켤 때마다 하나만 랜덤으로. 고른 것을 "prop"으로
         # 이름 붙여 두면 overlays 순서대로 얼굴 위에 함께 그려진다.
@@ -6663,7 +6664,7 @@ class Mascot:
         im = im.resize((max(8, round(im.width * k)), max(8, round(im.height * k))),
                        Image.LANCZOS)
         im = im.rotate(14, expand=True, resample=self._resample())
-        self.im["hat"] = ImageTk.PhotoImage(self._hard(im))
+        self.im["hat"] = self._tkimg(self._hard(im), im)
         self.has["hat"] = True
 
     TILT_PAD = 70                    # 회전 여유 (잘려나가지 않게 캔버스를 넓혀 합성)
@@ -12166,7 +12167,7 @@ class Mascot:
                                 for x in range(im.width):
                                     if a[x, y] and random.random() > keep:
                                         px[x, y] = (0, 0, 0, 0)
-                            lv.append(ImageTk.PhotoImage(self._hard(im)))
+                            lv.append(self._tkimg(self._hard(im), im))
                     made.append(lv)
                 self.fx_imgs[kind] = made
         except Exception:
@@ -14654,6 +14655,21 @@ class Mascot:
             return
         cv.create_image(cx - r - 1, cy - r - 1, image=got, anchor="nw")
 
+    def _tkimg(self, im, soft=None):
+        """ImageTk 로 바꾸면서 **매끈 경로가 쓸 원본을 달아 둔다.**
+
+        시트가 원본을 못 찾으면 그 그림만 진짜 캔버스로 새고, 캔버스는
+        캐릭터 레이어보다 아래라 **캐릭터 뒤에 그려진다** — 간식과 쓰담
+        손이 그렇게 숨었다. 캐릭터 위에 얹는 그림은 전부 이 함수로
+        만들 것. `soft` 를 주면 그것을(이분화 전 원본) 달아 둔다.
+        """
+        ph = ImageTk.PhotoImage(im)
+        try:
+            ph._pil_src = im if soft is None else soft
+        except Exception:
+            pass
+        return ph
+
     def _pic(self, im, edge=False, soft=False):
         """캐시에 담을 그림 한 장 — 지금 경로에 맞는 형태로 만든다.
 
@@ -14665,9 +14681,8 @@ class Mascot:
         if self._smooth:
             return im
         if soft:                     # 부르는 쪽이 이미 손봐 둔 그림
-            return ImageTk.PhotoImage(im)
-        return ImageTk.PhotoImage(self._hard_edge(im) if edge
-                                  else self._hard(im))
+            return self._tkimg(im)
+        return self._tkimg(self._hard_edge(im) if edge else self._hard(im), im)
 
     def _put(self, name, x, y, anchor="nw"):
         """파츠 이미지 그리기. 파일이 없으면 조용히 건너뛴다(업데이트 끊김 대비)."""
@@ -32533,7 +32548,7 @@ class Mascot:
             im = im.rotate(-ang, resample=Image.BICUBIC, expand=True)
             a = im.getchannel("A")      # 돌리면 가장자리가 흐려진다 — 다시 굽는다
             im.putalpha(a.point(lambda v: 255 if v >= 128 else 0))
-        got = ImageTk.PhotoImage(im)
+        got = self._tkimg(im)
         if len(self._hand_cache) > 24:
             for k2 in list(self._hand_cache)[:12]:
                 self._hand_cache.pop(k2, None)
