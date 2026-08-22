@@ -10915,11 +10915,12 @@ class Mascot:
         """상태 텍스트 폭(px) — 캔버스로 측정·캐시 (tkinter.font 의존 제거)."""
         w = self._tw_cache.get(text)
         if w is None:
-            t = self.canvas.create_text(-2000, -2000, text=text, anchor="nw",
-                                        font=(UI_FONT, 8))
-            bb = self.canvas.bbox(t)
+            cv = self._real_canvas          # 시트로 재면 안 된다 (_mw 참고)
+            t = cv.create_text(-2000, -2000, text=text, anchor="nw",
+                               font=(UI_FONT, 8))
+            bb = cv.bbox(t)
             w = (bb[2] - bb[0]) if bb else len(text) * 11
-            self.canvas.delete(t)
+            cv.delete(t)
             self._tw_cache[text] = w
         return w
 
@@ -13843,11 +13844,16 @@ class Mascot:
             # 다시 재는 값이라 비워도 그림은 그대로다.
             if len(self._tw_cache) > self.TW_CACHE_MAX:
                 self._tw_cache.clear()
-            t = self.canvas.create_text(-3000, -3000, text=text, anchor="nw",
-                                        font=font)
-            bb = self.canvas.bbox(t)
+            # **진짜 캔버스로 잰다.** 몸을 그리는 동안에는 self.canvas 가
+            # 시트를 가리키는데, 시트는 잴 수 없어 `글자수 × 11` 이라는
+            # 대충값으로 떨어진다 — 말풍선이 글자보다 좁아져 양옆이 잘렸다
+            # (제보). 21자짜리 말이 231 로 나왔고 실제는 272 였다.
+            cv = self._real_canvas
+            t = cv.create_text(-3000, -3000, text=text, anchor="nw",
+                               font=font)
+            bb = cv.bbox(t)
             w = (bb[2] - bb[0]) if bb else len(text) * 11
-            self.canvas.delete(t)
+            cv.delete(t)
             self._tw_cache[key] = w
         return w
 
@@ -13856,11 +13862,12 @@ class Mascot:
         key = ("__height__", font)
         h = self._tw_cache.get(key)
         if h is None:
-            t = self.canvas.create_text(-3000, -3000, text="가", anchor="nw",
-                                        font=font)
-            bb = self.canvas.bbox(t)
+            cv = self._real_canvas          # 시트로 재면 안 된다 (_mw 참고)
+            t = cv.create_text(-3000, -3000, text="가", anchor="nw",
+                               font=font)
+            bb = cv.bbox(t)
             h = (bb[3] - bb[1]) if bb else 16
-            self.canvas.delete(t)
+            cv.delete(t)
             self._tw_cache[key] = h
         return h
 
