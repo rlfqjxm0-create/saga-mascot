@@ -1,5 +1,5 @@
 {
- "version": 1787414183,
+ "version": 1787415104,
  "files": {
   "mascot.py": "f6ef858b674dad52833ced139f9665748dd30aa791782c36bbb6231eac46cceb",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
@@ -521,6 +521,9 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "머리 위로 솟는 소품(리본·뿔 같은 것)이 타이머 카드 뒤로 숨던 것을 고쳤어요",
+  "말풍선 글자가 양옆으로 삐져나가던 것을 고쳤어요. 긴 말은 줄을 나눠 말풍선이 아래로 자랍니다",
+  "친구가 놓고 간 간식이 타이머 카드 뒤로 숨던 것도 고쳤어요"
+ ]
 }
