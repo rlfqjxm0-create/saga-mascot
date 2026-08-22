@@ -29,10 +29,15 @@ jobs:
         run: |
           set -x
           /tmp/venv/bin/python -m py_compile mascot.py saga_mac.py
-          /tmp/venv/bin/pyinstaller --noconfirm --clean --windowed --name Saga             --osx-bundle-identifier com.ena.mascot.saga             --add-data "parts_saga:parts_saga"             --collect-submodules tkinter             --collect-data certifi --hidden-import certifi             saga_mac.py
+          /tmp/venv/bin/pyinstaller --noconfirm --clean --windowed --name Saga             --osx-bundle-identifier com.ena.mascot.saga             --add-data "parts_saga:parts_saga"             --collect-submodules tkinter             --collect-submodules Quartz             --collect-data certifi --hidden-import certifi             saga_mac.py
           ls -la dist
           # 인증서가 실제로 담겼는지 확인 (이게 빠지면 자동 업데이트가 조용히 실패한다)
           find dist/Saga.app -name "cacert.pem" | head
+          # Quartz 도 실제로 담겼는지 확인한다. 설치는 돼 있어도
+          # 굳힐 때 아무도 안 부르면 번들에서 빠진다 (지뢰 21) —
+          # 그러면 '부드러운 가장자리'가 맥에서 조용히 꺼진다.
+          find dist/Saga.app -path "*Quartz*" | head -5
+          test -n "$(find dist/Saga.app -path '*Quartz*' | head -1)" \n            || { echo "Quartz 가 번들에 없습니다 — 빌드를 멈춥니다"; exit 1; }
 
       - name: 앱 압축 후 build 브랜치에 올리기
         run: |
