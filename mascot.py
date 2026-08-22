@@ -1223,6 +1223,32 @@ class _CharSheet:
         self.spill += 1
         return self.real.create_text(x, y, **kw)
 
+    def create_arc(self, x0, y0, x1, y1, **kw):
+        """호 — 파이/현/호 세 가지 모양을 PIL 로."""
+        try:
+            st = float(kw.get("start", 0.0))
+            ext = float(kw.get("extent", 90.0))
+        except Exception:
+            return 0
+        # Tk 는 반시계, PIL 은 시계 방향이라 부호를 뒤집는다
+        a0, a1 = -(st + ext), -st
+        box = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]
+        f = self._col(kw.get("fill", ""))
+        o = self._col(kw.get("outline", ""))
+        w = max(1, int(round(float(kw.get("width", 1) or 1))))
+        style = str(kw.get("style", "pieslice"))
+        try:
+            if style == "arc":
+                self.dr.arc(box, a0, a1, fill=o or f or "#000000", width=w)
+            elif style == "chord":
+                self.dr.chord(box, a0, a1, fill=f, outline=o, width=w)
+            else:
+                self.dr.pieslice(box, a0, a1, fill=f, outline=o, width=w)
+        except Exception:
+            self.spill += 1
+            return self.real.create_arc(x0, y0, x1, y1, **kw)
+        return 0
+
     def create_polygon(self, *a, **kw):
         pts = self._flat(a)
         if len(pts) < 3:
@@ -32107,8 +32133,12 @@ class Mascot:
             # 어두운 테가 진다 (지뢰 31·65와 같은 뿌리). 파츠와 똑같이
             # 이분화해서 올린다 — 줄인 **뒤에** 해야 새로 생긴 반투명
             # 픽셀까지 잡힌다.
+            soft = im                    # 이분화 **전** 원본 (레이어용)
             im = self._hard(im)
             got = ImageTk.PhotoImage(im)
+            # 매끈 경로의 시트가 못 알아보면 진짜 캔버스로 넘어가 캐릭터
+            # 레이어 **뒤**에 그려진다 — 간식이 타이머 창 뒤로 숨었다(제보).
+            got._pil_src = soft
         except Exception:
             return None
         if len(cache) > self.SNACK_CACHE:      # 오래된 절반만 버린다 (지뢰 18)
