@@ -4713,6 +4713,8 @@ class Mascot:
         self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
         self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
         self._bubble_cookie = None   # 그 말풍선 안의 깐 포춘쿠키 (지뢰 13)
+        self._cur_near = False       # 커서가 캐릭터 곁에 있는가 (지뢰 13 —
+                                     # tick 이 draw 보다 먼저 이 값을 본다)
         self._face_now = None        # 지금 짓고 있는 곁표정 (지뢰 13)
         self._face_until = 0.0
         self._face_part = None       # 이번 프레임에 그릴 곁표정
@@ -13738,14 +13740,46 @@ class Mascot:
             if self._fail[where] >= 3:
                 self._safe_off_told(where)
 
+    # 프레임 주기 (ms). 한 프레임에 드는 값은 1.7~2.8ms 라 여유가 많다
+    # (실측). 그래서 **보고 있을 때만** 촘촘하게 그린다.
+    GAP_SLEEP = 100          # 자는 중 · 전체화면에 가려짐 (10fps)
+    GAP_QUIET = 66           # 오래 자리를 비웠다 (15fps)
+    GAP_NORM = 33            # 평소 (30fps)
+    GAP_SMOOTH = 16          # 보고 있을 때 (60fps)
+    QUIET_SLOW = 30.0        # 이만큼 입력이 없어야 프레임을 낮춘다
+    NEAR_PAD = 140           # 커서가 이 안에 있으면 '보고 있다'
+
+    def _want_smooth(self, now):
+        """지금 60fps 로 그릴 만한가.
+
+        늘 60fps 로 두면 친구들 노트북에서 한 코어의 20% 를 먹는다 (실측).
+        사람이 보고 있거나 뭔가 벌어지는 동안만 올린다 — 그때가 부드러움이
+        눈에 띄는 유일한 순간이기도 하다.
+        """
+        if self._cur_near or self.gest is not None:
+            return True
+        if self.bubble is not None or self.particles or self.notes:
+            return True
+        return now < max(self.click_bounce, self.smile_until,
+                         self.hat_until, self.celebrate_until)
+
     def tick(self):
         # 다음 프레임을 먼저 예약한다 — 중간에 예외가 나도 루프가 죽지 않게.
         # 입력이 없으면 볼 것도 없으므로 프레임을 낮춰 CPU를 아낀다.
-        # (자는 중 10fps / 5초 이상 무입력 15fps / 작업 중 30fps)
-        quiet = time.time() - max(self.last_key, self.last_pointer)
-        self._tick_after = self.root.after(
-            100 if (self._sleeping or self._fs_hidden)
-            else (66 if quiet > 5.0 else 33), self.tick)
+        # (자는 중 10fps / 오래 비움 15fps / 평소 30fps / 보고 있을 때 60fps)
+        now = time.time()
+        quiet = now - max(self.last_key, self.last_pointer)
+        if self._sleeping or self._fs_hidden:
+            gap = self.GAP_SLEEP
+        elif quiet > self.QUIET_SLOW:
+            gap = self.GAP_QUIET
+        else:
+            try:
+                smooth = bool(self._want_smooth(now))
+            except Exception:
+                smooth = False          # 판단이 터져도 루프는 돈다
+            gap = self.GAP_SMOOTH if smooth else self.GAP_NORM
+        self._tick_after = self.root.after(gap, self.tick)
         try:
             self._tick_body()
         except Exception:
@@ -15650,6 +15684,10 @@ class Mascot:
         cx, cy = cursor_pos()
         wx = self.root.winfo_rootx() + self.W // 2
         wy = self.root.winfo_rooty() + self.H // 2
+        # 커서가 캐릭터 곁에 있으면 '보고 있다'로 친다 — 그동안만 프레임을
+        # 올린다 (tick 이 이 값을 본다). 창 사각형에서 조금 넉넉히.
+        self._cur_near = (abs(cx - wx) < self.W / 2 + self.NEAR_PAD
+                          and abs(cy - wy) < self.H / 2 + self.NEAR_PAD)
         em = float(self.cfg.get("eye_move", 1.0))
         pdx = max(-5 * em, min(5 * em, (cx - wx) / 60 * em))
         pdy = max(-3 * em, min(4 * em, (cy - wy) / 90 * em))
