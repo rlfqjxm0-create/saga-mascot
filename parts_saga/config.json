@@ -452,5 +452,160 @@
   ]
  },
  "g2048": true,
- "kkodle": true
+ "kkodle": true,
+ "skins": [
+  {
+   "name": "마법소녀 (변신 후)",
+   "dir": ""
+  },
+  {
+   "name": "신하나 (변신 전)",
+   "dir": "skins/shinhana"
+  }
+ ],
+ "prop_motion": {
+  "미쿠": {
+   "prop": {
+    "motion": "sway",
+    "amp": 2.4,
+    "period": 3.1,
+    "jitter": 0.18,
+    "pivot": [
+     0.5,
+     0.08
+    ],
+    "steps": 24,
+    "phase": 0.31
+   },
+   "prop_bit2": {
+    "motion": "sway",
+    "amp": 4.6,
+    "period": 4.3,
+    "jitter": 0.22,
+    "pivot": [
+     0.5,
+     0.06
+    ],
+    "steps": 28,
+    "phase": 0.0
+   },
+   "prop_bit4": {
+    "motion": "sway",
+    "amp": 15.0,
+    "period": 1.5,
+    "jitter": 0.1,
+    "pivot": [
+     0.16,
+     0.14
+    ],
+    "steps": 32,
+    "phase": 0.63
+   }
+  },
+  "블록슈불꽃": {
+   "prop": {
+    "motion": "flame",
+    "amp": 0.1,
+    "period": 0.78,
+    "jitter": 0.3,
+    "steps": 16,
+    "phase": 0.0
+   },
+   "prop_bit2": {
+    "motion": "flame",
+    "amp": 0.13,
+    "period": 0.62,
+    "jitter": 0.3,
+    "steps": 16,
+    "phase": 0.37
+   },
+   "prop_bit3": {
+    "motion": "flame",
+    "amp": 0.17,
+    "period": 0.5,
+    "jitter": 0.32,
+    "steps": 16,
+    "phase": 0.66
+   },
+   "prop_bit4": {
+    "motion": "flame",
+    "amp": 0.21,
+    "period": 0.42,
+    "jitter": 0.35,
+    "steps": 16,
+    "phase": 0.13
+   },
+   "prop_bit5": {
+    "motion": "pulse",
+    "amp": 0.18,
+    "period": 1.7,
+    "jitter": 0.25,
+    "steps": 14,
+    "phase": 0.5
+   }
+  },
+  "츠나불꽃": {
+   "prop": {
+    "motion": "flame",
+    "amp": 0.09,
+    "period": 0.8,
+    "jitter": 0.3,
+    "steps": 16,
+    "phase": 0.0
+   },
+   "prop_bit2": {
+    "motion": "flame",
+    "amp": 0.15,
+    "period": 0.6,
+    "jitter": 0.32,
+    "steps": 16,
+    "phase": 0.41
+   },
+   "prop_bit3": {
+    "motion": "flame",
+    "amp": 0.2,
+    "period": 0.46,
+    "jitter": 0.35,
+    "steps": 16,
+    "phase": 0.72
+   }
+  }
+ },
+ "face_talk": {
+  "face4": [
+   "졸",
+   "하암",
+   "눈 붙",
+   "잠깐만 눈",
+   "밤샘",
+   "피곤",
+   "쉬자",
+   "자자",
+   "잘래"
+  ],
+  "face1": [
+   "마감",
+   "악당",
+   "큰일",
+   "헉",
+   "앗",
+   "어떡"
+  ],
+  "face2": [
+   "안 해",
+   "못 ",
+   "안 하",
+   "미안",
+   "아직",
+   "힘들"
+  ],
+  "face3": [
+   "도와줄래",
+   "괜찮",
+   "부탁",
+   "무서",
+   "떨려"
+  ]
+ },
+ "back_steps": 22
 }

@@ -4713,6 +4713,9 @@ class Mascot:
         self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
         self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
         self._bubble_cookie = None   # 그 말풍선 안의 깐 포춘쿠키 (지뢰 13)
+        self._face_now = None        # 지금 짓고 있는 곁표정 (지뢰 13)
+        self._face_until = 0.0
+        self._face_part = None       # 이번 프레임에 그릴 곁표정
         self._fortune_at = 0.0       # 이 시각이 되면 운세를 말한다 (0=없음)
         self._brief_key = None       # 브리핑을 어느 날짜로 찍을지 (지뢰 14)
         self.particles = []          # 폭죽 조각 [x, y, vx, vy, 색, 수명]
@@ -4820,10 +4823,13 @@ class Mascot:
         self.prop_dir = self.parts_dir   # 소품 PNG를 읽을 폴더
         self._prop_layout = self.layout  # 소품 좌표가 든 layout
         self._back_cache = {}        # 몸 뒤 파츠 움직임 프레임 (칸별로만 만든다)
+        self._anim_pil_cache = {}    # 그 파츠의 손질해 둔 원본 (지뢰 13)
         # 파츠별 움직임 상태 — 기뽀처럼 기본 날개와 소품 날개가 같이 있을 때
         # 서로 다른 박자로 움직이도록 이름별로 따로 든다
         self._back_st = {}
         self._prop_back_cfg = {}     # 뽑힌 소품의 뒤쪽 조각 움직임 설정
+        self._prop_bits = []         # 여러 조각짜리 소품의 곁조각 자리 이름
+        self._prop_bit_cfg = {}      # 그 조각마다의 움직임 (지뢰 13)
         self._load_parts()
 
         # 상태 변수는 한곳에 모아 둔다. 새 값을 넣을 자리를 헤매지
@@ -5042,6 +5048,13 @@ class Mascot:
 
         if os.environ.get("MASCOT_DEBUG") == "1":
             self.root.after(4000, self._dump_debug)
+
+        # 아바타를 갈아입고 다시 켜진 것이면 '샤라랑' 하고 나타난다 (요청).
+        # 옷 바꾸기는 파츠를 통째로 다시 읽어야 해서 프로그램이 다시 뜨는데,
+        # 그 사이에 연출이 끊긴다 — 그래서 표시를 남겨 두고 여기서 낸다.
+        if self.us.pop("skin_fx", None):
+            self._safe("save_settings", self._save_settings)
+            self.root.after(420, lambda: self._safe("skin_fx", self._skin_fx))
 
         if preview:
             self.root.after(600, self._preview_shots)
@@ -5532,6 +5545,72 @@ class Mascot:
             got["pos"] = [got["pos"][0] + dx9, got["pos"][1] + dy9]
         return got
 
+    PROP_BIT_MAX = 6         # 한 소품에 붙일 수 있는 곁조각 수
+
+    def _load_prop_bits(self, pick, s, pil_cache):
+        """여러 조각으로 된 특별 소품 (사가 신하나의 미쿠).
+
+        PSD 에서 `소품-<이름>` 폴더로 묶어 둔 것을 `extract_psd` 가
+        `propN` + `propN_bit2·3·…` 로 뽑아 두었다. 조각마다 **따로 그리고
+        따로 움직인다** — 양갈래는 흔들리고 파를 든 손은 크게 휘두른다.
+        움직임은 config 의 `prop_motion` 이 정한다 (layout.json 은 PSD 를
+        다시 뽑을 때마다 덮어써지므로 거기 두면 안 된다).
+
+        조각 이름은 자리 이름(`prop_bit2`…)으로 옮겨 담는다 — 그리기·
+        캐시가 전부 자리 이름으로 도니까.
+        """
+        for i9 in range(2, self.PROP_BIT_MAX + 1):
+            self.has["prop_bit%d" % i9] = False
+        self._prop_bits = []
+        self._prop_bit_cfg = {}
+        # 앞서 뽑힌 소품의 조각 자리를 **먼저 걷어 낸다** — 그림은 꺼져
+        # 있어도 이름이 남으면 그리는 차례가 지저분해진다
+        self.layout["overlays"] = [
+            o for o in (self.layout.get("overlays") or [])
+            if not o.startswith("prop_bit")]
+        if not pick:
+            return
+        ent = self._prop_layout.get(pick) or {}
+        keys = [k for k in (ent.get("bits") or [])][:self.PROP_BIT_MAX - 1]
+        if not keys:
+            return
+        # 움직임 설정은 **폴더 이름**으로 먼저 찾는다 — 소품 번호는 사람이
+        # 다시 매기면 밀린다 (미쿠가 prop16 → prop17 이 됐다). 번호로도
+        # 찾아 주므로 옛 config 도 그대로 돈다.
+        tab9 = self.cfg.get("prop_motion") or {}
+        mo_all = tab9.get(ent.get("gname") or "") or tab9.get(pick) or {}
+        self._prop_bit_cfg["prop"] = mo_all.get("prop") or {}
+        for j9, key9 in enumerate(keys):
+            nm9 = "prop_bit%d" % (j9 + 2)
+            p9 = os.path.join(self.prop_dir, "%s.png" % key9)
+            if key9 not in self._prop_layout or not os.path.exists(p9):
+                continue
+            im9 = Image.open(p9).convert("RGBA")
+            if s != 1.0:
+                im9 = im9.resize((max(1, round(im9.width * s)),
+                                  max(1, round(im9.height * s))),
+                                 Image.LANCZOS)
+            self.layout[nm9] = self._prop_at(key9)
+            pil_cache[nm9] = im9
+            self.im[nm9] = ImageTk.PhotoImage(self._hard(im9))
+            self.has[nm9] = True
+            self._prop_bits.append(nm9)
+            self._prop_bit_cfg[nm9] = mo_all.get(nm9) or {}
+        if not self._prop_bits:
+            return
+        # 프레임 미리 굽기는 여기서 하면 안 된다 — `_pil_cache` 가 아직
+        # 이번 파츠로 안 바뀌어 있다 (`_load_parts` 뒷쪽에서 채운다).
+        # 굽는 곳은 그 뒤다.
+        # 그리는 차례 — 소품 바로 뒤에 이어 붙인다 (PSD 순서 그대로)
+        ov = [o for o in (self.layout.get("overlays") or [])
+              if not o.startswith("prop_bit")]
+        if "prop" in ov:
+            at = ov.index("prop") + 1
+            ov[at:at] = self._prop_bits
+        else:
+            ov += self._prop_bits
+        self.layout["overlays"] = ov
+
     def _load_prop_back(self, pick, s, pil_cache):
         """뽑힌 소품에 '몸 뒤에 그리는 짝'이 있으면 같이 읽는다.
 
@@ -5579,6 +5658,8 @@ class Mascot:
         for n in layout:
             if not n.startswith("prop") or n == "prop":
                 continue
+            if "_bit" in n:
+                continue    # 여러 조각짜리 소품의 곁조각 — 따로 안 뽑는다
             base = n[:-5] if n.endswith("_back") else n
             front = os.path.join(folder, f"{base}.png")
             back = os.path.join(folder, f"{base}_back.png")
@@ -5703,7 +5784,8 @@ class Mascot:
         pil_cache = {}
         for name in ("body_open", "pupils", "body_mask", "lashes", "hair",
                      "eyes_closed", "head", "desk", "arm_pen",
-                     "smile", "pet1", "pet2", "scarf", "back"):
+                     "smile", "pet1", "pet2", "scarf", "back") \
+                + tuple(self.layout.get("faces") or []):
             # 파일과 layout 위치가 둘 다 있어야 사용 (자동업데이트 섞임 대비)
             self.has[name] = (os.path.exists(os.path.join(self.parts_dir,
                                                           f"{name}.png"))
@@ -5751,6 +5833,7 @@ class Mascot:
             # 앞쪽 그림이 없어도(뒤쪽만 있는 소품) 뒤쪽은 그린다
             self.prop_name = self.prop_name or pick
             self._load_prop_back(pick, s, pil_cache)
+        self._load_prop_bits(pick, s, pil_cache)
 
         # 타이머 카드 가로 중심 = 책상 내용의 중심 (캔버스 중심이 아니라)
         self.card_cx = self.W / 2
@@ -5860,6 +5943,37 @@ class Mascot:
         ko = self.cfg.get("arm_key_offset", [0, 0])
         self.arm_key_off = (ko[0] * s, ko[1] * s)
         self._pil_cache = {n: pil_cache[n] for n in pil_cache}
+        # 파츠를 다시 읽었으니 움직임 프레임도 새로 굽는다 ('소품 새로고침'
+        # 으로 다른 소품이 왔는데 옛 프레임이 남으면 엉뚱한 것이 나온다).
+        # **미리 구워 둔다** — 안 그러면 처음 한두 바퀴 동안 그리면서 굽느라
+        # 캐릭터가 버벅인다 (제보 — 불꽃은 주기가 짧아 78장이 1초 안에
+        # 몰린다).
+        # **반드시 `_pil_cache` 를 채운 뒤에.** 앞에 두었더니 옛 파츠의
+        # 그림을 굽고 있었다 (조각은 아예 안 구워졌다 — 실측으로 잡았다).
+        # `_safe` 는 여기서 못 쓴다 — `_init_state` 보다 먼저 도는 자리라
+        # 실패를 세는 그릇이 아직 없다.
+        self._back_cache = {}
+        self._anim_pil_cache = {}
+        # 소품 조각은 **지금** 굽는다 — 싸다 (한 장 0.5~0.9ms · 78장 58ms).
+        for _nm8 in ["prop"] + list(self._prop_bits):
+            try:
+                self._bake_anim(_nm8, self._prop_bit_cfg.get(_nm8) or {})
+            except Exception:
+                pass          # 미리 굽기는 없어도 되는 일 (그리다 구워진다)
+        # 몸 뒤 파츠(양갈래·날개)는 한 장이 커서 비싸다 (381x384 · 17ms).
+        # 켤 때 붙들고 있으면 창이 늦게 뜬다 — **창이 뜬 다음 틈에** 굽는다.
+        # 흔들림은 몇 초에 한 바퀴라 그 안에 다 구워진다.
+        def _bake_back():
+            for n8, m8 in (("back", self._back_cfg()),
+                           ("prop_back", self._prop_back_cfg)):
+                try:
+                    self._bake_anim(n8, m8)
+                except Exception:
+                    pass
+        try:
+            self.root.after(50, _bake_back)
+        except Exception:
+            _bake_back()
         self._load_pil = load_pil
 
         if self.has.get("head"):
@@ -6316,15 +6430,23 @@ class Mascot:
         """
         return Image.BICUBIC
 
+    def _back_cfg(self):
+        """기본 몸 뒤 파츠의 움직임 설정 (그리는 쪽과 미리 굽는 쪽이 같이 본다).
+
+        `steps` = 한 주기를 몇 칸으로 나눌지. 기본 12칸은 툭툭 끊겨 보인다 —
+        이 파츠는 한 장이 커서(사가 양갈래 381x384 · 586KB) 칸을 늘리면
+        그만큼 메모리가 는다. 캐릭터별로 config 에서 정한다.
+        """
+        return {"motion": self.cfg.get("back_motion"),
+                "amp": self.cfg.get("back_amp", 1.0),
+                "period": self.cfg.get("back_period", 2.6),
+                "jitter": self.cfg.get("back_jitter", 0.0),
+                "pivot": self.cfg.get("back_pivot"),
+                "steps": self.cfg.get("back_steps")}
+
     def _draw_back(self, now, yo):
         """기본 몸 뒤 파츠 (사가 양갈래·기뽀 요정 날개)."""
-        self._back_anim("back", {
-            "motion": self.cfg.get("back_motion"),
-            "amp": self.cfg.get("back_amp", 1.0),
-            "period": self.cfg.get("back_period", 2.6),
-            "jitter": self.cfg.get("back_jitter", 0.0),
-            "pivot": self.cfg.get("back_pivot"),
-        }, now, yo)
+        self._back_anim("back", self._back_cfg(), now, yo)
 
     def _draw_prop_back(self, now, yo):
         """뽑힌 소품의 몸 뒤 조각 (악마 꼬리·천사 날개)."""
@@ -6347,7 +6469,11 @@ class Mascot:
             self._put(name, x, y + yo)
             return
         amp = float(mo.get("amp", 1.0))
-        STEPS = 12                       # 한 주기를 12칸으로 — 캐시가 12장이면 끝
+        # 한 주기를 몇 칸으로 나눌지 — 칸이 많을수록 매끄럽고, 그만큼
+        # 그림이 더 생긴다. 기본 12칸은 큰 날개·꼬리에 맞춘 값이고,
+        # 작은 조각(미쿠)은 config 에서 올려 쓴다 (요청 — 메모리를 조금
+        # 더 써도 좋으니 매끄럽게).
+        STEPS = max(4, min(48, int(mo.get("steps") or 12)))
         st = self._back_st.get(name)
         if st is None:
             st = self._back_st[name] = {
@@ -6361,7 +6487,10 @@ class Mascot:
         if st["phase"] >= 1.0:
             st["phase"] -= int(st["phase"])
             st["period"] = self._new_back_period(mo)
-        k = int(st["phase"] * STEPS) % STEPS
+        # 조각마다 박자를 어긋나게 둘 수 있다 — 다 같이 움직이면 한 덩이가
+        # 통째로 흔들리는 것처럼 보여 부자연스럽다 (미쿠의 양갈래·팔·파).
+        ph0 = float(mo.get("phase") or 0.0)
+        k = int(((st["phase"] + ph0) % 1.0) * STEPS) % STEPS
         got = self._back_frame(name, mode, k, STEPS, amp, mo)
         if got is None:
             self._put(name, x, y + yo)
@@ -6382,12 +6511,62 @@ class Mascot:
             return base
         return base * random.uniform(max(0.15, 1.0 - j), 1.0 + j)
 
+    # 움직이는 파츠의 프레임 캐시 상한 (장수). 한 장이 작아서 (파츠를
+    # 표시 배율로 줄인 뒤 만든다) 장수로 잡아도 된다 — 실측 미쿠 네 조각
+    # 24칸씩에 6MB 남짓 (지뢰 42 — 큰 그림이면 용량으로 생각할 것).
+    BACK_CACHE_MAX = 260
+
+    def _hard_edge(self, im):
+        """가장자리 알파만 이분화 — **이미 손본 그림을 돌리거나 늘린 뒤**에 쓴다.
+
+        `_hard` 는 옅게 그린 안쪽 선까지 살리느라 흐림(GaussianBlur) 두 번과
+        구멍 메우기를 돈다 — 한 장에 11~25ms 다 (실측). 움직이는 파츠는
+        프레임마다 그걸 돌려 **불꽃이 켜질 때 캐릭터가 버벅였다** (제보).
+        원본을 한 번만 제대로 손봐 두면(`_anim_pil`), 돌리고 늘리며 새로
+        생긴 반투명 가장자리는 이 싼 처리로 충분하다.
+        """
+        if not self.cfg.get("hard_alpha"):
+            return im
+        im = self._avoid_key(im)
+        a = im.getchannel("A")
+        im = im.copy()
+        im.putalpha(a.point(lambda v: 255 if v >= 128 else 0))
+        return im
+
+    def _anim_pil(self, name):
+        """움직이는 파츠의 원본 — 무거운 이분화를 **한 번만** 해 둔다."""
+        got = self._anim_pil_cache.get(name)
+        if got is None:
+            pil = self._pil_cache.get(name)
+            if pil is None:
+                return None
+            got = self._safe_str(self._hard, pil) or pil
+            self._anim_pil_cache[name] = got
+        return got
+
+    def _bake_anim(self, name, mo):
+        """그 파츠의 움직임 프레임을 미리 구워 둔다.
+
+        안 구워 두면 **처음 한두 바퀴 동안 그리면서 굽느라** 캐릭터가
+        버벅인다. 불꽃은 주기가 짧아(0.4~0.8초) 78장이 1초 안에 몰려
+        특히 티가 났다 (제보). 파츠를 읽을 때 한 번에 구우면 그 뒤로는
+        꺼내 쓰기만 한다 — 실측 78장에 0.15초.
+        """
+        mode = mo.get("motion")
+        if not mode:
+            return 0
+        steps = max(4, min(48, int(mo.get("steps") or 12)))
+        amp = float(mo.get("amp", 1.0))
+        for k in range(steps):
+            self._back_frame(name, mode, k, steps, amp, mo)
+        return steps
+
     def _back_frame(self, name, mode, k, steps, amp, mo):
         key = (name, mode, k)
         hit = self._back_cache.get(key)
         if hit is not None:
             return hit
-        pil = self._pil_cache.get(name)
+        pil = self._anim_pil(name)      # 무거운 손질은 여기서 한 번만
         if pil is None:
             return None
         t = math.sin(2 * math.pi * k / steps)
@@ -6411,6 +6590,36 @@ class Mascot:
             base.alpha_composite(pil, (pad, pad))
             im = base.rotate(t * amp, center=(cx + pad, cy + pad),
                              resample=self._resample(), expand=False)
+        elif mode == "flame":
+            # 불꽃 — **밑동은 붙박이**로 두고 위로 늘었다 줄었다 한다.
+            # 가로는 반대로 조금 오므려 부피를 비슷하게 (그래야 '타오른다'
+            # 로 보인다). 겹쳐 놓은 안쪽 불꽃마다 박자를 어긋내면
+            # 살아 있는 것처럼 넘실거린다 (config 의 phase).
+            sy = 1.0 + amp * t
+            sx = 1.0 - amp * float(mo.get("squash", 0.55)) * t
+            w2 = max(1, int(round(pil.width * sx)))
+            h2 = max(1, int(round(pil.height * sy)))
+            pad = int(math.ceil(pil.height * abs(amp))) + 2
+            base = Image.new("RGBA",
+                             (pil.width + 2 * pad, pil.height + 2 * pad),
+                             (0, 0, 0, 0))
+            base.alpha_composite(
+                pil.resize((w2, h2), Image.LANCZOS),
+                (pad + (pil.width - w2) // 2, pad + pil.height - h2))
+            im = base
+        elif mode == "pulse":
+            # 반짝이(별) — 가운데를 축으로 커졌다 작아졌다
+            k2 = 1.0 + amp * t
+            w2 = max(1, int(round(pil.width * k2)))
+            h2 = max(1, int(round(pil.height * k2)))
+            pad = int(math.ceil(max(pil.width, pil.height) * abs(amp))) + 2
+            base = Image.new("RGBA",
+                             (pil.width + 2 * pad, pil.height + 2 * pad),
+                             (0, 0, 0, 0))
+            base.alpha_composite(
+                pil.resize((w2, h2), Image.LANCZOS),
+                (pad + (pil.width - w2) // 2, pad + (pil.height - h2) // 2))
+            im = base
         elif mode == "flap":
             # 가로만 줄였다 늘렸다 — 좌우 날개가 함께 접혔다 펴지는 느낌
             f = 1.0 - (1.0 - math.cos(2 * math.pi * k / steps)) * 0.5 * amp
@@ -6420,9 +6629,15 @@ class Mascot:
                                ((pil.width - w) // 2, 0))
         else:
             return None
-        if len(self._back_cache) > 40:
-            self._back_cache.clear()
-        hit = (ImageTk.PhotoImage(self._hard(im)), pad)
+        # 움직이는 조각이 넷이 되면서 12장 × 4 = 48장이라 상한 40 을 계속
+        # 넘겼다 — 그때마다 통째로 비우니 매 프레임 다시 굽느라 오히려
+        # 느리고 메모리가 계단처럼 뛴다 (지뢰 18). 상한을 올리고, 비울
+        # 때는 오래된 절반만 버린다.
+        if len(self._back_cache) > self.BACK_CACHE_MAX:
+            for _o9 in list(self._back_cache)[:self.BACK_CACHE_MAX // 2]:
+                self._back_cache.pop(_o9, None)
+        # 원본은 이미 손봐 두었으니 가장자리만 (지뢰 — 프레임마다 하면 느리다)
+        hit = (ImageTk.PhotoImage(self._hard_edge(im)), pad)
         self._back_cache[key] = hit
         return hit
 
@@ -10563,8 +10778,49 @@ class Mascot:
         self._bubble_big = bool(big)   # 반응 알림처럼 크게 보여야 하는 말
         self._bubble_act = ((text, str(btn), act) if (btn and act) else None)
         self._bubble_hold = text if hold else None
+        # 말에 맞춰 얼굴도 바꾼다 (곁표정이 있는 캐릭터만 — 요청).
+        # 말풍선이 떠 있는 동안 지어 두면 말과 얼굴이 함께 간다.
+        self._safe("face_say", self._face_show, text,
+                   min(float(secs), 8.0) if not hold else self.FACE_SECS)
 
     HOLD_MAX = 1800.0            # 눌러야 꺼지는 말풍선의 안전 시한(초)
+
+    # ── 곁표정 ───────────────────────────────────────────────────────
+    # 웃는 표정 말고 더 그려 둔 얼굴 (사가 신하나의 불안 셋·졸음 하나).
+    # `extract_psd` 가 layout 의 `faces` 에 face1..N 으로 적어 둔다.
+    # 어떤 말에 어떤 얼굴을 지을지는 **config 의 `face_talk`** 이 정한다 —
+    # {face4: ["졸", "하암", …]} 처럼 낱말을 적어 두면 그 말이 든 대사에
+    # 그 얼굴이 나온다. 아무것도 안 걸리면 그냥 아무 얼굴이나.
+    FACE_SECS = 3.4              # 한 번 지은 표정이 남아 있는 시간
+
+    def _faces(self):
+        return [f for f in (self.layout.get("faces") or [])
+                if self.has.get(f)]
+
+    def _face_for(self, text):
+        """그 말에 어울리는 얼굴 하나 (없으면 None)."""
+        got = self._faces()
+        if not got:
+            return None
+        t = str(text or "")
+        tab = self.cfg.get("face_talk") or {}
+        for key in got:
+            for w in (tab.get(key) or ()):
+                if str(w) and str(w) in t:
+                    return key
+        # 안 걸리면 최근에 안 지은 것 중에서 (같은 얼굴이 이어지면 심심하다)
+        pool = [f for f in got if f != self._face_now] or got
+        return random.choice(pool)
+
+    def _face_show(self, text=None, secs=None, now=None):
+        """곁표정을 짓는다. 그릴 것이 없으면 아무 일도 안 한다."""
+        pick = self._face_for(text)
+        if not pick:
+            return None
+        now = time.time() if now is None else now
+        self._face_now = pick
+        self._face_until = now + float(secs or self.FACE_SECS)
+        return pick
 
     def _talk_pool(self, state):
         return self.cfg.get("talk") or self.TALK
@@ -11764,6 +12020,23 @@ class Mascot:
             c.create_image(kx + self.arm_key_off[0] + hk["off"][0],
                            ky + self.arm_key_off[1] + hk["off"][1] + d4,
                            image=self._rotated_hop("arm_key", 0.0), anchor="nw")
+
+    def _skin_fx(self):
+        """아바타를 갈아입었다 — 샤라랑 반짝임과 소리 (요청).
+
+        옷을 바꾸면 파츠를 다시 읽느라 프로그램이 다시 뜬다. 그래서
+        누른 순간(옛 모습)과 다시 떴을 때(새 모습) 두 번 낸다 — 그래야
+        '변신했다'로 보인다.
+        """
+        now = time.time()
+        self._safe("spark_snd", self._sparkle_sound)
+        self._safe("fx", self._burst, 16, 34)
+        # 반짝이는 머리 위로 몇 개를 시차를 두고 (한 번에 내면 뭉친다)
+        for i9 in range(6):
+            self.root.after(int(i9 * 110), lambda: self._safe(
+                "fx", self._spawn_note, time.time(), "spark"))
+        self.smile_until = max(self.smile_until, now + 3.2)
+        self._safe("gest", self._gest_start, "cheer", True)
 
     def _burst(self, n=24, spread=45):
         """카드 위로 색종이가 팡 터진다 (할 일 완료·기록 갱신 등 작은 축하용)."""
@@ -15412,6 +15685,13 @@ class Mascot:
                        and (now < self.smile_until or self._g_smile
                             or self._stretch_hover
                             or f.get("smile", False)))
+        # 곁표정 — 웃는 표정 말고 더 그려 둔 얼굴 (사가 신하나의 불안·졸음).
+        # 웃음보다 약해서, 웃고 있을 때는 웃음이 이긴다.
+        self._face_part = None
+        if (not smiling and self._face_now and now < self._face_until
+                and self.has.get(self._face_now)):
+            self._face_part = self._face_now
+            smiling = True          # 그리는 길은 웃는 표정과 같다
         if smiling:
             blinking = False
 
@@ -15866,9 +16146,12 @@ class Mascot:
                 # 눈을 감은 채 고개를 기울이는 동작(하품·꾸벅)이 있다. 눈 뜬
                 # 판으로 그리면 감으라고 해도 눈이 떠진다 — 잘 때 쓰는 판이
                 # 곧 눈감은 판이라 그것을 쓴다.
+                # 곁표정에는 기울인 합성판이 없다 — 웃는 판을 쓰면 엉뚱한
+                # 얼굴이 나오므로 그냥 깨어 있는 판으로 (지뢰 14).
                 mode = ("sleep" if sleeping
                         else "shut" if blinking
-                        else "smile" if (smiling and self._tilt_base_smile is not None)
+                        else "smile" if (smiling and not self._face_part
+                                         and self._tilt_base_smile is not None)
                         else "awake")
                 img, tdx = self._sleep_head(tilt, mode)
                 # 합성판은 파츠를 ox 없이 붙여 만든다. 캐릭터가 작아 카드보다
@@ -15903,13 +16186,17 @@ class Mascot:
         """눈동자(시선) 또는 감은 눈/웃는 얼굴 + 눈 위 덮개들."""
         c = self.canvas
         if smiling:                       # 웃는 표정 파츠가 눈을 대신한다
+            # 곁표정이 켜져 있으면 그 얼굴로 (없으면 웃는 표정)
+            fp = getattr(self, "_face_part", None) or "smile"
+            if not self.has.get(fp):
+                fp = "smile"
             drawn = False
             for name in (self.layout.get("overlays") or []):
                 if name in ("body_mask", "lashes"):
                     continue
                 if name == "eyes_closed":
-                    sx, sy = self._pos("smile")
-                    self._put("smile", sx, sy + yo)
+                    sx, sy = self._pos(fp)
+                    self._put(fp, sx, sy + yo)
                     drawn = True
                     continue
                 if not self.has.get(name) or name == "head":
@@ -15917,8 +16204,8 @@ class Mascot:
                 ox, oy_ = self._pos(name)
                 self._put(name, ox, oy_ + yo)
             if not drawn:
-                sx, sy = self._pos("smile")
-                self._put("smile", sx, sy + yo)
+                sx, sy = self._pos(fp)
+                self._put(fp, sx, sy + yo)
             return
         if not blinking:
             ex, ey = self._pos("pupils")
@@ -15935,6 +16222,12 @@ class Mascot:
                 if not (blinking and self.has.get("eyes_closed")):
                     continue
             elif not self.has.get(name):
+                continue
+            # 여러 조각짜리 소품 — 조각마다 제 움직임이 있다 (미쿠)
+            mo9 = (getattr(self, "_prop_bit_cfg", None) or {}).get(name)
+            if mo9 and mo9.get("motion"):
+                self._safe("prop_bit", self._back_anim, name, mo9,
+                           time.time(), yo)
                 continue
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
@@ -16811,9 +17104,10 @@ class Mascot:
                       "slime_volume"):
                 if k in new:
                     new[k] = max(0, min(100, int(new[k])))
+            skin_changed = new.get("skin") != self.us.get("skin")
             need_restart = (new["scale_pct"] != self.us["scale_pct"]
                             or new["font_pct"] != self.us.get("font_pct", 100)
-                            or new.get("skin") != self.us.get("skin")
+                            or skin_changed
                             or bool(new["show_timer"]) != self.timer_on
                             or bool(new["shadow"]) != bool(self.us.get("shadow", True)))
             old_slime = self.us.get("slime_kind")
@@ -16839,6 +17133,11 @@ class Mascot:
             # 여백 보정은 재시작 없이 그 자리에서 — 창이 위로 자라거나 줄어든다
             self._safe("card_gap", self._relayout_card)
             win.destroy()
+            if skin_changed:
+                # 다시 뜬 뒤에 낼 연출을 예약해 두고, 지금은 소리부터.
+                self.us["skin_fx"] = 1
+                self._save_settings()
+                self._safe("spark_snd", self._sparkle_sound)
             if need_restart:
                 self._restart()
 
