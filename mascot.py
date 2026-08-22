@@ -1067,7 +1067,19 @@ class MacCharLayer:
         host = view.layer()
         if host is None:
             raise RuntimeError("레이어가 없음")
+        # **레티나 배율을 맞춘다.** CALayer 는 기본이 1배라, 2배 화면에서
+        # 우리 그림이 그대로 늘어나 가장자리가 뭉개진다 (제보 '픽셀이
+        # 깨진 듯'). 창의 backingScaleFactor 를 넣고, 그림도 그 배율로
+        # 만들어 넣는다.
+        self.scale = 1.0
+        try:
+            sc = float(view.window().backingScaleFactor())
+            if 1.0 <= sc <= 4.0:
+                self.scale = sc
+        except Exception:
+            pass
         lay = CALayer.layer()
+        lay.setContentsScale_(self.scale)
         lay.setContentsGravity_("topLeft")
         # 애니메이션을 끄지 않으면 그림을 바꿀 때마다 페이드가 걸려
         # 잔상이 남고 프레임이 밀린다.
@@ -1076,8 +1088,16 @@ class MacCharLayer:
         self.view, self.host, self.layer = view, host, lay
         self.ok = True
 
-    def push(self, im, scale=1.0):
-        """합성한 그림을 덧레이어에 올린다 (알파는 미리 곱한다 — 지뢰 117)."""
+    def push(self, im, _x=None, _y=None):
+        """합성한 그림을 덧레이어에 올린다 (알파는 미리 곱한다 — 지뢰 117).
+
+        레티나면 그 배율로 키워서 넣는다 — contentsScale 만 올리고 그림은
+        1배로 두면 반대로 절반 크기로 나온다.
+        """
+        if self.scale > 1.01:
+            im = im.resize((max(1, int(round(im.width * self.scale))),
+                            max(1, int(round(im.height * self.scale)))),
+                           Image.LANCZOS)
         from Foundation import NSData
         from Quartz import (CATransaction, CGColorSpaceCreateDeviceRGB,
                             CGDataProviderCreateWithCFData, CGImageCreate,
@@ -14504,12 +14524,19 @@ class Mascot:
                 ok = lay.push(sheet.im, self.root.winfo_rootx(),
                               self.root.winfo_rooty())
             if ok and self._smooth_try_path:
-                # 한 프레임 올라갔다 = 이 컴퓨터에서 되는 길이다
+                # 한 프레임 올라갔다 = 이 컴퓨터에서 되는 길이다.
+                # **무엇이 켜졌는지 기록에 남긴다** — 맥은 눈으로 못 봐서
+                # 제보를 받을 때 이 줄 하나로 갈린다.
                 try:
                     os.remove(self._smooth_try_path)
                 except Exception:
                     pass
                 self._smooth_try_path = None
+                if IS_MAC:
+                    self._safe("mac_smooth_log", self._mac_log,
+                               "매끈 덧레이어 켜짐 — 화면배율 %.2f · 그림 %dx%d"
+                               % (getattr(lay, "scale", 1.0),
+                                  sheet.im.width, sheet.im.height))
         except Exception:
             ok, _ = False, self._log_error("smooth_push")
         if not ok:
