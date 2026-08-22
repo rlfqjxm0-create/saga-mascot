@@ -385,6 +385,14 @@ MAC_KEY = "#5d0051"
 KEY_ROT = (-7.0, 7.0)            # 타이핑 시 손 회전(어깨 축) 범위 (도)
 PEN_KB_ROT = (-6.0, 6.0)
 SHADOW_PAD = 16                  # 그림자 이미지 여백 (가장자리 파츠 잘림 방지)
+# 말풍선·타이머 카드·동그란 단추의 테두리 굵기 (96DPI 기준).
+# 한 곳에서 정한다 — 옛날에는 자리마다 2 라고 적혀 있어서, 굵기를 바꾸면
+# 어디는 굵고 어디는 가는 채로 남았다.
+BORDER_W = 3
+# 검사에서 매끈 경로(몸만 레이어 창)를 끄는 스위치 — `enatest` 가 켠다.
+# 검사는 거의 다 '캔버스에 무엇이 올라갔나'로 확인하는데, 매끈 경로에서는
+# 몸이 캔버스에 없고 캐시도 PIL 을 담아 그 확인이 통째로 어긋난다.
+SMOOTH_OFF = False
 LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
 # 레벨 줄 아래 칸들을 이만큼 끌어올린다. 상태·시간 줄은 카드 윗변에서 20px
 # 떨어지게 짜여 있는데, 위에 레벨 줄이 생기면서 그 여백이 겹쳐 넓어 보였다
@@ -840,6 +848,406 @@ class FxLayer:
             pass
         self.hwnd = 0
         self.ok = False
+
+
+class CharLayer:
+    """캐릭터 몸을 진짜 반투명으로 그리는 레이어 창 (본체 창 **뒤**).
+
+    색상키 투명창은 픽셀이 켜짐/꺼짐 둘뿐이라 부드러운 선을 못 담는다.
+    그래서 지금까지는 가장자리를 일부러 이분화해 왔고(hard_alpha), 그것이
+    '도트처럼 깨져 보인다'는 그 모습이다 (지뢰 31·65). 몸만 그림자·파티클과
+    같은 UpdateLayeredWindow 창으로 옮기면 원본 알파가 그대로 나온다.
+
+    **본체 창 뒤에 두는 것이 요점이다.** 카드·말풍선·모자·연출은 캔버스에
+    그대로 두는데, 이 창이 뒤에 있으므로 그것들이 저절로 캐릭터 위에 온다 —
+    그리는 차례가 지금 그대로 지켜진다 (실측: 카드와 캐릭터가 겹치는 넓이는
+    0px²이고, 캐릭터 위에 얹는 것들만 겹친다).
+
+    클릭은 통과시키지 않는다 (WS_EX_TRANSPARENT 를 **안** 건다). 캔버스에서
+    몸을 지우면 그 자리는 색상키라 클릭이 뒤로 빠지는데, 그 클릭을 이 창이
+    받아 본체의 핸들러로 넘긴다. 알파 0인 자리는 레이어 창이 알아서
+    통과시키므로 '몸을 눌렀을 때만' 반응하는 지금 성질이 그대로 남는다.
+    """
+
+    def __init__(self, root):
+        self.ok = False
+        self.hwnd = 0
+        self._shown = False
+        self.top = tk.Toplevel(root)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.top.update_idletasks()
+        self.hwnd = int(self.top.wm_frame(), 16)
+        u, _g = layer_api()
+        if u is None:
+            return
+        GWL_EXSTYLE = -20
+        ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
+        # LAYERED | TOOLWINDOW | NOACTIVATE.
+        # TRANSPARENT(0x20)는 **안 건다** — 몸을 눌러야 하기 때문이다.
+        u.SetWindowLongW(self.hwnd, GWL_EXSTYLE,
+                         ex | 0x80000 | 0x80 | 0x8000000)
+        # 숨긴 창에 대고 UpdateLayeredWindow 를 부르면 오류 87 로 조용히
+        # 실패한다 (지뢰 23). 파티클과 같이 1x1 투명을 올려 둔다.
+        self._shown = True
+        self.push(Image.new("RGBA", (1, 1), (0, 0, 0, 0)), 0, 0)
+        self.ok = True
+
+    _FAST = [True]               # PIL 의 premultiplied 모드를 쓸 수 있는가
+
+    @classmethod
+    def _premul(cls, im):
+        """알파 미리곱한 BGRA 바이트 (지뢰 117).
+
+        PIL 에 premultiplied 모드('RGBa')가 있어서 한 번에 바꿀 수 있다 —
+        채널을 갈라 곱하는 파티클 방식보다 1.75배 빠르다(실측 1.19ms →
+        0.68ms, 348x498). 결과는 반올림 한 단계(±1)만 다르다.
+        옛 Pillow 에 rawmode 가 없을 수 있으니 한 번 해 보고 물러난다.
+        """
+        if cls._FAST[0]:
+            try:
+                return im.convert("RGBa").tobytes("raw", "BGRa")
+            except Exception:
+                cls._FAST[0] = False
+        return FxLayer._premul(im)
+
+    def push(self, im, x, y):
+        """그림을 화면 (x, y) 자리에 올린다. 자리·크기·그림을 한 번에.
+
+        알파를 미리 곱해야 한다 (지뢰 117) — 안 곱하면 반투명 가장자리가
+        밝아져 색 번짐 헤일로가 생긴다. 그림자가 무사했던 것은 새까매서
+        (0×α=0) 티가 안 났을 뿐이다.
+        """
+        u, g = layer_api()
+        if u is None:
+            return False
+        w, h = im.size
+        if w <= 0 or h <= 0:
+            return False
+        if not self._shown:
+            u.ShowWindow(self.hwnd, 4)           # SW_SHOWNOACTIVATE
+            self._shown = True
+        data = self._premul(im)
+        hdc = u.GetDC(0)
+        mem = g.CreateCompatibleDC(hdc)
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth, bmi.biHeight = w, -h        # 위에서 아래로
+        bmi.biPlanes, bmi.biBitCount = 1, 32
+        bits = ctypes.c_void_p()
+        hbm = g.CreateDIBSection(hdc, ctypes.byref(bmi), 0,
+                                 ctypes.byref(bits), None, 0)
+        ctypes.memmove(bits, data, len(data))
+        old = g.SelectObject(mem, hbm)
+        blend = _BLENDFUNCTION(0, 0, 255, 1)     # AC_SRC_OVER, 알파 사용
+        got = u.UpdateLayeredWindow(
+            self.hwnd, hdc, ctypes.byref(_POINT(int(x), int(y))),
+            ctypes.byref(_SIZE(w, h)), mem,
+            ctypes.byref(_POINT(0, 0)), 0,
+            ctypes.byref(blend), 2)              # ULW_ALPHA
+        g.SelectObject(mem, old)
+        g.DeleteObject(hbm)
+        g.DeleteDC(mem)
+        u.ReleaseDC(0, hdc)
+        return bool(got)
+
+    def place_behind(self, owner_hwnd):
+        """본체 창 바로 뒤 z순서로 끼운다 (자리는 안 건드린다)."""
+        u, _g = layer_api()
+        if u is None or not owner_hwnd:
+            return
+        try:
+            # 둘째 인자는 '이 창 뒤에 놓아라' 다 (지뢰 23)
+            u.SetWindowPos(self.hwnd, owner_hwnd, 0, 0, 0, 0,
+                           0x1 | 0x2 | 0x10)     # NOSIZE|NOMOVE|NOACTIVATE
+        except Exception:
+            pass
+
+    def set_topmost(self, on):
+        """'항상 위'를 캐릭터와 함께 움직인다 (그림자와 같은 이유)."""
+        u, _g = layer_api()
+        if u is None:
+            return
+        try:
+            u.SetWindowPos(self.hwnd, -1 if on else -2, 0, 0, 0, 0,
+                           0x1 | 0x2 | 0x10)
+        except Exception:
+            pass
+
+    def hide(self):
+        u, _g = layer_api()
+        if self._shown and self.hwnd and u is not None:
+            u.ShowWindow(self.hwnd, 0)
+            self._shown = False
+
+    def destroy(self):
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        self.hwnd = 0
+        self.ok = False
+
+
+class _CharSheet:
+    """캐릭터를 PIL 그림 한 장에 모으는, 캔버스인 척하는 물건 (매끈 경로).
+
+    몸을 그리는 동안만 `self.canvas` 자리에 들어앉는다. 캐릭터 구역이 쓰는
+    그리기(그림·선·타원·사각형·다각형)만 받아 PIL 에 그리고, **모르는 것은
+    진짜 캔버스로 넘긴다** — 그러면 옛 코드가 그대로 돌고, 넘어간 것은
+    레이어보다 위에 그려진다(본체 창이 위이므로). 안 보이는 것보다 낫다.
+    """
+
+    def __init__(self, real, w, h):
+        self.real = real
+        self.im = Image.new("RGBA", (max(1, int(w)), max(1, int(h))),
+                            (0, 0, 0, 0))
+        self.spill = 0            # 진짜 캔버스로 넘어간 횟수 (검사용)
+        self._dr = None
+
+    def __getattr__(self, name):
+        # 조회(bbox·coords·winfo_*)는 진짜 캔버스가 답한다. `real` 이
+        # 아직 없을 때 무한 재귀가 나지 않게 __dict__ 로 직접 본다.
+        real = self.__dict__.get("real")
+        if real is None:
+            raise AttributeError(name)
+        return getattr(real, name)
+
+    @property
+    def dr(self):
+        if self._dr is None:
+            self._dr = ImageDraw.Draw(self.im)
+        return self._dr
+
+    # ── 색·좌표 다듬기 ────────────────────────────────────────────────
+    @staticmethod
+    def _col(v):
+        """Tk 색 문자열 → PIL 색. 빈 값은 '안 칠함'."""
+        if not v or v in ("", "none"):
+            return None
+        return v
+
+    @staticmethod
+    def _flat(a):
+        """create_line(x0,y0,x1,y1) 과 create_line([(x,y),…]) 둘 다 받는다."""
+        if len(a) == 1 and isinstance(a[0], (list, tuple)):
+            a = a[0]
+        out = []
+        for v in a:
+            if isinstance(v, (list, tuple)):
+                out.extend(float(x) for x in v)
+            else:
+                out.append(float(v))
+        return [(out[i], out[i + 1]) for i in range(0, len(out) - 1, 2)]
+
+    @staticmethod
+    def _spline(pts, steps=12, closed=False):
+        """Tk 의 smooth=True 와 같은 2차 스플라인.
+
+        Tk 는 꼭짓점을 조종점으로, 변의 중점을 지나는 곡선을 그린다. PIL 에는
+        대응이 없어 직접 푼다 — 안 풀면 슬라임과 낙서가 각진 다각형이 된다.
+        """
+        n = len(pts)
+        if n < 3:
+            return list(pts)
+        steps = max(2, min(24, int(steps or 12)))
+
+        def mid(a, b):
+            return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+
+        def quad(p0, p1, p2, out):
+            for i in range(1, steps + 1):
+                t = i / float(steps)
+                u = 1.0 - t
+                out.append((u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0],
+                            u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]))
+
+        out = []
+        if closed:
+            out.append(mid(pts[-1], pts[0]))
+            for i in range(n):
+                quad(mid(pts[i - 1], pts[i]), pts[i],
+                     mid(pts[i], pts[(i + 1) % n]), out)
+        else:
+            out.append(pts[0])
+            for i in range(1, n - 1):
+                p0 = pts[0] if i == 1 else mid(pts[i - 1], pts[i])
+                p2 = pts[-1] if i == n - 2 else mid(pts[i], pts[i + 1])
+                quad(p0, pts[i], p2, out)
+            out.append(pts[-1])
+        return out
+
+    # ── 캔버스 흉내 ───────────────────────────────────────────────────
+    def delete(self, *_a):
+        return None                # 시트는 프레임마다 새로 만든다
+
+    def blit(self, pil, x, y, anchor="nw"):
+        w, h = pil.size
+        a = str(anchor or "nw")
+        if a == "center":
+            x, y = x - w / 2.0, y - h / 2.0
+        else:
+            if "e" in a:
+                x -= w
+            elif "w" not in a:
+                x -= w / 2.0
+            if "s" in a:
+                y -= h
+            elif "n" not in a:
+                y -= h / 2.0
+        self.im.alpha_composite(pil, (int(round(x)), int(round(y))))
+
+    def create_image(self, x, y, image=None, anchor="nw", **_kw):
+        pil = image if isinstance(image, Image.Image) else \
+            getattr(image, "_pil_src", None)
+        if pil is None:
+            # 무엇인지 모르는 그림 — 안 보이는 것보다 캔버스에 그리는 게 낫다
+            self.spill += 1
+            return self.real.create_image(x, y, image=image, anchor=anchor,
+                                          **_kw)
+        self.blit(pil, x, y, anchor)
+        return 0
+
+    def create_rectangle(self, x0, y0, x1, y1, fill="", outline="", width=1,
+                         **_kw):
+        f, o = self._col(fill), self._col(outline)
+        if f is None and o is None:
+            return 0
+        self.dr.rectangle([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+                          fill=f, outline=o, width=max(1, int(width or 1)))
+        return 0
+
+    def create_oval(self, x0, y0, x1, y1, fill="", outline="", width=1, **_kw):
+        f, o = self._col(fill), self._col(outline)
+        if f is None and o is None:
+            return 0
+        self.dr.ellipse([min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)],
+                        fill=f, outline=o, width=max(1, int(width or 1)))
+        return 0
+
+    def create_line(self, *a, **kw):
+        pts = self._flat(a)
+        if len(pts) < 2:
+            return 0
+        if kw.get("smooth"):
+            pts = self._spline(pts, kw.get("splinesteps", 12))
+        col = self._col(kw.get("fill", "#000000")) or "#000000"
+        w = max(1, int(round(float(kw.get("width", 1) or 1))))
+        self.dr.line(pts, fill=col, width=w,
+                     joint="curve" if w > 2 else None)
+        if w > 2 and str(kw.get("capstyle", "")) == "round":
+            r = w / 2.0
+            for px, py in (pts[0], pts[-1]):
+                self.dr.ellipse([px - r, py - r, px + r, py + r], fill=col)
+        return 0
+
+    def create_polygon(self, *a, **kw):
+        pts = self._flat(a)
+        if len(pts) < 3:
+            return 0
+        if kw.get("smooth"):
+            pts = self._spline(pts, kw.get("splinesteps", 12), closed=True)
+        f = self._col(kw.get("fill", ""))
+        o = self._col(kw.get("outline", ""))
+        w = max(1, int(round(float(kw.get("width", 1) or 1))))
+        if f is not None:
+            self.dr.polygon(pts, fill=f)
+        if o is not None:
+            self.dr.line(list(pts) + [pts[0]], fill=o, width=w,
+                         joint="curve" if w > 2 else None)
+        return 0
+
+
+def _off_line(p, q, toward, dist):
+    """선분 p→q 를 `toward` 쪽으로 dist 만큼 민 직선 (두 점으로)."""
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    n = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / n, dx / n
+    if (toward[0] - p[0]) * nx + (toward[1] - p[1]) * ny < 0:
+        nx, ny = -nx, -ny
+    return ((p[0] + nx * dist, p[1] + ny * dist),
+            (q[0] + nx * dist, q[1] + ny * dist))
+
+
+def _cross_pt(l1, l2):
+    """두 직선의 교점. 거의 평행이면 None."""
+    (x1, y1), (x2, y2) = l1
+    (x3, y3), (x4, y4) = l2
+    den = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if abs(den) < 1e-6:
+        return None
+    a = x1 * y2 - y1 * x2
+    b = x3 * y4 - y3 * x4
+    return ((a * (x3 - x4) - (x1 - x2) * b) / den,
+            (a * (y3 - y4) - (y1 - y2) * b) / den)
+
+
+def _line_at_y(l, y):
+    """직선 위에서 그 높이의 점."""
+    (x1, y1), (x2, y2) = l
+    if abs(y2 - y1) < 1e-6:
+        return (x1, y)
+    return (x1 + (x2 - x1) * (y - y1) / (y2 - y1), y)
+
+
+def bubble_img(w, h, r, tail, fill, outline, lw, S=4, pad=0):
+    """말풍선 한 장 (RGBA, 알파 그대로 — 가장자리가 반투명이다).
+
+    **몸통과 꼬리를 하나의 실루엣으로 그린다.** 바깥을 테두리색으로 채우고
+    그 안쪽을 채움색으로 덮는 방식이다. 선을 따로 긋던 예전 방식은 셋을
+    한꺼번에 못 줬다 — 이음매에 가로선이 남고(제보), 몸통과 꼬리의 테두리가
+    뚝 끊겨 보이고, 꼬리 끝이 뭉툭했다. 실루엣으로 그리면 셋 다 저절로
+    풀리고 끝도 뾰족하게 모인다.
+
+    tail — (밑변 왼쪽 x, 밑변 오른쪽 x, 끝점 x, 꼬리 높이) 또는 None.
+    셋 다 몸통 왼쪽 위 모서리 기준이고, 끝점은 몸통 아랫변에서 그만큼 아래다.
+    w·h·r·lw 은 1배 기준이고, 안에서 S배로 그린 뒤 줄인다.
+    """
+    th = tail[3] if tail else 0
+    W2, H2 = int(w + pad * 2 + 2), int(h + th + pad * 2 + 2)
+    im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    lw = max(1.0, float(lw)) * S
+    o = pad * S
+    x0, y0, x1, y1 = o, o, o + w * S - 1, o + h * S - 1
+
+    tri = None
+    if tail:
+        ta, tb, tt, _th = tail
+        tri = ((o + ta * S, y1), (o + tt * S, y1 + th * S), (o + tb * S, y1))
+
+    # 바깥 실루엣 — 테두리 색
+    d.rounded_rectangle([x0, y0, x1, y1], radius=r * S, fill=outline or fill)
+    if tri:
+        d.polygon(list(tri), fill=outline or fill)
+    # 안쪽 실루엣 — 채움색 (테두리 굵기만큼 안으로)
+    d.rounded_rectangle([x0 + lw, y0 + lw, x1 - lw, y1 - lw],
+                        radius=max(0.0, r * S - lw), fill=fill)
+    if tri:
+        a, tp, b = tri
+        l1 = _off_line(a, tp, b, lw)
+        l2 = _off_line(tp, b, a, lw)
+        t2 = _cross_pt(l1, l2)
+        if t2 is not None:
+            # 몸통 속까지 끌어올려 안쪽끼리 이어 붙인다 (틈이 안 생기게)
+            yy = y1 - lw * 2
+            d.polygon([_line_at_y(l1, yy), t2, _line_at_y(l2, yy)], fill=fill)
+    return im.resize((W2, H2), Image.LANCZOS)
+
+
+def flat_on_key(im, key_rgb, floor=140, cut=40):
+    """색상키 창에 얹을 수 있게 반투명 가장자리를 키 색과 미리 섞는다.
+
+    색상키 투명창은 반투명을 못 담는다. 그대로 두면 키 색(거의 검정)과
+    섞여 흰 바탕에서 어두운 얼룩 테가 진다 — 섞는 비율에 하한(55%)을 둬
+    중간톤으로 만든다 (지뢰 65).
+    """
+    a = im.split()[3]
+    a3 = a.point(lambda v: floor + v * (255 - floor) // 255 if v >= cut else 0)
+    rgb = Image.composite(im.convert("RGB"),
+                          Image.new("RGB", im.size, tuple(key_rgb)), a3)
+    a2 = a.point(lambda v: 255 if v >= cut else 0)
+    return Image.merge("RGBA", (*rgb.split(), a2))
 
 
 class _WAVEFORMATEX(ctypes.Structure):
@@ -2951,16 +3359,16 @@ class TodoPanel:
             self.on_zoom(self.zoom)
 
     def _soft_item(self, w, h, r, fill, outline, key):
-        """말풍선 한 칸(그림자+몸통+꼬리)을 PIL 한 장으로 — 계단 제거.
+        """말풍선 한 칸(몸통+꼬리)을 PIL 한 장으로 — 계단 제거.
 
-        색상키 창이라 반투명이 못 남는다. 3배로 그려 줄인 뒤 가장자리
-        반투명을 키 색과 미리 섞어 불투명으로 만든다(알파 40 미만은
-        버린다). 실패하면 None — 기존 Tk 다각형 경로로 물러난다.
+        색상키 창이라 반투명이 못 남는다. 4배로 그려 줄인 뒤 가장자리
+        반투명을 키 색과 미리 섞어 불투명으로 만든다. 실패하면 None —
+        기존 Tk 다각형 경로로 물러난다.
         """
         w, h, r = int(w), int(h), int(r)
         key2 = tuple(int(str(key)[i:i + 2], 16) for i in (1, 3, 5))
         ck = (w, h, r, fill, outline, self.flip, self.TAIL_W, self.TAIL_H,
-              key2)
+              key2, BORDER_W, round(self.k, 3))
         cache = getattr(self, "_bub_cache", None)
         if cache is None:
             cache = self._bub_cache = {}
@@ -2968,54 +3376,16 @@ class TodoPanel:
         if got is not None:
             return got
         try:
-            from PIL import ImageDraw
-            S = 4
+            # 테두리는 배율을 따라간다 — 키워 놓고 보면 선만 가늘어진다
+            lw = max(2, round(BORDER_W * self.k))
+            s2 = -1 if self.flip else 1
             tw_, th_ = self.TAIL_W, self.TAIL_H
-            W2, H2 = w + 3, h + th_ + 4
-            im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
-            d = ImageDraw.Draw(im)
-            lw = 2 * S
-
-            def body(dx, dy, f, o):
-                d.rounded_rectangle(
-                    [dx * S + lw // 2, dy * S + lw // 2,
-                     (dx + w) * S - 1 - lw // 2, (dy + h) * S - 1 - lw // 2],
-                    radius=r * S, fill=f, outline=o or None, width=lw)
-
-            def tail(dx, dy, f, o):
-                s2 = -1 if self.flip else 1
-                base = (r if self.flip else w - r) + dx
-                bin_ = base - tw_ * s2
-                lo, hi = min(base, bin_), max(base, bin_)
-                tipx = base + th_ * 0.7 * s2
-                tipy = dy + h + th_ - 2
-                # 몸통 아랫변 테두리 띠(굵기 lw)를 먼저 채움색으로 지운다 —
-                # 세모만 얹으면 이음매에 가로선이 남는다 (제보)
-                d.rectangle([lo * S, (dy + h - 4) * S,
-                             hi * S - 1, (dy + h) * S - 1], fill=f)
-                d.polygon([(bin_ * S, (dy + h - 3) * S),
-                           (tipx * S, tipy * S),
-                           (base * S, (dy + h - 3) * S)], fill=f)
-                if o:
-                    d.line([(bin_ * S, (dy + h - 1) * S),
-                            (tipx * S, tipy * S)], fill=o, width=lw)
-                    d.line([(tipx * S, tipy * S),
-                            (base * S, (dy + h - 1) * S)], fill=o, width=lw)
-
-            body(2, 3, "#e6e2e8", None)          # 그림자
-            tail(2, 3, "#e6e2e8", None)
-            body(0, 0, fill, outline)
-            tail(0, 0, fill, outline)
-            im = im.resize((W2, H2), Image.LANCZOS)
-            a = im.split()[3]
-            # 키 색이 거의 검정이라 그대로 섞으면 흰 바탕에서 어두운
-            # 얼룩 테가 진다 — 섞는 비율에 하한(55%)을 둬 중간톤으로.
-            a3 = a.point(lambda v: 140 + v * 115 // 255 if v >= 40 else 0)
-            rgb = Image.composite(im.convert("RGB"),
-                                  Image.new("RGB", im.size, key2), a3)
-            a2 = a.point(lambda v: 255 if v >= 40 else 0)
-            got = ImageTk.PhotoImage(Image.merge("RGBA", (*rgb.split(),
-                                                          a2)))
+            base = (r if self.flip else w - r)   # 밑변 바깥쪽 끝
+            bin_ = base - tw_ * s2               # 밑변 안쪽 끝
+            tip = base + th_ * 0.7 * s2
+            tail = (min(base, bin_), max(base, bin_), tip, th_)
+            im = bubble_img(w, h, r, tail, fill, outline, lw, pad=1)
+            got = ImageTk.PhotoImage(flat_on_key(im, key2))
         except Exception:
             return None
         if len(cache) > 40:                      # 지뢰 18 — 오래된 절반만
@@ -3034,7 +3404,7 @@ class TodoPanel:
                 pts.extend((cx + math.cos(a) * r, cy + math.sin(a) * r))
         return self.canvas.create_polygon(pts, smooth=True, **kw)
 
-    def _tail(self, x0, x1, y1, r, fill, outline=None, dx=0, dy=0):
+    def _tail(self, x0, x1, y1, r, fill, outline=None, dx=0, dy=0, width=2):
         """아래를 향한 날카로운 세모 꼬리. flip이면 왼쪽 아래를 본다.
 
         밑변을 말풍선 테두리 안쪽까지 덮어 그 구간의 테두리를 지우고,
@@ -3050,8 +3420,8 @@ class TodoPanel:
         c.create_polygon(bin_, by - 2, tipx, tipy, base, by - 2,
                          fill=fill, outline="")
         if outline:
-            c.create_line(bin_, by, tipx, tipy, fill=outline, width=2)
-            c.create_line(tipx, tipy, base, by, fill=outline, width=2)
+            c.create_line(bin_, by, tipx, tipy, fill=outline, width=width)
+            c.create_line(tipx, tipy, base, by, fill=outline, width=width)
 
 
     MEAS_MAX = 600               # 글자 폭 캐시 상한 (지뢰 18)
@@ -3182,15 +3552,15 @@ class TodoPanel:
             soft = self._soft_item(x1 - x0, h, r, "#ffffff",
                                    tint or cd["border"], self._key)
             if soft is not None:
-                c.create_image(x0, yy, image=soft, anchor="nw")
+                # 그림에 여백(pad=1)을 한 칸 뒀으므로 그만큼 당겨 얹는다
+                c.create_image(x0 - 1, yy - 1, image=soft, anchor="nw")
             else:
-                self._rrect(x0 + 2, yy + 3, x1 + 2, yy + h + 3, r,
-                            fill="#e6e2e8", outline="")      # 그림자
-                self._tail(x0 + 2, x1 + 2, yy + h, r, "#e6e2e8", dx=0, dy=3)
+                # (그림자 없음 — PIL 판과 같은 이유)
+                bw = max(2, round(BORDER_W * self.k))
                 self._rrect(x0, yy, x1, yy + h, r, fill="#ffffff",
-                            outline=tint or cd["border"], width=2)
+                            outline=tint or cd["border"], width=bw)
                 self._tail(x0, x1, yy + h, r, "#ffffff",
-                           tint or cd["border"])
+                           tint or cd["border"], width=bw)
             mid = yy + h / 2
             if lay is not None:            # 꾸밈이 섞인 칸 — 조각을 이어 그린다
                 lines, hs = lay
@@ -4655,6 +5025,9 @@ class Mascot:
         self.canvas = tk.Canvas(self.root, width=self.W, height=self.H,
                                 highlightthickness=0, **kw)
         self.canvas.pack()
+        # 몸을 레이어 창에 그리는 동안 self.canvas 가 잠깐 시트를 가리킨다.
+        # 진짜 캔버스는 늘 이쪽으로 남겨 둔다 (지뢰 24 — 되돌릴 곳이 있어야).
+        self._real_canvas = self.canvas
         self._boot_step("캔버스 만듦")
         if IS_MAC:                            # 제목 표시줄 제거 후 위치 재적용
             self._mac_borderless()
@@ -4832,6 +5205,23 @@ class Mascot:
         self._prop_back_cfg = {}     # 뽑힌 소품의 뒤쪽 조각 움직임 설정
         self._prop_bits = []         # 여러 조각짜리 소품의 곁조각 자리 이름
         self._prop_bit_cfg = {}      # 그 조각마다의 움직임 (지뢰 13)
+        # ── 매끈한 캐릭터 (몸만 레이어 창으로) ───────────────────────────
+        # **_load_parts 보다 먼저 정해야 한다.** 파츠를 읽으면서 몸 뒤
+        # 파츠의 움직임 프레임을 미리 굽는데, 그 캐시에 PIL 을 담을지
+        # ImageTk 를 담을지가 이 값으로 갈린다 (_pic).
+        self._sheet = None           # 지금 몸을 모으고 있는 시트
+        self._char_lay = None        # 몸 레이어 창 (처음 그릴 때 만든다)
+        self._smooth_why = ""        # 껐다면 왜 껐나 (진단)
+        self._smooth_spill = 0       # 시트가 못 알아봐 캔버스로 넘어간 그림 수
+        self._soft_cache = {}        # 매끈한 둥근 도형 그림 (카드·말풍선·단추)
+        _sb = self.us.get("smooth_body",
+                          self.cfg.get("smooth_body", False))
+        if isinstance(_sb, str):     # 손으로 고친 설정 파일 대비
+            _sb = _sb.strip().lower() not in ("", "0", "false", "no")
+        # 정한 값을 설정에 적어 둔다 — 환경설정 창이 이 값을 그대로 보여야
+        # '켜져 있는데 꺼짐으로 보이고, 저장하면 꺼지는' 일이 안 생긴다.
+        self.us["smooth_body"] = bool(_sb)
+        self._smooth_on = bool(IS_WIN and _sb and not SMOOTH_OFF)
         self._load_parts()
 
         # 상태 변수는 한곳에 모아 둔다. 새 값을 넣을 자리를 헤매지
@@ -4963,6 +5353,7 @@ class Mascot:
             self._menu_popup(e.x_root, e.y_root)
 
         self.canvas.bind("<Button-3>", _pop)
+        self._menu_pop = _pop        # 몸 레이어 창도 같은 것을 쓴다
         self.tray = None
         self._tray_q = []            # 트레이 스레드가 넣고 그리기 루프가 뺀다
         self._safe("tray", self._tray_setup)
@@ -6105,7 +6496,7 @@ class Mascot:
                 del self._tilt_cache[_old]
         layer = self._rot_head(key[0], mode)
         dx = max(-12, min(12, self._tilt_fit(layer)))
-        hit = (ImageTk.PhotoImage(self._hard(layer)), dx)
+        hit = (self._pic(layer), dx)
         self._tilt_cache[key] = hit
         return hit
 
@@ -6644,7 +7035,7 @@ class Mascot:
             for _o9 in list(self._back_cache)[:self.BACK_CACHE_MAX // 2]:
                 self._back_cache.pop(_o9, None)
         # 원본은 이미 손봐 두었으니 가장자리만 (지뢰 — 프레임마다 하면 느리다)
-        hit = (ImageTk.PhotoImage(self._hard_edge(im)), pad)
+        hit = (self._pic(im, edge=True), pad)
         self._back_cache[key] = hit
         return hit
 
@@ -6657,7 +7048,7 @@ class Mascot:
                 h["cache"].clear()
             im = h["pil"].rotate(deg, center=h["anchor"],
                                  resample=self._resample(), expand=False)
-            h["cache"][key] = ImageTk.PhotoImage(self._hard(im))
+            h["cache"][key] = self._pic(im)
         return h["cache"][key]
 
     # ── 타자 소리 ─────────────────────────────────────────────────────────
@@ -7731,6 +8122,9 @@ class Mascot:
             if self._fx is not None:
                 self._fx.destroy()
                 self._fx = None
+            if self._char_lay is not None:
+                self._char_lay.destroy()
+                self._char_lay = None
             # 음악 재생기를 먼저 거둔다. 파이프가 닫히면 스스로 끝나지만,
             # 여기서 확실히 보내 두어야 고아 프로세스가 남지 않는다.
             self._yt_stop()
@@ -8967,10 +9361,8 @@ class Mascot:
         bx = (g["x0"] + g["x1"]) / 2
         by = g["y0"] - 24            # 카드 윗변에서 10px 띄운다 (붙으면 답답하다)
         r = 14.0
-        self._oval(c, bx - r + 1.5, by - r + 2, bx + r + 1.5, by + r + 2,
-                      fill="#e3e6ee", outline="")            # 옅은 그림자
-        self._oval(c, bx - r, by - r, bx + r, by + r,
-                      fill=cd["bg"], outline=cd["border"], width=2)
+        # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
+        self._soft_circle(c, bx, by, r, cd["bg"], cd["border"])
         ink = cd["fill"]
         if self._yt_busy():                       # 켜는 중 — 도는 호
             a = (time.time() * 200) % 360
@@ -9000,10 +9392,8 @@ class Mascot:
         if self.us.get("yt_url") and self._yt_on():
             cx -= 34.0                    # 노래 버튼 왼쪽으로 비켜 준다
         by = g["y0"] - 24
-        self._oval(c, cx - r + 1.5, by - r + 2, cx + r + 1.5, by + r + 2,
-                      fill="#e3e6ee", outline="")            # 옅은 그림자
-        self._oval(c, cx - r, by - r, cx + r, by + r,
-                      fill=cd["bg"], outline=cd["border"], width=2)
+        # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
+        self._soft_circle(c, cx, by, r, cd["bg"], cd["border"])
         ink = cd["fill"]
         # 나뭇잎 — 위아래가 뾰족하고 배가 부른 렌즈 모양. 살짝 기울여
         # 놓고, 잎 전체(잎맥 포함)의 한가운데가 동그라미 중심에 온다.
@@ -9655,9 +10045,10 @@ class Mascot:
             return False
 
     def _fs_windows(self):
-        """같이 숨겼다 같이 보여야 하는 창들 (본체·그림자·말풍선 패널)."""
+        """같이 숨겼다 같이 보여야 하는 창들 (본체·몸·그림자·말풍선 패널)."""
         out = [self.root]
-        for holder in (self.shadow, self.todo_panel, self.due_panel):
+        for holder in (self._char_lay, self.shadow,
+                       self.todo_panel, self.due_panel):
             top = getattr(holder, "top", None)
             if top is not None:
                 out.append(top)
@@ -9762,7 +10153,8 @@ class Mascot:
         # 빠져 '내 팝업을 열 때마다 캐릭터가 그 위로 올라오는' 일이 생긴다
         # (제보). 그래서 프로세스로 가린다 — 새 창이 생겨도 안 낡는다.
         mine = {self._main_hwnd}
-        for holder in (self.shadow, self.todo_panel, self.due_panel, self._fx):
+        for holder in (self._char_lay, self.shadow, self.todo_panel,
+                       self.due_panel, self._fx):
             h = getattr(holder, "hwnd", None)
             if h:
                 mine.add(h)
@@ -10028,8 +10420,9 @@ class Mascot:
         self._rec_armed = True
 
     def _menu_layers_topmost(self, on):
-        """그림자·파티클 레이어의 '항상 위'를 캐릭터와 함께 움직인다."""
-        for lay in (getattr(self, "shadow", None), getattr(self, "_fx", None)):
+        """몸·그림자·파티클 레이어의 '항상 위'를 캐릭터와 함께 움직인다."""
+        for lay in (getattr(self, "_char_lay", None),
+                    getattr(self, "shadow", None), getattr(self, "_fx", None)):
             fn = getattr(lay, "set_topmost", None)
             if fn is not None:
                 self._safe("layer_z", fn, on)
@@ -10040,7 +10433,12 @@ class Mascot:
         self._safe("layer_order", self._layers_behind)
 
     def _layers_behind(self):
-        """그림자·파티클을 캐릭터 바로 뒤에 다시 끼운다 (윈도우만)."""
+        """몸·그림자·파티클을 캐릭터 창 뒤에 차례대로 끼운다 (윈도우만).
+
+        차례가 뜻이 있다 — 본체(카드·말풍선) → 몸 → 그림자 → 파티클.
+        몸이 본체 뒤라야 말풍선·모자가 캐릭터 위에 오고, 그림자는 몸보다
+        더 뒤라야 몸에 가려진다.
+        """
         if not IS_WIN:
             return
         main = getattr(self, "_main_hwnd", None)
@@ -10052,7 +10450,8 @@ class Mascot:
                                      ctypes.c_int, ctypes.c_int,
                                      ctypes.c_uint]
         prev = main
-        for lay in (getattr(self, "shadow", None), getattr(self, "_fx", None)):
+        for lay in (getattr(self, "_char_lay", None),
+                    getattr(self, "shadow", None), getattr(self, "_fx", None)):
             h = getattr(lay, "hwnd", None)
             if not h:
                 continue
@@ -10972,7 +11371,7 @@ class Mascot:
             cut = Image.composite(pil, blank, region)
             if name not in self._soft_parts:
                 cut = self._hard(cut)
-            hit = ImageTk.PhotoImage(cut)
+            hit = self._pic(cut, soft=True)
             self._pet_cache[key] = hit
         return hit
 
@@ -11164,12 +11563,20 @@ class Mascot:
         by = (max(h + 4.0, card_bottom + self.BUBBLE_UP)
               + (1.0 - u) ** 2 * 8)
         x0, x1 = cx - w / 2, cx + w / 2
-        pts = self._bubble_pts(x0, by - h, x1, by, 13, cx + 4, 17, 13)
         # 눌러서 끄는 말풍선(오늘의 운세)이 쓸 자리. 화면에 그린 값 그대로라
         # 내부 깃발이 아니다 (지뢰 24).
         self._bubble_box = (x0, by - h, x1, by)
-        c.create_polygon([p + 2 for p in pts], fill="#e6e2e8", outline="")
-        c.create_polygon(pts, fill="#ffffff", outline=cd["border"], width=2)
+        # 옅은 그림자 없음 — 할 일·마감 말풍선과 같은 이유 (어두운 바탕에서
+        # 바깥쪽 흰 테로 보인다). 캐릭터 말풍선만 남겨 두면 혼자 달라 보인다.
+        tx = cx + 4 - x0                      # 꼬리 자리 (몸통 왼쪽 기준)
+        soft = self._soft_shape(w, h, 13, "#ffffff", cd["border"],
+                                tail=(tx - 8.5, tx + 8.5, tx - 17 * 0.18, 13))
+        if soft is not None:
+            c.create_image(x0 - 1, by - h - 1, image=soft, anchor="nw")
+        else:                                  # PIL 이 실패하면 Tk 도형으로
+            pts = self._bubble_pts(x0, by - h, x1, by, 13, cx + 4, 17, 13)
+            c.create_polygon(pts, fill="#ffffff", outline=cd["border"],
+                             width=BORDER_W)
         if not act:
             c.create_text(cx, by - h / 2, text=text, font=font,
                           fill=cd["text"], justify="center")
@@ -13512,8 +13919,15 @@ class Mascot:
         pad = 14
 
         self._draw_deco(x0, y0, x1, y1)
-        self._rrect(x0 + 2, y0 + 3, x1 + 2, y1 + 3, 16, fill="#e3e6ee", outline="")
-        self._rrect(x0, y0, x1, y1, 16, fill=cd["bg"], outline=cd["border"], width=2)
+        # 옅은 그림자는 안 그린다 — 색상키 창이라 반투명이 못 남아, 어두운
+        # 바탕화면에서 밝은 회색 덩어리가 **바깥쪽 흰 테두리**로 보인다
+        # (제보). 대신 테두리를 굵게 한다.
+        card = self._soft_shape(x1 - x0, y1 - y0, 16, cd["bg"], cd["border"])
+        if card is not None:
+            c.create_image(x0 - 1, y0 - 1, image=card, anchor="nw")
+        else:                                  # PIL 이 실패하면 Tk 도형으로
+            self._rrect(x0, y0, x1, y1, 16, fill=cd["bg"],
+                        outline=cd["border"], width=BORDER_W)
         if now < self._lv_glow + self.LV_GLOW:
             self._safe("lv_glow", self._draw_lv_glow, x0, y0, x1, y1, now)
 
@@ -13711,8 +14125,233 @@ class Mascot:
         except Exception:
             pass
 
+    # ── 매끈한 캐릭터 (몸만 레이어 창으로) ────────────────────────────
+    def _smooth_layer(self):
+        """몸 레이어 창 (처음 쓸 때 만든다). 못 만들면 색상키로 물러난다.
+
+        다시 해 보지 않는다 — 켜진 채로 창만 없는 어중간한 상태에서는
+        캐시에 든 PIL 을 옛 경로가 image= 로 넘겨 통째로 터진다.
+        """
+        lay = self._char_lay
+        if lay is not None:
+            return lay
+        try:
+            lay = CharLayer(self.root)
+            if not lay.ok:
+                raise RuntimeError("layer not ok")
+        except Exception:
+            self._log_error("smooth_layer")
+            self._smooth_off("만들기 실패")
+            return None
+        self._char_lay = lay
+        lay.place_behind(self._main_hwnd)
+        self._safe("smooth_bind", self._bind_char_layer, lay)
+        return lay
+
+    def _z_owner(self):
+        """그림자가 바로 뒤에 붙어야 할 창.
+
+        몸 레이어가 있으면 그것이다 — 본체 바로 뒤에 붙이면 그림자가 몸보다
+        앞에 서서 캐릭터에 회색 그림자가 덮인다.
+        """
+        lay = self._char_lay
+        h = getattr(lay, "hwnd", 0) if lay is not None else 0
+        return h or self._main_hwnd
+
+    def _bind_char_layer(self, lay):
+        """몸을 누른 클릭을 본체 핸들러로 넘긴다.
+
+        캔버스에서 몸을 지우면 그 자리는 색상키라 클릭이 본체 창을 그냥
+        지나간다. 그 클릭을 이 창이 받는다. 두 창이 같은 자리·같은 크기라
+        e.x/e.y 가 그대로 통한다. **네 개를 한 창에 다 걸어야 한다** —
+        _on_release 는 뗀 자리가 아니라 '누른 자리'(self._press)로만
+        판정하므로, 누른 창과 뗀 창이 갈리면 클릭이 통째로 죽는다.
+        """
+        w = lay.top
+        w.bind("<Button-1>", self._on_press_layer)
+        w.bind("<B1-Motion>", self._on_drag)
+        w.bind("<ButtonRelease-1>", self._on_release)
+        w.bind("<Button-3>", self._menu_pop)
+
+    def _on_press_layer(self, e):
+        """몸 레이어를 누른 것 — 눌러서 앞으로 나왔을 수 있으니 되돌린다."""
+        lay = self._char_lay
+        if lay is not None:
+            lay.place_behind(self._main_hwnd)
+        return self._on_press(e)
+
+    def _smooth_begin(self):
+        """캐릭터를 시트에 모으기 시작한다. 매끈 경로가 아니면 None.
+
+        여기서부터 `self.canvas` 는 시트를 가리킨다 — 캐릭터를 그리는 옛
+        코드가 한 줄도 안 바뀐 채 PIL 한 장에 모인다.
+        """
+        if self._sheet is not None:          # 앞 프레임이 터진 흔적
+            self._smooth_end(push=False)
+        if not self._smooth_on:
+            return None
+        if self._smooth_layer() is None:
+            return None
+        try:
+            sheet = _CharSheet(self._real_canvas, self.W, self.H)
+        except Exception:
+            self._smooth_off("시트 만들기 실패")
+            return None
+        self._sheet = sheet
+        self.canvas = sheet
+        return sheet
+
+    def _smooth_end(self, push=True):
+        """시트를 레이어 창에 올리고 캔버스를 되돌린다."""
+        sheet = self._sheet
+        self._sheet = None
+        self.canvas = self._real_canvas
+        if sheet is None or not push:
+            return
+        # 시트가 못 알아본 그림은 진짜 캔버스로 넘어간다 (안 보이는 것보다
+        # 낫다). 0이 아니면 그만큼 캐릭터 위에 떠 있다는 뜻이라 검사가 본다.
+        self._smooth_spill = sheet.spill
+        lay = self._char_lay
+        if lay is None:
+            return
+        if self._fs_hidden:
+            # 전체화면에 비켜 있는 동안에는 창이 숨겨져 있다. 숨긴 창에
+            # 올리면 오류 87 로 실패하므로(지뢰 23) 그냥 건너뛴다 —
+            # 켜진 상태는 그대로 두어야 되돌아올 때 다시 그려진다.
+            return
+        try:
+            ok = lay.push(sheet.im, self.root.winfo_rootx(),
+                          self.root.winfo_rooty())
+        except Exception:
+            ok, _ = False, self._log_error("smooth_push")
+        if not ok:
+            # 올리기가 실패하면 그 프레임은 몸이 안 보인다. 반쪽으로 두지
+            # 말고 그 자리에서 색상키로 되돌아간다 (다음 프레임에 돌아온다).
+            self._smooth_off("올리기 실패")
+
+    def _smooth_off(self, why="", quiet=False):
+        """매끈 경로를 이 세션 동안 끈다 — 색상키 방식으로 되돌아간다.
+
+        캐시에는 PIL 이 들어 있으므로(_pic) 비워서 ImageTk 로 다시 굽게
+        한다. 안 비우면 옛 경로가 PIL 을 image= 로 넘겨 통째로 터진다.
+
+        quiet — 일부러 끄는 것(앉은 모습 굽기·검사)이면 기록을 안 남긴다.
+        고장으로 꺼진 것만 `.error.log` 에 남아야 진단에 쓸모가 있다.
+        """
+        if not self._smooth_on:
+            return
+        self._smooth_on = False
+        self._smooth_why = str(why or "")
+        self._sheet = None
+        self.canvas = self._real_canvas
+        lay, self._char_lay = self._char_lay, None
+        if lay is not None:
+            try:
+                lay.destroy()
+            except Exception:
+                pass
+        for cache in (getattr(self, "_tilt_cache", None),
+                      getattr(self, "_back_cache", None),
+                      getattr(self, "_arm_cache", None),
+                      getattr(self, "_pet_cache", None)):
+            try:
+                cache.clear()
+            except Exception:
+                pass
+        self._slime_pts = None
+        try:
+            for h in self.hop.values():
+                h["cache"].clear()
+        except Exception:
+            pass
+        try:
+            if self._pen_rot is not None:
+                self._pen_rot["cache"].clear()
+        except Exception:
+            pass
+        if not quiet:
+            try:
+                self._log_error("smooth_off:%s" % self._smooth_why)
+            except Exception:
+                pass
+
+    @property
+    def _smooth(self):
+        """이 세션이 매끈 경로인가 (_pic 이 본다).
+
+        '지금 시트를 쓰는 중인가'가 아니라 **세션 단위**여야 한다. 캐시는
+        그리는 도중이 아닐 때도 만들어지므로(게임 창·미리 굽기), 그때
+        ImageTk 로 담겼다가 몸을 그릴 때 시트가 그것을 못 읽는다.
+        """
+        return self._smooth_on
+
+    SOFT_MAX = 60                # 매끈한 둥근 도형 그림 캐시 상한 (지뢰 42)
+
+    def _soft_shape(self, w, h, r, fill, outline, lw=None, tail=None, pad=1):
+        """색상키 창에 얹을 **매끈한** 둥근 도형 (캐시). 실패하면 None.
+
+        캔버스의 Tk 도형은 안티에일리어싱이 없어 모서리가 계단진다. 4배로
+        그려 줄인 뒤 가장자리를 키 색과 미리 섞는다 — 할 일 말풍선이 이미
+        쓰던 방법이고(지뢰 65), 카드·캐릭터 말풍선·동그란 단추도 같이 쓴다.
+        레이어 창과 무관하므로 맥에서도 그대로 매끈해진다.
+        """
+        lw = BORDER_W if lw is None else lw
+        ck = (int(round(w)), int(round(h)), round(float(r), 1), fill, outline,
+              lw, None if tail is None else
+              tuple(round(float(v), 1) for v in tail), pad, self.canvas_bg)
+        got = self._soft_cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16)
+                         for i in (1, 3, 5))
+            im = bubble_img(int(round(w)), int(round(h)), r, tail,
+                            fill, outline, lw, pad=pad)
+            got = ImageTk.PhotoImage(flat_on_key(im, key2))
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:   # 오래된 절반만 (지뢰 18)
+            for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old, None)
+        self._soft_cache[ck] = got
+        return got
+
+    def _soft_circle(self, cv, cx, cy, r, fill, outline, lw=None):
+        """매끈한 동그라미 (카드 위 노래·환경음 단추). 실패하면 Tk 원으로."""
+        d = int(round(r * 2))
+        got = self._soft_shape(d, d, r, fill, outline, lw=lw)
+        if got is None:
+            self._oval(cv, cx - r, cy - r, cx + r, cy + r,
+                       fill=fill, outline=outline,
+                       width=BORDER_W if lw is None else lw)
+            return
+        cv.create_image(cx - r - 1, cy - r - 1, image=got, anchor="nw")
+
+    def _pic(self, im, edge=False, soft=False):
+        """캐시에 담을 그림 한 장 — 지금 경로에 맞는 형태로 만든다.
+
+        매끈 경로(레이어 창)는 원본 알파를 그대로 쓰므로 PIL 을 그대로 담고,
+        색상키 경로는 가장자리를 이분화한 ImageTk 를 담는다. **두 벌을 같이
+        들면 안 된다** — 기울인 머리만 33MB → 66MB 가 된다 (지뢰 42).
+        되돌아갈 때는 `_smooth_off` 가 캐시를 비워 다시 굽게 한다.
+        """
+        if self._smooth:
+            return im
+        if soft:                     # 부르는 쪽이 이미 손봐 둔 그림
+            return ImageTk.PhotoImage(im)
+        return ImageTk.PhotoImage(self._hard_edge(im) if edge
+                                  else self._hard(im))
+
     def _put(self, name, x, y, anchor="nw"):
         """파츠 이미지 그리기. 파일이 없으면 조용히 건너뛴다(업데이트 끊김 대비)."""
+        sh = self._sheet
+        if sh is not None:
+            # 매끈 경로 — 이분화 전 원본(_pil_cache)을 시트에 합성한다
+            pil = self._pil_cache.get(name)
+            if pil is None:
+                return False
+            sh.blit(pil, x, y, anchor)
+            return True
         im = self.im.get(name)
         if im is None:
             return False
@@ -13858,14 +14497,19 @@ class Mascot:
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
         if not self._fs_hidden and (self.shadow is not None
+                                    or self._char_lay is not None
                                     or self.todo_panel is not None
                                     or self.due_panel is not None):
             pos = (self.root.winfo_rootx(), self.root.winfo_rooty())
             if pos != self._last_pos:
                 self._last_pos = pos
                 self._z_check = now
+                # 몸 레이어는 자리를 매 프레임 스스로 잡는다(그림과 함께
+                # 한 번에 올린다) — 여기서는 z순서만 다시 못박는다.
+                if self._char_lay is not None:
+                    self._char_lay.place_behind(self._main_hwnd)
                 if self.shadow is not None:
-                    self.shadow.place(*pos, self._main_hwnd)
+                    self.shadow.place(*pos, self._z_owner())
                 if self.todo_panel is not None:
                     self.todo_panel.place(*pos)
             # 캐릭터를 누르면 그 창이 맨 앞으로 올라와 말풍선을 덮는다.
@@ -13879,9 +14523,13 @@ class Mascot:
                         _p.raise_above()
             if self.due_panel is not None:
                 self._safe("due", self._due_tick)
-            elif self.shadow is not None and now - self._z_check > 8.0:
+            elif ((self.shadow is not None or self._char_lay is not None)
+                    and now - self._z_check > 8.0):
                 self._z_check = now          # z순서만 가끔 재고정
-                self.shadow.place(*pos, self._main_hwnd)
+                if self._char_lay is not None:
+                    self._char_lay.place_behind(self._main_hwnd)
+                if self.shadow is not None:
+                    self.shadow.place(*pos, self._z_owner())
         # 기존 타이머(에이전트)에게 '캐릭터 타이머가 살아 있다'고 알린다.
         # 이게 없으면 에이전트가 자기 자식 프로세스만 보고 판단해, 따로 띄운
         # 캐릭터가 있어도 창을 다시 띄워 둘이 같이 보인다.
@@ -14019,7 +14667,8 @@ class Mascot:
         full = by0 + int(round(b)) + 2
         for q in range(1, self.SL_REVEAL + 1):
             hgt = max(1, int(round((full - by0) * q / self.SL_REVEAL)))
-            steps.append(ImageTk.PhotoImage(im.crop((0, 0, im.width, by0 + hgt))))
+            steps.append(self._pic(im.crop((0, 0, im.width, by0 + hgt)),
+                                   soft=True))
         bed = (ox0 + mid, oy0 + t + span * self.SL_BACK,
                oy0 + t + span * fb, hi - lo)
         got = (steps, bed)
@@ -15600,8 +16249,8 @@ class Mascot:
         if k not in e["cache"]:
             if len(e["cache"]) > 90:
                 e["cache"].clear()
-            e["cache"][k] = ImageTk.PhotoImage(
-                self._hard(e["pil"].rotate(k, resample=self._resample())))
+            e["cache"][k] = self._pic(
+                e["pil"].rotate(k, resample=self._resample()))
         self.canvas.create_image(tx, ty, image=e["cache"][k], anchor="center")
         return True
 
@@ -15650,11 +16299,16 @@ class Mascot:
             oy_ = atop[1] * k - nh / 2.0
             rx = ox_ * math.cos(a) + oy_ * math.sin(a) + im.width / 2.0
             ry = -ox_ * math.sin(a) + oy_ * math.cos(a) + im.height / 2.0
-            hit = (ImageTk.PhotoImage(self._hard(im)), (rx, ry))
+            hit = (self._pic(im), (rx, ry))
             self._arm_cache[key] = hit
         return hit
 
     def draw(self, now):
+        # 앞 프레임이 몸을 그리다 터졌으면 self.canvas 가 시트를 가리킨 채로
+        # 남는다. 무엇보다 먼저 되돌린다 — 안 그러면 아래 delete("all") 이
+        # 시트에 가서 진짜 캔버스가 영영 안 지워지고 잔상이 쌓인다.
+        if self._sheet is not None:
+            self._smooth_end(push=False)
         c = self.canvas
         c.delete("all")
         f = self._force
@@ -15766,6 +16420,12 @@ class Mascot:
             self._safe("update_dot", self._draw_update_dot)
 
         # ── 몸 (+머리 없는 캐릭터는 여기서 얼굴까지) ─────────────────────
+        # 여기서부터 제스처 손까지가 '캐릭터'다. 매끈 경로면 self.canvas 가
+        # 시트(_CharSheet)를 가리켜, 아래 코드가 한 줄도 안 바뀐 채 PIL 한
+        # 장에 모인다. 그 장은 본체 창 **뒤**의 레이어 창에 올라간다.
+        _sheet = self._smooth_begin()
+        if _sheet is not None:
+            c = self.canvas          # 낙서·슬라임·zzZ 가 쓰는 지역 변수
         # 개는 머리를 팔 위에 그려야 어깨가 안 튀어나오므로, 얼굴을 팔 뒤로 미룬다.
         head_early = bool(self.cfg.get("arms_over_head") and self.has.get("head"))
         # 몸 뒤 파츠(사가 양갈래·기뽀 날개) — 몸보다 먼저, 살아 있게 움직인다.
@@ -15840,6 +16500,13 @@ class Mascot:
             self._safe("pen_hand", self._draw_pen_hand)
         if self._g_hands is not None:        # 제스처 손 — 머리보다 위
             self._safe("gesture_arms", self._draw_gesture_arms, yo)
+
+        # 여기까지가 캐릭터다 — 시트를 레이어 창에 올리고 캔버스를 되돌린다.
+        # 아래(zzZ·음표·모자·말풍선·연출)는 캔버스에 남는다. 레이어가 본체
+        # 창 뒤에 있으므로 그것들이 저절로 캐릭터 위에 온다.
+        if _sheet is not None:
+            self._smooth_end()
+            c = self.canvas
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
@@ -16956,6 +17623,11 @@ class Mascot:
                 lambda ry: toggle(ry, "타블렛 낙서 표시", "trail"),
                 lambda ry: toggle(ry, "항상 위에 표시", "topmost"),
             ]
+            if IS_WIN:
+                # 맥에는 이 길이 없다(UpdateLayeredWindow 가 없음). 켜도
+                # 아무 일이 안 일어나는 항목이 보이면 제보가 온다.
+                disp.append(lambda ry: toggle(ry, "부드러운 가장자리",
+                                              "smooth_body"))
             if getattr(sys, "frozen", False):
                 disp.append(lambda ry: toggle(ry, "윈도우 시작 시 자동 실행",
                                               "autostart"))
@@ -17152,7 +17824,11 @@ class Mascot:
                             or new["font_pct"] != self.us.get("font_pct", 100)
                             or skin_changed
                             or bool(new["show_timer"]) != self.timer_on
-                            or bool(new["shadow"]) != bool(self.us.get("shadow", True)))
+                            or bool(new["shadow"]) != bool(self.us.get("shadow", True))
+                            # 가장자리 방식은 파츠 캐시가 통째로 달라진다
+                            # (한쪽은 PIL, 한쪽은 ImageTk) — 다시 켜는 게 안전하다
+                            or (bool(new.get("smooth_body"))
+                                != bool(self.us.get("smooth_body"))))
             old_slime = self.us.get("slime_kind")
             # 방 코드가 바뀌면 붙어 있던 연결을 끊는다 — 안 그러면 옛 방에
             # 계속 앉아 있는다 (RoomNet 은 만들 때의 코드를 그대로 쓴다).

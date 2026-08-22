@@ -1,14 +1,14 @@
 {
- "version": 1787400387,
+ "version": 1787409352,
  "files": {
-  "mascot.py": "839f6ab1e7ac4d9575cf14a0fead93f222778f8d195ea7abbf8603b2becd2fa1",
+  "mascot.py": "fdf8d94007e16d50cdc2628c79d4c3f8fea9004fb480c8cb4154c335c7173610",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
   "parts_saga/arm_right_typing.png": "8e2744dd074d326146bd1ea39d0a36490125f9918e466f153be74090638d517b",
   "parts_saga/back.png": "be4f06d5687474c90299d598141a8970c86b8965597343611a098660b6103b62",
   "parts_saga/body_open.png": "65378a26603924fb58d7a015758c831f25af0a025ee5df4e483ec5d2124eef2f",
-  "parts_saga/config.json": "5a251d0094faa448fd69f620c0f82be35afecfd37fd6971326f1f3b6c42031e2",
+  "parts_saga/config.json": "9ceab625d020841e3ad0f9692dcc0308fb14c6b23e3893774e2b483e7a69f47a",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "6c54dfa18470e2a17e6080f2b4830a36e3dd49ff751a5c79403c1daa8cb5e5f1",
   "parts_saga/eyes_closed.png": "10b1932ea6dc355094a470d1b4bda98e181b98134986dc0827d9c63d6f2a9143",
@@ -521,6 +521,10 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "**캐릭터 가장자리가 매끈해졌어요.** 몸 테두리가 도트처럼 계단지던 것을 없앴습니다 — 그림의 원래 가장자리가 그대로 나옵니다 (맥에서는 이 방법을 못 써서 지금 그대로예요)",
+  "타이머 카드·말풍선·동그란 단추의 모서리도 부드러워졌어요",
+  "말풍선 바깥에 흰 테처럼 보이던 그림자를 없애고 테두리를 조금 굵게 했습니다. 꼬리도 몸통과 자연스럽게 이어지고 끝이 뾰족해졌어요",
+  "이상하면 환경설정 → 표시 → '부드러운 가장자리'에서 끌 수 있어요"
+ ]
 }
