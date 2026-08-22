@@ -1,7 +1,7 @@
 {
- "version": 1787399431,
+ "version": 1787400387,
  "files": {
-  "mascot.py": "0464d63edf9f4e51430ddf5e15fa40c86c47b07d00c63320445cf54575fbb2af",
+  "mascot.py": "839f6ab1e7ac4d9575cf14a0fead93f222778f8d195ea7abbf8603b2becd2fa1",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -71,7 +71,7 @@
   "parts_saga/skins/shinhana/arm_right.png": "ea2f49beeafbd924064fb2db5fa469809a272ac17915a608133747020c0d3ef3",
   "parts_saga/skins/shinhana/arm_right_typing.png": "e6c28868ecefb383e87fbe146a416d303e7ab8f0ee69b4c9990be7c27bc7a286",
   "parts_saga/skins/shinhana/back.png": "4fd5b5fbde00e0750c31cc71281e6d52530a33d18409190a27c2cc6e991bbf14",
-  "parts_saga/skins/shinhana/body_open.png": "a3c54f9d4854b7c8e95e9b42c27d3440d9f34ca87751ae4496ec377e75038939",
+  "parts_saga/skins/shinhana/body_open.png": "35667daf342cea5996fb1b23bb453da7766bab9ffd0182bb62262ac83da52f0b",
   "parts_saga/skins/shinhana/desk.png": "d45a073f080efa837c8531bd6903a90f588d1eb4fac289611325e4d3adc3ee38",
   "parts_saga/skins/shinhana/eyes_closed.png": "9d1a46fd3b83636b5fbe7876120ced7b71fd9b774965c9b4452e0b8975d9802e",
   "parts_saga/skins/shinhana/face1.png": "4d264a7fdd1f83489d93fc1da04530c7f333ec0970bb283f46dcbb70d16b3e56",
@@ -81,7 +81,7 @@
   "parts_saga/skins/shinhana/hair.png": "f79e8cfbb251dd671925515a35deb7995792090d23dc0540dc7dbeba37211dc8",
   "parts_saga/skins/shinhana/head.png": "67a6a2b51f8d2ad05fd86d0d62f54ddb57a804e824c67b7a77f4cf9312694790",
   "parts_saga/skins/shinhana/lashes.png": "8a81cfcbeea61a2e915c398a903b777d3b3808ec77f4ef695976907520dbbbb6",
-  "parts_saga/skins/shinhana/layout.json": "242c0dee96e7a2fb616bcb943cf126c88833562c80dafab5991c561c3d5311b5",
+  "parts_saga/skins/shinhana/layout.json": "629811b7ff4872e22ca42b219ad382e342bbbfea67e06b72aa06e7ebe08fe41f",
   "parts_saga/skins/shinhana/prop1.png": "b13341bae3286986dbf7796becf3681a558a4ab90cc13856cabaceaba9d94b5d",
   "parts_saga/skins/shinhana/prop10_back.png": "b72ad8c56a010a7a95bade09988143975333d52d2c5c54559e8be391a5926533",
   "parts_saga/skins/shinhana/prop11.png": "deb7633a40ada8c4c5fbc910ff2dba9eca5e888f01da934bf03156e7e6f2769c",
@@ -521,10 +521,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "**캐릭터 움직임이 부드러워졌습니다.** 커서를 캐릭터 곁에 두거나 말풍선·연출이 떠 있는 동안에는 초당 60번 그려요 (전에는 30번). 숨쉬기·눈동자·팔이 눈에 띄게 매끄럽습니다",
-  "**가만히 바라볼 때 끊기던 것을 고쳤습니다.** 키보드·마우스를 5초만 안 건드려도 초당 15번으로 떨어졌는데, 구경하는 순간이 딱 그 상태였어요. 이제 30초는 지나야 낮춥니다",
-  "**양갈래·날개 흔들림이 두 배 촘촘해졌습니다** (사가·기뽀·패왕·햄북이·락스·제리·성실이). 락스는 초당 5장이 10장으로 늘었어요",
-  "**늘 빠르게 그리지는 않습니다.** 보고 있지 않을 때는 예전처럼 그려서 컴퓨터에 부담을 안 줘요. 늘어나는 메모리는 캐릭터당 1MB 안쪽입니다"
- ]
+ "notes": [],
+ "silent": true
 }
