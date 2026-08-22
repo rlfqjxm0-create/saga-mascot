@@ -133,7 +133,6 @@ class _MacChromaKey:
     def __init__(self, key_hex):
         self.err = None
         self.filter = None
-        self._srgb_done = set()      # 색공간을 이미 못박은 창
         self._srgb = None        # 창 색공간 고정용 (아래 apply_all 참고)
         self._keep = []          # 해제되면 안 되는 ObjC 객체를 붙잡아 둔다
         try:
@@ -253,7 +252,7 @@ class _MacChromaKey:
         return [self._msg(arr, "objectAtIndex:", i, argtypes=(ctypes.c_ulong,))
                 for i in range(n)]
 
-    def apply_all(self, want=None):
+    def apply_all(self):
         """색상키를 칠하는 창에만 필터를 건다.
 
         말풍선·할 일 패널은 나중에 생기므로 주기적으로 다시 부른다. 이미 걸린 창은
@@ -270,8 +269,6 @@ class _MacChromaKey:
             return 0
         done = 0
         for w in self.windows():
-            if want and w not in want:
-                continue
             try:
                 # 우클릭 메뉴·풍선도움말 창에 필터가 걸리면 배경 재질이
                 # 지워져 메뉴가 투명하게 보인다 (사가 제보). 건너뛴다.
@@ -287,12 +284,12 @@ class _MacChromaKey:
                 if self._srgb is None:
                     self._srgb = self._hold(self._msg(
                         self._cls("NSColorSpace"), "sRGBColorSpace"))
-                # 창마다 **한 번만** — 다시 걸면 그 창을 통째로 다시
-                # 그리게 된다 (2초마다 걸리던 값, 맥 '무겁다' 제보)
-                if self._srgb and w not in self._srgb_done:
+                # **매번 다시 건다.** 한 번만 걸도록 아꼈다가 되돌렸다 —
+                # 화면을 옮기면 창의 색공간이 화면 프로필로 되돌아가는데
+                # (지뢰 66, 사가 신티크 검은 줄), 한 번만 걸면 그때 못 잡는다.
+                if self._srgb:
                     self._msg(w, "setColorSpace:", self._srgb,
                               argtypes=(ctypes.c_void_p,))
-                    self._srgb_done.add(w)
                 cv = self._msg(w, "contentView")
                 if not cv:
                     continue
@@ -6699,8 +6696,12 @@ class Mascot:
         # 그림 위쪽에 빈 여백이 큰 캐릭터(햄북이 86px)는 카드와 머리가
         # 늘 그만큼 떨어진다 — 여백만큼 캐릭터를 올려 틈을 좁힌다.
         lift = int(self.cfg.get("char_lift", 0))
-        # 사람이 환경설정에서 직접 맞추는 보정 (머리가 카드에 겹치면 +)
-        gap = max(-20, min(60, int(self.us.get("card_gap") or 0)))
+        # 사람이 환경설정에서 직접 맞추는 보정 (머리가 카드에 겹치면 +).
+        # `card_gap_base` 는 그 눈금의 기준을 캐릭터마다 옮긴다 — 맨 아래
+        # (-20)까지 줄여도 아직 머니까 더 줄이게 해 달라는 요청(도로롱).
+        # 눈금 폭은 그대로 두고 0 이 가리키는 자리만 옮기는 것이다.
+        gap = (max(-20, min(60, int(self.us.get("card_gap") or 0)))
+               + int(self.cfg.get("card_gap_base", 0)))
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
             return max(0, base + self._yt_bar() + GOAL_ROW
@@ -33445,12 +33446,10 @@ class Mascot:
             clear = NSColor.clearColor()
             for w in self._mac_windows():
                 try:
-                    # **이미 투명하면 건너뛴다.** 2초마다 다시 걸면 그때마다
-                    # 창을 통째로 다시 그리게 되어 눈에 띄게 걸린다 (맥
-                    # '무겁다' 제보). 시스템이 되돌리면 isOpaque 가 참으로
-                    # 돌아오므로 그때 다시 걸린다 — 스스로 낫는다.
-                    if not w.isOpaque():
-                        continue
+                    # **건너뛰지 말 것.** '이미 투명하면 넘어간다'로 아끼려
+                    # 했다가 사가가 타이머를 아예 못 켰다 — 창이 투명해도
+                    # 그 위 뷰의 레이어는 따로 비워야 하는데, 건너뛰면 그
+                    # 일이 영영 안 일어난다 (검은 상자로 남는다).
                     w.setOpaque_(False)
                     w.setBackgroundColor_(clear)
                     # 창을 투명하게 해도 그 위를 덮는 뷰가 스스로 배경을 칠하면
@@ -33479,39 +33478,7 @@ class Mascot:
             else:
                 self._mac_log(f"색상키 준비됨: {MAC_KEY} 격자={ck.key_idx} "
                               f"큐브={ck.N}^3 반경={ck.RAD}")
-        return ck.apply_all(self._mac_key_windows(ck))
-
-    def _mac_key_windows(self, ck):
-        """색상키를 실제로 칠하는 창들 (NSWindow 포인터).
-
-        캐릭터 창과 말풍선 패널뿐이다. 게임·홈·환경설정 창은 색상키를 안
-        쓰므로 필터를 걸 이유가 없고, 걸면 그 창이 다시 그려질 때마다 색
-        큐브 합성을 지나 느려진다 (지뢰 — 수박게임 멈춤).
-
-        Tk 창에서 NSWindow 를 못 찾으면 **빈 값**을 준다 — 그때는 예전처럼
-        전부 걸어 캐릭터가 검은 상자로 남는 일만은 막는다.
-        """
-        out = set()
-        try:
-            wins = [self.root]
-            for holder in (getattr(self, "todo_panel", None),
-                           getattr(self, "due_panel", None)):
-                top = getattr(holder, "top", None)
-                if top is not None:
-                    wins.append(top)
-            for w in wins:
-                try:
-                    vid = w.winfo_id()
-                except Exception:
-                    continue
-                if not vid:
-                    continue
-                nsw = ck._msg(ctypes.c_void_p(vid), "window")
-                if nsw:
-                    out.add(nsw)
-        except Exception:
-            return set()
-        return out
+        return ck.apply_all()
 
     def _mac_keep_transparent(self):
         """투명 설정을 다시 못 박는다. 창이 나중에 더 생기므로 주기적으로 돈다."""
