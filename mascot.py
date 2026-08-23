@@ -7847,6 +7847,14 @@ class Mascot:
 
     def _on_press(self, e):
         self._press = (e.x, e.y, e.x_root, e.y_root)
+        # 본체 창을 누르면 윈도우가 그 창을 맨 앞으로 올려 몸 레이어가
+        # 뒤로 밀린다 — 말풍선·몸이 카드에 가려진다. 그 자리에서 되올린다
+        # (레이어 쪽 클릭이 이미 하는 것과 같은 일 — _on_press_layer).
+        if self._char_lay is not None:
+            try:
+                self._char_lay.place_above(self._main_hwnd)
+            except Exception:
+                pass
         self._dragged = False
         self._slime_grab = None
         if self.slime is not None:
@@ -15342,7 +15350,11 @@ class Mascot:
                         _p.raise_above()
             if self.due_panel is not None:
                 self._safe("due", self._due_tick)
-            elif ((self.shadow is not None or self._char_lay is not None)
+            # **elif 로 묶으면 안 된다** — 마감 말풍선이 떠 있는 동안
+            # 이 재고정이 영영 안 돌아서, 카드를 한 번 누르면 본체 창이
+            # 몸 레이어 위로 올라간 채 굳었다. 말풍선·몸이 카드 뒤로
+            # 가려진 제보의 뿌리다 (노래 제목 말풍선 사건).
+            if ((self.shadow is not None or self._char_lay is not None)
                     and now - self._z_check > 8.0):
                 self._z_check = now          # z순서만 가끔 재고정
                 if self._char_lay is not None:
