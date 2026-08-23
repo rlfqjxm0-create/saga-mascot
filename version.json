@@ -1,7 +1,7 @@
 {
- "version": 1787499140,
+ "version": 1787499480,
  "files": {
-  "mascot.py": "092c78e5cc63e9070d024e93aabf1a49913f0cca641590f06971649024f99ddc",
+  "mascot.py": "36d5fbb809ccc2d0eb5da7e3e78a7202f56eee1bae7c5eb891fcb2c87753a9bc",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -521,6 +521,8 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "모두의 플레이리스트를 트는 동안 타이머 위 단추가 셋이 됐어요 — 이전곡·재생/멈춤·다음곡. 곡을 편하게 넘겨 보세요.",
+  "홈의 방 꾸미기 그림이 훨씬 가볍게 전달되도록 통신을 아꼈어요. 바꾼 그림은 예전처럼 바로 보여요."
+ ]
 }

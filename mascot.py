@@ -5742,6 +5742,7 @@ class Mascot:
         self._yt_unblocked = False   # 차단 표식 풀기를 이미 해 봤는가
         self._yt_idle = 0.0          # 멈춘 채로 지낸 시각
         self._yt_btn = None          # 버튼 자리 (x, y, 반지름)
+        self._pl_ctl = []            # 플레이리스트 이전/다음 단추 자리
         self._amb_btn = None         # 환경음 알약 자리 (x0,y0,x1,y1)
         self._yt_note = None         # 지금 떠 있는 음악 음표 (하나만 띄운다)
         self._yt_note_at = 0.0       # 다음 음표를 띄울 시각
@@ -7932,6 +7933,14 @@ class Mascot:
             if (ab and ab[0] <= px <= ab[2] and ab[1] <= py <= ab[3]):
                 self._safe("ui_click", self._ui_click)
                 self._safe("amb_win", self._amb_toggle_win)
+            elif any((px - b[0]) ** 2 + (py - b[1]) ** 2 <= (b[2] + 3) ** 2
+                     for b in getattr(self, "_pl_ctl", []) or []):
+                b = next(b for b in self._pl_ctl
+                         if (px - b[0]) ** 2 + (py - b[1]) ** 2
+                         <= (b[2] + 3) ** 2)
+                self._safe("ui_click", self._ui_click)
+                step = -1 if b[3] == "prev" else 1
+                self._safe("pl_step", self._pl_play, self._pl_i + step)
             elif mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
                 self._safe("ui_click", self._ui_click)
                 self._safe("music", self._yt_toggle)
@@ -9913,29 +9922,67 @@ class Mascot:
             self._yt_note_at = now + 2.0
 
     def _draw_music_btn(self):
-        """타이머 카드 위 정중앙의 동그란 재생/멈춤 버튼."""
+        """타이머 카드 위 정중앙의 동그란 음악 단추.
+
+        모두의 플레이리스트로 트는 동안에는 **이전곡 · 재생/멈춤 · 다음곡**
+        셋이 나란히 선다 (정지 하나뿐이라 불편하다는 요청). 개인 노래는
+        곡이 하나라 지금처럼 재생/멈춤 하나만.
+        """
+        self._pl_ctl = []
         if not self._yt_bar():
             return
         c, cd = self.canvas, self.card
         g = self._card_geom()
-        bx = (g["x0"] + g["x1"]) / 2
+        mid = (g["x0"] + g["x1"]) / 2
         by = g["y0"] - 24            # 카드 윗변에서 10px 띄운다 (붙으면 답답하다)
-        r = 14.0
-        # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
-        self._soft_circle(c, bx, by, r, cd["bg"], cd["border"])
         ink = cd["fill"]
-        if self._yt_busy():                       # 켜는 중 — 도는 호
-            a = (time.time() * 200) % 360
-            c.create_arc(bx - 7, by - 7, bx + 7, by + 7, start=a, extent=110,
-                         style="arc", outline=ink, width=3)
-        elif self._yt.get("playing"):             # 멈춤 표시 (막대 둘)
-            for sx in (-3.8, 3.8):
-                c.create_rectangle(bx + sx - 1.8, by - 6, bx + sx + 1.8, by + 6,
-                                   fill=ink, outline="")
-        else:                                     # 재생 표시 (세모)
-            c.create_polygon(bx - 4.5, by - 6.5, bx - 4.5, by + 6.5,
-                             bx + 7.0, by, fill=ink, outline="")
-        self._yt_btn = (bx, by, r)
+        trio = bool(getattr(self, "_pl_on", False))
+
+        def circle(bx, r):
+            # 옅은 그림자 없음 — 어두운 바탕에서 흰 테로 보인다 (제보)
+            self._soft_circle(c, bx, by, r, cd["bg"], cd["border"])
+
+        def glyph_toggle(bx, k):
+            """재생/멈춤/켜는 중 — k 는 크기 배율 (1.0 = 예전 크기)."""
+            if self._yt_busy():                   # 켜는 중 — 도는 호
+                a = (time.time() * 200) % 360
+                c.create_arc(bx - 7 * k, by - 7 * k, bx + 7 * k, by + 7 * k,
+                             start=a, extent=110, style="arc",
+                             outline=ink, width=3)
+            elif self._yt.get("playing"):         # 멈춤 표시 (막대 둘)
+                for sx in (-3.8 * k, 3.8 * k):
+                    c.create_rectangle(bx + sx - 1.8 * k, by - 6 * k,
+                                       bx + sx + 1.8 * k, by + 6 * k,
+                                       fill=ink, outline="")
+            else:                                 # 재생 표시 (세모)
+                # 무게중심이 단추 중심에 오도록 왼쪽으로 살짝 당긴다
+                c.create_polygon(bx - 4.9 * k, by - 6.5 * k,
+                                 bx - 4.9 * k, by + 6.5 * k,
+                                 bx + 6.6 * k, by, fill=ink, outline="")
+
+        if not trio:
+            r = 14.0
+            circle(mid, r)
+            glyph_toggle(mid, 1.0)
+            self._yt_btn = (mid, by, r)
+            return
+        # ── 셋 나란히 — 카드 가로폭 정중앙 기준, 한 단계 작게 ─────────
+        r = 11.5
+        gap = 27.0                   # 단추 중심 사이
+        circle(mid, r)
+        glyph_toggle(mid, 0.78)
+        self._yt_btn = (mid, by, r)
+        for sign, kind in ((-1, "prev"), (1, "next")):
+            bx = mid + sign * gap
+            circle(bx, r)
+            # 겹세모 — 좌우 대칭이라 저절로 정중앙이다. 이전곡은 왼쪽,
+            # 다음곡은 오른쪽을 본다.
+            for off in (-3.4, 3.4):
+                x0 = bx + off - 3.1 * sign      # 밑변 쪽
+                x1 = bx + off + 3.1 * sign      # 꼭짓점 쪽
+                c.create_polygon(x0, by - 4.6, x0, by + 4.6, x1, by,
+                                 fill=ink, outline="")
+            self._pl_ctl.append((bx, by, r, kind))
 
     def _draw_amb_btn(self):
         """카드 위 환경음 알약 — 도는 동안만 보인다. 누르면 고르는 창.
@@ -9949,8 +9996,11 @@ class Mascot:
         g = self._card_geom()
         r = 14.0                          # 노래 버튼과 같은 동그라미
         cx = (g["x0"] + g["x1"]) / 2
-        if self.us.get("yt_url") and self._yt_on():
-            cx -= 34.0                    # 노래 버튼 왼쪽으로 비켜 준다
+        if (self.us.get("yt_url") or getattr(self, "_pl_on", False)) \
+                and self._yt_on():
+            # 노래 단추 왼쪽으로 비켜 준다. 플레이리스트는 단추가 셋이라
+            # 더 멀리 (이전곡 단추와 겹치지 않게).
+            cx -= 62.0 if getattr(self, "_pl_on", False) else 34.0
         by = g["y0"] - 24
         # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
         self._soft_circle(c, cx, by, r, cd["bg"], cd["border"])
@@ -17181,6 +17231,7 @@ class Mascot:
             # 버튼 자리는 구역 밖에서 지운다. 이 구역이 꺼졌을 때 옛 자리가
             # 남으면, 버튼이 안 보이는데도 그 자리를 누르면 음악이 켜진다.
             self._yt_btn = None
+            self._pl_ctl = []
             self._safe("music_btn", self._draw_music_btn)
             self._safe("amb_btn", self._draw_amb_btn)
             # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
