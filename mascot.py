@@ -732,6 +732,20 @@ class ShadowLayer:
         """그림자 이미지 교체 (시계 토글로 크기가 바뀔 때)."""
         self._push(image)
 
+    def show(self, on):
+        """그림자를 보였다 숨겼다 (상태 칩 '자리비움').
+
+        캐릭터만 안 그리면 그림자는 그대로 남아 회색 덩어리가 뜬다
+        (찍어서 확인). 창째로 숨긴다.
+        """
+        u, _g = layer_api()
+        if u is None:
+            return
+        try:
+            u.ShowWindow(self.hwnd, 5 if on else 0)   # SW_SHOW / SW_HIDE
+        except Exception:
+            pass
+
     def set_topmost(self, on):
         """이 레이어의 '항상 위'를 켜고 끈다.
 
@@ -5664,6 +5678,32 @@ class Mascot:
                 sub.config(postcommand=lambda: self._safe(
                     "slime_seen_menu", self._slime_menu_seen))
             self._slime_menu = sub
+        # 상태 칩 — 지금 무엇을 하는 중인지 홈에 알린다 (요청).
+        # BGM·슬라임 아래에 두고, 커서를 올리면 목록이 옆으로 나온다.
+        if self.cfg.get("chips"):
+            sub9 = tk.Menu(menu, tearoff=0, font=self._uf(9),
+                           bg=self.card["panel"], fg=self.card["text"],
+                           activeforeground="#ffffff",
+                           activebackground=self._shade(
+                               self.card["fill"], 0.22))
+            for key9, name9, _mark9, _img9, _short9 in self.CHIPS:
+                # _safe_str 는 그림을 빈 글자로 바꾼다 (지뢰 63) — 직접 감싼다
+                try:
+                    ico9 = self._chip_icon(key9, 15)
+                except Exception:
+                    ico9 = None
+                sub9.add_command(
+                    label="    " + name9,
+                    image=(ico9 or ""), compound="left",
+                    command=lambda k=key9: self._safe("chip", self._chip_set, k))
+            # **표시는 열 때마다 다시 찍는다.** 메뉴는 켤 때 한 번만
+            # 만들어지므로, 만들 때의 상태에 ● 를 박아 두면 나중에 상태를
+            # 바꿔도 그대로 남는다 (제보: 밥 먹는 중인데 온라인에 붙어
+            # 있었다). 슬라임 목록이 쓰는 postcommand 와 같은 방법이다.
+            sub9.config(postcommand=lambda: self._safe(
+                "chip_menu_mark", self._chip_menu_mark))
+            menu.add_cascade(label="상태 칩", menu=sub9)
+            self._chip_menu = sub9
         # 소품 새로고침 — 껐다 켜야만 소품이 바뀌던 것을 그 자리에서
         # 바꾼다 (건의). 뽑을 것이 둘 이상일 때만 보인다.
         if self._prop_count() > 1:
@@ -5742,6 +5782,20 @@ class Mascot:
         self._yt_unblocked = False   # 차단 표식 풀기를 이미 해 봤는가
         self._yt_idle = 0.0          # 멈춘 채로 지낸 시각
         self._yt_btn = None          # 버튼 자리 (x, y, 반지름)
+        self._chip_imgs = {}         # 상태 칩 그림 (칸마다 한 번)
+        self._chip_at = 0.0          # 상태를 바꾼 시각 (모션 기준)
+        self._chip_box = None        # 책상 위 상태 그림 자리
+        # 메뉴가 __init__ 앞쪽에서 이 캐시를 먼저 만들어 쓴다 —
+        # 여기서 덮으면 그림이 수거되어 Tk 가 "image doesn't exist"
+        # 로 죽는다 (실제로 겪음). 있으면 그대로 둔다.
+        self._chip_icons = getattr(self, "_chip_icons", None) or {}
+        self._chip_hits = {}         # 잘린 상태 칩 자리 (호버용)
+        self._chip_hover = None      # 커서가 올라간 칩
+        self._chip_kernel = None     # 손끝의 팝콘 한 알 자리
+        self._chip_note_at = 0.0     # 게임 중 음표 다음 시각
+        self._chip_note_side = 1     # 음표가 뜨는 쪽
+        self._chip_z_until = 0.0     # 이때까지 z순서를 다시 못박는다
+        self._chip_hide = False      # 자리비움 — 캐릭터를 숨겼나
         self._pl_ctl = []            # 플레이리스트 이전/다음 단추 자리
         self._amb_btn = None         # 환경음 알약 자리 (x0,y0,x1,y1)
         self._yt_note = None         # 지금 떠 있는 음악 음표 (하나만 띄운다)
@@ -6792,6 +6846,9 @@ class Mascot:
         for name in overlays:
             if name in ("body_mask", "head") or not self.has.get(name):
                 continue
+            if (name.startswith("prop")
+                    and self.cfg.get("prop_over_arms")):
+                continue              # 판에 구우면 팔 위로 못 올린다
             paste(name)
         self._tilt_base = layer
 
@@ -6806,6 +6863,9 @@ class Mascot:
         for name in overlays:
             if name in ("body_mask", "head", "eyes_closed")                     or not self.has.get(name):
                 continue
+            if (name.startswith("prop")
+                    and self.cfg.get("prop_over_arms")):
+                continue              # 판에 구우면 팔 위로 못 올린다
             paste(name)
 
         # 웃는 얼굴로 기울이는 판 — 리듬을 타는 내내 웃고 있어야 하는데,
@@ -7850,6 +7910,12 @@ class Mascot:
         # 본체 창을 누르면 윈도우가 그 창을 맨 앞으로 올려 몸 레이어가
         # 뒤로 밀린다 — 말풍선·몸이 카드에 가려진다. 그 자리에서 되올린다
         # (레이어 쪽 클릭이 이미 하는 것과 같은 일 — _on_press_layer).
+        # 다음 프레임에 z순서를 다시 못박게 한다 — 메뉴 창이 닫히면서
+        # 본체가 한 번 더 앞서는 일이 있어, 한 번 올리는 것만으로는
+        # 부족했다 (제보: 클릭해야 제자리로 갔다).
+        self._z_check = 0.0
+        self._last_pos = None
+        self._chip_z_until = time.time() + 2.5
         if self._char_lay is not None:
             try:
                 self._char_lay.place_above(self._main_hwnd)
@@ -9515,6 +9581,84 @@ class Mascot:
                     "필요해요. 무료로 받을 수 있어요.", "webview2")
         return ("음악을 켤 수 없어요 — 자세한 건 .yt_err.txt",
                 "음악을 켤 수 없어요.", "")
+
+    # ── 상태 칩 ──────────────────────────────────────────────────────
+    # 지금 무엇을 하는 중인지 홈에 알린다. '온라인' 은 **끄는 자리**라
+    # 아무것도 안 띄운다 — 깃발을 따로 두지 않고 값 하나로 계산한다
+    # (지뢰 30). 책상 위 그림이 필요한 상태는 chip_<열쇠>.png 를 쓴다.
+    # (열쇠, 메뉴 이름, 도형, 그림, **홈에 쓸 짧은 낱말**)
+    # 홈은 칸이 좁다 — 커서를 올려야 보이는 것보다 짧게 적는 쪽이 낫다
+    # (요청). 도형은 그림이 없는 상태(자리비움)에만 쓴다.
+    CHIPS = (
+        ("online", "온라인", "", "", ""),
+        ("away", "자리비움", "○", "", "자리비움"),
+        ("game", "게임 중", "▶", "game", "게임"),
+        ("movie", "영화 감상 중", "■", "movie", "영화"),
+        ("food", "밥 먹는 중", "◆", "food", "밥"),
+    )
+    CHIP_KEYS = tuple(c[0] for c in CHIPS)
+
+    def _chip(self):
+        """지금 상태 열쇠. 모르는 값이면 online 으로 본다."""
+        got = str(self.us.get("chip") or "online")
+        return got if got in self.CHIP_KEYS else "online"
+
+    def _chip_row(self, key=None):
+        key = key or self._chip()
+        for row in self.CHIPS:
+            if row[0] == key:
+                return row
+        return self.CHIPS[0]
+
+    def _chip_set(self, key):
+        """상태를 바꾼다 — 저장하고 방에도 바로 알린다."""
+        key = key if key in self.CHIP_KEYS else "online"
+        if key == self._chip():
+            return
+        self.us["chip"] = key
+        self._save_settings()
+        self._chip_at = time.time()      # 모션 기준 시각
+        # 메뉴를 거치면 윈도우가 본체 창을 앞세워 몸 레이어(말풍선이 실린
+        # 곳)가 뒤로 밀린다 — 클릭 때와 같은 되올리기 (제보).
+        if self._char_lay is not None:
+            try:
+                self._char_lay.place_above(self._main_hwnd)
+            except Exception:
+                pass
+        name = self._chip_row(key)[1]
+        self._say("온라인으로 돌아왔어요." if key == "online"
+                  else "'%s' 으로 해 둘게요." % name, 3.0)
+        self._safe("room_push", self._room_push_now)
+
+    def _chip_img(self, key):
+        """책상 위에 올리는 그림 (없으면 None). 칸마다 한 번만 읽는다."""
+        if key == "kernel":
+            row = (key, "", "", "kernel")     # 표에 없는 조각 그림
+        else:
+            row = self._chip_row(key)
+        if not row[3]:
+            return None
+        got = self._chip_imgs.get(key)
+        if got is not None:
+            return got or None
+        path = os.path.join(self.parts_dir, "chip_%s.png" % row[3])
+        try:
+            im = Image.open(path).convert("RGBA")
+            # 배율만 곱하면 너무 작아 뭔지 안 보인다 (찍어서 확인).
+            # 책상 폭에 맞춰 키운다 — 캐릭터 크기가 달라도 따라간다.
+            deskw = self.layout["desk"]["size"][0] * self.s
+            # 팝콘통·밥그릇은 작아야 팔이 몸에서 떨어져 보이지 않는다
+            # (제보). 게임기는 두 손을 얹어야 해서 넓게 둔다.
+            w = max(1, int(deskw * (0.42 if row[3] == "game"
+                                    else 0.075 if row[3] == "kernel"
+                                    else 0.27)))
+            h = max(1, int(im.height * w / max(1, im.width)))
+            im = im.resize((w, h), Image.LANCZOS)
+            got = (self._pic(im, edge=True), im)
+        except Exception:
+            got = False                  # 없다 — 다시 안 읽는다
+        self._chip_imgs[key] = got
+        return got or None
 
     def _yt_bar(self):
         """카드 위 줄(음악·환경음)이 요구하는 여백. 아무것도 없으면 0.
@@ -13078,7 +13222,10 @@ class Mascot:
         """
         s = self.s
         d = 1.0 if self.body_mid_x >= top[0] else -1.0
-        return (top[0] + 34 * s * d, top[1] + dy * s)
+        # 기본은 몸 **안쪽** 34px. 상태 칩처럼 팔을 몸통 바깥에 붙이고
+        # 싶을 때는 sh_out 으로 이 값을 줄인다 (요청).
+        inset = 34.0 - float((self._g_hands or {}).get("sh_out", 0.0))
+        return (top[0] + inset * s * d, top[1] + dy * s)
 
     def _draw_gesture_arms(self, yo):
         """제스처 중의 두 팔. 어깨는 그대로 두고 손끝만 원하는 자리로 보낸다.
@@ -17223,6 +17370,12 @@ class Mascot:
         if smiling:
             blinking = False
 
+        # 상태 칩 모션 — 제스처와 같은 값(_g_hands·_g_tilt)을 쓰므로
+        # 제스처 계산 뒤, 그리기 앞에 둔다. 값은 프레임마다 지워지므로
+        # 여기서 다시 세운다 (지뢰 14 — 구역 밖에서 지우고 다시 세운다).
+        if self.cfg.get("chips"):
+            self._safe("chip_motion", self._chip_motion, now)
+
         self._pet_drawn = []
         try:
             state = self._timer_tick(now, idle) if self.timer_on else "idle"
@@ -17266,17 +17419,30 @@ class Mascot:
         # 달라서 — 기뽀는 날개지만 사가는 양갈래다 — 뒤조각 있는 소품이
         # 뽑히면 사가의 머리카락이 통째로 사라졌다 (열넷 중 셋).
         # 겹쳐 보이는 게 싫은 캐릭터는 config 의 back_hide_on_prop 로 끈다.
-        if self.has.get("back"):
-            self._safe("back", self._draw_back, now, yo)
-        if self.has.get("prop_back"):
-            self._safe("prop_back", self._draw_prop_back, now, yo)
-        bx, by = self._pos("body_open")
-        self._safe("body", self._put, "body_open", bx, by + yo)
+        # 상태 칩 '자리비움' — 캐릭터와 소품이 사라지고 책상만 남는다.
+        # 책상·상태 그림은 아래에서 따로 그리므로 여기만 건너뛰면 된다.
+        chip_away = self._chip() == "away" if self.cfg.get("chips") else False
+        if chip_away:
+            self._chip_hide = True
+            # **그 자리에서 감춘다.** 틱에 맡기면 한 프레임 늦게 사라지고,
+            # 그 사이 그림자가 남아 보인다 (제보). 펫 그림자도 같이.
+            self._safe("chip_shadow", self._chip_shadow_sync, True)
+        else:
+            self._chip_hide = False
+            self._safe("chip_shadow", self._chip_shadow_sync, False)
+            if self.has.get("back"):
+                self._safe("back", self._draw_back, now, yo)
+            if self.has.get("prop_back"):
+                self._safe("prop_back", self._draw_prop_back, now, yo)
+            bx, by = self._pos("body_open")
+            self._safe("body", self._put, "body_open", bx, by + yo)
         # 뱀 혓바닥 — 몸 위·머리 아래 (PSD 레이어 차례 그대로).
         # 머리를 뒤에 그리므로 위로 밀면 저절로 입 안으로 들어간다.
         if self.has.get("tongue"):
             self._safe("tongue", self._draw_tongue, now, yo)
-        if not self.has.get("head"):
+        if chip_away:
+            pass                        # 자리비움 — 얼굴도 없다
+        elif not self.has.get("head"):
             self._safe("face", self._draw_face, yo, pdx, pdy, blinking, smiling)
         elif head_early:                # 준사: 책상·팔이 머리 위 (PSD 순서)
             self._safe("head", self._draw_head, now, yo, pdx, pdy,
@@ -17289,6 +17455,8 @@ class Mascot:
         # ── 책상 (+옵션: 화면 낙서) ──────────────────────────────────────
         dx_, dy_ = self._pos("desk")
         self._safe("desk", self._put, "desk", dx_, dy_)
+        if self.cfg.get("chips"):
+            self._safe("chip_img", self._draw_chip_img)
         if self.slime is not None:
             # 여기는 _safe에 맡기지 않는다. 구역이 꺼지면 매트만 덮인 채로
             # 굳어 책상이 영영 안 돌아온다 (지뢰 14). 터지면 그냥 치운다.
@@ -17321,7 +17489,13 @@ class Mascot:
         if self.cfg.get("pet_front"):
             self._safe("pet", self._draw_pet, now)
 
-        self._safe("arms", self._draw_arms, now, f, yo, pen_typing, cx, cy)
+        if not chip_away:
+            self._safe("arms", self._draw_arms, now, f, yo, pen_typing, cx, cy)
+        if self.cfg.get("chips"):
+            # 팝콘통·밥그릇은 팔보다 앞 — 손이 통 안으로 들어가 보인다
+            self._safe("chip_front", self._draw_chip_img, True)
+            if getattr(self, "_chip_kernel", None):
+                self._safe("chip_kernel", self._draw_chip_kernel)
 
         if self.has.get("scarf"):       # 목도리 — 팔 위, 머리 아래
             sx, sy = self._pos("scarf")
@@ -17329,9 +17503,18 @@ class Mascot:
 
         # ── 머리(팔 위) + 얼굴 — 개처럼 머리를 분리한 캐릭터 ──────────────
         # 머리를 팔보다 위에 그려 어깨가 머리 밖으로 튀어나오지 않게 한다.
-        if self.has.get("head") and not head_early:
+        if self.has.get("head") and not head_early and not chip_away:
             self._safe("head", self._draw_head, now, yo, pdx, pdy,
                        blinking, smiling, sleeping)
+        # 소품을 팔 위로 (요청) — **머리까지 그린 뒤**여야 한다. 이 캐릭터는
+        # 머리가 팔보다 나중이라(arms_over_head 없음) 팔 바로 뒤에 그리면
+        # 소품이 머리에 가려진다 (제보). 얼굴 차례와 기울인 머리 합성판
+        # 에서는 빼 두었으므로 여기서 한 번만 그려진다 (지뢰 14).
+        if (self.cfg.get("prop_over_arms") and not chip_away
+                and any(self.has.get(n9) for n9 in
+                        (self.layout.get("overlays") or [])
+                        if n9.startswith("prop"))):
+            self._safe("prop_top", self._draw_prop_top, yo)
         if self.cfg.get("pen_over_head"):     # 퀸시: 깃펜이 맨 위 레이어
             self._safe("pen_hand", self._draw_pen_hand)
         if self._g_hands is not None:        # 제스처 손 — 머리보다 위
@@ -17669,6 +17852,193 @@ class Mascot:
         else:
             self.canvas.create_image(tx + dx, ty + yo, image=tk, anchor="nw")
 
+    def _chip_spot(self):
+        """책상 위 상태 그림의 왼쪽 위 좌표와 크기. 없으면 None.
+
+        _desk_top 은 oy 가 빠져 있어 그대로 쓰면 허공에 뜬다 (지뢰 43) —
+        _pos("desk") 로 잡는다.
+        """
+        got = self._chip_img(self._chip())
+        if not got:
+            return None
+        tk_im, pil = got
+        dx, dy = self._pos("desk")
+        dw = self.layout["desk"]["size"][0] * self.s
+        dh = self.layout["desk"]["size"][1] * self.s
+        x = dx + dw * 0.5 - pil.width / 2.0        # 책상 가로 한가운데
+        y = dy + dh * 0.30 - pil.height * 0.55     # 상판 위에 얹히게
+        return tk_im, pil, x, y
+
+    # 그림을 팔보다 앞에 그릴 상태 — 손이 통 **안**으로 들어가야 자연
+    # 스럽다 (제보: 팔이 팝콘통 위로 올라와 이상하다). 게임기는 반대로
+    # 손이 단추 위에 얹혀야 하므로 뒤에 그린다.
+    CHIP_FRONT = ("movie", "food")
+
+    def _draw_chip_img(self, front=False):
+        """책상 위에 상태 그림을 올린다 (게임기·팝콘·밥그릇)."""
+        key9 = self._chip()
+        if front != (key9 in self.CHIP_FRONT):
+            if not front:
+                self._chip_box = None      # 자리는 뒤 차례에서 한 번만 지운다
+            return
+        got = self._chip_spot()
+        if not got:
+            self._chip_box = None
+            return
+        tk_im, pil, x, y = got
+        self._chip_box = (x, y, pil.width, pil.height)
+        sh = self._sheet
+        if sh is not None:
+            sh.blit(pil, x, y, "nw")
+        else:
+            self.canvas.create_image(x, y, image=tk_im, anchor="nw")
+
+    # 상태별 손 모션 — 제스처 손(_g_hands)과 같은 길을 쓴다. 제스처가
+    # 돌고 있으면 건드리지 않는다 (그쪽이 이긴다).
+    CHIP_GRAB = {"game": 0.0, "movie": 0.0, "food": 0.0}
+
+    def _chip_motion(self, now):
+        """게임 중·영화 감상 중·밥 먹는 중의 손·고개 움직임.
+
+        **_g_hands 는 '평소 손끝에서 얼마나 옮길까'(차이값)다.**
+
+        그리고 **손을 몸 반대쪽으로 보내면 팔이 가로질러 꼬인다** (제보).
+        이 캐릭터에서 '오른손'은 화면 왼쪽(x 103), '왼손'은 오른쪽(x 209)
+        이다 — 각자 제 어깨 아래에 두고 위아래로만 움직여야 일자로 뻗는다.
+        """
+        key = self._chip()
+        self._chip_kernel = None       # 프레임마다 지운다 (지뢰 14)
+        if key not in ("game", "movie", "food") or self.gest is not None:
+            return
+        box = getattr(self, "_chip_box", None)
+        if not box:
+            return
+        bx, by, bw, bh = box
+        rx0, ry0 = self.arm_bottom            # 오른손 평소 자리 (화면 왼쪽)
+        lx0, ly0 = self.armk_bottom           # 왼손 평소 자리 (화면 오른쪽)
+        rsx = self.arm_top[0]                 # 어깨 x — 손을 여기 아래 둔다
+        lsx = self.armk_top[0]
+        hx0, hy0, hx1, hy1 = self._head_box
+        mouth_y = self.oy + hy0 + (hy1 - hy0) * 0.80   # oy 필수 (지뢰 43)
+        # 손은 **몸통 바깥쪽**에 붙인다 (요청). 평소 손자리에서 어깨 쪽으로
+        # 조금만 당겨, 팔이 몸 앞을 가로지르지 않고 곧게 내려오게 한다.
+        rx = rx0 + (rsx - rx0) * 0.30
+        lx = lx0 + (lsx - lx0) * 0.30
+        # 팔 길이·몸 폭이 캐릭터마다 달라, 바깥에 두기만 하면 손이 통에서
+        # 멀찍이 떨어진다 (프고·햄북이는 44px 벌어졌다 — 실측). 통 가장
+        # 자리보다 더 바깥이면 통 쪽으로 당겨 닿게 한다.
+        rx = max(rx, bx - bw * 0.10)
+        lx = min(lx, bx + bw * 1.10)
+        if key == "game":
+            # 두 팔이 함께 뿅뿅 — 위아래로만 움직인다 (좌우로 안 건넌다)
+            self._g_tilt = math.sin(now * 3.2) * 7.0
+            self._g_smile = True
+            # 게임기는 두 손을 얹는다 — 그림 폭 안으로만 당긴다
+            rx = max(rx, bx + bw * 0.10)
+            lx = min(lx, bx + bw * 0.90)
+            pady = by + bh * 0.34
+            pr = abs(math.sin(now * 9.0)) * 6.0
+            pl = abs(math.sin(now * 9.0 + math.pi)) * 6.0
+            self._g_hands = {"r": (rx - rx0, pady - ry0 + pr),
+                             "l": (lx - lx0, pady - ly0 + pl),
+                             "sh_dy": 16.0, "hide_pen": True,
+                             "sh_out": 30.0}
+            # 음표 — 음악 들을 때와 같은 연출을 재활용한다 (요청).
+            # 한 번에 하나만 띄우고, 사라지면 다음 것을 낸다.
+            if now >= getattr(self, "_chip_note_at", 0.0):
+                self._chip_note_at = now + random.uniform(1.1, 1.9)
+                self._chip_note_side = -getattr(self, "_chip_note_side", 1)
+                self._safe("fx", self._spawn_note, now, "note",
+                           self._chip_note_side, self.YT_NOTE_SLOW)
+            return
+        # 안 쓰는 손(왼손)은 **통 뒤에** 있어야 자연스럽다 (요청).
+        # 통은 팔보다 앞에 그리므로, 왼손을 통 안쪽으로 조금 넣어 두면
+        # 통에 가려진다.
+        # 팝콘·밥 — 오른손이 통 **맨 아래**에서 입 **맨 위**까지 오간다.
+        # x 는 어깨 아래로 고정 — 위아래로만 움직여야 팔이 일자로 뻗는다.
+        speed = 1.5 if key == "movie" else 1.9
+        u = (math.sin(now * speed - math.pi / 2) + 1.0) / 2.0   # 0=통 1=입
+        gy = by + bh * 0.88                    # 통 아래끝
+        ty = gy + (mouth_y - gy) * u
+        self._g_tilt = math.sin(now * speed) * 2.5
+        out = {"r": (rx - rx0, ty - ry0), "sh_dy": 20.0, "hide_pen": True,
+               "sh_out": 30.0}
+        # 안 쓰는 손은 통 안쪽·아래로 넣어 통에 가려지게 한다 (요청).
+        # 다만 **멀리 있으면 그냥 둔다** — 억지로 끌어오면 팔이 길게
+        # 늘어나 막대처럼 보인다 (햄북이·프고에서 실제로 그랬다).
+        hold_x = bx + bw * (0.86 if key == "food" else 0.80)
+        hold_y = by + bh * (0.62 if key == "food" else 0.58)
+        if abs(lx0 - hold_x) < bw * 1.30:
+            out["l"] = (min(lx, hold_x) - lx0, hold_y - ly0)
+        self._g_hands = out
+        # 팝콘 한 알을 손끝에 붙여 입으로 가져간다. 입에 닿으면 사라진다
+        # (요청). 자리는 그리는 쪽이 쓰도록 남겨 둔다.
+        self._chip_kernel = ((rx, ty) if (key == "movie" and u < 0.88)
+                             else None)
+        if u > 0.86:                           # 입에 닿는 순간에만 웃는다
+            self._g_smile = True
+
+    def _chip_shadow_sync(self, hide):
+        """자리비움일 때 그림자를 감추고, 돌아오면 z순서까지 되돌린다.
+
+        **숨겼다 보인 창은 z순서가 딸려 오지 않는다** — 그대로 두면
+        그림자가 캐릭터 앞으로 나온다 (제보). 그리고 상태를 바꾼 직후
+        잠시 동안은 매 프레임 다시 못박는다 — 메뉴 창이 닫히며 본체가
+        한 번 더 앞서기 때문이다 (한 번만 올려서는 부족했다).
+        """
+        if self.shadow is None:
+            return
+        want = not hide
+        now = time.time()
+        if want != getattr(self, "_shadow_shown", True):
+            self._shadow_shown = want
+            self.shadow.show(want)
+            self._chip_z_until = now + 2.5
+        if now < getattr(self, "_chip_z_until", 0.0):
+            pos = (self.root.winfo_rootx(), self.root.winfo_rooty())
+            try:
+                if self._char_lay is not None:
+                    self._char_lay.place_above(self._main_hwnd)
+                if want:
+                    self.shadow.place(*pos, self._main_hwnd)
+            except Exception:
+                pass
+
+    def _draw_chip_kernel(self):
+        """손끝에 얹힌 팝콘 한 알 — 통보다 앞에 그린다."""
+        spot = getattr(self, "_chip_kernel", None)
+        if not spot:
+            return
+        got = self._chip_img("kernel")
+        if not got:
+            return
+        tk_im, pil = got
+        x = spot[0] - pil.width / 2.0
+        y = spot[1] - pil.height * 0.85
+        sh = self._sheet
+        if sh is not None:
+            sh.blit(pil, x, y, "nw")
+        else:
+            self.canvas.create_image(x, y, image=tk_im, anchor="nw")
+
+    def _draw_prop_top(self, yo):
+        """소품을 팔·머리보다 위에 그린다 (config 의 prop_over_arms).
+
+        **조각(prop_bit)까지 함께 올려야 한다** — 소품만 올리면 조각이
+        얼굴 차례에 남아 머리에 가려진다 (제보: 불꽃 안쪽 겹이 사라졌다).
+        차례와 움직임은 얼굴 차례에서 하던 것과 똑같이 한다.
+        """
+        now9 = time.time()
+        for name in (self.layout.get("overlays") or []):
+            if not name.startswith("prop") or not self.has.get(name):
+                continue
+            mo9 = (getattr(self, "_prop_bit_cfg", None) or {}).get(name)
+            if mo9 and mo9.get("motion"):
+                self._safe("prop_bit", self._back_anim, name, mo9, now9, yo)
+                continue
+            ox, oy_ = self._pos(name)
+            self._put(name, ox, oy_ + yo)
+
     def _draw_pen_hand(self):
         """펜 쥔 손. 퀸시처럼 펜이 맨 위 레이어인 캐릭터는 머리를 그린 뒤 호출.
 
@@ -17806,6 +18176,9 @@ class Mascot:
                     continue
                 if not self.has.get(name) or name == "head":
                     continue
+                if (name.startswith("prop")
+                        and self.cfg.get("prop_over_arms")):
+                    continue          # 팔보다 위에 그린다 (_draw_prop_top)
                 ox, oy_ = self._pos(name)
                 self._put(name, ox, oy_ + yo)
             if not drawn:
@@ -17828,6 +18201,9 @@ class Mascot:
                     continue
             elif not self.has.get(name):
                 continue
+            if (name.startswith("prop")
+                    and self.cfg.get("prop_over_arms")):
+                continue              # 팔보다 위에 그린다 (_draw_prop_top)
             # 여러 조각짜리 소품 — 조각마다 제 움직임이 있다 (미쿠)
             mo9 = (getattr(self, "_prop_bit_cfg", None) or {}).get(name)
             if mo9 and mo9.get("motion"):
@@ -19584,6 +19960,13 @@ class Mascot:
                 out["cal"] = self._stamp_pack()
             except Exception:
                 pass
+        if self.cfg.get("chips"):
+            ch9 = self._chip()
+            if ch9 != "online":
+                # '온라인' 은 끄는 자리라 아예 안 싣는다 — 받는 쪽은
+                # 열쇠가 없으면 아무것도 안 그린다 (지뢰 30: 깃발 대신
+                # 값의 있고 없음으로).
+                out["cp"] = ch9
         out["v"] = self._my_build()      # 실행 중 판 번호 (버전 확인용)
         # 진단 — 꺼진 구역과 마지막 실패 이유. '안 돼요' 제보가 왔을 때
         # 그 컴퓨터에 가지 않고도 무엇이 죽었는지 갈린다 (지뢰 51).
@@ -21529,7 +21912,8 @@ class Mascot:
         # 빠지면 '남이 눌렀는데 내 화면에서 영영 동그라미'가 된다.
         who = [(q.get("slot"), q.get("n"), q.get("lv"), q.get("ti"),
                 q.get("t"), q.get("p"), q.get("s"), q.get("cdh"),
-                q.get("m"), q.get("gm"), q.get("gd"), q.get("dl"))
+                q.get("m"), q.get("gm"), q.get("gd"), q.get("dl"),
+                q.get("cp"))
                for q in self.room_people]
         fresh = [k for k, v in self._room_flash.items()
                  if v > time.time() - 1.6]
@@ -22703,6 +23087,7 @@ class Mascot:
         self._room_song_box = {}
         self._room_song_slots = set()
         self._room_msg_boxes = {}
+        self._chip_hits = {}
         self._goal_hits = {}
         self._due_hits = {}
         self._goal_act = None
@@ -23503,6 +23888,10 @@ class Mascot:
         cv.create_text((kx0 + kx1) / 2, py0 + 12 * k, text=lab, font=f,
                        fill=P["sub"] if (sleeping or off) else P["ink"],
                        tags="dyn")
+        # 상태 칩 — 이름 알약 **왼쪽**에 작은 아이콘과 이름 (요청).
+        # '온라인' 은 신호에 안 실리므로 여기서 저절로 안 그려진다.
+        self._safe("chip_tag", self._room_chip_tag,
+                   cv, p, px0, py0, k, col, kx0, slot)
         if slot != self.char:
             self._safe("sent_chip", self._room_sent_chip, cv, slot,
                        px0 + tw + 24 * k, py0, kx1, k, col)
@@ -24553,6 +24942,93 @@ class Mascot:
                        fill=ink9, tags=("dyn", "ui"))
         self._goal_act = ((x0 - 4 * k, y0 - 4 * k, x0 + w + 4 * k,
                            y0 + h + 4 * k), slot, bool(done))
+
+    def _chip_menu_mark(self):
+        """상태 칩 메뉴를 열 때 지금 상태 앞에 ● 를 찍는다."""
+        sub = getattr(self, "_chip_menu", None)
+        if sub is None:
+            return
+        now9 = self._chip()
+        for i9, (key9, name9, _m, _im, _sh) in enumerate(self.CHIPS):
+            sub.entryconfigure(i9,
+                               label=("●  " if key9 == now9 else "    ") + name9)
+
+    def _chip_icon(self, key, h):
+        """홈 카드에 붙이는 작은 상태 그림 (게임기·팝콘통·밥그릇).
+
+        남의 칸에도 **내 파츠의 그림**을 쓴다 — 모양이 뜻을 나르는 것이라
+        그 사람 파일을 받아 올 이유가 없다. 자리비움은 그림이 없다.
+        게임기는 옆으로 길어 그대로 두면 칸을 다 먹는다 — 폭에 상한을
+        둔다 (요청).
+        """
+        row = self._chip_row(key)
+        if not row[3]:
+            return None
+        h = max(8, int(h))
+        ck = (key, h)
+        # 메뉴는 __init__ 앞쪽에서 만들어져 이 캐시보다 먼저 온다 —
+        # 없으면 여기서 만든다 (지뢰 13 의 순서 함정).
+        if getattr(self, "_chip_icons", None) is None:
+            self._chip_icons = {}
+        got = self._chip_icons.get(ck)
+        if got is not None:
+            return got or None
+        try:
+            im = Image.open(os.path.join(self.parts_dir,
+                                         "chip_%s.png" % row[3])).convert("RGBA")
+            w = max(1, int(im.width * h / max(1, im.height)))
+            cap = int(h * 1.25)               # 가로 상한 (게임기가 길다)
+            if w > cap:
+                h = max(6, int(h * cap / w))
+                w = cap
+            got = ImageTk.PhotoImage(im.resize((w, h), Image.LANCZOS))
+        except Exception:
+            got = False
+        if len(self._chip_icons) > 60:            # 상한 (지뢰 18)
+            for k9 in list(self._chip_icons)[:30]:
+                self._chip_icons.pop(k9, None)
+        self._chip_icons[ck] = got
+        return got or None
+
+    def _room_chip_tag(self, cv, p, px0, py0, k, col, kx0, slot=""):
+        """홈 카드의 상태 칩 — 이름 알약 왼쪽에 그림 + 짧은 낱말.
+
+        신호에 'cp' 가 없으면(=온라인) 아무것도 안 그린다. 모르는 값도
+        마찬가지다 — 옛 판이 새 상태를 보내와도 조용히 넘어간다.
+        낱말이 짧아 잘릴 일이 거의 없다 (정 좁으면 그림만 남긴다).
+        """
+        key = str((p or {}).get("cp") or "")
+        if not key or key == "online" or key not in self.CHIP_KEYS:
+            return
+        row = self._chip_row(key)
+        short = row[4] if len(row) > 4 and row[4] else row[1]
+        f9 = self._uf(7, True)
+        pad = 6 * k
+        x1 = px0 - 6 * k                     # 이름 알약 왼쪽에 붙인다
+        room = x1 - (kx0 + 4 * k)
+        h9 = 17 * k
+        icon = self._chip_icon(key, h9 * 0.80)
+        iw = (icon.width() + 3 * k) if icon is not None else 0
+        head = "" if icon is not None else (row[2] + " ")
+        txt = head + short
+        while txt and (self._room_tw(cv, txt, f9) + pad * 2 + iw) > room:
+            txt = txt[:-1].rstrip()
+        if not txt and (icon is None or iw + pad * 2 > room):
+            return                           # 그림도 못 넣을 만큼 좁다
+        tw9 = self._room_tw(cv, txt, f9) if txt else 0
+        x0 = x1 - (tw9 + pad * 2 + iw)
+        cy = py0 + 12 * k
+        self._rr(cv, x0, cy - h9 / 2, x1, cy + h9 / 2, h9 / 2,
+                 fill="#ffffff", outline=col, width=1)
+        tx = x0 + pad
+        if icon is not None:
+            # 그림은 알약의 **세로 한가운데**에 (요청) — anchor="w" 가
+            # 세로 가운데를 잡아 준다.
+            cv.create_image(tx, cy, image=icon, anchor="w", tags="dyn")
+            tx += iw
+        if txt:
+            cv.create_text(tx, cy, text=txt, font=f9, anchor="w",
+                           fill=self._shade(col, 0.25), tags="dyn")
 
     def _room_sent_chip(self, cv, slot, x0, py0, kx1, k, col):
         """내가 오늘 그 사람에게 보낸 수 — 이름표 바로 오른쪽에.

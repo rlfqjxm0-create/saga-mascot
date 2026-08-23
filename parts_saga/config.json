@@ -610,5 +610,7 @@
    "떨려"
   ]
  },
- "back_steps": 24
+ "back_steps": 24,
+ "chips": true,
+ "prop_over_arms": true
 }
