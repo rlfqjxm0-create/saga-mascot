@@ -5792,6 +5792,7 @@ class Mascot:
         self._chip_hits = {}         # 잘린 상태 칩 자리 (호버용)
         self._chip_hover = None      # 커서가 올라간 칩
         self._chip_kernel = None     # 손끝의 팝콘 한 알 자리
+        self._chip_meta = None       # chip_meta.json (한 번만 읽는다)
         self._chip_note_at = 0.0     # 게임 중 음표 다음 시각
         self._chip_note_side = 1     # 음표가 뜨는 쪽
         self._chip_z_until = 0.0     # 이때까지 z순서를 다시 못박는다
@@ -9597,6 +9598,8 @@ class Mascot:
         ("food", "밥 먹는 중", "◆", "food", "밥"),
     )
     CHIP_KEYS = tuple(c[0] for c in CHIPS)
+    # 그림이 없는 상태의 동그라미 색 (메뉴·홈 공용) — 요청
+    CHIP_DOT = {"online": (88, 196, 104, 255), "away": (245, 158, 52, 255)}
 
     def _chip(self):
         """지금 상태 열쇠. 모르는 값이면 online 으로 본다."""
@@ -9632,8 +9635,8 @@ class Mascot:
 
     def _chip_img(self, key):
         """책상 위에 올리는 그림 (없으면 None). 칸마다 한 번만 읽는다."""
-        if key == "kernel":
-            row = (key, "", "", "kernel")     # 표에 없는 조각 그림
+        if key in ("kernel", "spoon"):
+            row = (key, "", "", key)          # 표에 없는 조각 그림
         else:
             row = self._chip_row(key)
         if not row[3]:
@@ -9651,6 +9654,7 @@ class Mascot:
             # (제보). 게임기는 두 손을 얹어야 해서 넓게 둔다.
             w = max(1, int(deskw * (0.42 if row[3] == "game"
                                     else 0.075 if row[3] == "kernel"
+                                    else 0.15 if row[3] == "spoon"
                                     else 0.27)))
             h = max(1, int(im.height * w / max(1, im.width)))
             im = im.resize((w, h), Image.LANCZOS)
@@ -17494,8 +17498,6 @@ class Mascot:
         if self.cfg.get("chips"):
             # 팝콘통·밥그릇은 팔보다 앞 — 손이 통 안으로 들어가 보인다
             self._safe("chip_front", self._draw_chip_img, True)
-            if getattr(self, "_chip_kernel", None):
-                self._safe("chip_kernel", self._draw_chip_kernel)
 
         if self.has.get("scarf"):       # 목도리 — 팔 위, 머리 아래
             sx, sy = self._pos("scarf")
@@ -17519,6 +17521,10 @@ class Mascot:
             self._safe("pen_hand", self._draw_pen_hand)
         if self._g_hands is not None:        # 제스처 손 — 머리보다 위
             self._safe("gesture_arms", self._draw_gesture_arms, yo)
+        # 손끝의 팝콘 한 알·밥숟가락 — **모든 파츠보다 위** (요청).
+        # 몸짓 팔까지 그린 뒤여야 손에 가려지지 않는다.
+        if self.cfg.get("chips") and getattr(self, "_chip_kernel", None):
+            self._safe("chip_kernel", self._draw_chip_kernel)
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
@@ -17973,8 +17979,12 @@ class Mascot:
         self._g_hands = out
         # 팝콘 한 알을 손끝에 붙여 입으로 가져간다. 입에 닿으면 사라진다
         # (요청). 자리는 그리는 쪽이 쓰도록 남겨 둔다.
-        self._chip_kernel = ((rx, ty) if (key == "movie" and u < 0.88)
-                             else None)
+        # 영화는 팝콘 한 알 — 입에 닿으면 사라진다. 밥은 밥 얹은 숟가락 —
+        # 손에 늘 들려 있다 (요청). 종류를 함께 남겨 그리는 쪽이 고른다.
+        if key == "movie":
+            self._chip_kernel = (rx, ty, "kernel") if u < 0.88 else None
+        else:
+            self._chip_kernel = (rx, ty, "spoon")
         if u > 0.86:                           # 입에 닿는 순간에만 웃는다
             self._g_smile = True
 
@@ -18004,17 +18014,45 @@ class Mascot:
             except Exception:
                 pass
 
+    def _chip_grab(self, key, pil):
+        """chip_meta.json 의 '손이 닿는 점'을 지금 그림 크기로 바꾼 값.
+        없으면 아래 가운데."""
+        meta = getattr(self, "_chip_meta", None)
+        if meta is None:
+            meta = {}
+            try:
+                meta = json.load(io.open(os.path.join(
+                    self.parts_dir, "chip_meta.json"), encoding="utf-8"))
+            except Exception:
+                pass
+            self._chip_meta = meta
+        row = meta.get(key) or {}
+        try:
+            sw, sh = row["size"]
+            gx, gy = row["grab"]
+            return gx * pil.width / max(1, sw), gy * pil.height / max(1, sh)
+        except Exception:
+            return pil.width / 2.0, pil.height * 0.92
+
     def _draw_chip_kernel(self):
-        """손끝에 얹힌 팝콘 한 알 — 통보다 앞에 그린다."""
+        """손끝에 얹힌 팝콘 한 알 / 밥숟가락 — 모든 파츠보다 앞에 그린다."""
         spot = getattr(self, "_chip_kernel", None)
         if not spot:
             return
-        got = self._chip_img("kernel")
+        kind = spot[2] if len(spot) > 2 else "kernel"
+        got = self._chip_img(kind)
         if not got:
             return
         tk_im, pil = got
-        x = spot[0] - pil.width / 2.0
-        y = spot[1] - pil.height * 0.85
+        if kind == "spoon":
+            # 손잡이 끝을 손끝에 쥔다 — 대각선이라 그 점은 chip_meta.json 의
+            # grab 에서 읽는다 (굽는 쪽이 회전·자르기까지 셈해 둔 값).
+            gx, gy = self._chip_grab("spoon", pil)
+            x = spot[0] - gx
+            y = spot[1] - gy
+        else:
+            x = spot[0] - pil.width / 2.0
+            y = spot[1] - pil.height * 0.85
         sh = self._sheet
         if sh is not None:
             sh.blit(pil, x, y, "nw")
@@ -24962,7 +25000,8 @@ class Mascot:
         둔다 (요청).
         """
         row = self._chip_row(key)
-        if not row[3]:
+        dot = self.CHIP_DOT.get(key)
+        if not row[3] and not dot:
             return None
         h = max(8, int(h))
         ck = (key, h)
@@ -24974,14 +25013,30 @@ class Mascot:
         if got is not None:
             return got or None
         try:
-            im = Image.open(os.path.join(self.parts_dir,
-                                         "chip_%s.png" % row[3])).convert("RGBA")
-            w = max(1, int(im.width * h / max(1, im.height)))
-            cap = int(h * 1.25)               # 가로 상한 (게임기가 길다)
-            if w > cap:
-                h = max(6, int(h * cap / w))
-                w = cap
-            got = ImageTk.PhotoImage(im.resize((w, h), Image.LANCZOS))
+            if dot:
+                # 온라인(초록)·자리비움(주황)은 색 동그라미 (요청).
+                # 4배로 그려 줄여 매끈하게 — 메뉴·홈 바탕이 흰색이라
+                # 반투명 가장자리를 그대로 둬도 된다.
+                r = max(3, int(h * 0.30))
+                big = Image.new("RGBA", (r * 8, r * 8), (0, 0, 0, 0))
+                ImageDraw.Draw(big).ellipse([0, 0, r * 8 - 1, r * 8 - 1],
+                                            fill=dot)
+                im = big.resize((r * 2, r * 2), Image.LANCZOS)
+                # 다른 그림과 세로 높이를 맞춰 글자 줄이 안 흔들리게
+                pad = Image.new("RGBA", (max(r * 2, int(h * 0.9)), h),
+                                (0, 0, 0, 0))
+                pad.paste(im, ((pad.width - im.width) // 2,
+                               (h - im.height) // 2), im)
+                got = ImageTk.PhotoImage(pad)
+            else:
+                im = Image.open(os.path.join(
+                    self.parts_dir, "chip_%s.png" % row[3])).convert("RGBA")
+                w = max(1, int(im.width * h / max(1, im.height)))
+                cap = int(h * 1.25)           # 가로 상한 (게임기가 길다)
+                if w > cap:
+                    h = max(6, int(h * cap / w))
+                    w = cap
+                got = ImageTk.PhotoImage(im.resize((w, h), Image.LANCZOS))
         except Exception:
             got = False
         if len(self._chip_icons) > 60:            # 상한 (지뢰 18)
@@ -25011,8 +25066,24 @@ class Mascot:
         iw = (icon.width() + 3 * k) if icon is not None else 0
         head = "" if icon is not None else (row[2] + " ")
         txt = head + short
-        while txt and (self._room_tw(cv, txt, f9) + pad * 2 + iw) > room:
-            txt = txt[:-1].rstrip()
+        # '자리비움' 은 잘린 채로 뜨면 뜻이 안 통한다 (요청) — 안 들어가면
+        # 글자를 한 단계 작게 써 보고, 그래도 안 되면 동그라미만 남긴다.
+        # 한 글자씩 잘라 내는 것은 다른 상태에만 쓴다.
+        if key == "away":
+            # 실측: 글자 46px + 점 22px + 여백 18px = 86px 인데 칸 여유는
+            # 67~80px 다. 글자가 우선이다 — 점·여백을 차례로 양보한다.
+            tw0 = self._room_tw(cv, txt, f9)
+            if tw0 + pad * 2 + iw <= room:
+                pass
+            elif tw0 + pad * 2 <= room:
+                icon, iw = None, 0               # 점을 버린다
+            elif tw0 + 4 * k <= room:
+                icon, iw, pad = None, 0, 2 * k   # 여백까지 줄인다
+            else:
+                txt = ""                         # 정말 좁으면 점만
+        else:
+            while txt and (self._room_tw(cv, txt, f9) + pad * 2 + iw) > room:
+                txt = txt[:-1].rstrip()
         if not txt and (icon is None or iw + pad * 2 > room):
             return                           # 그림도 못 넣을 만큼 좁다
         tw9 = self._room_tw(cv, txt, f9) if txt else 0
