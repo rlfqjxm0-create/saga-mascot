@@ -2189,9 +2189,6 @@ class MacSoundPack(_MacSoundPool):
     인자만 맞춰 두고 무시한다.
     """
 
-    def play(self, key, code=None):
-        return super().play(key)
-
     def __init__(self, folder, volume=60):
         with open(os.path.join(folder, "config.json"), encoding="utf-8") as fp:
             cfg = json.load(fp)
@@ -2207,7 +2204,12 @@ class MacSoundPack(_MacSoundPool):
                 paths.append(p)
         super().__init__(paths, volume)
 
-    def play(self, key):
+    def play(self, key, code=None):
+        # **인자를 둘 받아야 한다.** 부르는 쪽은 늘
+        # `sp.play(key, self._scan_code(key))` 이고, 그 자리는
+        # `except Exception: pass` 로 감싸여 있어서 맞지 않으면 **아무 소리도
+        # 안 나면서 아무 자국도 안 남는다** — 맥에서 타자 소리가 한 번도
+        # 안 났던 원인 (사가 제보). 맥은 어느 키인지 몰라 code 는 안 쓴다.
         self._fire(hash(str(key)) % max(len(self.pool), 1))
 
     def reap(self):
@@ -2704,9 +2706,6 @@ class MacAmbientSound:
     def has(self, name):
         return str(name) in self.names
 
-    def is_on(self, name):
-        return str(name) in self.voices
-
     def on_names(self):
         return sorted(self.voices)
 
@@ -2962,6 +2961,50 @@ def list_monitors():
         out.append(monitor_at(0, 0))
     out.sort(key=lambda r: (r[1], r[0]))
     return out
+
+
+def _screens_union(frames, top):
+    """NSScreen 프레임 목록을 Tk 좌표의 한 범위로 합친다. → (x, y, w, h)
+
+    맥의 화면 좌표는 **주 화면 왼쪽 아래가 0,0 이고 y 가 위로** 자란다.
+    Tk 는 주 화면 왼쪽 위가 0,0 이고 y 가 아래로 자란다. `top` 은 주 화면의
+    높이(= NS 좌표에서 주 화면 위쪽 끝)다.
+
+    맥이 없어도 검사할 수 있게 계산만 떼어 두었다.
+    """
+    if not frames:
+        return None
+    x0 = min(f[0] for f in frames)
+    x1 = max(f[0] + f[2] for f in frames)
+    y0 = min(top - (f[1] + f[3]) for f in frames)
+    y1 = max(top - f[1] for f in frames)
+    return int(x0), int(y0), int(x1 - x0), int(y1 - y0)
+
+
+def _mac_desktop_rect():
+    """맥에서 **모든 화면을 합친** 범위 (Tk 좌표). 못 구하면 None.
+
+    `winfo_screenwidth/vrootwidth` 는 맥에서 **주 화면만** 알려 준다. 그래서
+    보조 화면에 둔 창은 '화면 밖'으로 판정되어 저장해 둔 자리가 버려지고,
+    켤 때마다 주 화면 기본 자리로 돌아갔다 (사가 제보 — 캐릭터도 환경설정
+    창도 같은 이유였다).
+
+    AppKit 은 맥 번들에 반드시 있다 (지뢰 21·57). 실패하면 None 을 돌려
+    예전 판정으로 물러난다.
+    """
+    try:
+        from AppKit import NSScreen
+        scr = list(NSScreen.screens())
+        if not scr:
+            return None
+        p = scr[0].frame()                      # 첫 번째가 주 화면이다
+        top = float(p.origin.y) + float(p.size.height)
+        frames = [(float(s.frame().origin.x), float(s.frame().origin.y),
+                   float(s.frame().size.width), float(s.frame().size.height))
+                  for s in scr]
+        return _screens_union(frames, top)
+    except Exception:
+        return None
 
 
 def monitor_at(x, y):
@@ -5354,6 +5397,7 @@ class Mascot:
                                      # tick 이 draw 보다 먼저 이 값을 본다)
         self._face_now = None        # 지금 짓고 있는 곁표정 (지뢰 13)
         self._face_until = 0.0
+        self._face_text = ""         # 그 표정을 지을 때 한 말 (같은 말이면 유지)
         self._face_part = None       # 이번 프레임에 그릴 곁표정
         self._fortune_at = 0.0       # 이 시각이 되면 운세를 말한다 (0=없음)
         self._brief_key = None       # 브리핑을 어느 날짜로 찍을지 (지뢰 14)
@@ -10300,6 +10344,14 @@ class Mascot:
                 vh = u32.GetSystemMetrics(79)
                 return (vx - 40 <= x <= vx + vw - 60
                         and vy - 20 <= y <= vy + vh - 60)
+            # 맥은 화면이 여럿일 수 있는데 winfo_screenwidth 는 주 화면만
+            # 알려 준다 — 보조 화면에 둔 창이 '화면 밖'이 되어 자리가
+            # 버려졌다 (사가 제보).
+            rect = _mac_desktop_rect() if IS_MAC else None
+            if rect:
+                vx, vy, vw, vh = rect
+                return (vx - 40 <= x <= vx + vw - 60
+                        and vy - 20 <= y <= vy + vh - 60)
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
             return -40 <= x <= sw - 60 and -20 <= y <= sh - 60
@@ -10712,10 +10764,18 @@ class Mascot:
             x, y = int(d["win_x"]), int(d["win_y"])
         except Exception:
             return base
-        vx = self.root.winfo_vrootx() if hasattr(self.root, "winfo_vrootx") else 0
-        vy = self.root.winfo_vrooty() if hasattr(self.root, "winfo_vrooty") else 0
-        vw = max(self.root.winfo_vrootwidth(), sw)
-        vh = max(self.root.winfo_vrootheight(), sh)
+        # 맥은 vroot 도 **주 화면만** 알려 준다 — 보조 화면에 둔 캐릭터가
+        # 켤 때마다 주 화면 기본 자리로 돌아간 원인 (사가 제보).
+        rect = _mac_desktop_rect() if IS_MAC else None
+        if rect:
+            vx, vy, vw, vh = rect
+        else:
+            vx = (self.root.winfo_vrootx()
+                  if hasattr(self.root, "winfo_vrootx") else 0)
+            vy = (self.root.winfo_vrooty()
+                  if hasattr(self.root, "winfo_vrooty") else 0)
+            vw = max(self.root.winfo_vrootwidth(), sw)
+            vh = max(self.root.winfo_vrootheight(), sh)
         if (x + self.W < vx + 40 or x > vx + vw - 40
                 or y + self.H < vy + 40 or y > vy + vh - 40):
             return base                      # 그 자리에 이제 화면이 없다
@@ -11717,12 +11777,27 @@ class Mascot:
         return random.choice(pool)
 
     def _face_show(self, text=None, secs=None, now=None):
-        """곁표정을 짓는다. 그릴 것이 없으면 아무 일도 안 한다."""
+        """곁표정을 짓는다. 그릴 것이 없으면 아무 일도 안 한다.
+
+        **같은 말이 이어지는 동안에는 다시 뽑지 않는다.** 스트레칭 알림은
+        말풍선을 붙잡아 두려고 매 프레임 `_say` 를 부르는데, 그때마다
+        새로 뽑으면 `_face_for` 가 무작위로 고르므로 초당 수십 번 얼굴이
+        바뀐다 — '표정이 엄청 빠르게 깜빡거린다'(사가 제보). 곁표정이
+        있는 캐릭터가 사가뿐이라 다른 사람에게는 안 보였다.
+        시간이 다 되어 표정이 내려간 뒤에 같은 말을 또 하면 그때는
+        새로 뽑는다.
+        """
+        now = time.time() if now is None else now
+        if (self._face_now and now < self._face_until
+                and str(text or "") == self._face_text):
+            self._face_until = max(self._face_until,
+                                   now + float(secs or self.FACE_SECS))
+            return self._face_now
         pick = self._face_for(text)
         if not pick:
             return None
-        now = time.time() if now is None else now
         self._face_now = pick
+        self._face_text = str(text or "")
         self._face_until = now + float(secs or self.FACE_SECS)
         return pick
 
@@ -23597,19 +23672,6 @@ class Mascot:
 
     CAL_S = 0.72             # 달력 아이콘 크기 배율 (요청 — 더 작게)
     CAL_PAD = 6              # 카드 왼쪽·위 모서리에서 떨어진 거리 (k 배)
-
-    def _room_cal_box(self, kx0, ky0, k):
-        """달력 아이콘이 차지하는 네모.
-
-        **그리는 쪽(_room_cal_draw)과 비켜 서는 쪽(말풍선)이 같은 값을
-        본다.** 예전에는 달력이 제 안에서 자리를 정하고 말풍선은 손으로
-        적은 수(32*k)를 비켜 서고 있어서, 한쪽만 고치면 말풍선이 아이콘
-        뒤로 들어갔다.
-        """
-        r = 10 * k * self.CAL_S
-        x0 = kx0 + self.CAL_PAD * k
-        y0 = ky0 + self.CAL_PAD * k
-        return (x0, y0, x0 + 2 * r, y0 + 2 * r)
 
     def _room_cal_img(self, col, px):
         """달력 아이콘 한 장 — PIL 로 구워 얹는다.
