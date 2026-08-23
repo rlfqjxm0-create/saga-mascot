@@ -19547,8 +19547,12 @@ class Mascot:
             # 불러 셈을 소모해, 정작 네트워크 박자에 그림이 안 실렸다.
             # 40초마다 8초 창이면 어떤 박자든 곧 걸린다.
             out["cdh"] = ch
-            now2 = time.time()
-            if getattr(self, "_cd_push", False) or (now2 % 40.0) < 8.0:
+            # 그림 본체는 **바꾼 직후(_cd_push)와 청받았을 때(cdq)만** 싣는다.
+            # 예전에는 40초마다 8초 창으로 늘 되풀이했는데, 모두가 이미
+            # 가진 그림을 영원히 다시 보내는 것이라 전송량의 85%였다
+            # (실측). 유실은 받는 쪽 재청 그물이 막는다 (_room_tick 의
+            # cdq — 불일치가 남아 있는 동안 60초마다 다시 청한다).
+            if getattr(self, "_cd_push", False):
                 out["cd"] = b64
                 # 그림(≤20000자)과 릴레이를 **같은 신호에 싣지 않는다.**
                 # 둘을 합치면 봉인 후 서버 상한(32000)을 넘을 수 있고,
@@ -19639,6 +19643,12 @@ class Mascot:
             # 실려 온 신호는 통째로 버려졌다 (제보 '방 칸 그림이 바로 안
             # 바뀐다'). 청해서 받아 낸 그림이 바로 그런 신호다.
             self._safe("deco_take", self._room_deco_take, people)
+            # **재청 그물** — 광고된 해시와 내가 가진 그림이 다른 동안
+            # 계속 청한다 (자리당 60초 제한은 _room_cd_ask 안에 있다).
+            # 그리기에 매달면 안 된다: 다시 그리기는 화면 열쇠가 바뀔
+            # 때만 돌아서, 청이 한 번 새면 재청이 영영 안 올 수 있다
+            # (지뢰 97 — 화면과 무관하게 필요한 일은 통신 바퀴에).
+            self._safe("cd_net", self._room_cd_net, people)
             for q in people:              # 깜빡임 완충용 — 마지막 모습
                 sl9 = q.get("slot") or ""
                 if sl9 and not q.get("off"):
@@ -24698,6 +24708,27 @@ class Mascot:
     def _slot_sane(slot):
         return "".join(ch for ch in str(slot)
                        if ch.isalnum() or ch == "_")[:40]
+
+    def _room_cd_net(self, people):
+        """방 칸 그림 재청 그물 — 불일치가 남아 있으면 다시 청한다.
+
+        청하기(cdq)는 네 곳 어디서든 샐 수 있다 (내 청 유실 · 상대의
+        20초 응답 방패 · 그림 실은 신호 유실 · 내가 받다 놓침). 어디서
+        새든 결과는 하나 — '상대가 매 신호에 싣는 해시(cdh) ≠ 내가
+        저장한 해시'가 그대로 남는다. 그래서 그 불변식만 보면 된다.
+        성공하는 순간 불일치가 사라져 저절로 멈춘다.
+        """
+        if self.room_net is None:
+            return
+        have = self._room_peer_hashes()
+        for q in people or []:
+            slot = q.get("slot") or ""
+            cdh = str(q.get("cdh") or "")
+            if (not slot or slot == self.char or not cdh
+                    or q.get("off") or q.get("cd")):
+                continue          # 그림이 같이 실려 왔으면 청할 것 없다
+            if have.get(slot) != cdh:
+                self._room_cd_ask(slot)
 
     def _room_cd_ask(self, slot):
         """'방 그림 좀 다시 보내 줘' — 자리마다 60초에 한 번만 청한다.
