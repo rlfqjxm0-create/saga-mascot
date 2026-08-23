@@ -5633,6 +5633,39 @@ class Mascot:
                                                     self._pomo_win))
         # 여기까지가 '오늘 할 일' 묶음 — 아래는 꾸미기·소리 묶음 (요청)
         menu.add_separator()
+        # 상태 칩 — 지금 무엇을 하는 중인지 홈에 알린다 (요청).
+        # 맨 위에 두고(요청: 상태 칩 → 소품 새로고침 → BGM → 슬라임),
+        # 커서를 올리면 목록이 옆으로 나온다.
+        if self.cfg.get("chips"):
+            sub9 = tk.Menu(menu, tearoff=0, font=self._uf(9),
+                           bg=self.card["panel"], fg=self.card["text"],
+                           activeforeground="#ffffff",
+                           activebackground=self._shade(
+                               self.card["fill"], 0.22))
+            for key9, name9, _mark9, _img9, _short9 in self.CHIPS:
+                # _safe_str 는 그림을 빈 글자로 바꾼다 (지뢰 63) — 직접 감싼다
+                try:
+                    ico9 = self._chip_icon(key9, 15)
+                except Exception:
+                    ico9 = None
+                sub9.add_command(
+                    label="    " + name9,
+                    image=(ico9 or ""), compound="left",
+                    command=lambda k=key9: self._safe("chip", self._chip_set, k))
+            # **표시는 열 때마다 다시 찍는다.** 메뉴는 켤 때 한 번만
+            # 만들어지므로, 만들 때의 상태에 ● 를 박아 두면 나중에 상태를
+            # 바꿔도 그대로 남는다 (제보: 밥 먹는 중인데 온라인에 붙어
+            # 있었다). 슬라임 목록이 쓰는 postcommand 와 같은 방법이다.
+            sub9.config(postcommand=lambda: self._safe(
+                "chip_menu_mark", self._chip_menu_mark))
+            menu.add_cascade(label="상태 칩", menu=sub9)
+            self._chip_menu = sub9
+        # 소품 새로고침 — 껐다 켜야만 소품이 바뀌던 것을 그 자리에서
+        # 바꾼다 (건의). 뽑을 것이 둘 이상일 때만 보인다.
+        if self._prop_count() > 1:
+            menu.add_command(label="소품 새로고침",
+                             command=lambda: self._safe("prop_refresh",
+                                                        self._prop_refresh))
         if self._yt_on() or self._amb is not None:
             # BGM 하나로 모은다 — 유튜브 노래와 환경음이 같은 자리에 있어야
             # '무엇을 틀까'를 한 곳에서 고르게 된다.
@@ -5678,38 +5711,6 @@ class Mascot:
                 sub.config(postcommand=lambda: self._safe(
                     "slime_seen_menu", self._slime_menu_seen))
             self._slime_menu = sub
-        # 상태 칩 — 지금 무엇을 하는 중인지 홈에 알린다 (요청).
-        # BGM·슬라임 아래에 두고, 커서를 올리면 목록이 옆으로 나온다.
-        if self.cfg.get("chips"):
-            sub9 = tk.Menu(menu, tearoff=0, font=self._uf(9),
-                           bg=self.card["panel"], fg=self.card["text"],
-                           activeforeground="#ffffff",
-                           activebackground=self._shade(
-                               self.card["fill"], 0.22))
-            for key9, name9, _mark9, _img9, _short9 in self.CHIPS:
-                # _safe_str 는 그림을 빈 글자로 바꾼다 (지뢰 63) — 직접 감싼다
-                try:
-                    ico9 = self._chip_icon(key9, 15)
-                except Exception:
-                    ico9 = None
-                sub9.add_command(
-                    label="    " + name9,
-                    image=(ico9 or ""), compound="left",
-                    command=lambda k=key9: self._safe("chip", self._chip_set, k))
-            # **표시는 열 때마다 다시 찍는다.** 메뉴는 켤 때 한 번만
-            # 만들어지므로, 만들 때의 상태에 ● 를 박아 두면 나중에 상태를
-            # 바꿔도 그대로 남는다 (제보: 밥 먹는 중인데 온라인에 붙어
-            # 있었다). 슬라임 목록이 쓰는 postcommand 와 같은 방법이다.
-            sub9.config(postcommand=lambda: self._safe(
-                "chip_menu_mark", self._chip_menu_mark))
-            menu.add_cascade(label="상태 칩", menu=sub9)
-            self._chip_menu = sub9
-        # 소품 새로고침 — 껐다 켜야만 소품이 바뀌던 것을 그 자리에서
-        # 바꾼다 (건의). 뽑을 것이 둘 이상일 때만 보인다.
-        if self._prop_count() > 1:
-            menu.add_command(label="소품 새로고침",
-                             command=lambda: self._safe("prop_refresh",
-                                                        self._prop_refresh))
         menu.add_separator()
         if ROOM_URL and ROOM_KEY:
             # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
@@ -10897,10 +10898,42 @@ class Mascot:
                 got.GetWindowThreadProcessId.argtypes = [
                     ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
                 got.GetWindowThreadProcessId.restype = ctypes.c_ulong
+                # z순서 걷기(_layer_buried)도 이 손잡이를 쓴다 — 64비트
+                # 핸들이 잘리지 않게 (지뢰 23)
+                got.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                got.GetWindow.restype = ctypes.c_void_p
             except Exception:
                 got = False
             self._u32p = got
         return got or None
+
+    def _layer_buried(self):
+        """본체 창이 몸 레이어보다 **앞**에 있는가.
+
+        레이어에서 z순서를 아래로 몇 창만 걸어 본체가 나오면 레이어가
+        앞(정상)이다. 못 찾으면 본체가 앞으로 나온 것이다. 창 몇 개만
+        보므로 매 프레임 불러도 값이 없다(실측 µs 단위).
+        """
+        lay = self._char_lay
+        if not IS_WIN or lay is None or not self._main_hwnd:
+            return False
+        h = getattr(lay, "hwnd", None)
+        if not h:
+            return False
+        try:
+            u = self._u32_pid()
+            if u is None:
+                return False
+            cur = u.GetWindow(ctypes.c_void_p(h), 2)      # GW_HWNDNEXT
+            for _ in range(48):
+                if not cur:
+                    break
+                if cur == self._main_hwnd:
+                    return False
+                cur = u.GetWindow(ctypes.c_void_p(cur), 2)
+            return True
+        except Exception:
+            return False
 
     def _z_pin(self, now):
         """'항상 위'인데도 뒤로 밀렸으면 다시 올린다.
@@ -15510,6 +15543,15 @@ class Mascot:
                 self._z_check = now          # z순서만 가끔 재고정
                 if self._char_lay is not None:
                     self._char_lay.place_above(self._main_hwnd)
+                if self.shadow is not None:
+                    self.shadow.place(*pos, self._main_hwnd)
+            # **본체가 몸 레이어보다 앞에 있으면 그 자리에서 되돌린다.**
+            # 메뉴가 닫히거나 창을 누르면 본체가 앞으로 나오는데, 위의
+            # 8초 재고정은 3초짜리 말풍선이 끝난 뒤에야 돈다 — 상태 칩을
+            # 바꿀 때마다 말풍선이 카드 뒤에 숨던 제보의 뿌리다. 매 프레임
+            # **재고 나서** 어긋났을 때만 올리므로 깜빡이지 않는다 (지뢰 15).
+            if self._char_lay is not None and self._layer_buried():
+                self._char_lay.place_above(self._main_hwnd)
                 if self.shadow is not None:
                     self.shadow.place(*pos, self._main_hwnd)
         # 기존 타이머(에이전트)에게 '캐릭터 타이머가 살아 있다'고 알린다.
