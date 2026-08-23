@@ -5951,6 +5951,7 @@ class Mascot:
         self._deco_dims = {}         # 그림 실제 크기 (드래그 환산용)
         self._cd_mem = None          # 내 방 칸 그림의 작은 사본 (mtime 기억)
         self._cd_push = True         # 켠 직후 첫 신호에 그림을 실어 보냄
+        self._cd_burst = 0.0         # 그림을 계속 싣는 분사 마감 시각
         self._cd_n = 0               # 그림을 이따금만 싣는 셈
         self._room_peer_hash = None  # 남의 방 칸 그림 해시 (첫 사용 때 읽음)
         self._room_tone_cache = {}
@@ -19552,7 +19553,17 @@ class Mascot:
             # 가진 그림을 영원히 다시 보내는 것이라 전송량의 85%였다
             # (실측). 유실은 받는 쪽 재청 그물이 막는다 (_room_tick 의
             # cdq — 불일치가 남아 있는 동안 60초마다 다시 청한다).
-            if getattr(self, "_cd_push", False):
+            # **한 신호에만 실으면 느리다** — 서버는 자리마다 마지막
+            # 신호 하나만 남기므로, 다음 일반 신호가 5~30초 만에 덮으면
+            # 받는 쪽 폴링이 그 순간을 놓치고 재청(60초)으로 몇 분씩
+            # 걸린다 (패왕 그림 제보). 그래서 20초 동안의 신호들에 계속
+            # 실어, 받는 쪽이 언제 읽어도 첫 시도에 잡히게 한다.
+            now2 = time.time()
+            if getattr(self, "_cd_push", False) and for_net:
+                self._cd_push = False
+                self._cd_burst = now2 + 20.0
+            if (getattr(self, "_cd_push", False)
+                    or now2 < getattr(self, "_cd_burst", 0.0)):
                 out["cd"] = b64
                 # 그림(≤20000자)과 릴레이를 **같은 신호에 싣지 않는다.**
                 # 둘을 합치면 봉인 후 서버 상한(32000)을 넘을 수 있고,
@@ -19560,8 +19571,6 @@ class Mascot:
                 # 사라진다 (지뢰 56 — 실측 최악 49980자). 릴레이는 다음
                 # 신호(8초 뒤)에 실리면 그만이다.
                 out.pop("rly", None)
-                if for_net:          # 진짜 나갈 때만 깃발을 내린다
-                    self._cd_push = False
         return out
 
     def _room_start(self):
