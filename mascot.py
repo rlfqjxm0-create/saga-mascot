@@ -3100,6 +3100,10 @@ CHARS = [
     # 어긋났는지 보는 검사가 이 자리를 건너뛴다.
     {"slot": "parts_jerry", "repo": "jerry-mascot", "name": "제리",
      "tint": "#9a9ba3", "tint_custom": True},
+    {"slot": "parts_ginggyu", "repo": "ginggyu-mascot", "name": "깅규",
+     "tint": "#8ed3f9"},
+    {"slot": "parts_hadok", "repo": "hadok-mascot", "name": "하독",
+     "tint": "#3b57d4"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False},
@@ -5395,6 +5399,9 @@ class Mascot:
         self._bubble_cookie = None   # 그 말풍선 안의 깐 포춘쿠키 (지뢰 13)
         self._cur_near = False       # 커서가 캐릭터 곁에 있는가 (지뢰 13 —
                                      # tick 이 draw 보다 먼저 이 값을 본다)
+        self._tongue_at = 0.0        # 마지막으로 날름거린 시각
+        self._tongue_cache = {}      # 칸별로 구워 둔 혀 그림
+        self._tongue_next = 0.0      # 다음 차례 (지뢰 13)
         self._face_now = None        # 지금 짓고 있는 곁표정 (지뢰 13)
         self._face_until = 0.0
         self._face_text = ""         # 그 표정을 지을 때 한 말 (같은 말이면 유지)
@@ -6543,7 +6550,8 @@ class Mascot:
         pil_cache = {}
         for name in ("body_open", "pupils", "body_mask", "lashes", "hair",
                      "eyes_closed", "head", "desk", "arm_pen",
-                     "smile", "pet1", "pet2", "scarf", "back") \
+                     "smile", "pet1", "pet2", "scarf", "back",
+                     "tongue") \
                 + tuple(self.layout.get("faces") or []):
             # 파일과 layout 위치가 둘 다 있어야 사용 (자동업데이트 섞임 대비)
             self.has[name] = (os.path.exists(os.path.join(self.parts_dir,
@@ -7134,6 +7142,18 @@ class Mascot:
             elif deco == "sushi":                  # 연어: 초밥 실루엣
                 d.ellipse([mx - 23, cy0 - 17, mx + 23, cy0 + 12],
                           fill=(0, 0, 0, 255))
+            elif deco == "ice":                    # 깅규: 각얼음 실루엣
+                d.polygon([(mx - 14, cy0 - 13), (mx - 4, cy0 - 23),
+                           (mx + 16, cy0 - 23), (mx + 16, cy0 - 1),
+                           (mx + 6, cy0 + 9), (mx - 14, cy0 + 9)],
+                          fill=(0, 0, 0, 255))
+            elif deco == "heart":                  # 하독: 하트 실루엣
+                d.ellipse([mx - 18.5, cy0 - 32, mx + 0.5, cy0 - 13],
+                          fill=(0, 0, 0, 255))
+                d.ellipse([mx - 0.5, cy0 - 32, mx + 18.5, cy0 - 13],
+                          fill=(0, 0, 0, 255))
+                d.polygon([(mx - 18.5, cy0 - 21), (mx + 18.5, cy0 - 21),
+                           (mx, cy0 - 2)], fill=(0, 0, 0, 255))
             elif deco == "tangerine":              # 레냥: 귤 실루엣
                 d.ellipse([mx - 16, cy0 - 15, mx + 16, cy0 + 13],
                           fill=(0, 0, 0, 255))
@@ -11565,6 +11585,39 @@ class Mascot:
                 sx2, cy2 = mx + dx2, y0 - 8
                 c.create_line(sx2 - 4, cy2 + half, sx2 + 4, cy2 - half,
                               fill="#f8cfb6", width=2, capstyle="round")
+        elif deco == "ice":
+            # 깅규: 각얼음 한 덩이 (윗면·앞면·옆면으로 각을 낸다)
+            mx = (x0 + x1) / 2
+            top, front, side = "#dcf2fd", "#a9ddf8", "#86c8ee"
+            line = "#3f5560"
+            c.create_polygon(mx - 14, y0 - 13, mx - 4, y0 - 23,
+                             mx + 16, y0 - 23, mx + 6, y0 - 13,
+                             fill=top, outline=line, width=2)
+            c.create_polygon(mx - 14, y0 - 13, mx + 6, y0 - 13,
+                             mx + 6, y0 + 9, mx - 14, y0 + 9,
+                             fill=front, outline=line, width=2)
+            c.create_polygon(mx + 6, y0 - 13, mx + 16, y0 - 23,
+                             mx + 16, y0 - 1, mx + 6, y0 + 9,
+                             fill=side, outline=line, width=2)
+            self._oval(c, mx - 10, y0 - 20, mx - 2, y0 - 16,
+                       fill="#ffffff", outline="")
+        elif deco == "heart":
+            # 하독: 파란 하트 (몸도 하트 모양이다). 광은 넣지 않는다.
+            # **꼬리까지 카드 위에** 둔다 — 아래가 잘리면 하트로 안 보인다.
+            # 그래서 이 캐릭터는 card_top 을 넉넉히(34) 잡아 둔다.
+            mx = (x0 + x1) / 2
+            col, hw = "#3f6fd6", 38
+            img = self._soft_heart(hw, col)
+            if img is not None:
+                c.create_image(mx - img.width() / 2,
+                               y0 - 2 - img.height(), image=img, anchor="nw")
+            else:                       # 매끈하게 못 만들면 도형으로
+                r, cy = hw / 4.0, y0 - 2 - hw * 0.75 + hw / 4.0
+                for ex in (mx - hw / 4.0, mx + hw / 4.0):
+                    self._oval(c, ex - r, cy - r, ex + r, cy + r,
+                               fill=col, outline="")
+                c.create_polygon(mx - hw / 2.0, cy, mx + hw / 2.0, cy,
+                                 mx, y0 - 2, fill=col, outline="")
         elif deco == "tangerine":
             # 레냥: 귤 한 알 (열매 + 초록 꼭지잎)
             mx = (x0 + x1) / 2
@@ -14901,6 +14954,7 @@ class Mascot:
         for cache in (getattr(self, "_tilt_cache", None),
                       getattr(self, "_back_cache", None),
                       getattr(self, "_arm_cache", None),
+                      getattr(self, "_tongue_cache", None),
                       getattr(self, "_pet_cache", None)):
             try:
                 cache.clear()
@@ -14974,6 +15028,46 @@ class Mascot:
             for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
                 self._soft_cache.pop(old, None)
         self._soft_cache[ck] = got
+        return got
+
+    def _soft_heart(self, w, fill, pad=2):
+        """매끈한 납작 하트 한 장 (캐시). 실패하면 None.
+
+        흔한 하트 = **동그라미 둘 + 아래 세모**. Tk 로 그리면 셋이 만나는
+        자리가 계단지므로 4배로 그려 줄이고 가장자리를 키 색과 섞는다
+        (지뢰 65·124 — 카드·말풍선이 쓰는 그 방법).
+
+        가로 w 를 주면 높이는 0.75w 가 된다 (흔한 하트의 비율).
+        """
+        w = int(round(w))
+        h = int(round(w * 0.75))
+        ck = ("heart", w, fill, pad, self.canvas_bg)
+        got = self._soft_cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            S = 4
+            iw, ih = w + pad * 2, h + pad * 2
+            im = Image.new("RGBA", (iw * S, ih * S), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            o = pad * S
+            W, H = w * S, h * S
+            r = W / 4.0
+            for cx in (o + r, o + W - r):
+                d.ellipse([cx - r, o, cx + r, o + 2 * r], fill=fill)
+            d.polygon([(o, o + r), (o + W, o + r), (o + W / 2.0, o + H)],
+                      fill=fill)
+            im = im.resize((iw, ih), Image.LANCZOS)
+            key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16)
+                         for i in (1, 3, 5))
+            got = ImageTk.PhotoImage(flat_on_key(im, key2))
+            got._pil_src = im        # 매끈 경로의 시트가 알아보게 (지뢰 128)
+            if len(self._soft_cache) > 240:
+                for old in list(self._soft_cache)[:120]:
+                    self._soft_cache.pop(old, None)
+            self._soft_cache[ck] = got
+        except Exception:
+            return None
         return got
 
     def _soft_circle(self, cv, cx, cy, r, fill, outline, lw=None):
@@ -17114,6 +17208,10 @@ class Mascot:
             self._safe("prop_back", self._draw_prop_back, now, yo)
         bx, by = self._pos("body_open")
         self._safe("body", self._put, "body_open", bx, by + yo)
+        # 뱀 혓바닥 — 몸 위·머리 아래 (PSD 레이어 차례 그대로).
+        # 머리를 뒤에 그리므로 위로 밀면 저절로 입 안으로 들어간다.
+        if self.has.get("tongue"):
+            self._safe("tongue", self._draw_tongue, now, yo)
         if not self.has.get("head"):
             self._safe("face", self._draw_face, yo, pdx, pdy, blinking, smiling)
         elif head_early:                # 준사: 책상·팔이 머리 위 (PSD 순서)
@@ -17447,6 +17545,65 @@ class Mascot:
             self._pen_vec = ((tipx * s + m) - ax, tipy * s - ay)
         except Exception:
             self._pen_vec = None
+
+    # ── 뱀 혓바닥 (하독) ──────────────────────────────────────────────
+    # 쉭— 하고 두 번 날름거렸다 들어간다. 머리를 나중에 그리므로 위로
+    # 밀어 넣기만 하면 입 안으로 사라진다 — 파츠를 껐다 켤 필요가 없다.
+    TONGUE_GAP = (2.6, 7.0)      # 쉭쉭 사이 쉬는 시간 (초)
+    TONGUE_OUT = 0.28            # 한 번 내밀었다 넣는 데 걸리는 시간
+    TONGUE_TIMES = 2             # 한 번에 몇 번 (쉭·쉭)
+
+    def _tongue_ext(self, now):
+        """지금 혀가 얼마나 나와 있나 — 0(숨음) ~ 1(끝까지)."""
+        if now >= self._tongue_next:
+            self._tongue_at = now
+            self._tongue_next = now + random.uniform(*self.TONGUE_GAP)
+        t = now - self._tongue_at
+        span = self.TONGUE_OUT * self.TONGUE_TIMES
+        if t < 0.0 or t > span:
+            return 0.0
+        u = (t % self.TONGUE_OUT) / self.TONGUE_OUT
+        return math.sin(u * math.pi) ** 0.7        # 쑥 나왔다 쏙 들어감
+
+    TONGUE_STEPS = 10            # 미리 구워 두는 칸 수
+
+    def _tongue_pic(self, k):
+        """혀를 위에서 k/N 만큼만 남긴 그림. 칸마다 한 번만 굽는다.
+
+        **위로 밀어 숨기는 방법은 안 된다** — 몸이 불투명이라 안 가려지고
+        얼굴 위에 빨간 자국으로 남는다 (찍어서 확인했다). 입에서 스르륵
+        나오게 하려면 나온 만큼만 잘라 그려야 한다.
+        """
+        got = self._tongue_cache.get(k)
+        if got is not None:
+            return got
+        src = self._pil_cache.get("tongue")
+        if src is None:
+            return None
+        h = max(1, int(round(src.height * k / self.TONGUE_STEPS)))
+        im = src.crop((0, 0, src.width, h))
+        firm = im if "tongue" in self._soft_parts else self._hard(im)
+        got = (im, self._tkimg(firm, im))
+        self._tongue_cache[k] = got
+        return got
+
+    def _draw_tongue(self, now, yo):
+        """혓바닥 — 입에서 나온 만큼만 그린다. 다 들어가면 안 그린다."""
+        e = 0.0 if self._force.get("sleep") else self._tongue_ext(now)
+        k = int(round(e * self.TONGUE_STEPS))
+        if k <= 0:
+            return                                 # 입 안 — 아무것도 없다
+        got = self._tongue_pic(k)
+        if not got:
+            return
+        pil, tk = got
+        tx, ty = self._pos("tongue")
+        dx = math.sin(now * 30.0) * 2.6 * self.s * e
+        sh = self._sheet
+        if sh is not None:
+            sh.blit(pil, tx + dx, ty + yo, "nw")
+        else:
+            self.canvas.create_image(tx + dx, ty + yo, image=tk, anchor="nw")
 
     def _draw_pen_hand(self):
         """펜 쥔 손. 퀸시처럼 펜이 맨 위 레이어인 캐릭터는 머리를 그린 뒤 호출.
@@ -17854,6 +18011,21 @@ class Mascot:
                     cv.create_line(sx2 - 4, y + half, sx2 + 4, y - half,
                                    fill="#f8cfb6", width=2,
                                    capstyle="round")
+            elif deco == "ice":                # 깅규: 각얼음
+                cv.create_polygon(mx - 16, y + 2, mx - 5, y - 9,
+                                  mx + 18, y - 9, mx + 7, y + 2,
+                                  fill="#dcf2fd", outline="#3f5560", width=2)
+                cv.create_polygon(mx - 16, y + 2, mx + 7, y + 2,
+                                  mx + 7, y + 24, mx - 16, y + 24,
+                                  fill="#a9ddf8", outline="#3f5560", width=2)
+                cv.create_polygon(mx + 7, y + 2, mx + 18, y - 9,
+                                  mx + 18, y + 13, mx + 7, y + 24,
+                                  fill="#86c8ee", outline="#3f5560", width=2)
+            elif deco == "heart":              # 하독: 파란 하트
+                img2 = self._soft_heart(42, "#3f6fd6")
+                if img2 is not None:
+                    cv.create_image(mx - img2.width() / 2, y - 9,
+                                    image=img2, anchor="nw")
             elif deco == "tangerine":          # 레냥: 귤 한 알
                 self._oval(cv, mx - 19, y - 8, mx + 19, y + 24,
                                fill="#f5a623", outline="#c97c12", width=2)

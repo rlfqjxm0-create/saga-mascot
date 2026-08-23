@@ -1,7 +1,7 @@
 {
- "version": 1787481046,
+ "version": 1787489002,
  "files": {
-  "mascot.py": "e34ddbb3d4d38897a0121b4df28568512d2504f4347a3b9ee6c43c3c656f9733",
+  "mascot.py": "594c9bff085bf96fe5528c32f446f654e443aad676dd092350291cd77e9f85bf",
   "parts_saga/arm_key.png": "440b875d9258e461461151caadb0b8f2732b00751f7ca99aa6426c5e8e8fdc7b",
   "parts_saga/arm_pen.png": "37a4af1f943980ea1e2dadfb73125f50e36d99b6c17891d75b416ef358c71d51",
   "parts_saga/arm_right.png": "793cb37088762858956fe763cf299c48c4860f37d178f9e8a7e959b48c246b3e",
@@ -521,6 +521,8 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "새 친구가 둘 들어왔어요 — 각얼음 깅규와 독사 하독이에요. 홈에서 만나 보세요!",
+  "우클릭 메뉴에 '오류 기록 폴더 열기'가 생겼어요. 뭔가 안 될 때 보내 주실 파일을 바로 찾을 수 있어요."
+ ]
 }
