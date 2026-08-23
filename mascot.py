@@ -19141,6 +19141,125 @@ class Mascot:
         return (str(self.us.get("room_song") or ""),
                 str(self.us.get("room_song_title") or ""))
 
+    def _yt_embeddable(self, vid):
+        """그 영상을 임베드로 틀 수 있는가 — True / False / None(모름).
+
+        유튜브 oEmbed 는 임베드가 막힌 영상에 401/403 을 돌려준다.
+        확인 실패(네트워크·기타)는 None — 그때는 막지 않는다.
+        vid 는 _yt_ids 가 걸러 준 영문·숫자라 그대로 붙여도 안전하다.
+        """
+        try:
+            req = urllib.request.Request(
+                "https://www.youtube.com/oembed?url=https%3A%2F%2Fyoutu.be"
+                "%2F" + str(vid) + "&format=json",
+                headers={"User-Agent": "mascot-embed"})
+            with urllib.request.urlopen(req, timeout=6,
+                                        context=_ssl_ctx()) as r:
+                return 200 <= getattr(r, "status", 200) < 300
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return False
+            return None                # 404(없는 영상) 등 — 재생이 알려 준다
+        except Exception:
+            return None
+
+    def _room_song_try(self, url):
+        """오늘의 노래 저장 — 임베드가 막힌 영상이면 물어보고 올린다.
+
+        창이 굳지 않게 확인은 딴 스레드에서 하고, 결과는 after 폴링으로
+        받는다 (스레드에서 Tk 를 직접 부르지 않는다 — 지뢰 26 부류).
+        """
+        url = str(url or "").strip()
+        if not url or url == self._room_song()[0]:
+            return self._room_song_set(url)      # 지우기·그대로 — 바로
+        vid, _lst = ("", "")
+        try:
+            vid, _lst = self._yt_ids(url)
+        except Exception:
+            pass
+        if not vid:                              # 재생목록 등 — 확인 불가
+            return self._room_song_set(url)
+        res = {}
+
+        def work():
+            try:
+                res["e"] = self._yt_embeddable(vid)
+            except Exception:
+                res["e"] = None
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll(n=0):
+            if "e" not in res:
+                if n > 50:                       # ~7.5초 — 그만 기다린다
+                    res["e"] = None
+                else:
+                    self.root.after(150, lambda: poll(n + 1))
+                    return
+            if res["e"] is False:
+                self._safe("song_ask", self._song_embed_ask, url)
+            else:
+                self._room_song_set(url)
+
+        poll()
+
+    def _song_embed_ask(self, url):
+        """'임베드가 막혀 있는데 그래도 올릴까요?' — 작은 확인 창.
+
+        표준 위젯 대화상자를 안 쓴다 — 맥 굳힌 앱의 지뢰밭이다
+        (지뢰 125 · 적대 검증 4). 캔버스 알약 두 개면 충분하다.
+        """
+        cd, u = self.card, self._ui
+        win = tk.Toplevel(self.root)
+        win.title("오늘의 노래")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.configure(bg=cd["panel"])
+        W, H = u(330), u(150)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        edge = self._tint(cd["fill"], 0.45)
+        cv.create_text(W / 2, u(34), text="이 노래는 임베드가 막혀 있어서",
+                       font=self._uf(10, True), fill=cd["text"])
+        cv.create_text(W / 2, u(56), text="자동재생되지 않아요!",
+                       font=self._uf(10, True), fill=cd["text"])
+        cv.create_text(W / 2, u(78), text="친구들 재생기에서 이 곡은 건너뛰어요.",
+                       font=self._uf(8), fill=cd["sub"])
+        hits = []
+        byy = H - u(38)
+        for cap, kind, bg9, fg9, bw9 in (
+                ("안 올릴래요", "no", cd["panel"], cd["sub"], u(104)),
+                ("그래도 올리기", "yes", cd["fill"], "#ffffff", u(118))):
+            x0 = W / 2 - u(8) - bw9 if kind == "no" else W / 2 + u(8)
+            self._rr_soft(cv, x0, byy - u(18), x0 + bw9, byy + u(18), u(18),
+                          fill=bg9, outline=edge, width=2)
+            cv.create_text(x0 + bw9 / 2, byy, text=cap,
+                           font=self._uf(9, True), fill=fg9)
+            hits.append((x0, byy - u(18), x0 + bw9, byy + u(18), kind))
+
+        def on_click(ev):
+            for x0, y0, x1, y1, kind in hits:
+                if x0 <= ev.x <= x1 and y0 <= ev.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    if kind == "yes":
+                        self._safe("room_song_set", self._room_song_set, url)
+                    try:
+                        win.destroy()
+                    except Exception:
+                        pass
+                    return
+
+        cv.bind("<Button-1>", on_click)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        # 캐릭터 곁에 띄운다
+        try:
+            win.geometry("+%d+%d" % (max(0, self.root.winfo_rootx() - u(40)),
+                                     max(0, self.root.winfo_rooty() + u(60))))
+        except Exception:
+            pass
+        return win
+
     def _room_song_set(self, url):
         """오늘의 노래를 건다 (빈 글자면 내린다). 제목은 뒤에서 받아 온다."""
         url = str(url or "").strip()
@@ -19382,7 +19501,7 @@ class Mascot:
                            var["goal"].get(), None,
                            self._safe_str(self._due_parse,
                                           var["due"].get()))
-                self._safe("room_song_set", self._room_song_set,
+                self._safe("room_song_set", self._room_song_try,
                            var["song"].get())
             try:
                 win.destroy()
