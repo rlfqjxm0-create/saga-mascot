@@ -14754,7 +14754,11 @@ class Mascot:
             bx = sx + w1 + gap
             # 알약이 카드 윗변에 딱 붙지 않게, 줄 높이 안에서 여백을 남긴다
             h = min(self._mh(f2) + 2, max(12, band - self.LV_PAD * 2))
-            self._rrect(bx, cy - h / 2, bx + w2 + pad * 2, cy + h / 2,
+            # 글자는 cy + INK_DY 에 그려지므로(옆 레벨 글자와 한 줄로 맞춘
+            # 값이다) 알약도 그 중심에 맞춘다 — 안 그러면 칭호가 알약 안에서
+            # INK_DY 만큼 위로 쏠린다 (실측 1.5px, 제보).
+            pcy = cy + INK_DY
+            self._rrect(bx, pcy - h / 2, bx + w2 + pad * 2, pcy + h / 2,
                         h / 2, fill=self._mix("#ffffff", cd["fill"], 0.20),
                         outline="")
             c.create_text(bx + pad, cy + INK_DY, anchor="w", text=title,
@@ -22944,8 +22948,12 @@ class Mascot:
         # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
         # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
-        # 꺼진 사람도 오늘 본 마지막 값이 실려 있어 합계가 안 깎인다
-        tot = sum(int(q.get("t") or 0) for q in people)
+        # '오늘 다 같이'는 **지금 타이머를 켜 둔 사람**의 오늘치만 더한다
+        # (요청). 껐다 나간 사람의 시간은 그 사람 칸에는 마지막 모습으로
+        # 남지만 합계에는 안 넣는다 — 06시가 지나면 실제로 켜 둔 사람들의
+        # 오늘 작업 시간만 보이게. off(=아직 안 켰어요/꺼짐)를 뺀다.
+        # (위 'on' 이 접속 수를 세는 것과 같은 기준이다.)
+        tot = sum(int(q.get("t") or 0) for q in people if not q.get("off"))
         # 다 같이 이만큼을 채우면 카드마다 캐릭터 옆에 반짝이가 돈다.
         # 사람이 늘어난 만큼 목표도 올린다 (24 → 40시간).
         self._room_goal_done = tot >= self.ROOM_GOAL_MIN
@@ -23294,8 +23302,10 @@ class Mascot:
             # 그림보다 안쪽에 그려져 그림이 삐져나온 것처럼 보였다).
             # 고른 칸만 굵게 둘러 어느 것을 골랐는지 알 수 있게 한다.
             if picked:
-                self._rr(cv, x0, yy0, x1, yy1, ch2 / 2, fill="",
-                         outline=col, width=3)
+                # 선을 캡슐 바깥으로 (요청 — 카드와 같은 이유)
+                e = 2.0
+                self._rr(cv, x0 - e, yy0 - e, x1 + e, yy1 + e, ch2 / 2 + e,
+                         fill="", outline=col, width=3)
             # 왼쪽 동그란 바탕 + 작은 캐릭터
             self._safe("soft_btn", self._soft_dot, cv, x0 + ch2 / 2 + 2 * k,
                        cyc, ch2 / 2 - 5 * k, "#ffffff",
@@ -23849,8 +23859,12 @@ class Mascot:
         # 그림이 선 밖으로 삐져나온 것처럼 보였다 (제보). 고른 칸만 굵게
         # 둘러 어느 것을 골랐는지 알 수 있게 한다.
         if picked:
-            self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill="",
-                     outline=col, width=3)
+            # 선을 **칸 바깥**으로 (요청). Tk 는 선을 경로 중앙에 그려서
+            # 그대로 두면 굵기의 절반이 칸 안으로 들어와 그림을 덮었다.
+            # 경로를 바깥으로 2px 밀면 선이 칸 가장자리에 맞닿아 밖에 선다.
+            e = 2.0
+            self._rr(cv, kx0 - e, ky0 - e, kx1 + e, ky1 + e, 18 * k + e,
+                     fill="", outline=col, width=3)
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, over, cut, mode = got
@@ -25179,32 +25193,39 @@ class Mascot:
             return
         row = self._chip_row(key)
         short = row[4] if len(row) > 4 and row[4] else row[1]
-        f9 = self._uf(7, True)
-        pad = 6 * k
+        # 글꼴은 **칸 배율(k)** 을 따른다 — self._uf 는 ui_k 만 봐서 전체
+        # 보기(칸이 작아진다)에서 글자만 그대로 커 칸 밖으로 잘렸다 (제보).
+        # 이름표(_cf9(10))보다 한 단계 작게. 카드 보기(k=1.5)는 예전과
+        # 같은 10pt, 전체 보기(k≈1)에선 7pt 로 줄어든다.
+        f9 = (UI_FONT, max(5, int(round(7 * k))), "bold")
+        pad = 5 * k
         x1 = px0 - 6 * k                     # 이름 알약 왼쪽에 붙인다
         room = x1 - (kx0 + 4 * k)
-        h9 = 17 * k
-        icon = self._chip_icon(key, h9 * 0.80)
+        h9 = 16 * k
+        # 아이콘도 칸을 따라 작아진다 — 게임기가 옆으로 길어 전체 보기에서
+        # 이름을 밀어냈다. 폭 상한(_chip_icon 안, h*1.25)과 함께 작게 잡는다.
+        icon = self._chip_icon(key, h9 * 0.74)
         iw = (icon.width() + 3 * k) if icon is not None else 0
         head = "" if icon is not None else (row[2] + " ")
         txt = head + short
-        # '자리비움' 은 잘린 채로 뜨면 뜻이 안 통한다 (요청) — 안 들어가면
-        # 글자를 한 단계 작게 써 보고, 그래도 안 되면 동그라미만 남긴다.
-        # 한 글자씩 잘라 내는 것은 다른 상태에만 쓴다.
-        if key == "away":
-            # 실측: 글자 46px + 점 22px + 여백 18px = 86px 인데 칸 여유는
-            # 67~80px 다. 글자가 우선이다 — 점·여백을 차례로 양보한다.
-            tw0 = self._room_tw(cv, txt, f9)
-            if tw0 + pad * 2 + iw <= room:
-                pass
-            elif tw0 + pad * 2 <= room:
-                icon, iw = None, 0               # 점을 버린다
-            elif tw0 + 4 * k <= room:
-                icon, iw, pad = None, 0, 2 * k   # 여백까지 줄인다
-            else:
-                txt = ""                         # 정말 좁으면 점만
+        # **글자가 뜻을 나른다 — 좁으면 아이콘을 먼저 버리고 글자를 살린다**
+        # (요청: 전체 보기·심플에서 글자가 온전히 보이게). 예전에는 글자를
+        # 한 자씩 잘라 아이콘만 남아 '게' 나 아무것도 안 뜨던 것이 제보다.
+        # 차례: ①아이콘+글자 ②글자만(아이콘 버림) ③여백까지 줄인 글자만
+        #      ④정말 좁으면 아이콘만.
+        tw0 = self._room_tw(cv, txt, f9)
+        if tw0 + pad * 2 + iw <= room:
+            pass                                 # 둘 다 들어간다
+        elif tw0 + pad * 2 <= room:
+            icon, iw = None, 0                   # 아이콘을 버려 글자를 살린다
+        elif tw0 + 4 * k <= room:
+            icon, iw, pad = None, 0, 2 * k       # 여백까지 줄인다
+        elif iw + pad * 2 <= room:
+            txt = ""                             # 글자가 도저히 안 들어간다
         else:
-            while txt and (self._room_tw(cv, txt, f9) + pad * 2 + iw) > room:
+            # 아이콘도 글자도 통째로는 안 들어간다 — 글자를 한 자씩 줄인다
+            icon, iw = None, 0
+            while txt and (self._room_tw(cv, txt, f9) + pad * 2) > room:
                 txt = txt[:-1].rstrip()
         if not txt and (icon is None or iw + pad * 2 > room):
             return                           # 그림도 못 넣을 만큼 좁다
