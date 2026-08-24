@@ -5612,18 +5612,21 @@ class Mascot:
         # 메뉴에 BGM 을 붙일지 여기서 갈리므로 재생기를 먼저 준비한다
         self._safe("amb_init", self._amb_init)
         menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
-        # 작업 종료는 카드에서 뺐으므로 여기가 유일한 통로다. 맨 위에 두고
-        # 색과 굵기로 다른 항목과 구분한다 — 하루를 끝내는, 되돌릴 수 없는
-        # 동작이라 다른 것과 같은 모양이면 눈에 안 들어온다.
-        if self.timer_on:
-            # 파스텔 테마에서도 흰 글자가 읽히도록 카드색을 조금 어둡게 쓴다
-            _bg = self._shade(self.card["fill"], 0.22)
-            menu.add_command(label="  작업 종료  ", command=self._end_workday,
+        # 메뉴 차례는 요청대로 — 홈 / 오늘 할 일 / 꾸미기·소리 /
+        # 설정·진단 / 끝내기. 되돌릴 수 없는 것(작업 종료·종료)은
+        # 맨 아래 한 무리에 모아 실수로 누르지 않게 한다.
+        if ROOM_URL and ROOM_KEY:
+            # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
+            # 되돌릴 수 없는 '작업 종료'가 여전히 가장 세 보여야 한다.
+            _hb = self._tint(self.card["fill"], 0.62)
+            menu.add_command(label="  홈  ", command=self._room_toggle,
                              font=self._uf(9, True),
-                             foreground="#ffffff", background=_bg,
+                             foreground=self._shade(self.card["fill"], 0.35),
+                             background=_hb,
                              activeforeground="#ffffff",
-                             activebackground=self._shade(_bg, 0.25))
-            menu.add_separator()
+                             activebackground=self._shade(
+                                 self.card["fill"], 0.22))
+        menu.add_separator()
         if self.todo_on:
             menu.add_command(label="할 일 추가", command=self.add_todo)
         if self.cfg.get("deadline_on"):
@@ -5712,17 +5715,6 @@ class Mascot:
                     "slime_seen_menu", self._slime_menu_seen))
             self._slime_menu = sub
         menu.add_separator()
-        if ROOM_URL and ROOM_KEY:
-            # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
-            # 되돌릴 수 없는 '작업 종료'가 여전히 가장 세 보여야 한다.
-            _hb = self._tint(self.card["fill"], 0.62)
-            menu.add_command(label="  홈  ", command=self._room_toggle,
-                             font=self._uf(9, True),
-                             foreground=self._shade(self.card["fill"], 0.35),
-                             background=_hb,
-                             activeforeground="#ffffff",
-                             activebackground=self._shade(
-                                 self.card["fill"], 0.22))
         menu.add_command(label="환경설정", command=self.open_settings)
         if self.cfg.get("update_dot"):
             menu.add_command(label="업데이트 소식", command=self.open_update_news)
@@ -5745,6 +5737,17 @@ class Mascot:
                          command=lambda: self._safe(
                              "open_state", self._open_state_dir))
         menu.add_separator()
+        # 작업 종료는 카드에서 뺐으므로 여기가 유일한 통로다. 맨 위에 두고
+        # 색과 굵기로 다른 항목과 구분한다 — 하루를 끝내는, 되돌릴 수 없는
+        # 동작이라 다른 것과 같은 모양이면 눈에 안 들어온다.
+        if self.timer_on:
+            # 파스텔 테마에서도 흰 글자가 읽히도록 카드색을 조금 어둡게 쓴다
+            _bg = self._shade(self.card["fill"], 0.22)
+            menu.add_command(label="  작업 종료  ", command=self._end_workday,
+                             font=self._uf(9, True),
+                             foreground="#ffffff", background=_bg,
+                             activeforeground="#ffffff",
+                             activebackground=self._shade(_bg, 0.25))
         menu.add_command(label="종료", command=self.close)
         self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
         # 메뉴 항목을 고를 때도 '똑' — 항목이 스무 개가 넘어 하나하나
