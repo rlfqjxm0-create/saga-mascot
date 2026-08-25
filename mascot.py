@@ -5542,7 +5542,8 @@ class Mascot:
         self._cat_moved = 0.0        # 쓰다듬은 거리 누적 (px)
         self._purr_until = 0.0       # 고롱고롱이 울리고 있는 시한 (5초)
         self._meow_at = 0.0          # 마지막 울음 시각 (연타 방어)
-        self._cat_cursor = False     # 커서가 손 모양인가
+        self._cat_cursor = ""        # 커서 상태 ("", "hover", "pet")
+        self._cat_hand_xy = None     # 쓰다듬는 손 그림 자리 (커서 대신)
         # ── 매끈한 캐릭터 (몸만 레이어 창으로) ───────────────────────────
         # **_load_parts 보다 먼저 정해야 한다.** 파츠를 읽으면서 몸 뒤
         # 파츠의 움직임 프레임을 미리 굽는데, 그 캐시에 PIL 을 담을지
@@ -8055,7 +8056,8 @@ class Mascot:
             lx, ly = self._cat_stroke
             self._cat_moved += abs(e.x - lx) + abs(e.y - ly)
             self._cat_stroke = (e.x, e.y)
-            self._cat_hand_cursor(True)
+            self._cat_hand_xy = (e.x, e.y)      # 손 그림이 따라온다
+            self._cat_hand_cursor("pet")
             if self._cat_moved > 24.0:
                 self._safe("cat_purr", self._cat_purr)
                 # 기분 좋아 눈을 감는다 — 하트는 평소 규칙대로 나온다
@@ -8083,7 +8085,8 @@ class Mascot:
             moved9 = self._cat_moved
             self._cat_stroke = None
             self._cat_moved = 0.0
-            self._cat_hand_cursor(False)
+            self._cat_hand_xy = None
+            self._cat_hand_cursor("")
             if moved9 <= 24.0:
                 self._safe("cat_meow", self._cat_meow)
             self._press = None
@@ -17758,6 +17761,11 @@ class Mascot:
         # 몸짓 팔까지 그린 뒤여야 손에 가려지지 않는다.
         if self.cfg.get("chips") and getattr(self, "_chip_kernel", None):
             self._safe("chip_kernel", self._draw_chip_kernel)
+        # 고양이를 쓰다듬는 손 — 숨긴 커서 자리에 그린다 (크기는 고양이
+        # 머리 폭의 1/4, 요청). 시트 경로에서도 _hand_img 가 _tkimg 를
+        # 쓰므로 안 샌다 (지뢰 128).
+        if self._cat_hand_xy is not None:
+            self._safe("cat_hand", self._draw_cat_hand)
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
         if sleeping:
@@ -18389,68 +18397,22 @@ class Mascot:
         except Exception:
             pass
 
-    def _cat_cur_str(self):
-        """쓰다듬기 커서 — 파츠의 손 그림(hand.png)을 CUR 로 구워 쓴다.
+    def _cat_hand_cursor(self, mode):
+        """고양이 머리 위의 커서.
 
-        크기는 고양이 얼굴 넓이의 1/4(변으로 절반) 남짓 (요청). 윈도우
-        Tk 는 "@경로.cur" 커서를 받는다 — 굽기가 안 되면(맥·경로 문제)
-        기본 손 모양으로 물러난다. CUR 는 ICO 와 같은 통에 핫스팟만
-        더한 형식이라 표준 라이브러리 없이 바이트로 직접 쓴다 (지뢰 21
-        — 새 import 를 만들지 않는다).
-        """
-        got = getattr(self, "_cat_cur_cache", None)
-        if got is not None:
-            return got or ("pointinghand" if IS_MAC else "hand2")
-        fall = "pointinghand" if IS_MAC else "hand2"
-        self._cat_cur_cache = False
-        if not IS_WIN:
-            return fall
-        try:
-            hb = self._cat_box(True)
-            fw = (hb[2] - hb[0]) if hb else 90.0
-            im = Image.open(os.path.join(self.dir, "hand.png")).convert("RGBA")
-            # 고양이 머리 폭의 1/4 (요청 — 절반은 너무 컸다)
-            w = max(14, min(96, int(round(fw * 0.25))))
-            h = max(1, int(round(im.height * w / im.width)))
-            im = im.resize((w, h), Image.LANCZOS)
-            px = im.tobytes("raw", "BGRA", 0, -1)     # 아래→위 (BMP 순서)
-            and_row = ((w + 31) // 32) * 4
-            mask = bytes(1) * (and_row * h)
-            def le(v, n):
-                return int(v).to_bytes(n, "little")
-            bih = (le(40, 4) + le(w, 4) + le(h * 2, 4) + le(1, 2)
-                   + le(32, 2) + le(0, 4) + le(len(px) + len(mask), 4)
-                   + le(0, 4) * 4)
-            img = bih + px + mask
-            hx, hy = w // 2, max(0, h // 5)           # 핫스팟 = 손끝께
-            head = (le(0, 2) + le(2, 2) + le(1, 2)
-                    + le(w if w < 256 else 0, 1) + le(h if h < 256 else 0, 1)
-                    + le(0, 1) + le(0, 1) + le(hx, 2) + le(hy, 2)
-                    + le(len(img), 4) + le(22, 4))
-            path = os.path.join(self.dir, ".cat_hand.cur")
-            tmp = path + ".tmp"
-            with open(tmp, "wb") as fp:
-                fp.write(head + img)
-            os.replace(tmp, path)
-            cur = "@" + path.replace("\\", "/")
-            # 진짜 받아 주는지 그 자리에서 확인 — 안 되면 기본 손으로
-            self.canvas.config(cursor=cur)
-            self.canvas.config(cursor="")
-            self._cat_cur_cache = cur
-            return cur
-        except Exception:
-            return fall
-
-    def _cat_hand_cursor(self, on):
-        """고양이 머리 위에서 커서를 손 그림으로 (요청).
-
+        "hover" = 기본 손 모양 (쓰다듬을 수 있다는 안내)
+        "pet"   = 커서를 숨긴다 — 그 자리에 손 **그림**을 우리가 그린다.
+                  CUR 커서로 만들었더니 윈도우의 포인터 크기 설정이
+                  마음대로 확대해 크기를 통제할 수 없었다 (제보 — 커서가
+                  캐릭터 머리만 했다). 직접 그리면 픽셀 그대로다.
+        ""      = 원래대로.
         본체 캔버스와 몸 레이어 창 **둘 다** 바꿔야 한다 — 매끈이 켜져
         있으면 클릭(과 커서)이 레이어 창으로 간다 (지뢰 118).
         """
-        if on == self._cat_cursor:
+        if mode == self._cat_cursor:
             return
-        self._cat_cursor = on
-        cur = self._safe_str(self._cat_cur_str) or "hand2" if on else ""
+        self._cat_cursor = mode
+        cur = {"hover": "hand2", "pet": "none"}.get(mode, "")
         for w in (self.canvas,
                   getattr(getattr(self, "_char_lay", None), "top", None)):
             if w is None:
@@ -18466,14 +18428,27 @@ class Mascot:
             return                       # 쓰다듬는 중에는 drag 가 켜 둔다
         hb = self._cat_box(True)
         if hb is None:
-            self._cat_hand_cursor(False)
+            self._cat_hand_cursor("")
             return
         try:
             mx = self.root.winfo_pointerx() - self.root.winfo_rootx()
             my = self.root.winfo_pointery() - self.root.winfo_rooty()
         except Exception:
             return
-        self._cat_hand_cursor(hb[0] <= mx <= hb[2] and hb[1] <= my <= hb[3])
+        self._cat_hand_cursor(
+            "hover" if hb[0] <= mx <= hb[2] and hb[1] <= my <= hb[3] else "")
+
+    def _draw_cat_hand(self):
+        """쓰다듬는 손 그림 — 커서 위치에, 고양이 머리 폭의 1/4 크기."""
+        xy = self._cat_hand_xy
+        hb = self._cat_box(True)
+        if xy is None or hb is None:
+            return
+        img = self._hand_img(int(max(14, (hb[2] - hb[0]) * 0.25)))
+        if img is None:
+            return
+        # 손끝(그림 아래 중앙)이 만지는 점에 오게 얹는다
+        self.canvas.create_image(xy[0], xy[1] + 4, image=img, anchor="s")
 
     def _cat_heart(self, now, yo):
         """고양이 소품 곁에서 뿅 하고 오르는 작은 하트.
