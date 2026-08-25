@@ -5534,6 +5534,10 @@ class Mascot:
         self._prop_back_cfg = {}     # 뽑힌 소품의 뒤쪽 조각 움직임 설정
         self._prop_bits = []         # 여러 조각짜리 소품의 곁조각 자리 이름
         self._prop_bit_cfg = {}      # 그 조각마다의 움직임 (지뢰 13)
+        self._prop_gname = ""        # 지금 소품의 이름 (고양이·만두…)
+        self._cat_open_until = 0.0   # 고양이가 눈을 뜨고 있는 시한
+        self._cat_open_next = 0.0    # 다음에 눈을 뜰 시각
+        self._cat_heart_next = 0.0   # 다음 하트가 나올 시각
         # ── 매끈한 캐릭터 (몸만 레이어 창으로) ───────────────────────────
         # **_load_parts 보다 먼저 정해야 한다.** 파츠를 읽으면서 몸 뒤
         # 파츠의 움직임 프레임을 미리 굽는데, 그 캐시에 PIL 을 담을지
@@ -6374,6 +6378,26 @@ class Mascot:
 
     PROP_BIT_MAX = 6         # 한 소품에 붙일 수 있는 곁조각 수
 
+    # 이름(gname)으로 주는 기본 움직임 — 열여덟 캐릭터의 config 를 일일이
+    # 고치지 않아도 새 소품이 살아 움직인다. config 의 prop_motion 이 있으면
+    # 그쪽이 이긴다 (캐릭터별 손맛).
+    #   고양이: prop=꼬리(살랑) · bit2=몸 · bit3=눈감은 얼굴(리듬 까닥) ·
+    #           bit4=눈뜬 얼굴(가만히 빤히 — 움직임 없음)
+    #   만두:   bit2=김(폴폴 오르며 옅어짐)
+    PROP_MOTION_DEF = {
+        "고양이": {
+            "prop": {"motion": "sway", "amp": 8.0, "period": 2.6,
+                     "jitter": 0.18, "pivot": [0.5, 0.9], "steps": 24},
+            "prop_bit3": {"motion": "sway", "amp": 3.6, "period": 1.35,
+                          "jitter": 0.08, "pivot": [0.5, 0.86],
+                          "steps": 20},
+        },
+        "만두": {
+            "prop_bit2": {"motion": "steam", "amp": 1.0, "period": 3.4,
+                          "jitter": 0.12, "rise": 1.1, "steps": 22},
+        },
+    }
+
     def _load_prop_bits(self, pick, s, pil_cache):
         """여러 조각으로 된 특별 소품 (사가 신하나의 미쿠).
 
@@ -6405,7 +6429,10 @@ class Mascot:
         # 다시 매기면 밀린다 (미쿠가 prop16 → prop17 이 됐다). 번호로도
         # 찾아 주므로 옛 config 도 그대로 돈다.
         tab9 = self.cfg.get("prop_motion") or {}
-        mo_all = tab9.get(ent.get("gname") or "") or tab9.get(pick) or {}
+        gname9 = str(ent.get("gname") or "")
+        self._prop_gname = gname9        # 그리는 쪽(고양이 눈)이 본다
+        mo_all = (tab9.get(gname9) or tab9.get(pick)
+                  or self.PROP_MOTION_DEF.get(gname9) or {})
         self._prop_bit_cfg["prop"] = mo_all.get("prop") or {}
         for j9, key9 in enumerate(keys):
             nm9 = "prop_bit%d" % (j9 + 2)
@@ -7478,6 +7505,34 @@ class Mascot:
             im = Image.new("RGBA", pil.size, (0, 0, 0, 0))
             im.alpha_composite(pil.resize((w, pil.height), Image.LANCZOS),
                                ((pil.width - w) // 2, 0))
+        elif mode == "steam":
+            # 김 — **제자리에서 위로 폴폴** 오르며 옅어졌다 다시 차오른다.
+            # 한 주기: 아래(진하게) → 위로 오르며 옅어짐 → 사라지고 다시.
+            # sin 이 아니라 톱니(주기 진행률)를 쓴다 — 김은 왕복하지 않는다.
+            t2 = (k / float(steps)) % 1.0
+            rise = pil.height * float(mo.get("rise", 0.9))
+            pad = int(math.ceil(rise)) + 2
+            # 처음엔 스르륵 나타나고(0→0.15) 끝에서 길게 사라진다
+            if t2 < 0.15:
+                a2 = t2 / 0.15
+            else:
+                a2 = max(0.0, 1.0 - (t2 - 0.15) / 0.85)
+            # 반투명 흰 김 (요청). 매끈 레이어에서는 알파 그대로 나오고,
+            # 색상키 경로에서는 키 색과 섞여 옅은 회색 김이 된다 — 김은
+            # 원래 회끄무레해 그 모습도 자연스럽다 (지뢰 65 의 얼룩과
+            # 달리 면적이 작고 늘 움직여 테로 보이지 않는다).
+            a2 *= 0.42 + 0.30 * (1.0 - t2)
+            fade = pil.copy()
+            fade.putalpha(fade.getchannel("A").point(
+                lambda v, m9=a2: int(v * m9)))
+            wob = math.sin(t2 * 2 * math.pi) * pil.width * 0.06
+            base = Image.new("RGBA",
+                             (pil.width + 2 * pad, pil.height + 2 * pad),
+                             (0, 0, 0, 0))
+            base.alpha_composite(fade,
+                                 (pad + int(round(wob)),
+                                  pad - int(round(rise * t2))))
+            im = base
         else:
             return None
         # 움직이는 조각이 넷이 되면서 12장 × 4 = 48장이라 상한 40 을 계속
@@ -12725,7 +12780,21 @@ class Mascot:
             hy = wy = round(h * 1.5)
             cloud = self._fx_cloud(hy)
 
+            # ③-2 작은 하트 — 고양이 소품 곁에 뿅뿅 (요청). 반 크기라
+            # 캐릭터 하트와 확실히 구분된다.
+            hs = round(h * 0.52)
+            whs = max(6, round(hs * 0.92))
+
+            def drawhs(d, c="#ff9fbc"):
+                r = whs * 0.26
+                d.ellipse([0, hs * 0.14, 2 * r, hs * 0.14 + 2 * r], fill=c)
+                d.ellipse([whs - 2 * r, hs * 0.14, whs, hs * 0.14 + 2 * r],
+                          fill=c)
+                d.polygon([(1, hs * 0.34), (whs - 1, hs * 0.34),
+                           (whs / 2, hs * 0.97)], fill=c)
+
             groups = {"note": notes, "heart": [(wh, drawh)],
+                      "heart_s": [(whs, drawhs, hs)],
                       "yawn": [(wy, cloud, hy)],
                       "sweat": [(ws, draws)], "question": [(wq, drawq)],
                       "spark": [(wk, drawk)], "bang": [(wb, drawb)]}
@@ -18116,8 +18185,27 @@ class Mascot:
         차례와 움직임은 얼굴 차례에서 하던 것과 똑같이 한다.
         """
         now9 = time.time()
+        # 고양이 소품 — 눈감은 얼굴(bit3)이 기본, 가끔 눈을 뜨고(bit4)
+        # 빤히 바라본다 (요청). 두 얼굴은 같은 자리라 하나만 그린다.
+        skip9 = None
+        if self._prop_gname == "고양이" and self.has.get("prop_bit4"):
+            if now9 < self._cat_open_until:
+                skip9 = "prop_bit3"          # 눈 뜸 — 가만히 응시
+            else:
+                skip9 = "prop_bit4"
+                if not self._cat_open_next:      # 켠 직후 — 예약만
+                    self._cat_open_next = now9 + random.uniform(8.0, 18.0)
+                elif now9 >= self._cat_open_next:
+                    self._cat_open_until = now9 + random.uniform(3.0, 5.5)
+                    self._cat_open_next = (self._cat_open_until
+                                           + random.uniform(14.0, 30.0))
+                # 눈을 감고 있는 동안 반투명 작은 하트가 뿅뿅 (요청)
+                if now9 >= self._cat_heart_next:
+                    self._cat_heart_next = now9 + random.uniform(1.4, 2.4)
+                    self._safe("cat_heart", self._cat_heart, now9, yo)
         for name in (self.layout.get("overlays") or []):
-            if not name.startswith("prop") or not self.has.get(name):
+            if (not name.startswith("prop") or not self.has.get(name)
+                    or name == skip9):
                 continue
             mo9 = (getattr(self, "_prop_bit_cfg", None) or {}).get(name)
             if mo9 and mo9.get("motion"):
@@ -18125,6 +18213,47 @@ class Mascot:
                 continue
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
+
+    def _cat_heart(self, now, yo):
+        """고양이 소품 곁에서 뿅 하고 오르는 작은 하트.
+
+        기존 하트 파티클(_spawn_note 의 heart)을 그대로 쓰되, 자리만
+        고양이(몸 조각) 위로 잡는다 — FxLayer 가 있으면 부드럽게 옅어지고
+        (반투명, 요청) 없으면 픽셀 솎기로 물러난다 (기존과 같은 길).
+        """
+        lvs = (self.fx_imgs.get("heart_s") or self.fx_imgs.get("heart")
+               or self.fx_imgs.get("note"))
+        if not lvs:
+            return
+        body9 = ("prop_bit2" if self.has.get("prop_bit2") else "prop")
+        try:
+            bx9, by9 = self._pos(body9)
+            ent9 = self.layout.get(body9) or {}
+            sz9 = ent9.get("size") or [40, 40]
+            w9 = float(sz9[0]) * self.s
+            h9 = float(sz9[1]) * self.s
+        except Exception:
+            return
+        # **주변을 번갈아** — 왼쪽·오른쪽·위를 돌아가며, 한 번에 두세 개를
+        # 박자를 어긋내 뿅뿅 (요청: 작게 여러 개).
+        side9 = getattr(self, "_cat_heart_side", 0)
+        self._cat_heart_side = (side9 + 1) % 3
+        for j9 in range(random.randint(2, 3)):
+            if side9 == 0:              # 왼쪽 곁
+                x = bx9 - w9 * random.uniform(0.05, 0.28)
+                y = by9 + yo + h9 * random.uniform(0.1, 0.7)
+            elif side9 == 1:            # 오른쪽 곁
+                x = bx9 + w9 * (1.0 + random.uniform(0.05, 0.28))
+                y = by9 + yo + h9 * random.uniform(0.1, 0.7)
+            else:                       # 머리 위
+                x = bx9 + w9 * random.uniform(0.2, 0.8)
+                y = by9 + yo - h9 * random.uniform(0.0, 0.25)
+            # 자리·속도·수명을 제각각 주면 같은 박자에 태어나도 흩어져
+            # '번갈아 뿅뿅'으로 보인다.
+            life = random.randint(24, 38)
+            self.notes.append([x, y, random.uniform(-0.35, 0.35),
+                               random.uniform(0.7, 1.15),
+                               random.choice(lvs), life, life])
 
     def _draw_pen_hand(self):
         """펜 쥔 손. 퀸시처럼 펜이 맨 위 레이어인 캐릭터는 머리를 그린 뒤 호출.
