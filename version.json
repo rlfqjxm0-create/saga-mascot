@@ -1,7 +1,7 @@
 {
- "version": 1787693698,
+ "version": 1787696341,
  "files": {
-  "mascot.py": "053723d2ade45db947965d9c5675c626ac997bfbc74968e31a584ed3c7d85cc0",
+  "mascot.py": "bbe3261d92ad9746c515feb361d9acb5d86dd2f456cf25b5cdcf515543cec231",
   "parts_saga/arm_key.png": "83415d057b6889306ee866b1dde5cf0be0099392d12832ce9a456dfab17b0410",
   "parts_saga/arm_pen.png": "c8966cb9d3a048011124c7552562991721d7b5a1684b07bcb7616d6e60ef6fc1",
   "parts_saga/arm_right.png": "3ccb8dcd05e9b0ffd84eaab1196cbe44767138845cceee60f42ff9b397e64d03",
@@ -214,6 +214,12 @@
   "parts_saga/sounds/banana split stock/banana-s-6.wav": "48cfd2717239effe50951f4096646d59e310f5d71c2e3d9324690038ca35af41",
   "parts_saga/sounds/banana split stock/config.json": "711d56f0577c4b6bd4e265406b415a6c3c33f78a6715ae8727c94c006d879930",
   "parts_saga/sounds/banana split stock/LICENSE.txt": "2e8578f16b6ea265412166e8b4b1da045fcc11f28db03d664908410124a2f01e",
+  "parts_saga/sounds/cat/meow1.wav": "52e23586bba749fe65f3bf31fba3de1edc55292e392d656cb72f4ba8b2b7e0ff",
+  "parts_saga/sounds/cat/meow2.wav": "52e3fe9600fe06746e03208cabb0c6c9cbd06c39a25e5549f9a140f5261b6f4d",
+  "parts_saga/sounds/cat/meow3.wav": "5f048ffdf52d3289421cedfdcfd5931c07476004423c2d5413ad544935fb9a33",
+  "parts_saga/sounds/cat/meow4.wav": "d9d189518dc52787752353da63001843f33693ea7a8f88ffabfab0f8cd696ad3",
+  "parts_saga/sounds/cat/meow5.wav": "967d7644fa1909575d750598cb8f1fa85fe7f0c75def8aa45ceddd29a6c13d50",
+  "parts_saga/sounds/cat/meow6.wav": "3352a8b5c98ee9ba5900e9af97756a133b40b07d5071bd0d1433794d9b8156f5",
   "parts_saga/sounds/ctile/pop/pop1.wav": "dc1c5535c83779e4a41bf21857659275e3954aab2ff2b6b4e58217b4a0d23162",
   "parts_saga/sounds/ctile_bgm/bgm.wav": "4fcd8b9a496b1febb8f5c663dd87b446a3f63cb836988214d0fbfd7a9ac43071",
   "parts_saga/sounds/frog mini/config.json": "f3d63d0dc8b12d5fc611efb6463516ce50ef75eca87e57ca69247d8a1cd6e6c6",
@@ -317,6 +323,7 @@
   "parts_saga/sounds/pen/clip_6.wav": "ffdb7c929f56e1f27bca1322413e3355497e013248727ccbe940965686b6144e",
   "parts_saga/sounds/poke/poke.wav": "5b4691361a56af9c93ba9ea7429715d60941784d82afcfc715a07b733b4ff213",
   "parts_saga/sounds/pomo/start.wav": "e0a752a4c4b586580e49ebc901079734e87831dc39327733326a43719e2bde98",
+  "parts_saga/sounds/purr/purr.wav": "a7d673154db90e6db2fa6c170434d5e955b5c0099703bb6af0469437b2206afe",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/alt.wav": "31983a24e5a0190043efcee356d5ad0ecf1d120c761b2dcfc38bac5737cfae77",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/back.wav": "8531c65d5c8ae0d39ae927e95c67c9793152ac5a621804c583d017aed3f7008d",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/caps.wav": "9dcb05127433771017532e0a541d5638da3af030c638d8e0b3c20b309d0e9459",
@@ -535,6 +542,8 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "새 소품 4종이 왔어요 — 잠자는 고양이, 김이 폴폴 나는 왕만두, 아기 쪽쪽이, 토끼 머리띠. '소품 새로고침'을 누르다 보면 만날 수 있어요.",
+  "고양이를 클릭하면 야옹 하고 울어요. 고양이 머리를 살살 쓰다듬으면(드래그) 고롱고롱 소리를 내요."
+ ]
 }

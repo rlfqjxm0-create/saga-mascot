@@ -5538,6 +5538,11 @@ class Mascot:
         self._cat_open_until = 0.0   # 고양이가 눈을 뜨고 있는 시한
         self._cat_open_next = 0.0    # 다음에 눈을 뜰 시각
         self._cat_heart_next = 0.0   # 다음 하트가 나올 시각
+        self._cat_stroke = None      # 고양이 머리를 쓰다듬는 중 (시작 좌표)
+        self._cat_moved = 0.0        # 쓰다듬은 거리 누적 (px)
+        self._purr_until = 0.0       # 고롱고롱이 울리고 있는 시한 (5초)
+        self._meow_at = 0.0          # 마지막 울음 시각 (연타 방어)
+        self._cat_cursor = False     # 커서가 손 모양인가
         # ── 매끈한 캐릭터 (몸만 레이어 창으로) ───────────────────────────
         # **_load_parts 보다 먼저 정해야 한다.** 파츠를 읽으면서 몸 뒤
         # 파츠의 움직임 프레임을 미리 굽는데, 그 캐시에 PIL 을 담을지
@@ -7605,6 +7610,16 @@ class Mascot:
                 self.pokesnd.close()
             except Exception:
                 pass
+        # 고양이 소리도 같이 닫는다 — 설정(볼륨)을 바꾸면 이 함수가 다시
+        # 불려 새 볼륨으로 다시 읽는다.
+        for _nm9 in ("catsnd", "purrsnd"):
+            _s9 = getattr(self, _nm9, None)
+            if _s9 is not None:
+                try:
+                    _s9.close()
+                except Exception:
+                    pass
+                setattr(self, _nm9, None)
             self.pokesnd = None
         if self.snacksnd is not None:
             try:
@@ -7669,6 +7684,25 @@ class Mascot:
                     poke_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.pokesnd = None
+        # 고양이 소품 소리 — 울음(클릭)과 고롱고롱(머리 쓰다듬기).
+        # PokeSound 는 맥에서 MacPokeSound 로 갈아끼워져 있어 양쪽 다 돈다.
+        # 폴더가 없으면(옛 선물본) 조용히 넘어간다 — 지뢰 76 의 규칙대로
+        # 굽기 스크립트(make_cat_sfx)가 열여덟 폴더 전부에 넣는다.
+        self.catsnd = self.purrsnd = None
+        cat_dir = os.path.join(self.dir, "sounds", "cat")
+        if os.path.isdir(cat_dir):
+            try:
+                self.catsnd = PokeSound(
+                    cat_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.catsnd = None
+        purr_dir = os.path.join(self.dir, "sounds", "purr")
+        if os.path.isdir(purr_dir):
+            try:
+                self.purrsnd = PokeSound(
+                    purr_dir, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                self.purrsnd = None
         # 홈에서 온 반응은 평소 말풍선 소리('뿅')와 달라야 구분이 된다.
         # 종소리 두 음짜리 '띠링' — 없으면 그냥 평소 소리로 물러난다.
         room_dir = os.path.join(self.dir, "sounds", "room")
@@ -7977,6 +8011,20 @@ class Mascot:
 
     def _on_press(self, e):
         self._press = (e.x, e.y, e.x_root, e.y_root)
+        # 고양이 소품의 **머리**를 잡았다 — 쓰다듬기다. 창을 옮기면 안
+        # 된다 (요청) — 슬라임 잡기와 같은 길로 _on_drag 가 가로챈다.
+        hb9 = self._safe_str(self._cat_box, True) or None
+        # 눌러서 끄는 말풍선(운세)이 머리 위에 떠 있으면 그쪽이 먼저다 —
+        # 쓰다듬기가 가로채면 말풍선을 끌 수 없게 된다.
+        bb9 = getattr(self, "_bubble_box", None)
+        on_bub9 = (self._bubble_hold and bb9
+                   and bb9[0] <= e.x <= bb9[2] and bb9[1] <= e.y <= bb9[3])
+        if (hb9 and not on_bub9
+                and hb9[0] <= e.x <= hb9[2] and hb9[1] <= e.y <= hb9[3]):
+            self._cat_stroke = (e.x, e.y)
+            self._cat_moved = 0.0
+        else:
+            self._cat_stroke = None
         # 본체 창을 누르면 윈도우가 그 창을 맨 앞으로 올려 몸 레이어가
         # 뒤로 밀린다 — 말풍선·몸이 카드에 가려진다. 그 자리에서 되올린다
         # (레이어 쪽 클릭이 이미 하는 것과 같은 일 — _on_press_layer).
@@ -8001,6 +8049,18 @@ class Mascot:
         if self._slime_grab is not None:
             self._safe("slime_move", self._slime_move, e.x, e.y)
             return
+        # 고양이 머리를 쓰다듬는 중 — 창을 옮기지 않는다 (요청). 좌우·
+        # 상하로 문지른 거리가 조금 쌓이면 고롱고롱이 울린다 (5초).
+        if self._cat_stroke is not None:
+            lx, ly = self._cat_stroke
+            self._cat_moved += abs(e.x - lx) + abs(e.y - ly)
+            self._cat_stroke = (e.x, e.y)
+            self._cat_hand_cursor(True)
+            if self._cat_moved > 24.0:
+                self._safe("cat_purr", self._cat_purr)
+                # 기분 좋아 눈을 감는다 — 하트는 평소 규칙대로 나온다
+                self._cat_open_until = 0.0
+            return
         if self._press is None:
             return
         px, py, prx, pry = self._press
@@ -8016,6 +8076,16 @@ class Mascot:
         if self._slime_grab is not None:
             self._safe("slime_up", self._slime_release)
             self._slime_grab = None
+            self._press = None
+            return
+        if self._cat_stroke is not None:
+            # 쓰다듬기를 놓았다. 거의 안 문질렀으면 클릭 — 냐옹이 운다.
+            moved9 = self._cat_moved
+            self._cat_stroke = None
+            self._cat_moved = 0.0
+            self._cat_hand_cursor(False)
+            if moved9 <= 24.0:
+                self._safe("cat_meow", self._cat_meow)
             self._press = None
             return
         if self._dragged:
@@ -8102,10 +8172,16 @@ class Mascot:
                            self._slime_close if self.slime is not None
                            else self._slime_open)
             elif self.can_talk and not on_card and py > self.oy:
-                # 콕 소리와 함께 '똑'도 낸다 (요청). _ui_click 은 아주 짧고
-                # 작아서 콕 위에 얇게 얹히기만 한다.
-                self._safe("ui_click", self._ui_click)
-                self._on_poke()                        # 캐릭터를 콕 찌름
+                cb9 = self._safe_str(self._cat_box) or None
+                if cb9 and cb9[0] <= px <= cb9[2] and cb9[1] <= py <= cb9[3]:
+                    # 고양이 소품을 눌렀다 — 콕 대신 냐옹 (요청). 콕까지
+                    # 같이 내면 두 소리가 겹쳐 지저분하다.
+                    self._safe("cat_meow", self._cat_meow)
+                else:
+                    # 콕 소리와 함께 '똑'도 낸다 (요청). _ui_click 은 아주
+                    # 짧고 작아서 콕 위에 얇게 얹히기만 한다.
+                    self._safe("ui_click", self._ui_click)
+                    self._on_poke()                    # 캐릭터를 콕 찌름
         self._press = None
 
     def _todo_load(self):
@@ -17503,6 +17579,10 @@ class Mascot:
         if smiling:
             blinking = False
 
+        # 고양이 머리 위에 커서가 오면 손 모양 — 쓰다듬을 수 있다는 안내.
+        # 상태가 바뀔 때만 커서를 만져 깜빡임이 없다.
+        if self._prop_gname == "고양이":
+            self._safe("cat_cursor", self._cat_cursor_tick)
         # 상태 칩 모션 — 제스처와 같은 값(_g_hands·_g_tilt)을 쓰므로
         # 제스처 계산 뒤, 그리기 앞에 둔다. 값은 프레임마다 지워지므로
         # 여기서 다시 세운다 (지뢰 14 — 구역 밖에서 지우고 다시 세운다).
@@ -18224,6 +18304,100 @@ class Mascot:
                 continue
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
+
+    def _cat_box(self, head_only=False):
+        """고양이 소품의 화면 상자 (x0, y0, x1, y1). 없으면 None.
+
+        head_only 면 **얼굴 조각**(bit3/bit4)만 — 쓰다듬는 자리다.
+        _pos 는 ox 가 든 화면 좌표라 클릭 좌표와 바로 견줄 수 있다.
+        숨쉬기(yo)는 ±2px 라 판정에는 무시해도 된다.
+        """
+        if self._prop_gname != "고양이":
+            return None
+        names = (("prop_bit3", "prop_bit4") if head_only
+                 else ("prop", "prop_bit2", "prop_bit3", "prop_bit4"))
+        x0 = y0 = x1 = y1 = None
+        for nm in names:
+            if not self.has.get(nm):
+                continue
+            ent = self.layout.get(nm) or {}
+            try:
+                px, py = self._pos(nm)
+                w = float((ent.get("size") or [0, 0])[0]) * self.s
+                h = float((ent.get("size") or [0, 0])[1]) * self.s
+            except Exception:
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            x0 = px if x0 is None else min(x0, px)
+            y0 = py if y0 is None else min(y0, py)
+            x1 = px + w if x1 is None else max(x1, px + w)
+            y1 = py + h if y1 is None else max(y1, py + h)
+        if x0 is None:
+            return None
+        return (x0, y0, x1, y1)
+
+    def _cat_meow(self):
+        """울음소리 하나를 랜덤으로 — 연타는 0.5초 간격으로 막는다."""
+        now = time.time()
+        if self.catsnd is None or now - self._meow_at < 0.5:
+            return
+        self._meow_at = now
+        try:
+            self.catsnd.play()
+        except Exception:
+            pass
+        # 놀라서 눈을 뜨고 잠깐 바라본다
+        self._cat_open_until = now + random.uniform(2.5, 4.0)
+        self._cat_open_next = self._cat_open_until + random.uniform(14.0, 30.0)
+
+    def _cat_purr(self):
+        """고롱고롱 — 한 번 쓰다듬으면 5초 (wav 길이가 곧 5초다).
+
+        울리는 동안 또 긁어도 겹치지 않게 시한으로 막는다.
+        """
+        now = time.time()
+        if self.purrsnd is None or now < self._purr_until:
+            return
+        self._purr_until = now + 5.0
+        try:
+            self.purrsnd.play()
+        except Exception:
+            pass
+
+    def _cat_hand_cursor(self, on):
+        """고양이 머리 위에서 커서를 손 모양으로 (요청 — 윈도우 기본 손).
+
+        본체 캔버스와 몸 레이어 창 **둘 다** 바꿔야 한다 — 매끈이 켜져
+        있으면 클릭(과 커서)이 레이어 창으로 간다 (지뢰 118).
+        """
+        if on == self._cat_cursor:
+            return
+        self._cat_cursor = on
+        cur = "hand2" if on else ""
+        for w in (self.canvas,
+                  getattr(getattr(self, "_char_lay", None), "top", None)):
+            if w is None:
+                continue
+            try:
+                w.config(cursor=cur)
+            except Exception:
+                pass
+
+    def _cat_cursor_tick(self):
+        """커서가 고양이 머리 위에 있는지 재서 손 모양을 켜고 끈다."""
+        if self._cat_stroke is not None:
+            return                       # 쓰다듬는 중에는 drag 가 켜 둔다
+        hb = self._cat_box(True)
+        if hb is None:
+            self._cat_hand_cursor(False)
+            return
+        try:
+            mx = self.root.winfo_pointerx() - self.root.winfo_rootx()
+            my = self.root.winfo_pointery() - self.root.winfo_rooty()
+        except Exception:
+            return
+        self._cat_hand_cursor(hb[0] <= mx <= hb[2] and hb[1] <= my <= hb[3])
 
     def _cat_heart(self, now, yo):
         """고양이 소품 곁에서 뿅 하고 오르는 작은 하트.
