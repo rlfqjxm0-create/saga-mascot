@@ -7412,13 +7412,23 @@ class Mascot:
         return im
 
     def _anim_pil(self, name):
-        """움직이는 파츠의 원본 — 무거운 이분화를 **한 번만** 해 둔다."""
+        """움직이는 파츠의 원본 — 무거운 이분화를 **한 번만** 해 둔다.
+
+        매끈 레이어가 켜져 있으면 이분화를 건너뛴다 — 레이어는 진짜
+        알파를 내주므로, 여기서 깎으면 부드러운 가장자리가 계단이 된다
+        (새 소품 제보: 고양이·만두 가장자리가 거칠다). 색상키 경로만
+        예전대로 이분화한다. 경로를 바꾸면 _smooth_off 가 이 캐시를
+        비워 형식이 안 섞인다 (지뢰 119).
+        """
         got = self._anim_pil_cache.get(name)
         if got is None:
             pil = self._pil_cache.get(name)
             if pil is None:
                 return None
-            got = self._safe_str(self._hard, pil) or pil
+            if self._smooth_on:
+                got = pil
+            else:
+                got = self._safe_str(self._hard, pil) or pil
             self._anim_pil_cache[name] = got
         return got
 
@@ -15272,6 +15282,7 @@ class Mascot:
                 pass
         for cache in (getattr(self, "_tilt_cache", None),
                       getattr(self, "_back_cache", None),
+                      getattr(self, "_anim_pil_cache", None),
                       getattr(self, "_arm_cache", None),
                       getattr(self, "_tongue_cache", None),
                       getattr(self, "_pet_cache", None)):
@@ -18248,6 +18259,9 @@ class Mascot:
             else:                       # 머리 위
                 x = bx9 + w9 * random.uniform(0.2, 0.8)
                 y = by9 + yo - h9 * random.uniform(0.0, 0.25)
+            # 창 밖으로 나가면 하트가 세로로 잘려 보인다 (제보 —
+            # 고양이가 창 왼끝 가까이 앉는 캐릭터). 안쪽으로 되민다.
+            x = min(max(x, 14.0), self.W - 14.0)
             life = random.randint(24, 38)
             self.notes.append([x, y, random.uniform(-0.35, 0.35),
                                random.uniform(0.7, 1.15),
