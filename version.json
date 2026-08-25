@@ -1,7 +1,7 @@
 {
- "version": 1787696341,
+ "version": 1787696861,
  "files": {
-  "mascot.py": "bbe3261d92ad9746c515feb361d9acb5d86dd2f456cf25b5cdcf515543cec231",
+  "mascot.py": "e9114d85f935bd375a4aea7fab36170e29ee5d9fb3c01dbb923988c96819230e",
   "parts_saga/arm_key.png": "83415d057b6889306ee866b1dde5cf0be0099392d12832ce9a456dfab17b0410",
   "parts_saga/arm_pen.png": "c8966cb9d3a048011124c7552562991721d7b5a1684b07bcb7616d6e60ef6fc1",
   "parts_saga/arm_right.png": "3ccb8dcd05e9b0ffd84eaab1196cbe44767138845cceee60f42ff9b397e64d03",
@@ -323,7 +323,9 @@
   "parts_saga/sounds/pen/clip_6.wav": "ffdb7c929f56e1f27bca1322413e3355497e013248727ccbe940965686b6144e",
   "parts_saga/sounds/poke/poke.wav": "5b4691361a56af9c93ba9ea7429715d60941784d82afcfc715a07b733b4ff213",
   "parts_saga/sounds/pomo/start.wav": "e0a752a4c4b586580e49ebc901079734e87831dc39327733326a43719e2bde98",
-  "parts_saga/sounds/purr/purr.wav": "a7d673154db90e6db2fa6c170434d5e955b5c0099703bb6af0469437b2206afe",
+  "parts_saga/sounds/purr/purr1.wav": "c23a64563cc03f638a95655fdef8ac215daf32f36315e07068908f0f2eb5e1a9",
+  "parts_saga/sounds/purr/purr2.wav": "33b7ccd6044e1a85c24c0dceaa801d45afe4d3f759a51a896308e412582bc9d7",
+  "parts_saga/sounds/purr/purr3.wav": "a7d673154db90e6db2fa6c170434d5e955b5c0099703bb6af0469437b2206afe",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/alt.wav": "31983a24e5a0190043efcee356d5ad0ecf1d120c761b2dcfc38bac5737cfae77",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/back.wav": "8531c65d5c8ae0d39ae927e95c67c9793152ac5a621804c583d017aed3f7008d",
   "parts_saga/sounds/Razer Green (Blackwidow Elite) - Akira/caps.wav": "9dcb05127433771017532e0a541d5638da3af030c638d8e0b3c20b309d0e9459",
@@ -542,8 +544,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "새 소품 4종이 왔어요 — 잠자는 고양이, 김이 폴폴 나는 왕만두, 아기 쪽쪽이, 토끼 머리띠. '소품 새로고침'을 누르다 보면 만날 수 있어요.",
-  "고양이를 클릭하면 야옹 하고 울어요. 고양이 머리를 살살 쓰다듬으면(드래그) 고롱고롱 소리를 내요."
- ]
+ "notes": [],
+ "silent": true
 }

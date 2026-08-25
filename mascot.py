@@ -18365,8 +18365,59 @@ class Mascot:
         except Exception:
             pass
 
+    def _cat_cur_str(self):
+        """쓰다듬기 커서 — 파츠의 손 그림(hand.png)을 CUR 로 구워 쓴다.
+
+        크기는 고양이 얼굴 넓이의 1/4(변으로 절반) 남짓 (요청). 윈도우
+        Tk 는 "@경로.cur" 커서를 받는다 — 굽기가 안 되면(맥·경로 문제)
+        기본 손 모양으로 물러난다. CUR 는 ICO 와 같은 통에 핫스팟만
+        더한 형식이라 표준 라이브러리 없이 바이트로 직접 쓴다 (지뢰 21
+        — 새 import 를 만들지 않는다).
+        """
+        got = getattr(self, "_cat_cur_cache", None)
+        if got is not None:
+            return got or ("pointinghand" if IS_MAC else "hand2")
+        fall = "pointinghand" if IS_MAC else "hand2"
+        self._cat_cur_cache = False
+        if not IS_WIN:
+            return fall
+        try:
+            hb = self._cat_box(True)
+            fw = (hb[2] - hb[0]) if hb else 90.0
+            im = Image.open(os.path.join(self.dir, "hand.png")).convert("RGBA")
+            w = max(16, min(96, int(round(fw * 0.5))))
+            h = max(1, int(round(im.height * w / im.width)))
+            im = im.resize((w, h), Image.LANCZOS)
+            px = im.tobytes("raw", "BGRA", 0, -1)     # 아래→위 (BMP 순서)
+            and_row = ((w + 31) // 32) * 4
+            mask = bytes(1) * (and_row * h)
+            def le(v, n):
+                return int(v).to_bytes(n, "little")
+            bih = (le(40, 4) + le(w, 4) + le(h * 2, 4) + le(1, 2)
+                   + le(32, 2) + le(0, 4) + le(len(px) + len(mask), 4)
+                   + le(0, 4) * 4)
+            img = bih + px + mask
+            hx, hy = w // 2, max(0, h // 5)           # 핫스팟 = 손끝께
+            head = (le(0, 2) + le(2, 2) + le(1, 2)
+                    + le(w if w < 256 else 0, 1) + le(h if h < 256 else 0, 1)
+                    + le(0, 1) + le(0, 1) + le(hx, 2) + le(hy, 2)
+                    + le(len(img), 4) + le(22, 4))
+            path = os.path.join(self.dir, ".cat_hand.cur")
+            tmp = path + ".tmp"
+            with open(tmp, "wb") as fp:
+                fp.write(head + img)
+            os.replace(tmp, path)
+            cur = "@" + path.replace("\\", "/")
+            # 진짜 받아 주는지 그 자리에서 확인 — 안 되면 기본 손으로
+            self.canvas.config(cursor=cur)
+            self.canvas.config(cursor="")
+            self._cat_cur_cache = cur
+            return cur
+        except Exception:
+            return fall
+
     def _cat_hand_cursor(self, on):
-        """고양이 머리 위에서 커서를 손 모양으로 (요청 — 윈도우 기본 손).
+        """고양이 머리 위에서 커서를 손 그림으로 (요청).
 
         본체 캔버스와 몸 레이어 창 **둘 다** 바꿔야 한다 — 매끈이 켜져
         있으면 클릭(과 커서)이 레이어 창으로 간다 (지뢰 118).
@@ -18374,7 +18425,7 @@ class Mascot:
         if on == self._cat_cursor:
             return
         self._cat_cursor = on
-        cur = "hand2" if on else ""
+        cur = self._safe_str(self._cat_cur_str) or "hand2" if on else ""
         for w in (self.canvas,
                   getattr(getattr(self, "_char_lay", None), "top", None)):
             if w is None:
