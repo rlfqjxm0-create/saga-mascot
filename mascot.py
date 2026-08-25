@@ -18234,11 +18234,11 @@ class Mascot:
             h9 = float(sz9[1]) * self.s
         except Exception:
             return
-        # **주변을 번갈아** — 왼쪽·오른쪽·위를 돌아가며, 한 번에 두세 개를
-        # 박자를 어긋내 뿅뿅 (요청: 작게 여러 개).
+        # **주변을 번갈아** — 왼쪽·오른쪽·위를 돌아가며 **한 번에 하나씩**
+        # (요청 — 여러 개를 한꺼번에 내면 겹쳐 지저분하다).
         side9 = getattr(self, "_cat_heart_side", 0)
         self._cat_heart_side = (side9 + 1) % 3
-        for j9 in range(random.randint(2, 3)):
+        for j9 in range(1):
             if side9 == 0:              # 왼쪽 곁
                 x = bx9 - w9 * random.uniform(0.05, 0.28)
                 y = by9 + yo + h9 * random.uniform(0.1, 0.7)
@@ -18248,8 +18248,6 @@ class Mascot:
             else:                       # 머리 위
                 x = bx9 + w9 * random.uniform(0.2, 0.8)
                 y = by9 + yo - h9 * random.uniform(0.0, 0.25)
-            # 자리·속도·수명을 제각각 주면 같은 박자에 태어나도 흩어져
-            # '번갈아 뿅뿅'으로 보인다.
             life = random.randint(24, 38)
             self.notes.append([x, y, random.uniform(-0.35, 0.35),
                                random.uniform(0.7, 1.15),
