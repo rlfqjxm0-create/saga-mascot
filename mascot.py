@@ -15597,7 +15597,22 @@ class Mascot:
             except Exception:
                 smooth = False          # 판단이 터져도 루프는 돈다
             gap = self.GAP_SMOOTH if smooth else self.GAP_NORM
-        self._tick_after = self.root.after(gap, self.tick)
+        # 맥 + 큰 창(아바타 크기 ↑)은 매끈 push(NSBitmap 변환)가 픽셀에
+        # 비례해 무거워진다 — 20fps 로 눌러 입력이 먼저 돌게 한다.
+        if IS_MAC and self._smooth_on:
+            try:
+                if self.root.winfo_width() * self.root.winfo_height() > 300000:
+                    gap = max(gap, 50)
+            except Exception:
+                pass
+        # **예약은 본체를 돌린 뒤, 걸린 시간만큼 뒤로 미뤄서 한다**
+        # (지뢰 129 의 본체판). 예전처럼 먼저 예약하면, 한 프레임이 gap 을
+        # 넘길 때(맥에서 아바타를 키우면 시트가 커져 매 프레임 push 가
+        # 느려진다) 다음 콜백이 이미 만료된 채 쉼 없이 이어지고 idle 틈이
+        # 사라진다 — 맥은 그 틈에서 창 열기·클릭을 처리하므로 '렉이 걸려
+        # 환경설정이 안 열린다'가 됐다 (사가 제보 — 크기를 키우자 발생).
+        # 예외가 나도 루프가 죽지 않는 것은 try/finally 가 보장한다.
+        t0 = time.time()
         try:
             self._tick_body()
         except Exception:
@@ -15606,6 +15621,15 @@ class Mascot:
                 self.draw(time.time())      # 지워진 화면을 다시 채운다
             except Exception:
                 self._log_error("redraw")
+        finally:
+            spent = int((time.time() - t0) * 1000)
+            if spent > gap:
+                # 오래 걸렸다 — 남는 틈을 살짝 더 주어 입력이 먼저 돈다
+                gap = min(spent + self.GAME_SLACK, self.GAP_SLEEP * 3)
+            try:
+                self._tick_after = self.root.after(gap, self.tick)
+            except Exception:
+                pass                        # 닫히는 중 — 루프를 끝낸다
 
     def _tick_body(self):
         now = time.time()
@@ -18385,7 +18409,8 @@ class Mascot:
             hb = self._cat_box(True)
             fw = (hb[2] - hb[0]) if hb else 90.0
             im = Image.open(os.path.join(self.dir, "hand.png")).convert("RGBA")
-            w = max(16, min(96, int(round(fw * 0.5))))
+            # 고양이 머리 폭의 1/4 (요청 — 절반은 너무 컸다)
+            w = max(14, min(96, int(round(fw * 0.25))))
             h = max(1, int(round(im.height * w / im.width)))
             im = im.resize((w, h), Image.LANCZOS)
             px = im.tobytes("raw", "BGRA", 0, -1)     # 아래→위 (BMP 순서)
