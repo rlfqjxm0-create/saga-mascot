@@ -1183,6 +1183,16 @@ class MacCharLayer:
         except Exception:
             pass
 
+    # 윈도우 CharLayer 와 같은 이름의 z순서 메서드 — 맥은 덧레이어라
+    # 본체 창과 z순서를 다툴 일이 없다. **없으면 tick 이 8초마다
+    # AttributeError 로 죽는다** (CI 맥 러너가 잡아낸 실사고 — z순서
+    # 재고정·창 이동·상태 칩 핀이 전부 이 이름을 부른다).
+    def place_above(self, owner_hwnd):
+        pass
+
+    def set_topmost(self, on):
+        pass
+
     def destroy(self):
         try:
             self.layer.removeFromSuperlayer()
