@@ -274,6 +274,7 @@ class _MacChromaKey:
             return 0
         done = 0
         self.skipped = skipped = 0       # 건너뛴 창 수 (진단 기록에 남는다)
+        seen9 = []                       # 창별 현황 — 진단 로그용 (지뢰 51)
         for w in self.windows():
             try:
                 # 우클릭 메뉴·풍선도움말 창에 필터가 걸리면 배경 재질이
@@ -314,14 +315,28 @@ class _MacChromaKey:
                 lay = self._msg(cv, "layer")
                 if not lay:
                     continue
+                # 크기(frame)는 구조체 반환이라 ctypes msgSend 로 받으면
+                # 아키텍처에 따라 프로세스가 죽을 수 있다 (지뢰 130) —
+                # 정수인 창 번호만 쓴다. 번호는 .macwindow.log 의 다른
+                # 기록과 같은 체계라 어느 창인지 대조된다.
+                try:
+                    sz9 = "#%d" % int(self._msg(w, "windowNumber",
+                                                restype=ctypes.c_long))
+                except Exception:
+                    sz9 = "#?"
                 if self._msg(lay, "compositingFilter") == self.filter:
+                    seen9.append(sz9 + ":걸림")
                     continue
                 self._msg(lay, "setCompositingFilter:", self.filter,
                           argtypes=(ctypes.c_void_p,))
+                seen9.append(sz9 + ":새로")
                 done += 1
             except Exception:
-                pass
+                seen9.append("?:실패")
         self.skipped = skipped
+        # 창별 현황 — '검은 줄이 남는다' 제보를 원격 로그 하나로 가르기
+        # 위한 것 (지뢰 51). 바뀌었을 때만 밖에서 기록한다.
+        self.status_line = " ".join(sorted(seen9)) + " 건너뜀%d" % skipped
         return done
 
     # ── 진단: 실제로 투명해졌는지 화면 합성 결과를 직접 읽는다 ──────────
@@ -35432,6 +35447,12 @@ class Mascot:
             sk = int(getattr(ck, "skipped", 0) or 0)
             if n or sk:
                 self._mac_log(f"색상키 적용한 창 수: {n} (건너뜀 {sk})")
+            # 창별 현황이 바뀌면 남긴다 — 어느 창이 필터를 못 받는지
+            # 이 로그 한 줄로 갈린다 (사가 '검은 줄' 제보용, 지뢰 51)
+            line9 = str(getattr(ck, "status_line", "") or "")
+            if line9 and line9 != getattr(self, "_mac_filt_line", ""):
+                self._mac_filt_line = line9
+                self._mac_log("색상키 창별: " + line9)
         except Exception as e:
             self._mac_log(f"투명 유지 실패 → {e!r}")
         try:
