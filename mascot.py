@@ -5655,6 +5655,10 @@ class Mascot:
         self._cat_open_until = 0.0   # 고양이가 눈을 뜨고 있는 시한
         self._cat_open_next = 0.0    # 다음에 눈을 뜰 시각
         self._cat_heart_next = 0.0   # 다음 하트가 나올 시각
+        self._bibi_blink_until = 0.0  # 비비가 눈을 감고 있는 시한 (깜빡)
+        self._bibi_blink_next = 0.0   # 다음 깜빡임 시각
+        self._bibi_shut_until = 0.0   # 클릭·쓰다듬기로 눈을 감고 있는 시한
+        self._bibi_hello = False      # 비비가 새로 나와 인사할 차례인가
         self._cat_stroke = None      # 고양이 머리를 쓰다듬는 중 (시작 좌표)
         self._cat_moved = 0.0        # 쓰다듬은 거리 누적 (px)
         self._purr_until = 0.0       # 고롱고롱이 울리고 있는 시한 (5초)
@@ -6519,6 +6523,19 @@ class Mascot:
             "prop_bit2": {"motion": "steam", "amp": 1.0, "period": 3.4,
                           "jitter": 0.12, "rise": 1.1, "steps": 22},
         },
+        # 하독의 반려동물 비비 — prop=꼬리 · bit2=몸체 · bit3=눈깜빡(평소
+        # 숨김) · bit4=왼발 · bit5=오른발. 꼬리는 몸 쪽 밑동을 축으로
+        # 위아래로 느리게 큰 궤적, 발은 반 박자 어긋나게 번갈아 살랑.
+        "비비": {
+            "prop": {"motion": "sway", "amp": 13.0, "period": 4.2,
+                     "jitter": 0.12, "pivot": [0.08, 0.25], "steps": 28},
+            "prop_bit4": {"motion": "sway", "amp": 7.0, "period": 3.0,
+                          "jitter": 0.1, "pivot": [0.5, 0.12],
+                          "steps": 24, "phase": 0.0},
+            "prop_bit5": {"motion": "sway", "amp": 7.0, "period": 3.0,
+                          "jitter": 0.1, "pivot": [0.5, 0.12],
+                          "steps": 24, "phase": 0.5},
+        },
     }
 
     def _load_prop_bits(self, pick, s, pil_cache):
@@ -6553,6 +6570,10 @@ class Mascot:
         # 찾아 주므로 옛 config 도 그대로 돈다.
         tab9 = self.cfg.get("prop_motion") or {}
         gname9 = str(ent.get("gname") or "")
+        if gname9 == "비비" and self._prop_gname != "비비":
+            # 비비가 새로 나왔다 — 잠깐 인사 (요청). 말풍선은 아직 못
+            # 띄우는 시점(부팅 중)일 수 있어 표시만 하고 tick 이 말한다.
+            self._bibi_hello = True
         self._prop_gname = gname9        # 그리는 쪽(고양이 눈)이 본다
         mo_all = (tab9.get(gname9) or tab9.get(pick)
                   or self.PROP_MOTION_DEF.get(gname9) or {})
@@ -17725,8 +17746,12 @@ class Mascot:
 
         # 고양이 머리 위에 커서가 오면 손 모양 — 쓰다듬을 수 있다는 안내.
         # 상태가 바뀔 때만 커서를 만져 깜빡임이 없다.
-        if self._prop_gname == "고양이":
+        if self._prop_gname in self.CAT_GNAMES:
             self._safe("cat_cursor", self._cat_cursor_tick)
+        if self._bibi_hello and self.can_talk:
+            # 비비가 새로 나왔을 때 한 번만 (요청)
+            self._bibi_hello = False
+            self._say("저는 하독님의 고양이 비비예요!", 4.0)
         # 상태 칩 모션 — 제스처와 같은 값(_g_hands·_g_tilt)을 쓰므로
         # 제스처 계산 뒤, 그리기 앞에 둔다. 값은 프레임마다 지워지므로
         # 여기서 다시 세운다 (지뢰 14 — 구역 밖에서 지우고 다시 세운다).
@@ -18427,7 +18452,25 @@ class Mascot:
         now9 = time.time()
         # 고양이 소품 — 눈감은 얼굴(bit3)이 기본, 가끔 눈을 뜨고(bit4)
         # 빤히 바라본다 (요청). 두 얼굴은 같은 자리라 하나만 그린다.
+        # 비비는 반대다 — 몸체(bit2)가 눈뜬 그림이고 bit3 이 감은 눈이라,
+        # 평소엔 bit3 을 숨기고 **가끔 깜빡일 때만** 잠깐 얹는다.
         skip9 = None
+        if self._prop_gname == "비비" and self.has.get("prop_bit3"):
+            # 쓰다듬는 동안(드래그 중)에는 기분 좋게 감은 채로 둔다 (요청)
+            if self._cat_stroke is not None:
+                self._bibi_shut_until = now9 + 0.4
+            shut9 = (now9 < self._bibi_blink_until
+                     or now9 < self._bibi_shut_until)
+            if shut9:
+                pass                          # 감은 눈(bit3)을 그린다
+            else:
+                skip9 = "prop_bit3"
+                if not self._bibi_blink_next:
+                    self._bibi_blink_next = now9 + random.uniform(4.0, 9.0)
+                elif now9 >= self._bibi_blink_next:
+                    self._bibi_blink_until = now9 + 0.16
+                    self._bibi_blink_next = (self._bibi_blink_until
+                                             + random.uniform(4.0, 10.0))
         if self._prop_gname == "고양이" and self.has.get("prop_bit4"):
             if now9 < self._cat_open_until:
                 skip9 = "prop_bit3"          # 눈 뜸 — 가만히 응시
@@ -18454,17 +18497,25 @@ class Mascot:
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
 
-    def _cat_box(self, head_only=False):
-        """고양이 소품의 화면 상자 (x0, y0, x1, y1). 없으면 None.
+    # 고양이처럼 구는 소품들 — 클릭하면 야옹, 쓰다듬으면 고롱고롱
+    CAT_GNAMES = ("고양이", "비비")
 
-        head_only 면 **얼굴 조각**(bit3/bit4)만 — 쓰다듬는 자리다.
+    def _cat_box(self, head_only=False):
+        """고양이류 소품의 화면 상자 (x0, y0, x1, y1). 없으면 None.
+
+        head_only 면 **쓰다듬는 자리**다 — 고양이는 얼굴 조각(bit3/bit4),
+        비비는 몸체(bit2 — 요청: 몸체를 쓰다듬으면 고롱고롱).
         _pos 는 ox 가 든 화면 좌표라 클릭 좌표와 바로 견줄 수 있다.
         숨쉬기(yo)는 ±2px 라 판정에는 무시해도 된다.
         """
-        if self._prop_gname != "고양이":
+        if self._prop_gname not in self.CAT_GNAMES:
             return None
-        names = (("prop_bit3", "prop_bit4") if head_only
-                 else ("prop", "prop_bit2", "prop_bit3", "prop_bit4"))
+        if self._prop_gname == "비비":
+            names = (("prop_bit2",) if head_only
+                     else ("prop", "prop_bit2", "prop_bit4", "prop_bit5"))
+        else:
+            names = (("prop_bit3", "prop_bit4") if head_only
+                     else ("prop", "prop_bit2", "prop_bit3", "prop_bit4"))
         x0 = y0 = x1 = y1 = None
         for nm in names:
             if not self.has.get(nm):
@@ -18496,9 +18547,14 @@ class Mascot:
             self.catsnd.play()
         except Exception:
             pass
-        # 놀라서 눈을 뜨고 잠깐 바라본다
-        self._cat_open_until = now + random.uniform(2.5, 4.0)
-        self._cat_open_next = self._cat_open_until + random.uniform(14.0, 30.0)
+        if self._prop_gname == "고양이":
+            # 놀라서 눈을 뜨고 잠깐 바라본다
+            self._cat_open_until = now + random.uniform(2.5, 4.0)
+            self._cat_open_next = (self._cat_open_until
+                                   + random.uniform(14.0, 30.0))
+        elif self._prop_gname == "비비":
+            # 비비는 반대 — 기분 좋게 눈을 감았다 뜬다 (요청)
+            self._bibi_shut_until = now + random.uniform(2.0, 3.0)
 
     def _cat_purr(self):
         """고롱고롱 — 한 번 쓰다듬으면 5초 (wav 길이가 곧 5초다).
@@ -18509,6 +18565,8 @@ class Mascot:
         if self.purrsnd is None or now < self._purr_until:
             return
         self._purr_until = now + 5.0
+        if self._prop_gname == "비비":
+            self._bibi_shut_until = self._purr_until   # 고롱 동안 감은 채
         try:
             self.purrsnd.play()
         except Exception:
