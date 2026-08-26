@@ -4252,6 +4252,20 @@ class TodoPanel:
                 self._hwnd_cache = 0
         return self._hwnd_cache
 
+    def hidden(self):
+        """빈 패널(withdraw)인가 — 숨은 창은 절대 건드리면 안 된다.
+
+        맥(Tk 9)에서 숨은 창에 geometry/lift 를 계속 부르면 창이 도로
+        화면에 올라오는데, 백킹에는 아무것도 안 그려져 있어 **10px 높이의
+        새까만 가로 막대**가 된다 (사가 '검은 두 줄' — 창스캔으로 775x10·
+        745x10 순검정을 확인했다). 다시 나타나는 문은 render(내용 있음)
+        하나뿐이어야 한다.
+        """
+        try:
+            return self.top.state() == "withdrawn"
+        except Exception:
+            return False
+
     def raise_above(self):
         """캐릭터 창보다 위로 올린다.
 
@@ -4259,6 +4273,8 @@ class TodoPanel:
         한 번 뒤집히면 캐릭터가 말풍선을 덮어 할 일이 안 보인다. 그래서 자리를
         잡을 때마다 다시 맨 앞으로 올려 둔다.
         """
+        if self.hidden():
+            return
         try:
             if IS_WIN:
                 h = self._hwnd()
@@ -4275,6 +4291,8 @@ class TodoPanel:
         """본체 창 기준 저장된 자리에 붙인다 (끌어서 옮긴 위치)."""
         if self._moved and self._pressed is not None:
             return                      # 끄는 중에는 건드리지 않는다
+        if self.hidden():
+            return                      # 숨은 창을 되살리면 검은 막대가 된다
         try:
             dx, dy = self.offset
             # 창에 사방 여백이 있으므로 그만큼 당겨 놓아야 첫 칸이

@@ -219,6 +219,41 @@ try:
 except Exception as e:
     print("[패널픽셀] 실패 %r" % e, flush=True)
 
+# ── '검은 막대' 재현 검사 — 빈 패널을 place/raise 로 계속 건드려도
+# 화면에 안 올라와야 한다 (사가 사고의 시나리오 그대로).
+try:
+    from AppKit import NSApplication
+    tp = m.todo_panel
+    dp = m.due_panel
+    for pn, nm in ((tp, "할일"), (dp, "마감")):
+        if pn is None:
+            continue
+        pn.render([])                       # 비움 → withdraw
+    for i in range(200):                    # 그리기 루프 흉내
+        for pn in (tp, dp):
+            if pn is None:
+                continue
+            pn.place(m.root.winfo_rootx(), m.root.winfo_rooty())
+            pn.raise_above()
+        m.root.update()
+        time.sleep(0.005)
+    bad9 = []
+    for w in NSApplication.sharedApplication().windows():
+        try:
+            f = w.frame()
+            if f.size.height <= 14 and f.size.width > 300 and w.isVisible():
+                bad9.append("%dx%d" % (f.size.width, f.size.height))
+        except Exception:
+            pass
+    print("[막대] 빈 패널 place/raise 200번 뒤 보이는 납작 창: %s"
+          % (bad9 or "없음(정상)"), flush=True)
+    ck9 = getattr(m, "_mac_ck", None)
+    if ck9 is not None:
+        for line in ck9.scan_all():
+            print("[막대스캔] " + line, flush=True)
+except Exception as e:
+    print("[막대] 검사 실패 %r" % e, flush=True)
+
 # ── 매끈 레이어 채움 검증 — GPU 확대(contentsScale=1)가 창을 꽉
 # 채우는가. 예전 '절반 크기' 사고(contentsScale=2 + 1배 그림)의 재발을
 # 픽셀로 잡는다: 창 세로 82% 지점(책상)이 불투명해야 한다.
