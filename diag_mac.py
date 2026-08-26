@@ -155,6 +155,70 @@ for want in ("만두", "고양이"):
             print("[진단] %s 로드 실패 %r" % (want, e), flush=True)
     wins = run_phase(m, want, 18, wins)
 
+# ── 패널(할 일·마감) 재현 — '검은 줄' 제보의 창들을 실제로 띄운다 ──
+def dump_filters(tag):
+    """창마다 색상키 필터·색공간이 걸렸는지 덤프한다."""
+    try:
+        from AppKit import NSApplication
+        ck = getattr(m, "_mac_ck", None)
+        want = getattr(ck, "filter", None)
+        for w in NSApplication.sharedApplication().windows():
+            try:
+                f = w.frame()
+                cv = w.contentView()
+                lay = cv.layer() if cv else None
+                filt = lay.compositingFilter() if lay is not None else None
+                on = (filt == want) if want is not None else bool(filt)
+                cs = ""
+                try:
+                    cs = str(w.colorSpace().localizedName())
+                except Exception:
+                    pass
+                print("[필터:%s] #%d %4dx%-4d 보임=%s 필터=%s 색공간=%s"
+                      % (tag, w.windowNumber(), int(f.size.width),
+                         int(f.size.height), bool(w.isVisible()),
+                         "걸림" if on else "!! 없음", cs), flush=True)
+            except Exception as e:
+                print("[필터:%s] 창 하나 실패 %r" % (tag, e), flush=True)
+    except Exception as e:
+        print("[필터] 덤프 실패 %r" % e, flush=True)
+
+
+dump_filters("패널 넣기 전")
+try:
+    if m.todo_panel is not None:
+        m.todos = [{"t": "진단 할 일", "done": False}]
+        try:
+            m.todo_panel.render(m.todos)
+        except Exception:
+            m.todo_panel.render(["진단 할 일"])
+        m.todo_panel.place(m.root.winfo_rootx(), m.root.winfo_rooty())
+    if m.due_panel is not None:
+        m.due_panel.render(["D-3 진단 마감"], ["#d64a63"])
+        m.due_panel.place(m.root.winfo_rootx(), m.root.winfo_rooty())
+    print("[패널] 할 일·마감을 띄웠다", flush=True)
+except Exception as e:
+    print("[패널] 띄우기 실패 %r" % e, flush=True)
+# 색상키 주기가 새 창을 잡을 시간을 주고 다시 덤프
+t9 = time.time()
+while time.time() - t9 < 5.0:
+    try:
+        m.root.update()
+    except Exception:
+        break
+    time.sleep(0.01)
+dump_filters("패널 넣은 뒤")
+# 패널 픽셀 — 폭 790(패널) 창을 찍어 투명한지 본다
+try:
+    ck = getattr(m, "_mac_ck", None)
+    if ck is not None:
+        for pw in (790,):
+            got = ck.probe(pw, [(20, 5), (pw // 2, 5)])
+            print("[패널픽셀] 폭 %d 창 (20,5)/(중앙,5) = %s" % (pw, got),
+                  flush=True)
+except Exception as e:
+    print("[패널픽셀] 실패 %r" % e, flush=True)
+
 # ── 매끈 레이어 채움 검증 — GPU 확대(contentsScale=1)가 창을 꽉
 # 채우는가. 예전 '절반 크기' 사고(contentsScale=2 + 1배 그림)의 재발을
 # 픽셀로 잡는다: 창 세로 82% 지점(책상)이 불투명해야 한다.
