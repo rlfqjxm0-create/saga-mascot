@@ -562,7 +562,7 @@ DEFAULT_SETTINGS = {
     "autostart": True,    # 윈도우 시작 시 자동 실행 (exe로 배포된 경우만 적용)
     "sound": True,        # 타자 소리 (Mechvibes 팩)
     "sound_volume": 60,   # 타자 소리 볼륨 (0~100)
-    "pen_volume": 10,     # 펜 긋는 소리 볼륨 (0~100)
+    "pen_volume": 0,      # 펜 긋는 소리 볼륨 (0~100) — 기본 무음 (요청)
     "poke_volume": 40,    # 캐릭터를 눌렀을 때 나는 소리 볼륨 (0~100)
     "slime_volume": 45,   # 슬라임 만지는 소리 볼륨 (0~100)
     "slime_kind": "",     # 슬라임 종류 (sounds/slime/ 아래 폴더 이름)
@@ -2432,16 +2432,26 @@ class PokeSound:
                 keep.append((h, hdr, _b))
         self._voices = keep
 
-    def close(self):
+    def _all_stop(self):
+        """울리고 있는 소리를 그 자리에서 끊는다 (고롱고롱이 쓴다).
+
+        버퍼·클립은 그대로 두므로 곧바로 다시 `play()` 할 수 있다.
+        맥 쪽(`_MacSoundPool`)에도 같은 이름이 있어 부르는 쪽은 갈래를
+        나누지 않는다.
+        """
         wm = ctypes.windll.winmm
         for h, hdr, _b in self._voices:
             try:
                 wm.waveOutReset(h)
-                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr), ctypes.sizeof(_WAVEHDR))
+                wm.waveOutUnprepareHeader(h, ctypes.byref(hdr),
+                                          ctypes.sizeof(_WAVEHDR))
                 wm.waveOutClose(h)
             except Exception:
                 pass
         self._voices = []
+
+    def close(self):
+        self._all_stop()
 
 
 class MacPokeSound(_MacSoundPool):
@@ -5337,6 +5347,16 @@ class Mascot:
             spot = self.layout.get(name)
             if isinstance(spot, dict) and spot.get("pos"):
                 spot["pos"] = [spot["pos"][0] + off[0], spot["pos"][1] + off[1]]
+        # 배치 도구(place_tool)로 **새로 넣은** 소품 — PSD 없이 PNG 만 넣은
+        # 것들이다. layout.json 은 PSD 를 다시 뽑을 때마다 덮어써지므로
+        # (지뢰 13) config 에도 같이 남겨 두고, 없으면 여기서 되살린다.
+        # 그림이 없는 칸은 건너뛴다 — 반쪽 업데이트로 PNG 만 빠지면
+        # `_pick_prop` 이 뽑아 놓고 KeyError 로 죽는다 (지뢰 71).
+        for nm9, ent9 in (self.cfg.get("prop_extra") or {}).items():
+            if not (isinstance(ent9, dict) and ent9.get("pos")):
+                continue
+            if os.path.exists(os.path.join(self.parts_dir, "%s.png" % nm9)):
+                self.layout.setdefault(nm9, dict(ent9))
         # 펜이 닿는 영역은 책상 그림에 붙은 값이라, 옷마다 책상 자리가
         # 조금 다르면 옷별로 따로 둬야 한다 (안 그러면 그 옷에서만 펜이 밀린다).
         # skins 항목의 screen_quad가 있으면 그것을 쓰고, 없으면 공용 값.
@@ -5658,10 +5678,11 @@ class Mascot:
         self._bibi_blink_until = 0.0  # 비비가 눈을 감고 있는 시한 (깜빡)
         self._bibi_blink_next = 0.0   # 다음 깜빡임 시각
         self._bibi_shut_until = 0.0   # 클릭·쓰다듬기로 눈을 감고 있는 시한
-        self._bibi_hello = False      # 비비가 새로 나와 인사할 차례인가
+        self._bibi_hello = ""         # 인사할 반려묘 이름 (비비·덤보…)
         self._cat_stroke = None      # 고양이 머리를 쓰다듬는 중 (시작 좌표)
         self._cat_moved = 0.0        # 쓰다듬은 거리 누적 (px)
-        self._purr_until = 0.0       # 고롱고롱이 울리고 있는 시한 (5초)
+        self._purr_until = 0.0       # 지금 울리는 고롱고롱 판이 끝나는 시각
+        self._purr_move_at = 0.0     # 마지막으로 손이 움직인 시각 (멈추면 끊는다)
         self._meow_at = 0.0          # 마지막 울음 시각 (연타 방어)
         self._cat_cursor = ""        # 커서 상태 ("", "hover", "pet")
         self._cat_hand_xy = None     # 쓰다듬는 손 그림 자리 (커서 대신)
@@ -6492,15 +6513,117 @@ class Mascot:
         i9 = len(dxs) // 2
         return float(dxs[i9]), float(dys[i9])
 
+    @staticmethod
+    def _prop_base(name):
+        """곁조각·뒤짝 이름에서 소품 본체 이름을 얻는다 (prop24_bit2 → prop24)."""
+        base = str(name)
+        if base.endswith("_back"):
+            base = base[:-5]
+        return base.split("_bit")[0]
+
+    @staticmethod
+    def _prop_piece(name):
+        """조각 자리표 — 'main'(본체) · 'back'(뒤짝) · 'bitN'(곁조각).
+
+        번호(prop24)가 아니라 자리로 부른다 — 번호는 PSD 를 다시 뽑으면
+        밀리지만 자리는 그대로다.
+        """
+        if name.endswith("_back"):
+            return "back"
+        if "_bit" in name:
+            return "bit" + name.split("_bit")[1]
+        return "main"
+
+    @staticmethod
+    def _tune3(got):
+        """[dx, dy, 배율] 한 벌을 안전하게 읽는다."""
+        try:
+            dx = float(got[0])
+            dy = float(got[1])
+            f = float(got[2]) if len(got) > 2 else 1.0
+        except Exception:
+            return 0.0, 0.0, 1.0
+        return dx, dy, max(0.2, min(5.0, f))
+
+    def _prop_tune2(self, name):
+        """config `prop_tune` 의 손보정 — (묶음 dx·dy·배율, 조각 dx·dy·배율).
+
+        값이 리스트면 묶음 전체 한 벌이고, 딕셔너리면 조각별이다:
+            "비비": [10, -5, 0.9]                          ← 묶음만
+            "악마뿔": {"all": [0,0,1], "back": [4,10,1.2]}  ← 뿔은 두고 꼬리만
+        조각 열쇠는 자리표(main·back·bit2…)다 (`_prop_piece`).
+        """
+        tab = self.cfg.get("prop_tune") or {}
+        if not tab:
+            return (0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
+        base = self._prop_base(name)
+        ent = self._prop_layout.get(base) or {}
+        got = (tab.get(str(ent.get("gname") or "")) or tab.get(base))
+        if isinstance(got, dict):
+            g = self._tune3(got.get("all"))
+            p = self._tune3(got.get(self._prop_piece(name)))
+            return g + p
+        return self._tune3(got) + (0.0, 0.0, 1.0)
+
+    def _prop_tune(self, name):
+        """그 조각에 실제로 걸리는 손보정 (dx, dy, 배율) — 그림 로드가 쓴다.
+
+        PSD 에서 뽑은 자리가 캐릭터마다 조금씩 어긋날 때, PSD 를 다시
+        그리지 않고 config 로 옮기고 줄인다 (`place_tool.py` 가 쓰는 값).
+        열쇠는 폴더 이름(gname)이 먼저다 — 소품 번호는 PSD 를 다시 뽑으면
+        밀린다 (지뢰 13과 같은 이유로 layout.json 에 두지 않는다).
+        """
+        gdx, gdy, gf, pdx, pdy, pf = self._prop_tune2(name)
+        return gdx + pdx, gdy + pdy, max(0.2, min(5.0, gf * pf))
+
+    def _prop_group_center(self, base):
+        """소품 묶음(본체+뒤짝+곁조각)의 layout 좌표계 중심 — 배율의 축.
+
+        조각마다 제 중심으로 줄이면 서로 떨어져 버린다. 묶음의 중심
+        하나를 축으로 모두 같이 줄여야 모양이 유지된다 (지뢰 112의
+        중앙값 보정과 같은 정신 — 묶음은 한 덩어리로 움직인다).
+        """
+        x0 = y0 = x1 = y1 = None
+        ent = self._prop_layout.get(base) or {}
+        for nm in [base, base + "_back"] + list(ent.get("bits") or []):
+            e = self._prop_layout.get(nm)
+            if not (isinstance(e, dict) and e.get("pos") and e.get("size")):
+                continue
+            px, py = e["pos"][0], e["pos"][1]
+            w, h = e["size"][0], e["size"][1]
+            x0 = px if x0 is None else min(x0, px)
+            y0 = py if y0 is None else min(y0, py)
+            x1 = px + w if x1 is None else max(x1, px + w)
+            y1 = py + h if y1 is None else max(y1, py + h)
+        if x0 is None:
+            return 0.0, 0.0
+        return (x0 + x1) / 2.0, (y0 + y1) / 2.0
+
     def _prop_at(self, name):
         """그 소품의 layout 한 칸 — 지금 옷에 맞게 옮겨 둔 사본.
 
         원본을 고치면 안 된다 (다음에 다른 옷으로 갈아입을 때 또 옮긴다).
+        config `prop_tune` 의 손보정(dx·dy·배율)도 여기서 얹는다 — 소품
+        좌표는 전부 이 통로를 지나므로 본체·뒤짝·곁조각이 같이 맞는다.
         """
         got = dict(self._prop_layout[name])
-        dx9, dy9 = self._prop_delta()
-        if (dx9 or dy9) and isinstance(got.get("pos"), list):
-            got["pos"] = [got["pos"][0] + dx9, got["pos"][1] + dy9]
+        gdx, gdy, gf, pdx, pdy, pf = self._prop_tune2(name)
+        if isinstance(got.get("pos"), list):
+            px, py = got["pos"][0], got["pos"][1]
+            w9, h9 = (got.get("size") or [0, 0])[:2]
+            if gf != 1.0:
+                # 묶음 배율 — 묶음 중심을 축으로 (조각들이 같이 줄어든다)
+                cx9, cy9 = self._prop_group_center(self._prop_base(name))
+                px = cx9 + (px - cx9) * gf
+                py = cy9 + (py - cy9) * gf
+            if pf != 1.0:
+                # 조각 배율 — **그 조각의 중심**을 축으로 (뿔만 커진다)
+                px += w9 * gf * (1 - pf) / 2.0
+                py += h9 * gf * (1 - pf) / 2.0
+            if isinstance(got.get("size"), list):
+                got["size"] = [w9 * gf * pf, h9 * gf * pf]
+            dx9, dy9 = self._prop_delta()
+            got["pos"] = [px + dx9 + gdx + pdx, py + dy9 + gdy + pdy]
         return got
 
     PROP_BIT_MAX = 6         # 한 소품에 붙일 수 있는 곁조각 수
@@ -6559,34 +6682,42 @@ class Mascot:
         self.layout["overlays"] = [
             o for o in (self.layout.get("overlays") or [])
             if not o.startswith("prop_bit")]
+        ent = (self._prop_layout.get(pick) or {}) if pick else {}
+        # 이름은 **곁조각이 없어도** 갱신해야 한다. 예전에는 조각이 있는
+        # 소품에서만 넣어서, 비비에서 평범한 소품으로 바꾸면(소품 새로고침)
+        # 옛 이름이 남았다 — `_cat_box` 는 이 이름만 보므로 고양이가 아닌
+        # 소품을 눌러도 야옹 소리가 났다.
+        gname9 = str(ent.get("gname") or "")
+        if gname9 in self.PET_CATS and self._prop_gname != gname9:
+            # 반려묘가 새로 나왔다 — 잠깐 인사 (요청). 말풍선은 아직 못
+            # 띄우는 시점(부팅 중)일 수 있어 **누구인지**만 적어 두고
+            # tick 이 말한다.
+            self._bibi_hello = gname9
+        self._prop_gname = gname9        # 그리는 쪽(고양이 눈)이 본다
         if not pick:
-            return
-        ent = self._prop_layout.get(pick) or {}
-        keys = [k for k in (ent.get("bits") or [])][:self.PROP_BIT_MAX - 1]
-        if not keys:
             return
         # 움직임 설정은 **폴더 이름**으로 먼저 찾는다 — 소품 번호는 사람이
         # 다시 매기면 밀린다 (미쿠가 prop16 → prop17 이 됐다). 번호로도
         # 찾아 주므로 옛 config 도 그대로 돈다.
         tab9 = self.cfg.get("prop_motion") or {}
-        gname9 = str(ent.get("gname") or "")
-        if gname9 == "비비" and self._prop_gname != "비비":
-            # 비비가 새로 나왔다 — 잠깐 인사 (요청). 말풍선은 아직 못
-            # 띄우는 시점(부팅 중)일 수 있어 표시만 하고 tick 이 말한다.
-            self._bibi_hello = True
-        self._prop_gname = gname9        # 그리는 쪽(고양이 눈)이 본다
         mo_all = (tab9.get(gname9) or tab9.get(pick)
                   or self.PROP_MOTION_DEF.get(gname9) or {})
+        # 조각이 없는 소품도 움직일 수 있다 — 그리는 두 길이 모두
+        # `_prop_bit_cfg[이름]` 을 보므로 'prop' 한 칸이면 된다.
         self._prop_bit_cfg["prop"] = mo_all.get("prop") or {}
+        keys = [k for k in (ent.get("bits") or [])][:self.PROP_BIT_MAX - 1]
+        if not keys:
+            return
         for j9, key9 in enumerate(keys):
             nm9 = "prop_bit%d" % (j9 + 2)
             p9 = os.path.join(self.prop_dir, "%s.png" % key9)
             if key9 not in self._prop_layout or not os.path.exists(p9):
                 continue
             im9 = Image.open(p9).convert("RGBA")
-            if s != 1.0:
-                im9 = im9.resize((max(1, round(im9.width * s)),
-                                  max(1, round(im9.height * s))),
+            s9 = s * self._prop_tune(key9)[2]   # prop_tune 배율 (배치 도구)
+            if s9 != 1.0:
+                im9 = im9.resize((max(1, round(im9.width * s9)),
+                                  max(1, round(im9.height * s9))),
                                  Image.LANCZOS)
             self.layout[nm9] = self._prop_at(key9)
             pil_cache[nm9] = im9
@@ -6622,9 +6753,10 @@ class Mascot:
         if name not in self._prop_layout or not os.path.exists(path):
             return
         im = Image.open(path).convert("RGBA")
-        if s != 1.0:
-            im = im.resize((max(1, round(im.width * s)),
-                            max(1, round(im.height * s))), Image.LANCZOS)
+        s9 = s * self._prop_tune(name)[2]       # prop_tune 배율 (배치 도구)
+        if s9 != 1.0:
+            im = im.resize((max(1, round(im.width * s9)),
+                            max(1, round(im.height * s9))), Image.LANCZOS)
         self.layout["prop_back"] = self._prop_at(name)
         pil_cache["prop_back"] = im
         self.im["prop_back"] = self._tkimg(self._hard(im), im)
@@ -6806,9 +6938,10 @@ class Mascot:
             # 다른 옷의 layout 에서 가져온 좌표는 지금 옷에 맞게 옮긴다
             self.layout["prop"] = self._prop_at(pick)
             im = Image.open(front).convert("RGBA")
-            if s != 1.0:
-                im = im.resize((max(1, round(im.width * s)),
-                                max(1, round(im.height * s))), Image.LANCZOS)
+            s9 = s * self._prop_tune(pick)[2]   # prop_tune 배율 (배치 도구)
+            if s9 != 1.0:
+                im = im.resize((max(1, round(im.width * s9)),
+                                max(1, round(im.height * s9))), Image.LANCZOS)
             # 소품도 머리 안에만 있으면 이분화하지 않는다 (안경테 계단 방지)
             covered = self._covered_by_base(
                 self.layout["prop"],
@@ -7803,8 +7936,10 @@ class Mascot:
         except Exception:
             self.sndpack = None
         pen_dir = os.path.join(self.dir, "sounds", "pen")
-        if os.path.isdir(pen_dir):
-            vol = float(self.us.get("pen_volume", 30))
+        # 볼륨 0(기본)이면 아예 안 만든다 — 무음을 재생할 이유가 없다.
+        # 설정에서 올리면 _init_sound 가 다시 불려 그때 만들어진다.
+        if os.path.isdir(pen_dir) and float(self.us.get("pen_volume", 0)) > 0:
+            vol = float(self.us.get("pen_volume", 0))
             # pen_grain(도로롱 전용): 알갱이 방식. 실패하면 원샷으로 폴백.
             use_grain = bool(self.cfg.get("pen_grain")) and not IS_MAC
             try:
@@ -8225,6 +8360,7 @@ class Mascot:
             self._cat_moved = 0.0
             self._cat_hand_xy = None
             self._cat_hand_cursor("")
+            self._purr_stop()          # 손을 떼면 고롱고롱도 그친다 (요청)
             if moved9 <= 24.0:
                 self._safe("cat_meow", self._cat_meow)
             self._press = None
@@ -17748,10 +17884,16 @@ class Mascot:
         # 상태가 바뀔 때만 커서를 만져 깜빡임이 없다.
         if self._prop_gname in self.CAT_GNAMES:
             self._safe("cat_cursor", self._cat_cursor_tick)
+        # 손이 멈추면 고롱고롱을 끊는다 (요청). _safe 밖이다 — 꺼지면
+        # 소리가 안 멎으므로 예외가 나도 안전한 쪽(정지)으로 되돌린다.
+        self._purr_tick(time.time())
         if self._bibi_hello and self.can_talk:
-            # 비비가 새로 나왔을 때 한 번만 (요청)
-            self._bibi_hello = False
-            self._say("저는 하독님의 고양이 비비예요!", 4.0)
+            # 반려묘가 새로 나왔을 때 한 번만 (요청). 깃발에 **누구인지**를
+            # 담아 둔다 — 고양이마다 인사말이 다르다.
+            said9 = (self.PET_CATS.get(self._bibi_hello) or {}).get("hello")
+            self._bibi_hello = ""
+            if said9:
+                self._say(said9, 4.0)
         # 상태 칩 모션 — 제스처와 같은 값(_g_hands·_g_tilt)을 쓰므로
         # 제스처 계산 뒤, 그리기 앞에 둔다. 값은 프레임마다 지워지므로
         # 여기서 다시 세운다 (지뢰 14 — 구역 밖에서 지우고 다시 세운다).
@@ -18455,16 +18597,17 @@ class Mascot:
         # 비비는 반대다 — 몸체(bit2)가 눈뜬 그림이고 bit3 이 감은 눈이라,
         # 평소엔 bit3 을 숨기고 **가끔 깜빡일 때만** 잠깐 얹는다.
         skip9 = None
-        if self._prop_gname == "비비" and self.has.get("prop_bit3"):
+        pet9 = self.PET_CATS.get(self._prop_gname)
+        if pet9 and self.has.get(pet9["shut"]):
             # 쓰다듬는 동안(드래그 중)에는 기분 좋게 감은 채로 둔다 (요청)
             if self._cat_stroke is not None:
                 self._bibi_shut_until = now9 + 0.4
             shut9 = (now9 < self._bibi_blink_until
                      or now9 < self._bibi_shut_until)
             if shut9:
-                pass                          # 감은 눈(bit3)을 그린다
+                pass                          # 감은 눈 조각을 그린다
             else:
-                skip9 = "prop_bit3"
+                skip9 = pet9["shut"]
                 if not self._bibi_blink_next:
                     self._bibi_blink_next = now9 + random.uniform(4.0, 9.0)
                 elif now9 >= self._bibi_blink_next:
@@ -18497,8 +18640,22 @@ class Mascot:
             ox, oy_ = self._pos(name)
             self._put(name, ox, oy_ + yo)
 
+    # 반려동물 고양이들 — 눈을 깜빡이고, 누르면 야옹, 쓰다듬으면 고롱고롱.
+    # **조각 구성이 캐릭터마다 다르다** — PSD 를 그린 사람이 정하는 것이라
+    # 번호로 짐작하면 안 된다. 여기에 적어 둔 것만 믿는다.
+    #   비비(하독): prop=꼬리 · bit2=몸체(눈 뜬) · bit3=눈감음 · bit4·5=발
+    #   덤보(개):   prop=꼬리 · bit2=몸통 · bit3=머리(눈 뜬) · bit4=눈감음
+    # shut = 평소 숨겼다가 깜빡일 때만 얹는 '눈감은' 조각
+    # pet  = 쓰다듬는 자리 (여기를 문질러야 고롱고롱)
+    PET_CATS = {
+        "비비": {"shut": "prop_bit3", "pet": ("prop_bit2",),
+                 "hello": "저는 하독님의 고양이 비비예요!"},
+        "덤보": {"shut": "prop_bit4", "pet": ("prop_bit2", "prop_bit3"),
+                 "hello": "전 개님의 고양이 덤보예요!"},
+    }
+
     # 고양이처럼 구는 소품들 — 클릭하면 야옹, 쓰다듬으면 고롱고롱
-    CAT_GNAMES = ("고양이", "비비")
+    CAT_GNAMES = ("고양이",) + tuple(PET_CATS)
 
     def _cat_box(self, head_only=False):
         """고양이류 소품의 화면 상자 (x0, y0, x1, y1). 없으면 None.
@@ -18510,9 +18667,11 @@ class Mascot:
         """
         if self._prop_gname not in self.CAT_GNAMES:
             return None
-        if self._prop_gname == "비비":
-            names = (("prop_bit2",) if head_only
-                     else ("prop", "prop_bit2", "prop_bit4", "prop_bit5"))
+        pet9 = self.PET_CATS.get(self._prop_gname)
+        if pet9:
+            names = (pet9["pet"] if head_only
+                     else tuple(["prop"] + ["prop_bit%d" % i
+                                            for i in range(2, 6)]))
         else:
             names = (("prop_bit3", "prop_bit4") if head_only
                      else ("prop", "prop_bit2", "prop_bit3", "prop_bit4"))
@@ -18552,25 +18711,65 @@ class Mascot:
             self._cat_open_until = now + random.uniform(2.5, 4.0)
             self._cat_open_next = (self._cat_open_until
                                    + random.uniform(14.0, 30.0))
-        elif self._prop_gname == "비비":
-            # 비비는 반대 — 기분 좋게 눈을 감았다 뜬다 (요청)
+        elif self._prop_gname in self.PET_CATS:
+            # 반려묘는 반대 — 기분 좋게 눈을 감았다 뜬다 (요청)
             self._bibi_shut_until = now + random.uniform(2.0, 3.0)
 
-    def _cat_purr(self):
-        """고롱고롱 — 한 번 쓰다듬으면 5초 (wav 길이가 곧 5초다).
+    PURR_CLIP = 5.0        # 고롱고롱 wav 한 판의 길이(초)
+    PURR_HOLD = 0.35       # 손이 이만큼 멈춰 있으면 끊는다
 
-        울리는 동안 또 긁어도 겹치지 않게 시한으로 막는다.
+    def _cat_purr(self, now=None):
+        """고롱고롱 — **쓰다듬는 동안** 울린다 (요청).
+
+        예전에는 한 번 긁으면 5초를 그냥 다 틀었다. 지금은 손이 움직일
+        때마다 시각을 찍어 두고(`_purr_move_at`), 판이 끝나면 이어서
+        다시 틀어 오래 쓰다듬으면 길게 난다. 손이 멈추면 `_purr_tick`
+        이 그 자리에서 끊는다.
+
+        `now` 를 받는 이유: `_purr_tick` 이 넘겨 준 시각과 여기서 다시
+        읽은 시계가 어긋나면 '판이 끝났는데 이어 틀지 않는' 일이 난다.
+        한 쌍으로 도는 함수는 같은 시계를 봐야 한다.
         """
-        now = time.time()
-        if self.purrsnd is None or now < self._purr_until:
+        now = time.time() if now is None else now
+        if self.purrsnd is None:
             return
-        self._purr_until = now + 5.0
-        if self._prop_gname == "비비":
+        self._purr_move_at = now
+        if now < self._purr_until:
+            return                       # 아직 울리는 중 — 이어서 난다
+        self._purr_until = now + self.PURR_CLIP
+        if self._prop_gname in self.PET_CATS:
             self._bibi_shut_until = self._purr_until   # 고롱 동안 감은 채
         try:
             self.purrsnd.play()
         except Exception:
             pass
+
+    def _purr_stop(self):
+        """울리던 고롱고롱을 그 자리에서 끊는다."""
+        self._purr_until = 0.0
+        self._purr_move_at = 0.0
+        try:
+            if self.purrsnd is not None:
+                self.purrsnd._all_stop()
+        except Exception:
+            pass
+
+    def _purr_tick(self, now):
+        """손이 멈췄으면 끊는다 — 매 프레임 부른다.
+
+        **`_safe` 로 감싸지 않는다.** 세 번 터져 구역이 꺼지면 고롱고롱이
+        영영 안 멎어 소리가 계속 난다 (지뢰 37 과 같은 이야기 — 최악이
+        '꺼진 채 굳음'인 일은 예외가 나도 안전한 쪽으로 되돌린다).
+        """
+        if self._purr_until <= 0:
+            return
+        try:
+            if now - self._purr_move_at > self.PURR_HOLD:
+                self._purr_stop()
+            elif now >= self._purr_until and self._cat_stroke is not None:
+                self._cat_purr(now)      # 판이 끝났는데 아직 쓰다듬는 중
+        except Exception:
+            self._purr_stop()
 
     def _cat_hand_cursor(self, mode):
         """고양이 머리 위의 커서.
