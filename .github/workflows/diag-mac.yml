@@ -1,0 +1,27 @@
+name: 맥 진단 (렉·검은 줄)
+
+# 실기기가 없어 맥 러너에서 실제 Mascot 을 띄워 잰다 — 프레임 시간,
+# _safe 구역별 비용, 자라는 창(NSWindow) 색출, 색상키 검증, 오류 로그.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tk 9 파이썬 준비
+        run: |
+          set -x
+          brew install --quiet python@3.13 python-tk@3.13
+          /opt/homebrew/bin/python3.13 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet --upgrade pip
+          /tmp/venv/bin/pip install --quiet pillow pyobjc-framework-Cocoa pyobjc-framework-Quartz certifi
+          /tmp/venv/bin/python -c "import tkinter; r=tkinter.Tk(); print('Tk', r.tk.call('info','patchlevel')); r.destroy()"
+
+      - name: 진단 실행
+        run: |
+          set -x
+          /tmp/venv/bin/python -X utf8 diag_mac.py parts_saga
