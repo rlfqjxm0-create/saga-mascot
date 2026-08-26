@@ -155,6 +155,27 @@ for want in ("만두", "고양이"):
             print("[진단] %s 로드 실패 %r" % (want, e), flush=True)
     wins = run_phase(m, want, 18, wins)
 
+# ── 매끈 레이어 채움 검증 — GPU 확대(contentsScale=1)가 창을 꽉
+# 채우는가. 예전 '절반 크기' 사고(contentsScale=2 + 1배 그림)의 재발을
+# 픽셀로 잡는다: 창 세로 82% 지점(책상)이 불투명해야 한다.
+try:
+    ck = getattr(m, "_mac_ck", None)
+    W9 = m.root.winfo_width()
+    H9 = m.root.winfo_height()
+    if ck is not None:
+        pts = [(W9 // 2, int(H9 * 0.82)), (W9 // 2, int(H9 * 0.55)),
+               (W9 // 2, 2)]
+        got = ck.probe(W9, pts)
+        print("[채움] 창 %dx%d 중앙 82%%/55%%/위끝 ARGB = %s" % (W9, H9, got),
+              flush=True)
+        if got and len(got) >= 2:
+            a_desk = (got[0][0] if isinstance(got[0], (list, tuple)) else 0)
+            print("[채움] 책상 자리 알파=%s → %s" % (
+                a_desk, "채워짐(정상)" if a_desk and a_desk > 30
+                else "!! 비었다 — 절반 크기 재발 의심"), flush=True)
+except Exception as e:
+    print("[채움] 검증 실패 %r" % e, flush=True)
+
 # ── 색상키 실검증 (검은 줄 — 지워지는지 합성 결과를 직접 읽는다) ──
 try:
     m._safe("mac_verify", m._mac_verify)

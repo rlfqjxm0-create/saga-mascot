@@ -1110,7 +1110,13 @@ class MacCharLayer:
         except Exception:
             pass
         lay = CALayer.layer()
-        lay.setContentsScale_(self.scale)
+        # **contentsScale 은 1로 둔다.** 배율(레티나)만큼 그림을 CPU 로
+        # 키워 넣던 예전 방식은 매 프레임 LANCZOS 리사이즈가 돌아
+        # (실측 728x998 → 2배 36ms + 변환 12ms) 아바타를 키운 맥에서
+        # 앱이 먹통이 됐다 (사가·퀸시 렉 제보). 1배 그림을 넣고 확대는
+        # GPU(레이어 합성)가 한다 — 기본 보간이 linear 라 부드럽고,
+        # 색상키 시절과 같은 선명도다.
+        lay.setContentsScale_(1.0)
         lay.setContentsGravity_("topLeft")
         # 애니메이션을 끄지 않으면 그림을 바꿀 때마다 페이드가 걸려
         # 잔상이 남고 프레임이 밀린다.
@@ -1125,10 +1131,7 @@ class MacCharLayer:
         레티나면 그 배율로 키워서 넣는다 — contentsScale 만 올리고 그림은
         1배로 두면 반대로 절반 크기로 나온다.
         """
-        if self.scale > 1.01:
-            im = im.resize((max(1, int(round(im.width * self.scale))),
-                            max(1, int(round(im.height * self.scale)))),
-                           Image.LANCZOS)
+        # 레티나 리사이즈는 GPU 가 한다 (contentsScale=1 — __init__ 참고).
         from Foundation import NSData
         from Quartz import (CATransaction, CGColorSpaceCreateDeviceRGB,
                             CGDataProviderCreateWithCFData, CGImageCreate,
