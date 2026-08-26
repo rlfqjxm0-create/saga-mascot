@@ -383,6 +383,77 @@ class _MacChromaKey:
             self.err = repr(e)
         return None
 
+    def scan_all(self):
+        """우리 창 전부를 찍어 '안 지워진 픽셀'을 찾는다 (검은 줄 사냥).
+
+        probe 는 정해 둔 점만 보므로, 줄이 다른 자리에 있으면 못 잡았다
+        (사가 — 모서리 3점은 투명인데 화면엔 줄이 남았다). 창마다 전체를
+        훑어 알파가 남은 픽셀 수·상자·대표색을 돌려준다. 파이썬 루프라
+        창당 수백 ms — 주기 실행이 아니라 시작·진단 때만 부른다.
+        """
+        out = []
+        try:
+            self._cg.CGWindowListCreateImage.restype = ctypes.c_void_p
+            self._cg.CGWindowListCreateImage.argtypes = [
+                _CGRect, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+            null = _CGRect(_CGPoint(float("inf"), float("inf")),
+                           _CGSize(0, 0))
+            for w in self.windows():
+                try:
+                    fr = self._msg(w, "frame", restype=_CGRect)
+                    wid = self._msg(w, "windowNumber",
+                                    restype=ctypes.c_long)
+                    img = self._cg.CGWindowListCreateImage(
+                        null, 1 << 3, ctypes.c_uint32(wid), 1)
+                    if not img:
+                        out.append("#%d %dx%d 캡처실패"
+                                   % (wid, fr.size.width, fr.size.height))
+                        continue
+                    rep = self._msg(
+                        self._msg(self._cls("NSBitmapImageRep"), "alloc"),
+                        "initWithCGImage:", img,
+                        argtypes=(ctypes.c_void_p,))
+                    data = self._msg(rep, "bitmapData")
+                    if not data:
+                        continue
+                    pw = self._msg(rep, "pixelsWide", restype=ctypes.c_long)
+                    ph = self._msg(rep, "pixelsHigh", restype=ctypes.c_long)
+                    row = self._msg(rep, "bytesPerRow", restype=ctypes.c_long)
+                    spp = self._msg(rep, "samplesPerPixel",
+                                    restype=ctypes.c_long)
+                    buf = ctypes.string_at(data, row * ph)
+                    n = 0
+                    x0 = y0 = 10 ** 9
+                    x1 = y1 = -1
+                    for y in range(ph):
+                        plane = buf[y * row:y * row + pw * spp:spp]
+                        nz = len(plane) - plane.count(0)
+                        if not nz:
+                            continue
+                        n += nz
+                        y0 = min(y0, y)
+                        y1 = max(y1, y)
+                        fx = next((i for i, b in enumerate(plane) if b), 0)
+                        lx = pw - 1 - next(
+                            (i for i, b in enumerate(plane[::-1]) if b), 0)
+                        x0 = min(x0, fx)
+                        x1 = max(x1, lx)
+                    line = "#%d %dx%d 남은픽셀 %d" % (
+                        wid, fr.size.width, fr.size.height, n)
+                    if n:
+                        cx = min(pw - 1, (x0 + x1) // 2)
+                        cy = min(ph - 1, (y0 + y1) // 2)
+                        o = cy * row + cx * spp
+                        col = tuple(buf[o + i] for i in range(spp))
+                        line += " 상자=(%d,%d~%d,%d) 색=%s" % (
+                            x0, y0, x1, y1, col)
+                    out.append(line)
+                except Exception as e:
+                    out.append("창 스캔 실패 %r" % (e,))
+        except Exception as e:
+            self.err = repr(e)
+        return out
+
 
 class _CGPoint(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
@@ -35358,6 +35429,8 @@ class Mascot:
             # 나중에 생기므로 계속 다시 걸어 준다.
             self.root.after(300, self._mac_keep_transparent)
             self.root.after(1500, self._mac_verify)
+            # 줄은 한참 뒤에 생기기도 한다 — 5분 뒤 한 번 더 훑는다
+            self.root.after(300000, self._mac_verify)
             for i, w in enumerate(NSApp.windows()):
                 try:
                     bc = w.backgroundColor()
@@ -35487,6 +35560,14 @@ class Mascot:
                ("투명" if p[0] == 0 else f"불투명{p[1:]}") for p in r["px"]]
         self._mac_log(f"합성 결과(배율 {r['scale']:.0f}x) 좌상/우상/좌하 = "
                       + " · ".join(got))
+        # 창마다 전체를 훑는다 — '줄이 남는다' 제보를 이 로그로 특정한다.
+        # 캐릭터 창은 캐릭터 픽셀이 남는 게 정상이고, **패널·이펙트 창에
+        # 남은 픽셀의 상자 모양**이 곧 줄의 정체다.
+        try:
+            for line in ck.scan_all():
+                self._mac_log("창스캔: " + line)
+        except Exception as e:
+            self._mac_log(f"창스캔 실패 → {e!r}")
 
     def _mac_env(self):
         """투명이 안 될 때 원인을 가르는 정보 — Tk 색상 처리 · 시스템 설정."""
