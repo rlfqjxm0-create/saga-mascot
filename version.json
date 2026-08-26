@@ -1,5 +1,5 @@
 {
- "version": 1787702304,
+ "version": 1787703826,
  "files": {
   "mascot.py": "979d46443da9c8d0a47e92c71b34342fcf302eb7ba46c587203061a01a3c0b1f",
   "parts_saga/arm_key.png": "83415d057b6889306ee866b1dde5cf0be0099392d12832ce9a456dfab17b0410",
@@ -552,6 +552,9 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "새 소품 4종이 왔어요 — 잠자는 고양이, 김이 폴폴 나는 왕만두, 아기 쪽쪽이, 토끼 머리띠. '소품 새로고침'을 누르다 보면 만날 수 있어요.",
+  "고양이를 클릭하면 야옹 하고 울어요. 고양이 머리를 살살 쓰다듬으면(드래그) 고롱고롱 소리를 내요.",
+  "모두의 플레이리스트에서 퍼오기가 막혀 건너뛰던 곡도 이제 재생돼요. 유튜브 프리미엄을 쓰신다면 음악 메뉴에서 한 번 로그인해 두면 광고 없이 나와요."
+ ]
 }
