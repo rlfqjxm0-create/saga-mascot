@@ -934,6 +934,13 @@ def load_ui_font(char_dir):
     """
     global UI_FONT
     if not IS_WIN:
+        if IS_MAC:
+            # '맑은 고딕'은 맥에 없다 — 없는 이름을 주면 Tk 가 **없는
+            # 글꼴의 메트릭**으로 세로 중앙을 잡고 글리프는 대체 글꼴로
+            # 그려서, 글자가 알약보다 몇 px 아래로 쏠린다 (사가 제보 —
+            # CI 맥 러너 캡처로 재현). ♥ 같은 기호가 깨져 보이는 것도
+            # 같은 뿌리다. 모든 맥에 있는 한글 글꼴을 준다.
+            UI_FONT = "Apple SD Gothic Neo"
         return
     try:
         d = os.path.join(char_dir, "fonts")
@@ -10252,17 +10259,19 @@ class Mascot:
             # 얼린 배포본에는 재생기가 exe 안에 구워져 있어 파일이 없을 수 있다.
             has_file = (os.path.exists(os.path.join(HERE, "youtube_player.py"))
                         or getattr(sys, "frozen", False))
-            if self.cfg.get("youtube") and has_file:
+            if IS_MAC and self.cfg.get("youtube"):
+                # 맥 재생기는 mascot.py 안에 있다(_mac_yt_player_main) —
+                # youtube_player.py 존재 확인이 필요 없다. 맥 배포 레포에는
+                # 그 파일이 안 실려서(WIN_EXTRA), 파일을 요구하면 소스로
+                # 도는 검증(CI)에서만 꺼져 헛짚게 된다.
+                got = True
+            elif self.cfg.get("youtube") and has_file:
                 if IS_WIN:
                     try:
                         import importlib.util
                         got = importlib.util.find_spec("webview") is not None
                     except Exception:
                         got = False
-                elif IS_MAC:
-                    # 시스템 WebKit + 번들 pyobjc — 따로 확인할 것이 없다
-                    # (_mac_yt_player_main, 퀸시 실기기 검증)
-                    got = True
             self._yt_avail = got
             if not got:
                 # **왜 없는지 남긴다.** 단추가 아예 안 뜨면 사람은 이유를
@@ -25015,8 +25024,12 @@ class Mascot:
         flimg = self._safe_str(self._room_floor_img, kx1 - kx0, ky1 - ky0,
                                18 * k, ky1 - floor, band9)
         if flimg:
-            cv.create_image(int(kx0), int(floor), image=flimg, anchor="nw",
-                            tags="dyn")
+            # **카드 아래끝 기준(anchor="sw")** 으로 붙인다. 위끝 기준으로
+            # 놓으면 int 잘림 때문에 띠가 1~2px 떠서, 그 틈으로 뒤에 깔린
+            # 방 꾸미기 그림이 삐져 보인다 (사가 제보 — 맥은 배율이 달라
+            # 어긋남이 더 티가 난다). 아래를 붙이면 어긋날 수가 없다.
+            cv.create_image(int(kx0), int(math.ceil(ky1)), image=flimg,
+                            anchor="sw", tags="dyn")
         else:                     # 만들기 실패 — 예전 방식으로 물러난다
             self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
                      fill=band9, width=0)
@@ -25636,10 +25649,13 @@ class Mascot:
                 self._oval(cv, hx + sx * hw * 0.23 - r2, ty - r2,
                                hx + sx * hw * 0.23 + r2, ty + r2,
                                fill=pink, width=0, tags="dyn")
+            # outline="" 필수 — 맥 Tk9 는 width=0 이어도 기본 검정
+            # 외곽선을 헤어라인으로 그려서, 작은 삼각형이 통째로 까맣게
+            # 보인다 (사가 제보 '하트 아래가 까만 삼각형' — CI 캡처 재현)
             cv.create_polygon(hx - hw * 0.47, ty + r2 * 0.35,
                               hx + hw * 0.47, ty + r2 * 0.35,
                               hx, cy2 + hw * 0.52,
-                              fill=pink, width=0, tags="dyn")
+                              fill=pink, outline="", width=0, tags="dyn")
             cv.create_text(hx + hw / 2 + gap, cy2, text=num, font=f2,
                            fill=pink, anchor="w", tags="dyn")
         self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
