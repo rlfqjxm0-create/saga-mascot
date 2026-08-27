@@ -7884,6 +7884,16 @@ class Mascot:
                 pass
         # 고양이 소리도 같이 닫는다 — 설정(볼륨)을 바꾸면 이 함수가 다시
         # 불려 새 볼륨으로 다시 읽는다.
+        # 반려동물 소리 — 고양이(cat·purr) 말고 강아지(dog·pant)도 들고
+        # 있으므로 표에 담아 둔 것을 함께 거둔다 (안 거두면 설정을 바꿀
+        # 때마다 소리 장치가 쌓인다).
+        for _s9 in list((getattr(self, "_pet_snds", None) or {}).values()):
+            try:
+                if _s9 is not None:
+                    _s9.close()
+            except Exception:
+                pass
+        self._pet_snds = {}
         for _nm9 in ("catsnd", "purrsnd"):
             _s9 = getattr(self, _nm9, None)
             if _s9 is not None:
@@ -7977,6 +7987,20 @@ class Mascot:
                     purr_dir, volume=float(self.us.get("poke_volume", 40)))
             except Exception:
                 self.purrsnd = None
+        # 반려동물마다 다른 소리 (강아지 곰돌이의 멍멍·헥헥 — 요청).
+        # PET_CATS 가 폴더 이름을 정하고, 폴더가 없으면 조용히 건너뛴다
+        # (지뢰 76 — 옛 선물본에는 그 폴더가 없다).
+        self._pet_snds = {"cat": self.catsnd, "purr": self.purrsnd}
+        for sub9 in sorted({v.get(k) for v in self.PET_CATS.values()
+                            for k in ("cry", "pet_snd") if v.get(k)}):
+            d9 = os.path.join(self.dir, "sounds", sub9)
+            if not os.path.isdir(d9):
+                continue
+            try:
+                self._pet_snds[sub9] = PokeSound(
+                    d9, volume=float(self.us.get("poke_volume", 40)))
+            except Exception:
+                pass
         # 홈에서 온 반응은 평소 말풍선 소리('뿅')와 달라야 구분이 된다.
         # 종소리 두 음짜리 '띠링' — 없으면 그냥 평소 소리로 물러난다.
         room_dir = os.path.join(self.dir, "sounds", "room")
@@ -18645,13 +18669,23 @@ class Mascot:
     # 번호로 짐작하면 안 된다. 여기에 적어 둔 것만 믿는다.
     #   비비(하독): prop=꼬리 · bit2=몸체(눈 뜬) · bit3=눈감음 · bit4·5=발
     #   덤보(개):   prop=꼬리 · bit2=몸통 · bit3=머리(눈 뜬) · bit4=눈감음
+    #   옹이(패왕): prop=몸체 · bit2=눈감음 · bit3=꼬리
+    #   곰돌이(젖소도로롱): prop=꼬리 · bit2=몸통 · bit3=혓바닥 ·
+    #                       bit4=머리 · bit5=눈감음 · bit6=귀쫑긋
     # shut = 평소 숨겼다가 깜빡일 때만 얹는 '눈감은' 조각
-    # pet  = 쓰다듬는 자리 (여기를 문질러야 고롱고롱)
+    # pet  = 쓰다듬는 자리 (여기를 문질러야 고롱고롱·헥헥)
+    # cry  = 클릭 소리 폴더 (sounds/…), pet_snd = 쓰다듬 소리 폴더.
+    #        강아지는 다른 소리를 쓴다 (곰돌이: 멍멍·헥헥 — 요청).
     PET_CATS = {
         "비비": {"shut": "prop_bit3", "pet": ("prop_bit2",),
                  "hello": "저는 하독님의 고양이 비비예요!"},
         "덤보": {"shut": "prop_bit4", "pet": ("prop_bit2", "prop_bit3"),
                  "hello": "전 개님의 고양이 덤보예요!"},
+        "옹이": {"shut": "prop_bit2", "pet": ("prop",),
+                 "hello": "저는 패왕님의 반려동물 옹이예요!"},
+        "곰돌이": {"shut": "prop_bit5", "pet": ("prop_bit2", "prop_bit4"),
+                   "hello": "저는 젖소교사님의 반려동물 곰돌이예요!",
+                   "cry": "dog", "pet_snd": "pant"},
     }
 
     # 고양이처럼 구는 소품들 — 클릭하면 야옹, 쓰다듬으면 고롱고롱
@@ -18696,14 +18730,29 @@ class Mascot:
             return None
         return (x0, y0, x1, y1)
 
+    def _pet_snd(self, which):
+        """지금 반려동물의 소리 — which 는 'cry'(클릭) 또는 'pet'(쓰다듬).
+
+        표에 폴더가 적혀 있으면 그것을, 없으면 고양이 기본(cat·purr)을
+        쓴다. 강아지 곰돌이만 멍멍·헥헥으로 갈린다 (요청).
+        """
+        pet9 = self.PET_CATS.get(self._prop_gname) or {}
+        key9 = pet9.get("cry" if which == "cry" else "pet_snd") \
+            or ("cat" if which == "cry" else "purr")
+        got9 = (getattr(self, "_pet_snds", None) or {}).get(key9)
+        if got9 is not None:
+            return got9
+        return self.catsnd if which == "cry" else self.purrsnd
+
     def _cat_meow(self):
         """울음소리 하나를 랜덤으로 — 연타는 0.5초 간격으로 막는다."""
         now = time.time()
-        if self.catsnd is None or now - self._meow_at < 0.5:
+        snd9 = self._pet_snd("cry")
+        if snd9 is None or now - self._meow_at < 0.5:
             return
         self._meow_at = now
         try:
-            self.catsnd.play()
+            snd9.play()
         except Exception:
             pass
         if self._prop_gname == "고양이":
@@ -18731,28 +18780,44 @@ class Mascot:
         한 쌍으로 도는 함수는 같은 시계를 봐야 한다.
         """
         now = time.time() if now is None else now
-        if self.purrsnd is None:
+        snd9 = self._pet_snd("pet")
+        if snd9 is None:
             return
         self._purr_move_at = now
         if now < self._purr_until:
             return                       # 아직 울리는 중 — 이어서 난다
-        self._purr_until = now + self.PURR_CLIP
+        # 한 판의 길이는 소리마다 다르다 (고롱 5초 · 헥헥 3초). 짧은
+        # 소리에 긴 시한을 쓰면 이어 틀기가 늦어 소리가 끊겨 들린다.
+        self._purr_until = now + self._pet_clip(snd9)
         if self._prop_gname in self.PET_CATS:
-            self._bibi_shut_until = self._purr_until   # 고롱 동안 감은 채
+            self._bibi_shut_until = self._purr_until   # 소리 동안 감은 채
         try:
-            self.purrsnd.play()
+            snd9.play()
         except Exception:
             pass
 
+    @staticmethod
+    def _pet_clip(snd, default=5.0):
+        """그 소리 한 판의 길이(초) — 담아 둔 pcm 에서 잰다."""
+        try:
+            fr, pcm = snd.clips[0]
+            return max(0.4, len(pcm) / 2.0 / float(fr))
+        except Exception:
+            return default
+
     def _purr_stop(self):
-        """울리던 고롱고롱을 그 자리에서 끊는다."""
+        """울리던 쓰다듬 소리(고롱고롱·헥헥)를 그 자리에서 끊는다."""
         self._purr_until = 0.0
         self._purr_move_at = 0.0
-        try:
-            if self.purrsnd is not None:
-                self.purrsnd._all_stop()
-        except Exception:
-            pass
+        # **지금 반려동물 것만 끄면 안 된다** — 소품을 바꾸는 사이에
+        # 울리던 소리가 남을 수 있어 들고 있는 것을 전부 멎게 한다.
+        for s9 in list((getattr(self, "_pet_snds", None) or {}).values()) \
+                + [self.purrsnd]:
+            try:
+                if s9 is not None:
+                    s9._all_stop()
+            except Exception:
+                pass
 
     def _purr_tick(self, now):
         """손이 멈췄으면 끊는다 — 매 프레임 부른다.

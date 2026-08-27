@@ -1,7 +1,7 @@
 {
- "version": 1787789107,
+ "version": 1787815606,
  "files": {
-  "mascot.py": "8e674e9daee1a60d2c017869dbb913f51c16220ebd4cb1eba3b6a691b4c98d60",
+  "mascot.py": "90cf8a3eacd16412630c0f9ac9c271799e2adfc5b90f150f969953fe363ef0c5",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,8 +14,8 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "2940f4e41304c7fb5c45c3142d74b04d52feef11c82416398c65b46ad25e7b6c",
-  "parts_saga/config.json.bak": "2940f4e41304c7fb5c45c3142d74b04d52feef11c82416398c65b46ad25e7b6c",
+  "parts_saga/config.json": "1147260ac2ea05ec8107047060ae738b6b2d4fbf24dd72058cabf988f7d95d7d",
+  "parts_saga/config.json.bak": "1147260ac2ea05ec8107047060ae738b6b2d4fbf24dd72058cabf988f7d95d7d",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
   "parts_saga/eyes_closed.png": "343347beac62927c83329ce20575518c1cfe258a05b8d5b22afef133944b91f6",
@@ -74,6 +74,15 @@
   "parts_saga/propx1_bit2.png": "81cf67eb121c60bfd7b52e0e270f480cb0aa0b3540a1f8a874194a96117c8f45",
   "parts_saga/propx1_bit3.png": "fcdd5262fb6588571ecfa6100d732d5d0be55683b3ef890b9ce2941c553e243a",
   "parts_saga/propx1_bit4.png": "c988c0f585189ede308b55455d3444ee83931afa8c7c12e1deb9af49a0a4c430",
+  "parts_saga/propx2.png": "9e651b2b8cc7e9fce6fe2ec2c8eb9cf53628a41f31c17c184cb8ea342aed0580",
+  "parts_saga/propx2_bit2.png": "8008862a5595050a494075d9f5c29726f8153b2b9e474f5268ad5222d71f561d",
+  "parts_saga/propx2_bit3.png": "58b1e597ddc015df04462506a1f187db9ccc89d6396c18add7593effe7a5829c",
+  "parts_saga/propx2_bit4.png": "e03f30431561bc523e00d2313e48b85dcbb9dfbc760603c4609b5f2bb12976ef",
+  "parts_saga/propx2_bit5.png": "cef851070b7d6d230ea4a4b982406bde9e09c63751da4e24465d934d25d03cf1",
+  "parts_saga/propx2_bit6.png": "e4ba7c52a38a5dca01c3aa5681100a1e084eef4d5e5309b78070eb37c2b8634c",
+  "parts_saga/propx3.png": "c0cfd7b4bd5420905b024015358daff3b75420699421973fa5086a5a7390183d",
+  "parts_saga/propx3_bit2.png": "9d28bfd716c99e6513f0c927176690742625781c5f6b6a29d9fc4411a7ab6735",
+  "parts_saga/propx3_bit3.png": "a1819a39b916e8fe7030706e3d47f66f73c368973c9f5dc9ecbaf4e05e8e8e15",
   "parts_saga/pupils.png": "2473d94d66a3809f656b118f54612613e0e2479314955d338a13ea8687fd42b9",
   "parts_saga/seat.png": "e3e38f1fdb849931aced5cbf5a6066dd5e9059c50458a9f45a32296f98abaeb6",
   "parts_saga/seat_idle.png": "d051891ce1cc2986993692fcfb858c5ef1d009c063e1fdca86980b06c841b2ee",
@@ -242,6 +251,11 @@
   "parts_saga/sounds/cat/meow8.wav": "c158c9c5e56fba46d928ffe76beb04064cb29ad5cd8393f87caded78e95d4b64",
   "parts_saga/sounds/ctile/pop/pop1.wav": "dc1c5535c83779e4a41bf21857659275e3954aab2ff2b6b4e58217b4a0d23162",
   "parts_saga/sounds/ctile_bgm/bgm.wav": "4fcd8b9a496b1febb8f5c663dd87b446a3f63cb836988214d0fbfd7a9ac43071",
+  "parts_saga/sounds/dog/bark1.wav": "31428e4a20f86006d7eefc2c3e33c8fa57d9c1f7c7238ab78c45eba99eb23b5a",
+  "parts_saga/sounds/dog/bark2.wav": "80b328912fa45a6b7f4cbe54f5d2ebe8a24bf93287d9784491169e797bbb8d8d",
+  "parts_saga/sounds/dog/bark3.wav": "fefb8c2d6a7625f50336a42499d510e21079cac45f49348fd103b8123d05f416",
+  "parts_saga/sounds/dog/bark4.wav": "59e875ef3d397d82b2e401943e1c0348621c97a94db78a6c4582e759e5790a29",
+  "parts_saga/sounds/dog/bark5.wav": "b05b435b69884d2c35e2901ca5b764f0ad6d4f0dfdd0769c4d9d9423e57f0f87",
   "parts_saga/sounds/frog mini/config.json": "f3d63d0dc8b12d5fc611efb6463516ce50ef75eca87e57ca69247d8a1cd6e6c6",
   "parts_saga/sounds/frog mini/frogmini-back1.wav": "b30155e8242b6b092c10dbd909ac29212597aedeaa24ca5e3e37a952e0ce6696",
   "parts_saga/sounds/frog mini/frogmini-enter1.wav": "e1e62c4ffb7ec5f3ce24f2e8f045a9957915ac73e1335afc3bbc6a492b80760c",
@@ -335,6 +349,8 @@
   "parts_saga/sounds/neo65 black/neo65black-key9.wav": "96d6f6f578cd01ed59cda6df2d71ada2f017c1735f9fe76feb41f18f0f0a4dc1",
   "parts_saga/sounds/neo65 black/neo65black-shift1.wav": "589687821cc792c6bd0f0cc0c7981addfa315a7db47901e6876034822ecb571d",
   "parts_saga/sounds/neo65 black/neo65black-space1.wav": "6924aa185700cfc3adcb67204c16dcfb07b3b39bdcedc7126b5fcf0a6085cb7e",
+  "parts_saga/sounds/pant/pant1.wav": "2dd90ae1091c8a10322590e043aefbf74c79938efc3b8b37748906816b3af3e3",
+  "parts_saga/sounds/pant/pant2.wav": "d0b15c9f70123b6ad9cc39d1ae132fa1a4e64c6928bad7bc085a3023189d2194",
   "parts_saga/sounds/pen/clip_1.wav": "aba157ef543fcecfaf25b91f4c2da91b85a09875291e01a0ff55a4fd787c3b46",
   "parts_saga/sounds/pen/clip_2.wav": "399b26f1cdc53d95916a967913f88ad34ade453dda08ddbc4bd137b09eb1fdd8",
   "parts_saga/sounds/pen/clip_3.wav": "2053da15a8eab5a95b697532233b3eff3ca6a8d9830c00637c110935581d476f",
@@ -565,10 +581,10 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
+  "반려동물이 넷으로 늘었어요! 패왕님의 고양이 옹이와 젖소교사님의 강아지 곰돌이가 새로 왔어요. 소품 새로고침을 누르다 보면 만날 수 있어요.",
+  "곰돌이는 강아지라 소리가 달라요 — 클릭하면 멍멍, 몸이나 머리를 쓰다듬으면 헥헥거려요. 넷 다 쓰다듬거나 클릭하면 기분 좋게 눈을 감아요.",
+  "개님의 고양이 덤보, 하독님의 고양이 비비도 있어요. 클릭하면 야옹, 쓰다듬으면 고롱고롱 — 쓰다듬는 동안 계속 나고 손을 멈추면 그쳐요.",
   "혹시 캐릭터가 예전 모습으로 보이면(소품 새로고침·미니게임이 안 보이거나, 캐릭터와 소품만 창 아래로 내려가 있으면) 업데이트가 반쪽만 받아진 상태예요. 아래 방법으로 고쳐집니다.",
-  "타이머를 완전히 끈 뒤, 우클릭 메뉴의 '오류 기록 폴더 열기'로 열리는 폴더에서 live 폴더만 지우고 다시 켜 주세요. 그 메뉴가 없으면 Win+R 을 눌러 %APPDATA% 를 붙여넣고, 캐릭터 이름이 붙은 폴더(예: DororongMascot) 안의 live 를 지우면 돼요. 작업 기록·설정·할 일은 한 단계 위에 있어서 그대로 남아요.",
-  "개의 반려동물 고양이 덤보가 왔어요! 머리 위에 앉은 덤보를 클릭하면 야옹, 몸을 쓰다듬으면 고롱고롱 하며 눈을 감아요.",
-  "하독의 반려동물 고양이 비비도 있어요! 발과 꼬리를 살랑이는 비비를 클릭하거나 몸을 쓰다듬어 보세요.",
-  "고양이 울음소리가 여러 가지로 늘었어요. 고롱고롱은 쓰다듬는 동안 계속 나고, 손을 멈추면 그쳐요."
+  "타이머를 완전히 끈 뒤, 우클릭 메뉴의 '오류 기록 폴더 열기'로 열리는 폴더에서 live 폴더만 지우고 다시 켜 주세요. 그 메뉴가 없으면 Win+R 을 눌러 %APPDATA% 를 붙여넣고, 캐릭터 이름이 붙은 폴더(예: DororongMascot) 안의 live 를 지우면 돼요. 작업 기록·설정·할 일은 한 단계 위에 있어서 그대로 남아요."
  ]
 }

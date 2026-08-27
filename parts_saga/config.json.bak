@@ -586,6 +586,58 @@
           1.0
         ]
       }
+    },
+    "옹이": {
+      "prop_bit3": {
+        "motion": "sway",
+        "amp": 4.0,
+        "period": 1.8,
+        "jitter": 0.12,
+        "steps": 24,
+        "phase": 0.8,
+        "pivot": [
+          0.88,
+          0.11
+        ]
+      }
+    },
+    "곰돌이": {
+      "prop": {
+        "motion": "sway",
+        "amp": 24.0,
+        "period": 1.4,
+        "jitter": 0.12,
+        "steps": 24,
+        "phase": 0.6,
+        "pivot": [
+          0.26,
+          0.87
+        ]
+      },
+      "prop_bit3": {
+        "motion": "steam",
+        "amp": 11.0,
+        "period": 1.7,
+        "jitter": 0.12,
+        "steps": 24,
+        "phase": 0.8,
+        "pivot": [
+          0.3,
+          0.0
+        ]
+      },
+      "prop_bit6": {
+        "motion": "sway",
+        "amp": 1.5,
+        "period": 1.0,
+        "jitter": 0.12,
+        "steps": 24,
+        "phase": 0.95,
+        "pivot": [
+          0.87,
+          0.05
+        ]
+      }
     }
   },
   "face_talk": {
@@ -682,6 +734,129 @@
       ],
       "label": "덤보",
       "pname": "눈깜빡"
+    },
+    "propx2": {
+      "pos": [
+        758,
+        -290
+      ],
+      "size": [
+        161,
+        222
+      ],
+      "label": "곰돌이",
+      "pname": "꼬리",
+      "gname": "곰돌이",
+      "over": 1,
+      "bits": [
+        "propx2_bit2",
+        "propx2_bit3",
+        "propx2_bit4",
+        "propx2_bit5",
+        "propx2_bit6"
+      ]
+    },
+    "propx2_bit2": {
+      "pos": [
+        415,
+        -71
+      ],
+      "size": [
+        453,
+        350
+      ],
+      "label": "곰돌이",
+      "pname": "몸통"
+    },
+    "propx2_bit3": {
+      "pos": [
+        584,
+        130
+      ],
+      "size": [
+        85,
+        78
+      ],
+      "label": "곰돌이",
+      "pname": "혓바닥"
+    },
+    "propx2_bit4": {
+      "pos": [
+        469,
+        -199
+      ],
+      "size": [
+        390,
+        346
+      ],
+      "label": "곰돌이",
+      "pname": "머리"
+    },
+    "propx2_bit5": {
+      "pos": [
+        520,
+        -67
+      ],
+      "size": [
+        224,
+        133
+      ],
+      "label": "곰돌이",
+      "pname": "눈깜빡"
+    },
+    "propx2_bit6": {
+      "pos": [
+        419,
+        -128
+      ],
+      "size": [
+        107,
+        179
+      ],
+      "label": "곰돌이",
+      "pname": "귀쫑긋"
+    },
+    "propx3": {
+      "pos": [
+        393,
+        -263
+      ],
+      "size": [
+        505,
+        405
+      ],
+      "label": "옹이",
+      "pname": "몸체",
+      "gname": "옹이",
+      "over": 1,
+      "bits": [
+        "propx3_bit2",
+        "propx3_bit3"
+      ]
+    },
+    "propx3_bit2": {
+      "pos": [
+        508,
+        -161
+      ],
+      "size": [
+        198,
+        100
+      ],
+      "label": "옹이",
+      "pname": "눈깜빡"
+    },
+    "propx3_bit3": {
+      "pos": [
+        506,
+        5
+      ],
+      "size": [
+        379,
+        215
+      ],
+      "label": "옹이",
+      "pname": "꼬리"
     }
   },
   "prop_tune": {
@@ -689,6 +864,16 @@
       0.0,
       -318.0,
       1.21
+    ],
+    "옹이": [
+      0.0,
+      327.0,
+      1.12
+    ],
+    "곰돌이": [
+      3.0,
+      273.0,
+      0.99
     ]
   }
 }
