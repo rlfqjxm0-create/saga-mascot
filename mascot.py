@@ -473,10 +473,306 @@ if getattr(sys, "frozen", False) and not os.path.exists(os.path.abspath(__file__
     HERE = sys._MEIPASS
 else:
     HERE = os.path.dirname(os.path.abspath(__file__))
+# ── 맥 유튜브 재생기 (퀸시 맥에서 검증한 판) ─────────────────────────
+# 맥은 pywebview 가 없어 음악이 통째로 꺼져 있었다. 시스템 WebKit
+# (WKWebView) + 번들 pyobjc 로 윈도우 youtube_player 와 **같은 줄
+# 프로토콜**의 재생기를 만든다 (추가 의존성 없음). 창 숨김(소리만)·
+# 임베드 막힌 곡 watch 우회까지 퀸시의 실기기에서 검증했다.
+# `queue`/`http.server` 는 맥 번들에 없어 list+Lock·raw socket 을 쓴다.
+_MAC_YT_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000;height:100%;overflow:hidden}
+#p{width:100%;height:100%}</style></head><body><div id="p"></div>
+<script>
+(function(){try{
+  Object.defineProperty(document,'hidden',{configurable:true,get:function(){return false;}});
+  Object.defineProperty(document,'visibilityState',{configurable:true,get:function(){return 'visible';}});
+  document.addEventListener('visibilitychange',function(e){e.stopImmediatePropagation();},true);
+}catch(e){}})();
+var player=null, ready=false, pend=null, pendVol=null;
+function send(o){ try{ window.webkit.messageHandlers.yt.postMessage(JSON.stringify(o)); }catch(e){} }
+function doLoad(v,list){ if(!player)return;
+  try{ if(list){ player.loadPlaylist({list:list}); } else if(v){ player.loadVideoById({videoId:v}); } }catch(e){} }
+function applyPend(){ if(pend){ doLoad(pend.v,pend.list); pend=null; } if(pendVol!=null){ try{player.setVolume(pendVol);}catch(e){} pendVol=null; } }
+function report(){
+  if(!player||!player.getPlayerState) return;
+  var st=player.getPlayerState();
+  var d={ready:ready, playing: st===1};
+  try{ var vd=player.getVideoData(); if(vd){ if(vd.title) d.title=vd.title; if(vd.video_id) d.vid=vd.video_id; } }catch(e){}
+  send(d);
+}
+function onYouTubeIframeAPIReady(){
+  player=new YT.Player('p',{ height:'100%', width:'100%',
+    playerVars:{autoplay:1, controls:1, rel:0, playsinline:1, modestbranding:1,
+                enablejsapi:1},
+    events:{
+      'onReady':function(){ ready=true; applyPend(); send({ready:true}); report(); },
+      'onStateChange':function(e){ report(); if(e.data===0){ send({ended:true}); } },
+      'onError':function(e){ send({err:e.data||1}); }
+    }});
+}
+window.ytLoad=function(v,list){ if(!ready){ pend={v:v,list:list}; return; } doLoad(v,list); };
+window.ytPlay=function(){ if(player&&ready) player.playVideo(); };
+window.ytPause=function(){ if(player&&ready) player.pauseVideo(); };
+window.ytVol=function(x){ if(!ready){ pendVol=x; return; } try{player.setVolume(x);}catch(e){} };
+var t=document.createElement('script'); t.src="https://www.youtube.com/iframe_api";
+document.head.appendChild(t);
+</script></body></html>"""
+
+
+def _mac_yt_player_main():
+    """맥 WebKit 유튜브 재생기 — 윈도우 youtube_player 와 같은 줄 프로토콜.
+
+    임베드가 막힌 곡(err 150/101/100)은 watch 페이지로 우회해 그래도 튼다.
+    stdin: {"c":"load/play/pause/vol/quit"} · stdout: '@YT {json}'.
+    """
+    import objc
+    import threading
+    import socket
+    import AppKit
+    from Foundation import (NSObject, NSURL, NSURLRequest, NSTimer,
+                            NSMakeRect)
+
+    objc.loadBundle("WebKit", globals(),
+                    bundle_path="/System/Library/Frameworks/WebKit.framework")
+    WKWebView = objc.lookUpClass("WKWebView")
+    WKWebViewConfiguration = objc.lookUpClass("WKWebViewConfiguration")
+    WKUserContentController = objc.lookUpClass("WKUserContentController")
+    WKUserScript = objc.lookUpClass("WKUserScript")
+
+    cmds = []
+    cmds_lock = threading.Lock()
+    st = {"mode": "iframe", "vid": "", "title": "", "vol": None, "home": ""}
+
+    def emit(d):
+        try:
+            sys.stdout.write("@YT " + json.dumps(d) + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def run_js(js):
+        try:
+            web.evaluateJavaScript_completionHandler_(js, None)
+        except Exception:
+            pass
+
+    def go_watch(vid):
+        st["mode"] = "watch"
+        page_ready[0] = True
+        try:
+            web.loadRequest_(NSURLRequest.requestWithURL_(NSURL.URLWithString_(
+                "https://www.youtube.com/watch?v=%s&autoplay=1" % vid)))
+        except Exception:
+            pass
+
+    def go_home():
+        st["mode"] = "iframe"
+        page_ready[0] = False
+        try:
+            web.loadRequest_(NSURLRequest.requestWithURL_(
+                NSURL.URLWithString_(st["home"])))
+        except Exception:
+            pass
+
+    class Handler(NSObject):
+        def userContentController_didReceiveScriptMessage_(self, ucc, msg):
+            try:
+                body = msg.body()
+                d = json.loads(body) if isinstance(body, str) else dict(body)
+            except Exception:
+                return
+            if d.get("watch"):
+                dur = float(d.get("d") or 0.0)
+                tt = float(d.get("t") or 0.0)
+                if st.get("vol") is not None:
+                    run_js("window.ytVol(%d)" % int(st["vol"]))
+                out = {"ready": True, "playing": bool(d.get("p")),
+                       "vid": st["vid"]}
+                ttl = d.get("title") or st["title"]
+                if ttl:
+                    out["title"] = st["title"] = ttl
+                if dur > 0 and tt >= dur - 2.0:
+                    out["ended"] = True
+                emit(out)
+                return
+            if d.get("vid"):
+                st["vid"] = d["vid"]
+            if d.get("title"):
+                st["title"] = d["title"]
+            err = int(d.get("err") or 0)
+            if err in (2, 100, 101, 150) and st["vid"]:
+                go_watch(st["vid"])
+                return
+            emit(d)
+
+    class Delegate(NSObject):
+        def applicationShouldTerminateAfterLastWindowClosed_(self, app):
+            return True
+
+    page_ready = [False]
+
+    class NavDelegate(NSObject):
+        def webView_didFailProvisionalNavigation_withError_(self, wv, nav, err):
+            try:
+                emit({"nav_fail": str(err.localizedDescription())})
+            except Exception:
+                pass
+
+        def webView_didFinishNavigation_(self, wv, nav):
+            page_ready[0] = True
+
+    app = AppKit.NSApplication.sharedApplication()
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    delegate = Delegate.alloc().init()
+    app.setDelegate_(delegate)
+
+    ucc = WKUserContentController.alloc().init()
+    handler = Handler.alloc().init()
+    ucc.addScriptMessageHandler_name_(handler, "yt")
+    WATCH_JS = (
+        "(function(){if(location.hostname.indexOf('youtube.com')<0"
+        "||location.pathname.indexOf('/watch')<0)return;"
+        "function vd(){return document.querySelector('video');}"
+        "window.ytPlay=function(){var v=vd();if(v)v.play();};"
+        "window.ytPause=function(){var v=vd();if(v)v.pause();};"
+        "window.ytVol=function(x){var v=vd();if(v)v.volume=Math.max(0,Math.min(1,x/100));};"
+        "setInterval(function(){var v=vd();if(!v)return;try{if(v.paused)v.play();}catch(e){}"
+        "var t=(document.title||'').replace(/ - YouTube$/,'');"
+        "try{window.webkit.messageHandlers.yt.postMessage(JSON.stringify("
+        "{watch:1,t:Math.round(v.currentTime),d:Math.round(v.duration||0),"
+        "p:!v.paused,title:t}));}catch(e){}},1000);})();")
+    ucc.addUserScript_(
+        WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
+            WATCH_JS, 1, True))
+
+    cfg = WKWebViewConfiguration.alloc().init()
+    cfg.setUserContentController_(ucc)
+    try:
+        cfg.setMediaTypesRequiringUserActionForPlayback_(0)
+    except Exception:
+        pass
+
+    # localhost origin 필수 — loadHTMLString 은 origin 이 비어 유튜브가
+    # err 150/152 로 막는다. 그래서 한 파일짜리 로컬 서버를 띄운다.
+    _srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _srv.bind(("127.0.0.1", 0))
+    _srv.listen(8)
+    _port = _srv.getsockname()[1]
+    st["home"] = "http://127.0.0.1:%d/" % _port
+    _body = _MAC_YT_HTML.encode("utf-8")
+    _resp = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+             b"Content-Length: " + str(len(_body)).encode()
+             + b"\r\nConnection: close\r\n\r\n" + _body)
+
+    def _serve():
+        while True:
+            try:
+                conn, _a = _srv.accept()
+            except Exception:
+                break
+            try:
+                conn.recv(8192)
+                conn.sendall(_resp)
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    threading.Thread(target=_serve, daemon=True).start()
+
+    rect = NSMakeRect(0, 0, 400, 300)
+    web = WKWebView.alloc().initWithFrame_configuration_(rect, cfg)
+    navdel = NavDelegate.alloc().init()
+    web.setNavigationDelegate_(navdel)
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        rect, AppKit.NSWindowStyleMaskBorderless,
+        AppKit.NSBackingStoreBuffered, False)
+    win.setContentView_(web)
+    win.setOpaque_(False)
+    win.setAlphaValue_(0.0)
+    win.setIgnoresMouseEvents_(True)
+    win.orderFrontRegardless()
+    web.loadRequest_(NSURLRequest.requestWithURL_(
+        NSURL.URLWithString_(st["home"])))
+
+    def reader():
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    c = json.loads(line)
+                except Exception:
+                    continue
+                with cmds_lock:
+                    cmds.append(c)
+        except Exception:
+            pass
+        with cmds_lock:
+            cmds.append({"c": "quit"})
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def pump(_timer=None):
+        if not page_ready[0]:
+            return
+        drained = 0
+        while drained < 50:
+            with cmds_lock:
+                if not cmds:
+                    break
+                c = cmds.pop(0)
+            drained += 1
+            k = c.get("c")
+            if k == "quit":
+                AppKit.NSApp().terminate_(None)
+                return
+            elif k == "load":
+                v = c.get("v") or ""
+                lst = c.get("list") or ""
+                st["vid"] = v
+                if st["mode"] == "watch":
+                    go_home()
+                    with cmds_lock:
+                        cmds.insert(0, c)
+                    return
+                run_js("window.ytLoad(%s,%s)"
+                       % (json.dumps(v), json.dumps(lst)))
+                if st.get("vol") is not None:
+                    run_js("window.ytVol(%d)" % int(st["vol"]))
+            elif k == "play":
+                run_js("window.ytPlay()")
+            elif k == "pause":
+                run_js("window.ytPause()")
+            elif k == "vol":
+                try:
+                    st["vol"] = int(c.get("v", 50))
+                    run_js("window.ytVol(%d)" % st["vol"])
+                except Exception:
+                    pass
+
+    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.05, True, pump)
+    app.run()
+
+
 if "--yt-player" in sys.argv:
     # 음악 재생기로 넘어가는 갈림길. 얼려 배포한 exe 안에는 파이썬이 따로
     # 없어서, 재생기를 자식으로 띄울 때 같은 실행 파일을 이 깃발로 다시 부른다.
     # 이 파일은 자동 업데이트를 타므로 런처를 다시 굽지 않아도 길이 생긴다.
+    # 맥 런처(quincy_mac)는 갈림길이 없지만 mascot 을 import 하는 순간
+    # 이 블록이 돌므로 같은 길이 생긴다 (sys.exit 는 SystemExit 라
+    # 런처의 except Exception 에 안 잡힌다).
+    if IS_MAC:
+        try:
+            _mac_yt_player_main()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        sys.exit(0)
     try:
         if HERE not in sys.path:
             sys.path.insert(0, HERE)
@@ -1146,6 +1442,7 @@ class MacCharLayer:
         self.ok = False
         self.layer = None
         self._sz = None
+        self._last_src = None    # 직전에 올린 프레임 (같으면 push 스킵)
         # **Quartz 가 있어야 한다.** 맥 번들에 pyobjc-framework-Quartz 가
         # 빠져 있으면 여기서 ImportError 로 깔끔하게 물러난다 — 부르는 쪽이
         # 색상키로 되돌린다.
@@ -1222,6 +1519,13 @@ class MacCharLayer:
         from Quartz import (CATransaction, CGColorSpaceCreateDeviceRGB,
                             CGDataProviderCreateWithCFData, CGImageCreate,
                             kCGImageAlphaPremultipliedLast)
+        # 안 바뀐 프레임은 통째로 건너뛴다 (퀸시 맥 실측 — 캐릭터가 멈춰
+        # 있을 때 push 가 그대로 프레임 비용이었다). 비교(700KB memcmp)는
+        # 변환+CGImage 만들기보다 훨씬 싸다.
+        src = im.tobytes()
+        if src == getattr(self, "_last_src", None):
+            return True
+        self._last_src = src
         w, h = im.size
         raw = im.convert("RGBa").tobytes("raw", "RGBa")
         data = NSData.dataWithBytes_length_(raw, len(raw))
@@ -1245,6 +1549,7 @@ class MacCharLayer:
         return True
 
     def hide(self):
+        self._last_src = None      # 다음 push 는 반드시 그린다 (스킵 무효화)
         try:
             from Quartz import CATransaction
             CATransaction.begin()
@@ -9947,12 +10252,17 @@ class Mascot:
             # 얼린 배포본에는 재생기가 exe 안에 구워져 있어 파일이 없을 수 있다.
             has_file = (os.path.exists(os.path.join(HERE, "youtube_player.py"))
                         or getattr(sys, "frozen", False))
-            if IS_WIN and self.cfg.get("youtube") and has_file:
-                try:
-                    import importlib.util
-                    got = importlib.util.find_spec("webview") is not None
-                except Exception:
-                    got = False
+            if self.cfg.get("youtube") and has_file:
+                if IS_WIN:
+                    try:
+                        import importlib.util
+                        got = importlib.util.find_spec("webview") is not None
+                    except Exception:
+                        got = False
+                elif IS_MAC:
+                    # 시스템 WebKit + 번들 pyobjc — 따로 확인할 것이 없다
+                    # (_mac_yt_player_main, 퀸시 실기기 검증)
+                    got = True
             self._yt_avail = got
             if not got:
                 # **왜 없는지 남긴다.** 단추가 아예 안 뜨면 사람은 이유를
@@ -9960,8 +10270,8 @@ class Mascot:
                 # 안 들어 있다). 굳힌 exe 는 자동 갱신이 안 되므로
                 # 새 exe 를 전달해야 하는 상황인지 이 줄로 갈린다.
                 why = []
-                if not IS_WIN:
-                    why.append("맥")
+                if not IS_WIN and not IS_MAC:
+                    why.append("지원 안 되는 OS")
                 if not self.cfg.get("youtube"):
                     why.append("config 에 youtube 없음")
                 if not has_file:
@@ -10224,6 +10534,9 @@ class Mascot:
             # 얼린 배포본: 파이썬이 따로 없으므로 같은 실행 파일을 부르고,
             # mascot.py 맨 위의 갈림길이 재생기로 넘겨 준다.
             cmd = [exe, "--yt-player"]
+        elif IS_MAC:
+            # 맥은 재생기가 mascot.py 안에 있다 (_mac_yt_player_main)
+            cmd = [exe, "-u", os.path.abspath(__file__), "--yt-player"]
         else:
             pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
             if os.path.exists(pyw):
@@ -10248,12 +10561,22 @@ class Mascot:
         except Exception:
             errf = None
         try:
-            self._yt_proc = subprocess.Popen(
-                cmd + ["--profile", prof],
+            popen_kw = dict(
                 cwd=HERE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=(errf or subprocess.DEVNULL),
-                encoding="utf-8", errors="replace",
-                creationflags=0x08000000)          # CREATE_NO_WINDOW
+                encoding="utf-8", errors="replace")
+            if IS_WIN:
+                # CREATE_NO_WINDOW — 윈도우 전용. 맥에서 넘기면 Popen 이
+                # ValueError 로 죽는다.
+                popen_kw["creationflags"] = 0x08000000
+            elif IS_MAC and getattr(sys, "frozen", False):
+                # 자식은 런처(quincy_mac)를 다시 지나온다 — 업데이트 확인을
+                # 건너뛰게 해 바로 재생기로 넘어온다 (런처가 이 env 를 안다).
+                env9 = dict(os.environ)
+                env9["MASCOT_NO_UPDATE"] = "1"
+                popen_kw["env"] = env9
+            self._yt_proc = subprocess.Popen(
+                cmd + ["--profile", prof], **popen_kw)
         except Exception:
             self._yt_proc = None
             self._log_error("yt_spawn")
@@ -15913,6 +16236,10 @@ class Mascot:
         # (자는 중 10fps / 오래 비움 15fps / 평소 30fps / 보고 있을 때 60fps)
         now = time.time()
         quiet = now - max(self.last_key, self.last_pointer)
+        # smooth 기본값을 먼저 둔다 — 아래 sleep/quiet 갈래에서는 정하지
+        # 않으므로, 안 두면 맥 분기에서 UnboundLocalError 가 난다
+        # (퀸시 클로드의 경고 그대로).
+        smooth = False
         if self._sleeping or self._fs_hidden:
             gap = self.GAP_SLEEP
         elif quiet > self.QUIET_SLOW:
@@ -15931,6 +16258,14 @@ class Mascot:
                     gap = max(gap, 50)
             except Exception:
                 pass
+        # 맥은 안 볼 때 프레임을 확 낮춘다 (퀸시 맥 실측 — 매끈 합성이
+        # 프레임당 ~14ms 라 30fps 로 계속 돌면 딴 작업 중에도 무겁다).
+        # 볼 때 24fps / 안 볼 때 12fps. 매끈이 아니어도 draw 자체가
+        # 프레임당 11ms 라(같은 실측) 안 볼 때는 15fps 로 낮춘다.
+        if IS_MAC and self._smooth_on:
+            gap = max(gap, 42 if smooth else 84)
+        elif IS_MAC and not smooth:
+            gap = max(gap, 66)
         # **예약은 본체를 돌린 뒤, 걸린 시간만큼 뒤로 미뤄서 한다**
         # (지뢰 129 의 본체판). 예전처럼 먼저 예약하면, 한 프레임이 gap 을
         # 넘길 때(맥에서 아바타를 키우면 시트가 커져 매 프레임 push 가
