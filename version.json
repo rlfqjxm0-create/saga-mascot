@@ -1,7 +1,7 @@
 {
- "version": 1787815606,
+ "version": 1787816588,
  "files": {
-  "mascot.py": "90cf8a3eacd16412630c0f9ac9c271799e2adfc5b90f150f969953fe363ef0c5",
+  "mascot.py": "fceae23cae2b3faf56442c2e708e7d881fb8167121c6e4c3b7c88f1e92947f0e",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,8 +14,8 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "1147260ac2ea05ec8107047060ae738b6b2d4fbf24dd72058cabf988f7d95d7d",
-  "parts_saga/config.json.bak": "1147260ac2ea05ec8107047060ae738b6b2d4fbf24dd72058cabf988f7d95d7d",
+  "parts_saga/config.json": "ac7df4666741ab22376eae394567f66f6269642d9dfe0f7ae5404cc4ca9cb322",
+  "parts_saga/config.json.bak": "ac7df4666741ab22376eae394567f66f6269642d9dfe0f7ae5404cc4ca9cb322",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
   "parts_saga/eyes_closed.png": "343347beac62927c83329ce20575518c1cfe258a05b8d5b22afef133944b91f6",
@@ -582,8 +582,8 @@
  },
  "notes": [
   "반려동물이 넷으로 늘었어요! 패왕님의 고양이 옹이와 젖소교사님의 강아지 곰돌이가 새로 왔어요. 소품 새로고침을 누르다 보면 만날 수 있어요.",
-  "곰돌이는 강아지라 소리가 달라요 — 클릭하면 멍멍, 몸이나 머리를 쓰다듬으면 헥헥거려요. 넷 다 쓰다듬거나 클릭하면 기분 좋게 눈을 감아요.",
-  "개님의 고양이 덤보, 하독님의 고양이 비비도 있어요. 클릭하면 야옹, 쓰다듬으면 고롱고롱 — 쓰다듬는 동안 계속 나고 손을 멈추면 그쳐요.",
+  "곰돌이는 강아지라 소리가 달라요 — 클릭하면 멍멍, 몸이나 머리를 쓰다듬으면 헥헥거려요. 혀도 낼름낼름 움직여요.",
+  "개님의 고양이 덤보, 하독님의 고양이 비비도 있어요. 클릭하면 야옹, 쓰다듬으면 고롱고롱 — 쓰다듬는 동안 계속 나고 손을 멈추면 그쳐요. 넷 다 만져 주면 기분 좋게 눈을 감아요.",
   "혹시 캐릭터가 예전 모습으로 보이면(소품 새로고침·미니게임이 안 보이거나, 캐릭터와 소품만 창 아래로 내려가 있으면) 업데이트가 반쪽만 받아진 상태예요. 아래 방법으로 고쳐집니다.",
   "타이머를 완전히 끈 뒤, 우클릭 메뉴의 '오류 기록 폴더 열기'로 열리는 폴더에서 live 폴더만 지우고 다시 켜 주세요. 그 메뉴가 없으면 Win+R 을 눌러 %APPDATA% 를 붙여넣고, 캐릭터 이름이 붙은 폴더(예: DororongMascot) 안의 live 를 지우면 돼요. 작업 기록·설정·할 일은 한 단계 위에 있어서 그대로 남아요."
  ]

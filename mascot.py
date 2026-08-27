@@ -7772,6 +7772,31 @@ class Mascot:
                 pil.resize((w2, h2), Image.LANCZOS),
                 (pad + (pil.width - w2) // 2, pad + pil.height - h2))
             im = base
+        elif mode == "lick":
+            # 낼름낼름 — 혀는 **입에 붙은 윗변이 붙박이**고 아래로 쭉
+            # 나왔다 쏙 들어간다 (요청: 곰돌이 혓바닥).
+            #
+            # flame 을 그냥 쓰면 안 되는 이유가 둘이다.
+            #  ① flame 은 아랫변을 고정하고 위로 자란다 — 혀는 반대다.
+            #  ② sin 그대로면 내내 흐물거린다. 혀는 **잠깐 나왔다 들어가고
+            #     한동안 가만히** 있어야 낼름거려 보인다. 그래서 반주기는
+            #     쉬고(0), 나머지 반주기에만 한 번 쭉 내민다.
+            u = math.sin(2 * math.pi * k / steps)
+            u = 0.0 if u <= 0 else u ** 0.7      # 앞 반주기는 쉰다
+            sy = 1.0 + amp * u
+            # 내밀 때 살짝 좁아진다 (혀끝이 뾰족해 보이게)
+            sx = 1.0 - amp * float(mo.get("squash", 0.18)) * u
+            w2 = max(1, int(round(pil.width * sx)))
+            h2 = max(1, int(round(pil.height * sy)))
+            pad = int(math.ceil(pil.height * abs(amp))) + 2
+            base = Image.new("RGBA",
+                             (pil.width + 2 * pad, pil.height + 2 * pad),
+                             (0, 0, 0, 0))
+            # 윗변을 붙박이로 — y 는 pad 그대로 두고 아래로만 자란다
+            base.alpha_composite(
+                pil.resize((w2, h2), Image.LANCZOS),
+                (pad + (pil.width - w2) // 2, pad))
+            im = base
         elif mode == "pulse":
             # 반짝이(별) — 가운데를 축으로 커졌다 작아졌다
             k2 = 1.0 + amp * t
