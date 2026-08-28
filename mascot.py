@@ -5818,6 +5818,14 @@ class Mascot:
         self.font_k = max(FONT_MIN / 100.0 * FONT_SPAN, min(
             FONT_SPAN,
             float(self.us.get("font_pct", 100)) / 100.0 * FONT_SPAN))
+        # oy 는 위(5792)에서 font_k=1.0 일 때 계산됐다. 레벨 줄(_lv_row)이
+        # 글자 크기를 따라 커지므로 그대로 두면 창이 13px 모자란 채 굳고,
+        # 한참 뒤 처음 _relayout_card 가 불릴 때 그 빚이 한꺼번에 터져
+        # 캐릭터가 아래로 밀린다 (제보: "시간이 지나면 아래로 내려감").
+        # font_k 가 정해진 지금 다시 계산한다 — 창 geometry 는 아직
+        # 안 잡았으므로(아래 5835) 여기서 고치면 값만 바뀐다.
+        self.oy = self._timer_oy()
+        self.H = self.ch_px + self.oy
         self._boot_step("설정·창 준비됨")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", bool(self.us["topmost"]))
@@ -7542,6 +7550,12 @@ class Mascot:
             for name in overlays:
                 if name in ("body_mask", "head", "lashes")                         or not self.has.get(name):
                     continue
+                if (name.startswith("prop")
+                        and self.cfg.get("prop_over_arms")):
+                    continue          # 판에 구우면 팔 위로 못 올린다 —
+                    # 안 빼면 정지로 구운 소품 + _draw_prop_top 의 모션 소품이
+                    # 겹쳐 '기본 포즈가 뒤에 겹친다' (자는 판·깨어있는 판엔
+                    # 이 제외가 있는데 웃는 판만 빠져 있었다 — 제보)
                 paste("smile" if name == "eyes_closed" else name)
             if "eyes_closed" not in overlays:
                 paste("smile")
@@ -9341,6 +9355,14 @@ class Mascot:
         d = self.oy - old_oy
         self.canvas.config(height=self.H)
         self.root.geometry(f"{self.W}x{self.H}+{old_x}+{old_y - (self.H - old_H)}")
+        # 미뤄 둔 이동을 그 자리에서 적용시킨다. Tk 는 geometry 를 모아 뒀다
+        # 나중에 반영하는데, 같은 tick 뒤쪽에서 본체 창에 SetWindowPos 가
+        # 들어가면(_z_pin·place_above) 그 이동이 조용히 버려진다 (지뢰 15).
+        # 그러면 창은 위로 안 가고 높이만 자라 캐릭터가 아래로 밀린다.
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
         self._pen_xy[1] += d                 # 좌표계가 d만큼 내려가므로 펜도 이동
         self._bake_oy()
         self._build_shadow_img()
@@ -17355,6 +17377,10 @@ class Mascot:
             mix.pop(name, None)
         self._amb_save_mix(mix)
         self._safe("amb_apply", self._amb_apply, mix)
+        # 환경음 알약이 서고 사라지면 카드 위 줄(_yt_bar)이 0↔24 로 바뀐다.
+        # 재배치를 안 부르면 카드만 라이브로 내려앉고 캐릭터의 oy 는 그대로라
+        # 둘이 어긋난다 (제보 원인 중 하나).
+        self._safe("card", self._relayout_card)
 
     def _amb_setvol(self, name, vol):
         """켜져 있는 것의 볼륨만 바꾼다 (소리가 안 끊긴다)."""
@@ -17372,6 +17398,8 @@ class Mascot:
         if self._amb is None:
             return
         self._amb_apply()
+        # 복원으로 알약이 서면 카드 위 줄이 생긴다 — 창도 같이 키운다
+        self._safe("card", self._relayout_card)
 
     def _amb_toggle_win(self):
         """알약을 누를 때 — 열려 있으면 닫고, 아니면 연다."""
@@ -35018,10 +35046,40 @@ class Mascot:
                     for dx2, sc2 in ((-13, 0.6), (13, 0.6)):
                         self._fx_spark(c, cx + dx2 * k, top + 12 * k,
                                        9 * k * sc2, "#ffe9a8")
+            elif kind == "gwhip":
+                # 채찍질 — 붉은 사선이 후려친다 (전에는 큐에만 들어오고
+                # 그리는 분기가 없어 아무것도 안 떴다 — 제보)
+                self._fx_whip(c, p, cx, mid, k)
             elif kind == "snack":
                 pass      # 간식은 연출이 아니라 책상에 놓인다 (_draw_snack_on)
 
     POKE_RING = ("#ff9ec4", "#ffb6d2", "#ffd6e4")
+
+    def _fx_whip(self, c, p, cx, cy, k):
+        """채찍질 — 붉은 사선 빗금이 위에서 아래로 후려치고, 맞은 자리에서
+        작은 충격이 튄다. 색상키 창이라 반투명 대신 얇아지는 선으로 잔상을
+        낸다 (콕 물결과 같은 방식)."""
+        span = self.cw_px * 0.85
+        for i in range(3):
+            q = p * 1.9 - i * 0.15
+            if not (0 < q < 1):
+                continue
+            e = 1.0 - (1.0 - q) ** 2
+            yc = cy - span * 0.42 + e * span * 0.8 + i * 11 * k
+            w = max(1, int(8 * k * (1 - q)))
+            col = ("#d64545", "#e9797d", "#f4b0b3")[i]
+            c.create_line(cx - span * 0.55, yc + span * 0.20,
+                          cx + span * 0.55, yc - span * 0.20,
+                          fill=col, width=w, capstyle="round")
+        if p < 0.55:                       # 후려친 자리 — 붉은 충격 별과 튐
+            q = p / 0.55
+            self._fx_spark(c, cx, cy, (12 + 18 * q) * k * (1 - q * 0.5),
+                           "#ff5555")
+            d = (24 + 66 * q) * k
+            for a in (0.5, 2.1, 3.9, 5.3):
+                self._fx_spark(c, cx + math.cos(a) * d,
+                               cy + math.sin(a) * d * 0.7,
+                               (4.5 + 3 * (1 - q)) * k, "#ff9a9a")
 
     def _fx_poke(self, c, p, cx, cy, k):
         """콕 — 동그란 물결 세 겹, 톡 튀는 점, 가운데 반짝임.
@@ -35346,6 +35404,20 @@ class Mascot:
                         cv.create_line(cx - 40 * k, yy, cx + 40 * k, yy,
                                        fill=soft, width=max(1, int(2 * k)),
                                        tags="fx")
+            elif kind == "gwhip":
+                for i in range(3):                 # 붉은 사선이 후려친다
+                    q = p * 1.9 - i * 0.15
+                    if 0 < q < 1:
+                        yc = cy - 22 * k + (1 - (1 - q) ** 2) * 40 * k + i * 6 * k
+                        cv.create_line(cx - 26 * k, yc + 9 * k,
+                                       cx + 26 * k, yc - 9 * k,
+                                       fill=self._mix("#d64545", soft, q * 0.55),
+                                       width=max(1, int(3 * k * (1 - q))),
+                                       capstyle="round", tags="fx")
+                if p < 0.55:
+                    q = p / 0.55
+                    self._fx_spark(cv, cx, cy, (5 + 7 * q) * k * (1 - q * 0.5),
+                                   "#ff5555")
             elif kind == "snack":
                 q = min(1.0, p * 1.8)              # 간식이 툭 떨어진다
                 yy = cy - 40 * k + q * q * 66 * k
