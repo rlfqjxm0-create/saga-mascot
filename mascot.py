@@ -19250,6 +19250,11 @@ class Mascot:
         """
         if self.shadow is None:
             return
+        # 전체화면 프로그램에 비켜 준 동안에는 손대지 않는다. 아래의
+        # '현실 확인'이 숨어 있는 그림자를 다시 띄워 **게임 위로 튀어나온다**
+        # (검사로 잡았다). 돌아올 때 _fs_show 가 알아서 되살린다.
+        if getattr(self, "_fs_hidden", False):
+            return
         want = not hide
         now = time.time()
         # **깃발만 믿으면 안 된다** (지뢰 24·30). 전체화면 프로그램이 왔다
