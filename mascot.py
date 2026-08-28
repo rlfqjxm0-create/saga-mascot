@@ -12131,21 +12131,7 @@ class Mascot:
             # **바닥뿐 아니라 지금 값에도** 건다. 예전에는 바닥에만 걸어서,
             # day_base 가 어제 그대로면 화면과 서버가 서로 다른 값을 말했다.
             cap = self._day_min() * 60.0 + 300.0
-            fl = min(self._day_floor(), cap)
-            if fl > raw + 1.0:
-                # 연동 시계(에이전트)가 다시 켜지면서 뒤로 갔다.
-                # 예전에는 `max(raw, 바닥)` 으로 붙들기만 해서, raw 가
-                # 바닥을 따라잡을 때까지 **화면이 멈춘 채로 있었다**
-                # (제보: "4시 57분에서 더 시간이 안 재져" — 실제 279분,
-                # 바닥 297분이라 18분 동안 얼어 있었다).
-                # 붙드는 대신 **기준점을 옮겨** 바닥에서 이어 세게 한다.
-                # zero_at 도 같은 만큼 옮겨야 카드의 '작업 종료 뒤로 다시
-                # 센 만큼'이 어긋나지 않는다.
-                d9 = fl - raw
-                self.day_base -= d9
-                self.zero_at -= d9
-                raw = fl
-            return min(cap, raw)
+            return min(cap, max(raw, min(self._day_floor(), cap)))
         except Exception:
             return raw
 
