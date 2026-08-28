@@ -8782,9 +8782,20 @@ class Mascot:
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
     def _on_release(self, e):
-        # 여백 직접 조정 — 놓으면 지금 여백을 저장하고 모드를 끝낸다.
+        # 여백 직접 조정 — **끌었을 때만** 저장하고 끝낸다. 클릭 한 번으로
+        # 끝내면, 잡으려고 누른 순간 '저장됐어요' 가 뜨고 모드가 사라져
+        # 아무것도 못 맞춘다 (제보: 눌렀더니 바로 저장됨).
         if self._gap_adj:
-            self._gap_adjust_done()
+            if self._dragged:
+                self._gap_adjust_done()
+            else:
+                # 안 끌었다 — 모드를 그대로 두고 다시 잡을 수 있게 한다.
+                # 안내 말풍선이 꺼져 있으면 다시 띄운다 (시한이 지나면
+                # 사라지는데, 그러면 지금 무슨 상태인지 알 수 없다).
+                self._gap_adj_y0 = None
+                if not self._bubble_hold:
+                    self._say("위아래로 끌어 여백을 맞춰요 · 놓으면 저장돼요",
+                              hold=True)
             self._press = None
             return
         if self._slime_grab is not None:
