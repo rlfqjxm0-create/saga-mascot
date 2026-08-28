@@ -891,6 +891,9 @@ DEFAULT_SETTINGS = {
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%) — 100%가 가장 큼
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
+    "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
+    "pomo_short": 5,      # 짧은 휴식(분)
+    "pomo_long": 15,      # 네 번째 뒤 긴 휴식(분)
     "sleep_min": 10,      # 이 시간(분) 동안 무입력이면 수면 모드
     "shadow": True,       # 캐릭터 뒤 옅은 그림자
     "clock_open": False,  # 시계형 카드에서 시계 펼침 상태
@@ -6565,6 +6568,8 @@ class Mascot:
         self._curwatch_n = 0             # 예비 감지가 입력으로 쳐 준 횟수
         self._told_off = set()            # 꺼졌다고 이미 말한 구역
         self._health_at = 0.0             # .health.txt 를 마지막으로 쓴 시각
+        self._sos_told = False            # 캐릭터가 안 보인다고 알렸는가
+        self._sos_tried = False           # 파츠를 다시 받아 봤는가 (한 번만)
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
@@ -8702,6 +8707,18 @@ class Mascot:
 
     def _on_press(self, e):
         self._press = (e.x, e.y, e.x_root, e.y_root)
+        # 누르면 윈도우가 본체 창을 맨 앞으로 올려 몸 레이어가 뒤로 밀린다.
+        # 되올리는 일은 **어느 분기로 가든** 해야 한다 — 여백 조정 분기가
+        # 이걸 건너뛰는 바람에, 다음 프레임의 place_above 가 본체 창에
+        # SetWindowPos 를 때려 미뤄 둔 창 크기 변경이 버려졌다 (지뢰 15).
+        self._z_check = 0.0
+        self._last_pos = None
+        self._chip_z_until = time.time() + 2.5
+        if self._char_lay is not None:
+            try:
+                self._char_lay.place_above(self._main_hwnd)
+            except Exception:
+                pass
         # 여백 직접 조정 중 — 누른 자리를 기준으로 위아래 끌기를 시작한다.
         # 다른 반응(쓰다듬·슬라임·창 옮기기)은 모두 건너뛴다.
         if self._gap_adj:
@@ -8723,20 +8740,8 @@ class Mascot:
             self._cat_moved = 0.0
         else:
             self._cat_stroke = None
-        # 본체 창을 누르면 윈도우가 그 창을 맨 앞으로 올려 몸 레이어가
-        # 뒤로 밀린다 — 말풍선·몸이 카드에 가려진다. 그 자리에서 되올린다
-        # (레이어 쪽 클릭이 이미 하는 것과 같은 일 — _on_press_layer).
-        # 다음 프레임에 z순서를 다시 못박게 한다 — 메뉴 창이 닫히면서
-        # 본체가 한 번 더 앞서는 일이 있어, 한 번 올리는 것만으로는
-        # 부족했다 (제보: 클릭해야 제자리로 갔다).
-        self._z_check = 0.0
-        self._last_pos = None
-        self._chip_z_until = time.time() + 2.5
-        if self._char_lay is not None:
-            try:
-                self._char_lay.place_above(self._main_hwnd)
-            except Exception:
-                pass
+        # (z순서 되올리기는 위에서 이미 했다 — 어느 분기로 가든 해야 하므로
+        #  맨 앞으로 옮겼다.)
         self._dragged = False
         self._slime_grab = None
         if self.slime is not None:
@@ -9359,6 +9364,17 @@ class Mascot:
         old_oy, old_H = self.oy, self.H
         new_oy = self._timer_oy()
         if new_oy == old_oy:
+            # 값은 그대로여도 **창이 실제로 그 높이인지**는 따로 봐야 한다.
+            # 미뤄 둔 크기 변경이 버려지면(지뢰 15) 창만 옛 높이로 남는데,
+            # 여기서 값만 보고 돌아가면 다시는 안 고쳐진다 — 캔버스가
+            # 잘려 몸·손·책상이 사라진 채로 굳는다. 어긋나면 다시 건다.
+            try:
+                real_h = self.root.winfo_height()
+                if real_h > 1 and abs(real_h - self.H) >= 2:
+                    self.root.geometry("%dx%d" % (self.W, self.H))
+                    self.root.update_idletasks()
+            except Exception:
+                pass
             return
         old_x, old_y = self.root.winfo_x(), self.root.winfo_y()
         self.oy = new_oy
@@ -11800,7 +11816,14 @@ class Mascot:
     def _fs_show(self):
         """비켜 있던 창들을 되돌린다. 자리와 z순서를 다시 잡아 준다."""
         self._fs_hidden = False
+        # 자리비움(상태 칩)으로 일부러 감춰 둔 그림자는 되살리지 않는다.
+        # 되살리면 캐릭터는 없는데 그림자만 남는다 (제보).
+        skip = None
+        if getattr(self, "_chip_hide", False) and self.shadow is not None:
+            skip = getattr(self.shadow, "top", None)
         for w in self._fs_windows():
+            if skip is not None and w is skip:
+                continue
             try:
                 w.deiconify()
             except Exception:
@@ -15670,7 +15693,9 @@ class Mascot:
                    fill="#ffffff", outline=col, width=2)
         # 분침 — 이번 구간이 얼마나 남았나 (한 바퀴 = 그 구간 전체)
         st = self._pomo()
-        full = max(1.0, self._pomo_len(st["phase"]) * 60.0)
+        # `_pomo_len` 은 **이미 초**다. 여기서 60 을 또 곱하고 있어서
+        # 남은 비율이 늘 0 언저리였고, 분침이 사실상 안 움직였다.
+        full = max(1.0, self._pomo_len(st["phase"]))
         frac = max(0.0, min(1.0, 1.0 - self._pomo_left(st) / full))
         a = math.radians(-90 + 360 * frac)
         c.create_line(bx, by, bx + math.cos(a) * br * 0.72,
@@ -15908,6 +15933,67 @@ class Mascot:
                             "\n".join(rows) + "\n")
         except Exception:
             pass
+
+    # 캐릭터가 화면에 보이려면 살아 있어야 하는 구역들. 이것들이 꺼지면
+    # 사람에게는 '캐릭터가 사라지고 그림자만 남은' 것으로 보인다.
+    CORE_ZONES = ("body", "head", "arms", "back", "face", "desk")
+    SOS_RETRY = 60.0             # 꺼진 구역을 다시 해 보는 간격(초)
+
+    def _char_sos(self, now):
+        """캐릭터를 그리는 구역이 꺼졌다 — 알리고, 스스로 고쳐 본다.
+
+        지금까지는 **아무 말 없이 사라졌다**. 사람은 '없어졌다'는 것만
+        알고 무엇을 해야 할지 몰랐다 (젖소 도로롱 제보: "도롱이가
+        사라지고 그림자만 남아있어요 · 기지개 켜는 것만 보임" — 몸·머리·
+        팔 구역이 꺼지면 실제로 그 모습이 된다. 재현으로 확인했다).
+
+        하는 일은 셋이다. ①한 번 말해 준다 ②선물본이면 파츠가 섞였는지
+        보고 다시 받아 온다 ③5분(FAIL_FORGET)을 기다리지 말고 1분마다
+        다시 그려 본다 — 잠깐 터진 것이면 저절로 돌아온다.
+        """
+        off = [w for w in self.CORE_ZONES if self._safe_off(w)]
+        if not off:
+            return
+        if not self._sos_told:
+            self._sos_told = True
+            self._safe("sos_say", self._say,
+                       "그림을 잠깐 못 그리고 있어요 — 고쳐 볼게요", 6.0)
+        # 1분마다 다시 해 본다 (방 구역이 쓰는 것과 같은 방식)
+        for w in off:
+            if now - (self._fail_at.get(w) or 0) > self.SOS_RETRY:
+                self._fail[w] = 0
+        # 파츠가 섞인 것이면 다시 받아야 낫는다. 네트워크를 쓰므로
+        # 딴 실에서, 그리고 한 번만 (되풀이하면 계속 내려받는다).
+        if self._sos_tried:
+            return
+        self._sos_tried = True
+        try:
+            threading.Thread(target=self._char_sos_fix, daemon=True).start()
+        except Exception:
+            self._log_error("sos_thread")
+
+    def _char_sos_fix(self):
+        """딴 실 — 파츠를 다시 받아 맞춘다 (선물본에서만 실제로 받는다)."""
+        try:
+            repair_parts(self.dir, self.state_dir)
+        except Exception:
+            self._log_error("sos_repair")
+            return
+        # 그림을 다시 읽는 일은 반드시 본 실에서 (Tk 는 딴 실에서 만지면
+        # 죽는다). 다음 프레임에 맡긴다.
+        try:
+            self.root.after(0, lambda: self._safe("sos_reload",
+                                                  self._char_sos_reload))
+        except Exception:
+            pass
+
+    def _char_sos_reload(self):
+        """파츠를 다시 읽고 꺼진 구역을 되살린다."""
+        self._load_parts()
+        for w in self.CORE_ZONES:
+            self._fail[w] = 0
+            self._fail_why.pop(w, None)
+        self._say("다시 그릴 수 있게 됐어요", 4.0)
 
     def _safe_off(self, name):
         """그 구역이 여러 번 터져서 꺼졌는가 (_safe 가 3번이면 끈다)."""
@@ -16488,6 +16574,9 @@ class Mascot:
         self._frames = getattr(self, "_frames", 0) + 1
         try:      # 진단은 _safe 로 감싸지 않는다 — 같이 꺼지면 볼 것이 없다
             self._health_tick(now)
+            # 캐릭터가 안 보이는 채로 굳지 않게 (지뢰 14 의 최악형).
+            # 이것도 _safe 로 감싸면 안 된다 — 구조하는 쪽이 같이 꺼진다.
+            self._char_sos(now)
         except Exception:
             pass
         self._room_dead = self._safe_off("room")
@@ -16969,6 +17058,12 @@ class Mascot:
     # ── 뽀모도로 타이머 ───────────────────────────────────────────────
     # 널리 쓰는 규칙 그대로 — 25분 집중, 5분 쉬고, 네 번째 뒤에는 15분.
     POMO_FOCUS, POMO_SHORT, POMO_LONG, POMO_ROUNDS = 25, 5, 15, 4
+    # 사람이 뽀모도로 창 안에서 바꿀 수 있는 범위와 눈금 (요청 — 하독).
+    # 위 상수는 '한 번도 안 바꾼 사람'의 기본값으로 남는다.
+    POMO_RANGE = {"focus": (5, 120), "short": (1, 60), "long": (5, 90)}
+    POMO_STEP = {"focus": 5, "short": 1, "long": 5}
+    POMO_KEY = {"focus": "pomo_focus", "short": "pomo_short",
+                "long": "pomo_long"}
     POMO_NAME = {"focus": "집중", "short": "쉬는 중", "long": "긴 휴식"}
     POMO_DOT = {"focus": DOT_ON, "short": "#2a9d8a", "long": "#2a9d8a"}
     POMO_LINES = {
@@ -17042,9 +17137,57 @@ class Mascot:
                                 "n": self._pomo_sets() + 1}
         self._safe("pomo_sets_save", self._save_settings)
 
+    def _pomo_mins(self, phase):
+        """그 구간의 길이(분). 사람이 창에서 바꿔 두었으면 그 값.
+
+        설정에 엉뚱한 값이 들어 있어도 범위 안으로 눌러 돌려준다 —
+        여기서 나온 값이 곧 화면의 남은 시간이라, 0 이나 글자가 새면
+        매 프레임 예외가 난다.
+        """
+        dv = {"focus": self.POMO_FOCUS, "short": self.POMO_SHORT,
+              "long": self.POMO_LONG}.get(phase, self.POMO_FOCUS)
+        key = self.POMO_KEY.get(phase)
+        if not key:
+            return dv
+        try:
+            v = int(float(self.us.get(key, dv)))
+        except (TypeError, ValueError):
+            v = dv
+        lo, hi = self.POMO_RANGE.get(phase, (1, 600))
+        return max(lo, min(hi, v))
+
     def _pomo_len(self, phase):
-        return {"focus": self.POMO_FOCUS, "short": self.POMO_SHORT,
-                "long": self.POMO_LONG}.get(phase, self.POMO_FOCUS) * 60
+        return self._pomo_mins(phase) * 60
+
+    def _pomo_set_len(self, phase, mins):
+        """구간 길이를 바꾼다 (뽀모도로 창 안에서).
+
+        **지금 돌고 있는 구간을 바꾸면 이미 흘린 시간은 그대로 두고**
+        끝나는 시각만 그만큼 밀거나 당긴다. 안 그러면 25분 중 20분을
+        보낸 사람이 30분으로 늘렸을 때 처음부터 다시 세게 된다.
+        """
+        key = self.POMO_KEY.get(phase)
+        if not key:
+            return
+        lo, hi = self.POMO_RANGE.get(phase, (1, 600))
+        new = max(lo, min(hi, int(mins)))
+        old = self._pomo_mins(phase)
+        if new == old:
+            return
+        self.us[key] = new
+        st = self._pomo()
+        d = (new - old) * 60.0
+        if st["phase"] == phase:
+            if st["on"] and st["end"] > 0:
+                # 남은 시간이 0 이하로 내려가면 그 자리에서 다음 구간으로
+                # 넘어가 버린다 — 최소 1초는 남겨 사람이 놀라지 않게.
+                st["end"] = max(time.time() + 1.0, st["end"] + d)
+            elif st["left"] > 0:
+                st["left"] = max(1.0, st["left"] + d)
+            self._pomo_save(st)          # 설정 저장까지 여기서 한다
+        else:
+            self._safe("pomo_save", self._save_settings)
+        self._pomo_redraw()
 
     def _pomo_left(self, st=None):
         """남은 초. 멈춰 있으면 멈춘 자리 그대로."""
@@ -17087,7 +17230,7 @@ class Mascot:
             st["round"] = int(st["round"]) + 1
             nxt = "long" if st["round"] % self.POMO_ROUNDS == 0 else "short"
             line = (self.POMO_LINES["long"] if nxt == "long"
-                    else self.POMO_LINES["short"] % self.POMO_FOCUS)
+                    else self.POMO_LINES["short"] % self._pomo_mins("focus"))
         else:
             nxt = "focus"
             line = self.POMO_LINES["back"]
@@ -17170,7 +17313,8 @@ class Mascot:
             got.lift()
             return
         cd, u = self.card, self._ui
-        W, H = u(300), u(372)      # 아래 '오늘 끝낸 세트' 칸만큼 더 높게
+        # 시간 바꾸는 칸(집중·짧은 휴식·긴 휴식)이 들어가 그만큼 더 높다
+        W, H = u(300), u(440)
         win = tk.Toplevel(self.root)
         self._pomo_winref = win
         win.title("뽀모도로")
@@ -17216,21 +17360,54 @@ class Mascot:
                 self._oval(cv, cx - r, u(152) - r, cx + r, u(152) + r,
                                fill=cd["fill"] if i < done else "#ffffff",
                                outline=line, width=1)
-            cv.create_text(W / 2, u(192),
-                           text="%d분 집중 · %d분 휴식 · 네 번째엔 %d분"
-                           % (self.POMO_FOCUS, self.POMO_SHORT,
-                              self.POMO_LONG),
-                           font=self._uf(8), fill=cd["sub"])
-            cv.create_text(W / 2, u(210),
+            # ── 시간 바꾸기 (요청 — 창 안에서 바로) ─────────────────
+            # 누르는 자리는 아래 단추와 한 목록에 모은다. 목록을 여기서
+            # 비우고 단추 쪽에서는 비우지 않는다 (비우면 이 자리가 사라진다).
+            self._pomo_hits = []
+            ty0, ty1 = u(186), u(286)
+            self._rr_soft(cv, pad, ty0, W - pad, ty1, u(18),
+                          fill="#ffffff", outline=line, width=1)
+            rows = (("focus", "집중"), ("short", "짧은 휴식"),
+                    ("long", "긴 휴식"))
+            rh = (ty1 - ty0) / len(rows)
+            for i, (ph9, lab9) in enumerate(rows):
+                ry = ty0 + rh * (i + 0.5)
+                cur = self._pomo_mins(ph9)
+                lo9, hi9 = self.POMO_RANGE[ph9]
+                stp = self.POMO_STEP[ph9]
+                cv.create_text(pad + u(14), ry, anchor="w", text=lab9,
+                               font=self._uf(9),
+                               fill=cd["text"] if ph9 == ph else cd["sub"])
+                # − 값 +  (맥에서 tk.Scale 은 못 쓴다 — 지뢰 4)
+                for sign, cx9 in ((-1, W - pad - u(78)), (1, W - pad - u(16))):
+                    hot = (cur > lo9) if sign < 0 else (cur < hi9)
+                    r9 = u(12)
+                    self._oval(cv, cx9 - r9, ry - r9, cx9 + r9, ry + r9,
+                               fill="#f2edf4" if hot else "#f7f5f8",
+                               outline=line, width=1)
+                    cv.create_line(cx9 - u(5), ry, cx9 + u(5), ry, width=2,
+                                   capstyle="round",
+                                   fill=cd["text"] if hot else cd["sub"])
+                    if sign > 0:
+                        cv.create_line(cx9, ry - u(5), cx9, ry + u(5),
+                                       width=2, capstyle="round",
+                                       fill=cd["text"] if hot else cd["sub"])
+                    if hot:
+                        self._pomo_hits.append(
+                            (cx9 - r9 - u(2), ry - r9 - u(2),
+                             cx9 + r9 + u(2), ry + r9 + u(2),
+                             ("len", ph9, sign * stp)))
+                cv.create_text(W - pad - u(47), ry, text="%d분" % cur,
+                               font=self._uf(10, True), fill=cd["text"])
+            cv.create_text(W / 2, u(298),
                            text="시간이 되면 알려 주고 같이 몸을 펴요",
                            font=self._uf(8), fill=cd["sub"])
             # 스티커는 여기까지의 그림 위, **단추 아래** (단추를 가리면
             # 누를 수가 없다 — 홈과 같은 규칙)
             self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
             # 단추 셋
-            by0, by1 = u(232), u(272)
+            by0, by1 = u(314), u(354)
             bw = (W - pad * 2 - u(16)) / 3.0
-            self._pomo_hits = []
             for i, (lab, act) in enumerate(
                     ((("멈춤" if st["on"] else "시작"), "toggle"),
                      ("건너뛰기", "skip"), ("처음으로", "reset"))):
@@ -17282,7 +17459,12 @@ class Mascot:
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                     self._safe("ui_click", self._ui_click)
-                    if act == "toggle":
+                    if isinstance(act, tuple) and act[0] == "len":
+                        # 시간 바꾸기 (− / +)
+                        _, ph9, d9 = act
+                        self._safe("pomo_len", self._pomo_set_len, ph9,
+                                   self._pomo_mins(ph9) + d9)
+                    elif act == "toggle":
                         self._pomo_toggle()
                     elif act == "skip":
                         self._pomo_skip()
@@ -18579,9 +18761,12 @@ class Mascot:
                         (self.layout.get("overlays") or [])
                         if n9.startswith("prop"))):
             self._safe("prop_top", self._draw_prop_top, yo)
-        if self.cfg.get("pen_over_head"):     # 퀸시: 깃펜이 맨 위 레이어
+        # 자리비움이면 몸에 딸린 것은 하나도 그리지 않는다. 이 둘이 가드
+        # 밖에 있어서, 캐릭터가 사라진 자리에 **기지개 팔만 둥둥 떠 보였다**
+        # (제보: "손도 사라졌는데 기지개 켜는 것만 보임"). 펜 손도 같은 몸이다.
+        if self.cfg.get("pen_over_head") and not chip_away:   # 깃펜이 맨 위
             self._safe("pen_hand", self._draw_pen_hand)
-        if self._g_hands is not None:        # 제스처 손 — 머리보다 위
+        if self._g_hands is not None and not chip_away:   # 제스처 손
             self._safe("gesture_arms", self._draw_gesture_arms, yo)
         # 손끝의 팝콘 한 알·밥숟가락 — **모든 파츠보다 위** (요청).
         # 몸짓 팔까지 그린 뒤여야 손에 가려지지 않는다.
@@ -19067,7 +19252,20 @@ class Mascot:
             return
         want = not hide
         now = time.time()
-        if want != getattr(self, "_shadow_shown", True):
+        # **깃발만 믿으면 안 된다** (지뢰 24·30). 전체화면 프로그램이 왔다
+        # 가면 _fs_show 가 숨겨 둔 창을 전부 되살리는데, 그때 이 깃발은
+        # '숨김'인 채로 남아 변화가 없다고 보고 **다시는 안 숨겼다** —
+        # 자리비움인데 그림자만 남는 제보의 진짜 원인이 이것이다.
+        # 창이 실제로 보이는지 재서 어긋나 있으면 바로잡는다.
+        real = None
+        try:
+            top9 = getattr(self.shadow, "top", None)
+            if top9 is not None:
+                real = bool(top9.winfo_ismapped())
+        except Exception:
+            real = None
+        if (want != getattr(self, "_shadow_shown", True)
+                or (real is not None and real != want)):
             self._shadow_shown = want
             self.shadow.show(want)
             self._chip_z_until = now + 2.5
@@ -20644,6 +20842,16 @@ class Mascot:
         self.us["scale_pct"] = max(50, min(200, int(self.us["scale_pct"])))
         self.us["font_pct"] = max(FONT_MIN, min(
             FONT_MAX, int(self.us.get("font_pct", FONT_MAX))))
+        # 뽀모도로 길이 — 창에서 바꾸는 값이라 범위를 벗어나면 시계가
+        # 0:00 에 붙거나 음수가 된다. 읽는 쪽(_pomo_mins)도 누르지만
+        # 저장된 값 자체를 여기서 한 번 다듬어 둔다.
+        for _ph, _key in Mascot.POMO_KEY.items():
+            _lo, _hi = Mascot.POMO_RANGE[_ph]
+            try:
+                self.us[_key] = max(_lo, min(_hi, int(float(
+                    self.us.get(_key, DEFAULT_SETTINGS[_key])))))
+            except (TypeError, ValueError):
+                self.us[_key] = DEFAULT_SETTINGS[_key]
 
     def _font_migrate(self):
         """옛 눈금(70~160%)에 저장된 값을 새 눈금(45~100%)으로 옮긴다.
