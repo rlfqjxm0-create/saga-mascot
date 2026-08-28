@@ -1,7 +1,7 @@
 {
- "version": 1787820318,
+ "version": 1787879359,
  "files": {
-  "mascot.py": "dc0529ee0e28b762af49857ad0d1789c9b518460f0e0d9955b7e4f84021cd0ec",
+  "mascot.py": "d30b8fa02cbf563694ef7a243065ae63533529680b9c52ce55c76a40efcb6e0a",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -580,6 +580,8 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "타이머와 캐릭터 사이 여백을 직접 끌어서 맞출 수 있어요",
+  "환경설정 → 표시 → '끌어서 맞추기' 를 누르고 캐릭터를 위아래로 끌면 저장돼요"
+ ]
 }

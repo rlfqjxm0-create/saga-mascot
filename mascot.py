@@ -857,6 +857,12 @@ TIMER_H = 92                     # 타이머 카드 영역 높이 (게이지형 
 OY_CLOCK_COMPACT = 70            # 시계형 카드 접힘 (상태+시간 한 줄)
 OY_CLOCK_OPEN = 182             # 시계형 카드 펼침 (시계 + 시간)
 YT_BAR = 24                      # 음악 버튼이 카드 위에 요구하는 여백
+# 타이머 카드와 머리 사이 여백 보정의 범위. 머리 위에 소품을 얹으면
+# 세로가 많이 필요해 60 으로는 모자란다(도로롱) — 넉넉히 넓혀 두고,
+# 정밀한 조정은 '끌어서 맞추기'(직접 드래그)로 한다. 세 곳(읽기 클램프·
+# 슬라이더·저장 클램프)이 같은 값을 써야 한다.
+CARD_GAP_MIN = -40
+CARD_GAP_MAX = 240
 
 # 타이머 카드 팔레트 (준사 배색)
 CARD_BORDER = "#f2b8c6"          # 소프트 핑크
@@ -5893,6 +5899,9 @@ class Mascot:
         self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
         self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
         self._bubble_cookie = None   # 그 말풍선 안의 깐 포춘쿠키 (지뢰 13)
+        self._gap_adj = False        # '여백 직접 조정' 모드 (끌어서 맞추기)
+        self._gap_adj_y0 = None      # 끌기 시작 화면 y
+        self._gap_adj_g0 = 0         # 끌기 시작 card_gap
         self._cur_near = False       # 커서가 캐릭터 곁에 있는가 (지뢰 13 —
                                      # tick 이 draw 보다 먼저 이 값을 본다)
         self._tongue_at = 0.0        # 마지막으로 날름거린 시각
@@ -7703,7 +7712,7 @@ class Mascot:
         # `card_gap_base` 는 그 눈금의 기준을 캐릭터마다 옮긴다 — 맨 아래
         # (-20)까지 줄여도 아직 머니까 더 줄이게 해 달라는 요청(도로롱).
         # 눈금 폭은 그대로 두고 0 이 가리키는 자리만 옮기는 것이다.
-        gap = (max(-20, min(60, int(self.us.get("card_gap") or 0)))
+        gap = (max(CARD_GAP_MIN, min(CARD_GAP_MAX, int(self.us.get("card_gap") or 0)))
                + int(self.cfg.get("card_gap_base", 0)))
         if self.has_clock:
             base = OY_CLOCK_OPEN if self.clock_open else OY_CLOCK_COMPACT
@@ -8679,6 +8688,13 @@ class Mascot:
 
     def _on_press(self, e):
         self._press = (e.x, e.y, e.x_root, e.y_root)
+        # 여백 직접 조정 중 — 누른 자리를 기준으로 위아래 끌기를 시작한다.
+        # 다른 반응(쓰다듬·슬라임·창 옮기기)은 모두 건너뛴다.
+        if self._gap_adj:
+            self._gap_adj_y0 = e.y_root
+            self._gap_adj_g0 = int(self.us.get("card_gap") or 0)
+            self._dragged = False
+            return
         # 고양이 소품의 **머리**를 잡았다 — 쓰다듬기다. 창을 옮기면 안
         # 된다 (요청) — 슬라임 잡기와 같은 길로 _on_drag 가 가로챈다.
         hb9 = self._safe_str(self._cat_box, True) or None
@@ -8713,6 +8729,16 @@ class Mascot:
             self._safe("slime_press", self._slime_press, e.x, e.y)
 
     def _on_drag(self, e):
+        # 여백 직접 조정 — 세로로 끈 만큼만 여백을 바꾼다 (가로는 무시).
+        # 아래로 끌면 캐릭터가 커서를 따라 내려가며 카드와의 틈이 벌어진다.
+        if self._gap_adj:
+            if self._gap_adj_y0 is None:
+                return
+            dy = e.y_root - self._gap_adj_y0
+            if abs(dy) >= 3:
+                self._dragged = True
+            self._safe("gap_set", self._gap_set, self._gap_adj_g0 + dy)
+            return
         # 슬라임을 잡고 있으면 창을 옮기지 않는다 — 그 손짓은 늘이기다
         if self._slime_grab is not None:
             self._safe("slime_move", self._slime_move, e.x, e.y)
@@ -8742,6 +8768,11 @@ class Mascot:
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
     def _on_release(self, e):
+        # 여백 직접 조정 — 놓으면 지금 여백을 저장하고 모드를 끝낸다.
+        if self._gap_adj:
+            self._gap_adjust_done()
+            self._press = None
+            return
         if self._slime_grab is not None:
             self._safe("slime_up", self._slime_release)
             self._slime_grab = None
@@ -9315,6 +9346,46 @@ class Mascot:
         self._build_shadow_img()
         if self.shadow is not None and self.shadow_img is not None:
             self.shadow.set_image(self.shadow_img)
+
+    def _gap_adjust_start(self):
+        """'여백 직접 조정' 모드 진입 — 캐릭터를 위아래로 끌어 카드와의
+        틈을 눈으로 맞춘다. 슬라이더로는 안 되는 큰 여백(머리 위 소품)을
+        위한 길이다. 놓으면 저장되고, 가로로는 움직이지 않는다."""
+        if not self.timer_on:
+            self._safe("say", self._say,
+                       "타이머가 꺼져 있어 맞출 여백이 없어요", secs=3.0)
+            return
+        self._gap_adj = True
+        self._gap_adj_y0 = None
+        self._say("위아래로 끌어 여백을 맞춰요 · 놓으면 저장돼요",
+                  hold=True)
+
+    def _gap_set(self, new_gap):
+        """card_gap 을 바꾸고 그 자리에서 다시 배치한다 — 조정 모드에서는
+        창 '위'를 고정해 캐릭터가 커서를 따라 아래로 내려가게 한다
+        (_relayout_card 는 아래를 고정하므로 되돌려 놓는다)."""
+        new_gap = max(CARD_GAP_MIN, min(CARD_GAP_MAX, int(new_gap)))
+        if new_gap == int(self.us.get("card_gap") or 0):
+            return
+        top = self.root.winfo_y()
+        x = self.root.winfo_x()
+        self.us["card_gap"] = new_gap
+        self._relayout_card()          # 아래 고정 — 창이 위로 자란다
+        # 위 고정으로 되돌린다 — 캐릭터가 커서 따라 내려가며 여백이 벌어진다
+        self.root.geometry("+%d+%d" % (x, top))
+
+    def _gap_adjust_done(self):
+        """조정 끝 — 지금 여백과 창 자리를 저장하고 모드를 끝낸다."""
+        if not self._gap_adj:
+            return
+        self._gap_adj = False
+        self._gap_adj_y0 = None
+        if self._bubble_hold:          # 안내 말풍선을 지운다
+            self.bubble = None
+            self._bubble_hold = None
+        self._save_settings()
+        self._safe("win_pos", self._save_win_pos)
+        self._say("여백을 저장했어요", secs=2.0)
 
     def _toggle_clock(self):
         """시계 펼침/접힘 — 창 높이를 바꾸고(아래 고정) 좌표·그림자 재계산."""
@@ -13261,8 +13332,14 @@ class Mascot:
         # **타이머 카드 자리까지 올린다** (요청). 카드 아래에 두면
         # 말풍선이 캐릭터 얼굴을 덮었다 — 이제 카드 쪽으로 올라간다.
         # 창 위로 넘치면 그만큼만 내린다 (글이 길어 말풍선이 클 때).
-        by = (max(h + 4.0, card_bottom + self.BUBBLE_UP)
-              + (1.0 - u) ** 2 * 8)
+        if getattr(self, "_gap_adj", False):
+            # 여백을 끌어 맞추는 동안에는 말풍선을 카드 위(맨 위)에 붙인다.
+            # 평소 자리는 아래끝이 카드 아래끝에 붙어, 여백이 작을 때 바로
+            # 그 자리에서 시작하는 머리와 겹쳐 '얼마나 벌어졌나'가 안 보인다.
+            by = h + 2.0 + (1.0 - u) ** 2 * 8
+        else:
+            by = (max(h + 4.0, card_bottom + self.BUBBLE_UP)
+                  + (1.0 - u) ** 2 * 8)
         x0, x1 = cx - w / 2, cx + w / 2
         # 눌러서 끄는 말풍선(오늘의 운세)이 쓸 자리. 화면에 그린 값 그대로라
         # 내부 깃발이 아니다 (지뢰 24).
@@ -19923,6 +20000,19 @@ class Mascot:
                            font=(FONT, FS(9), "bold"), fill=cd["text"])
             sliders.append((sx0, sx1, y, key, lo, hi))
 
+        def gap_adjust_row(y):
+            """'끌어서 맞추기' — 설정을 닫고, 캐릭터를 위아래로 끌어 여백을
+            직접 맞추는 모드로 들어간다. 슬라이더 숫자로 맞추기 어려운
+            (머리 위 소품처럼) 큰 여백을 눈으로 보며 정한다."""
+            label(y, "여백 직접 조정")
+
+            def go():
+                win.destroy()      # 설정을 닫고 본체에서 끌어 맞춘다
+                self.root.after(
+                    150, lambda: self._safe("gap_adjust", self._gap_adjust_start))
+            pill(RX, y, "끌어서 맞추기", go, strong=True)
+            return 0
+
         def chevron(cx, y, sign):
             """sign -1이면 ‹, +1이면 › 모양."""
             for dy in (-5, 5):
@@ -20196,7 +20286,8 @@ class Mascot:
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
                 lambda ry: slider(ry, "타이머와 머리 사이 여백", "card_gap",
-                                  -20, 60),
+                                  CARD_GAP_MIN, CARD_GAP_MAX),
+                gap_adjust_row,
                 lambda ry: stepper(ry, "글자 크기", "font_pct",
                                    FONT_MIN, FONT_MAX, 5, "%"),
                 lambda ry: toggle(ry, "캐릭터 그림자", "shadow"),
@@ -20392,7 +20483,8 @@ class Mascot:
             new["sleep_min"] = max(1, int(new["sleep_min"]))
             new["day_start"] = max(0, min(12, int(new.get("day_start", 6))))
             new["scale_pct"] = max(50, min(200, int(new["scale_pct"])))
-            new["card_gap"] = max(-20, min(60, int(new.get("card_gap", 0))))
+            new["card_gap"] = max(CARD_GAP_MIN, min(CARD_GAP_MAX,
+                                                    int(new.get("card_gap", 0))))
             new["font_pct"] = max(FONT_MIN, min(FONT_MAX,
                                                 int(new["font_pct"])))
             for k in ("sound_volume", "pen_volume", "poke_volume",
