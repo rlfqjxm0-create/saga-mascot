@@ -5678,6 +5678,14 @@ class Mascot:
         # 한 번은 켜 준다 — 딱 한 번만이라, 그 뒤에 다시 끄면 꺼진 채로 둔다.
         if not self.us.get("shadow_on"):
             self.us["shadow_on"] = True
+        # '자리비움' 상태는 켤 때 온라인으로 되돌린다. 자리비움은 캐릭터가
+        # 통째로 사라지는 상태인데 재시작해도 저장값으로 유지되어, 실수로
+        # 누른 사람에게는 **캐릭터가 안 나오는 버그**로 보였다 (젖소 도로롱
+        # 제보 두 번 — 업데이트를 받아도 안 나온다고 했다. 프로그램을 다시
+        # 켰다는 것 자체가 '자리에 돌아왔다'는 뜻이기도 하다). 게임·영화·
+        # 밥은 캐릭터가 보이니 그대로 둔다.
+        if str(self.us.get("chip") or "") == "away":
+            self.us["chip"] = "online"
             self.us["shadow"] = True
             self._save_settings()
 
@@ -8897,6 +8905,13 @@ class Mascot:
             elif self.has_clock and on_card:
                 self._safe("ui_click", self._ui_click)
                 self._toggle_clock()
+            elif (self.cfg.get("chips") and self._chip() == "away"
+                    and not on_card and py > self.oy):
+                # 자리비움 중 빈 자리(책상)를 눌렀다 — 온라인으로 돌아온다.
+                # 안내 문구("누르면 돌아와요")와 한 쌍이다. **슬라임 분기보다
+                # 앞이어야 한다** — 책상 클릭이라 슬라임 꺼내기가 가로챈다.
+                self._safe("ui_click", self._ui_click)
+                self._safe("chip", self._chip_set, "online")
             elif self.cfg.get("slime") and not on_card and self._on_desk(px, py):
                 # 책상을 누르면 슬라임을 꺼냈다 치웠다 한다. 슬라임 위를
                 # 눌렀으면 이미 _on_press가 붙잡았으므로 여기까지 안 온다.
@@ -16480,6 +16495,13 @@ class Mascot:
         smooth = False
         if self._sleeping or self._fs_hidden:
             gap = self.GAP_SLEEP
+        elif self.cfg.get("chips") and self._chip() == "away":
+            # 자리비움 — 캐릭터가 통째로 숨어 볼 것이 빈 책상뿐이다.
+            # 그런데도 평소처럼(커서가 곁이면 60fps 까지) 그리면, 그림
+            # 없는 화면에 레이어 갱신 비용만 계속 낸다 — "사라진 상태로
+            # 쓰면 올가미툴이 버벅인다"는 제보(젖소 도로롱)의 마스코트
+            # 몫을 여기서 줄인다 (10fps).
+            gap = self.GAP_SLEEP
         elif quiet > self.QUIET_SLOW:
             gap = self.GAP_QUIET
         else:
@@ -18696,8 +18718,10 @@ class Mascot:
             self._safe("head", self._draw_head, now, yo, pdx, pdy,
                        blinking, smiling, sleeping)
 
-        # 반려동물은 책상 바로 앞(=책상에 가려지게) 그린다
-        if not self.cfg.get("pet_front"):
+        # 반려동물은 책상 바로 앞(=책상에 가려지게) 그린다.
+        # 자리비움이면 펫도 함께 숨는다 — 캐릭터만 없고 펫이 남으면
+        # 반쪽으로 보이고, 안 보이는 소품 상자가 클릭까지 가로챈다 (지뢰 147)
+        if not self.cfg.get("pet_front") and not chip_away:
             self._safe("pet", self._draw_pet, now)
 
         # ── 책상 (+옵션: 화면 낙서) ──────────────────────────────────────
@@ -18705,6 +18729,11 @@ class Mascot:
         self._safe("desk", self._put, "desk", dx_, dy_)
         if self.cfg.get("chips"):
             self._safe("chip_img", self._draw_chip_img)
+        if chip_away:
+            # 자리비움은 캐릭터가 통째로 사라지는 상태라, 아무 표시가 없으면
+            # 고장으로 보인다 (젖소 도로롱 제보 두 번). 빈 책상 위에 지금
+            # 상태와 돌아오는 길을 적어 둔다. 누르면 돌아온다 (_on_release).
+            self._safe("away_note", self._draw_away_note)
         if self.slime is not None:
             # 여기는 _safe에 맡기지 않는다. 구역이 꺼지면 매트만 덮인 채로
             # 굳어 책상이 영영 안 돌아온다 (지뢰 14). 터지면 그냥 치운다.
@@ -18734,7 +18763,7 @@ class Mascot:
             self.strokes = []
 
         # 앞으로 나오는 반려동물: 얼굴 위 · 팔 아래 (책상선 마스크는 그대로)
-        if self.cfg.get("pet_front"):
+        if self.cfg.get("pet_front") and not chip_away:
             self._safe("pet", self._draw_pet, now)
 
         if not chip_away:
@@ -19110,6 +19139,32 @@ class Mascot:
         else:
             self.canvas.create_image(tx + dx, ty + yo, image=tk, anchor="nw")
 
+    def _draw_away_note(self):
+        """자리비움 중 빈 책상 위 안내 — 지금 상태와 돌아오는 길.
+
+        캐릭터가 통째로 숨는 상태라 아무 표시가 없으면 고장으로 보인다
+        (젖소 도로롱 제보 두 번 — '캐릭터가 안 나온다'). 시트 경로에서도
+        _soft_shape 이 원본을 달아 두므로 그대로 시트에 실린다 (지뢰 128).
+        """
+        c, cd = self.canvas, self.card
+        dx, dy = self._pos("desk")
+        dw = self.layout["desk"]["size"][0] * self.s
+        cx = dx + dw / 2.0
+        cy = (self.oy + dy) / 2.0          # 캐릭터가 있던 빈 자리 한가운데
+        txt = "자리 비움 중 · 누르면 돌아와요"
+        f = self._cf_n(max(7, round(9 * getattr(self, "font_k", 1.0))))
+        w = self._mw(txt, f) + 26
+        h = self._mh(f) + 14
+        x0, y0 = cx - w / 2.0, cy - h / 2.0
+        soft = self._soft_shape(w, h, min(13, int(h // 2)), "#ffffff",
+                                cd["border"])
+        if soft is not None:
+            c.create_image(x0 - 1, y0 - 1, image=soft, anchor="nw")
+        else:                              # PIL 이 실패하면 Tk 도형으로
+            self._rr(c, x0, y0, x0 + w, y0 + h, min(13, h / 2),
+                     fill="#ffffff", outline=cd["border"], width=BORDER_W)
+        c.create_text(cx, cy, text=txt, font=f, fill=cd["text"])
+
     def _chip_spot(self):
         """책상 위 상태 그림의 왼쪽 위 좌표와 크기. 없으면 None.
 
@@ -19421,6 +19476,10 @@ class Mascot:
         숨쉬기(yo)는 ±2px 라 판정에는 무시해도 된다.
         """
         if self._prop_gname not in self.CAT_GNAMES:
+            return None
+        # 자리비움 중에는 펫을 안 그린다 — 안 보이는 소품의 상자가 남아
+        # 있으면 '빈 자리를 눌러 돌아오기' 클릭을 쓰다듬기가 가로챈다.
+        if self.cfg.get("chips") and self._chip() == "away":
             return None
         pet9 = self.PET_CATS.get(self._prop_gname)
         if pet9:
