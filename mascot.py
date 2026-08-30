@@ -21642,6 +21642,10 @@ class Mascot:
         dl9 = self._my_due()
         if dl9:
             out["dl"] = dl9         # 마감 날짜. 남은 날은 보는 쪽이 센다
+        ms9 = self._safe_str(self._month_share) or None
+        if isinstance(ms9, dict):
+            out["ms"] = ms9         # 이번 달 요약 (월말정산 시상식용).
+            #                         옛 판 받는 쪽은 모르는 열쇠라 무시한다.
         rmsg = self._rank_msg_get("wgb")
         if rmsg:
             out["rm"] = rmsg        # 한마디 — 옛 판이 읽는 자리
@@ -22067,6 +22071,24 @@ class Mascot:
             # 사건). 새 그림이 오면 값이 달라서 자연히 바뀐다.
             cdh9 = (str(q.get("cdh") or "")[:64]
                     or str(cur.get("cdh") or "")[:64])
+            # 이번 달 요약 (월말정산 시상식) — dict 로 오면 그것이 최신,
+            # 열쇠가 없으면(옛 판) 기존 것을 지킨다. 달(k)이 다르면 묵은
+            # 것이라 시상식 쪽에서 걸러진다.
+            ms9 = q.get("ms")
+            if isinstance(ms9, dict) and ms9.get("k"):
+                try:
+                    ms9 = {"k": str(ms9.get("k"))[:7],
+                           "t": max(0, min(46 * 24 * 60,
+                                           int(ms9.get("t") or 0))),
+                           "d": max(0, min(31, int(ms9.get("d") or 0))),
+                           "b": max(0, min(24 * 60,
+                                           int(ms9.get("b") or 0))),
+                           "g": max(0, min(31, int(ms9.get("g") or 0)))}
+                except (TypeError, ValueError):
+                    ms9 = None
+            else:
+                ms9 = cur.get("ms") if isinstance(cur.get("ms"), dict) \
+                    else None
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             rmg = q.get("rmg")
             rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
@@ -22083,6 +22105,7 @@ class Mascot:
                     or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
                     or float(cur.get("lvd") or 0) != lvd
+                    or (cur.get("ms") or None) != ms9
                     or (cur.get("rmg") or {}) != rmg):
                 row2 = {"lv": lv, "ti": ti, "n": nm}
                 if wb > 0:
@@ -22099,6 +22122,8 @@ class Mascot:
                     row2["dl"] = dl
                 if kd9:
                     row2["kd"] = kd9
+                if ms9:
+                    row2["ms"] = ms9
                 if cdh9:
                     row2["cdh"] = cdh9
                 if lvd:
@@ -33370,6 +33395,10 @@ class Mascot:
             if games9:
                 rows9.append(("미니\n게임", "games", "#eaf6df", "#5f8352"))
             rows9.append(("꾸미기", "deco", cust or "#f6f0f8", P["sub"]))
+            # 월말정산 — 공개일(달이 넘어가는 순간)부터 전원, 그 전엔
+            # config 게이트(내 도로롱)만. 미리 보여 주지 않는다 (요청).
+            if self._monthly_on():
+                rows9.append(("월말\n정산", "monthly", "#fdf0dc", "#a2793c"))
             # 알림 끄기 — 켜 두면 눈에 띄게 (지금 막고 있다는 뜻이다)
             rows9.append((("알림\n켜기" if mute9 else "알림\n끄기"), "mute",
                           "#f3c9cf" if mute9 else "#f7f2ee",
@@ -34756,6 +34785,1005 @@ class Mascot:
          " 코드가 같은 사람끼리만 모이고, 코드 자체는 서로에게 안 보여요."
          " 친구와 방 번호(#xxxx)가 다르면 코드가 다른 것입니다."),
     )
+
+    # ── 월말정산 (1차 — 개인 정산, config "monthly" 인 캐릭터만) ────────
+    # 하루 기록(.history.json)만으로 만든다. 공통(방 시상식)·자동 팝업은
+    # 다음 차수. 달력 계산은 표준 calendar 를 안 쓰고 직접 한다 —
+    # mascot.py 에 새 import 를 넣지 않는다 (지뢰 21).
+
+    # 월말정산이 모두에게 열리는 작업일 — 8월이 끝나는 순간(9/1 06시).
+    # 그 전에는 config "monthly" 인 캐릭터(내 도로롱)만 쓴다.
+    MONTHLY_OPEN = "2026-09-01"
+
+    def _monthly_on(self):
+        if self.cfg.get("monthly"):
+            return True
+        try:
+            return self._my_workday() >= self.MONTHLY_OPEN
+        except Exception:
+            return False
+
+    def _month_key(self, off=0):
+        """off달 전의 (yyyy-mm 접두, 연, 월). off=0 은 이번 달.
+
+        '이번 달'은 작업일(06시) 기준이다 — 1일 새벽 5시는 아직 지난달.
+        """
+        day = self._my_workday()               # 'YYYY-MM-DD'
+        y, mo = int(day[:4]), int(day[5:7])
+        mo -= off
+        while mo < 1:
+            mo += 12
+            y -= 1
+        return "%04d-%02d" % (y, mo), y, mo
+
+    @staticmethod
+    def _month_len(y, mo):
+        leap = (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+        return [31, 29 if leap else 28, 31, 30, 31, 30,
+                31, 31, 30, 31, 30, 31][mo - 1]
+
+    def _month_stat(self, off=0):
+        """그 달의 정산 숫자 묶음. 기록이 한 줄도 없으면 None."""
+        days = self._hist_load() or {}
+        pre, y, mo = self._month_key(off)
+        n = self._month_len(y, mo)
+        work = {}                               # 일(1~n) → 초
+        st = {"strokes": 0, "clicks": 0, "undo": 0, "dist": 0.0, "keys": 0}
+        for d in range(1, n + 1):
+            key = "%s-%02d" % (pre, d)
+            row = days.get(key)
+            if not isinstance(row, dict):
+                continue
+            w = float(row.get("work") or 0)
+            if key == self._my_workday():       # 오늘은 진행분까지
+                w = max(w, float(self._today_secs()))
+            work[d] = w
+            for k in st:
+                st[k] += float(row.get(k) or 0)
+        if not work and off == 0:
+            work[int(self._my_workday()[8:10])] = float(self._today_secs())
+        if not any(v >= 60 for v in work.values()):
+            return None
+        total = sum(work.values())
+        worked = [d for d, v in sorted(work.items()) if v >= 60]
+        streak = best = 0
+        prev = None
+        for d in worked:
+            streak = streak + 1 if prev == d - 1 else 1
+            best = max(best, streak)
+            prev = d
+        top = max(work, key=lambda d: work[d])
+        goal = max(0.5, float(self.us.get("goal_hours") or 0) or 6.0)
+        goal_days = sum(1 for v in work.values() if v >= goal * 3600.0)
+        return {"y": y, "mo": mo, "n": n, "work": work, "total": total,
+                "days": len(worked), "streak": best,
+                "top_day": top, "top_sec": work[top],
+                "goal": goal, "goal_days": goal_days,
+                "lv_up": int(total // 3600), **st}
+
+    def _month_has(self, off):
+        """그 달에 보여 줄 기록이 있는가 (‹ 를 어디까지 열어 둘지)."""
+        try:
+            return self._month_stat(off) is not None
+        except Exception:
+            return False
+
+    MONTH_GRASS = 7200.0        # 잔디 한 단계의 폭(초) — 2시간마다 진해진다
+
+    def _receipt_edge(self, w, tooth, color="#ffffff"):
+        """영수증 아래끝 톱니(지그재그) 이미지 — 3배로 그려 줄여 매끈하게."""
+        sc = 3
+        W9, T9 = max(1, int(w * sc)), max(3, int(tooth * sc))
+        im = Image.new("RGBA", (W9, T9), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        n = max(2, int(round(W9 / (T9 * 1.6))))
+        step = W9 / float(n)
+        pts = [(0, 0), (W9, 0)]
+        for i in range(n, -1, -1):
+            pts.append((i * step, T9 if i % 2 else 0))
+        dr.polygon(pts, fill=color)
+        im = im.resize((max(1, int(w)), max(1, int(tooth))), Image.LANCZOS)
+        return ImageTk.PhotoImage(im)
+
+    # 품목 줄의 아이콘 배지 — (문자, 바탕, 잉크). BMP 안 글자만 쓴다
+    # (맥 Tk 는 BMP 밖 글자에서 죽는다 — praise 연출에서 겪은 일).
+    MONTH_ROWS = (
+        ("\u25cf", "#eaf6df", "#5f8352"),   # 작업한 날
+        ("\u2605", "#fdf0dc", "#a2793c"),   # 최고 기록
+        ("\u270e", None, None),             # 펜 획 (테마색 배지)
+        ("\u25ce", "#dbeaff", "#4a6c9b"),   # 클릭
+        ("\u21ba", "#f1e9f6", "#7a5f96"),   # 되돌리기
+        ("\u2248", "#e0f4f1", "#3f7d74"),   # 그린 거리
+        ("\u2714", "#ffe9ef", "#b3556e"),   # 목표 채운 날
+        ("\u25b2", "#efe9ff", "#6b5bd4"),   # 레벨
+    )
+
+    def _month_snap_path(self):
+        return os.path.join(self.state_dir, ".month_snap.json")
+
+    def _month_snap_note(self):
+        """이번 달 스냅샷 — 지금 알고 있는 전원의 레벨·게임 점수를 한 번
+        적어 둔다. 다음 달 시상식에서 '이번 달 +얼마'를 셀 밑천이다.
+        이미 이번 달 것이 있으면 건드리지 않는다 (달 시작값이어야 한다)."""
+        pre, _y, _mo = self._month_key(0)
+        snap = _load_json(self._month_snap_path()) or {}
+        if pre in snap:
+            return
+        rows = {}
+        for slot, v in (self._room_who_get() or {}).items():
+            if not isinstance(v, dict):
+                continue
+            rows[slot] = {k: v.get(k) for k in ("lv", "wgb", "ctb", "g2b")}
+        rows.setdefault(self.char, {})["lv"] = self._level()
+        snap[pre] = {"at": time.time(), "rows": rows}
+        # 오래된 달은 몇 개만 남긴다
+        for k in sorted(snap)[:-6]:
+            snap.pop(k, None)
+        _save_json(self._month_snap_path(), snap)
+
+    MONTH_SHARE_GAP = 300.0      # 월간 요약 다시 계산 간격(초)
+
+    def _month_share(self):
+        """신호에 실을 이번 달 요약 — {"k": 달, "t": 분, "d": 일수, "b": 최고분}.
+
+        하루 기록을 읽어야 해서 5분 캐시로 든다 (신호는 몇 초마다 나간다).
+        기록을 못 읽었으면 None — 빈 값이 나가면 받는 쪽 캐시를 오염시킨다
+        (지뢰 92 와 같은 이야기).
+        """
+        now = time.time()
+        got = getattr(self, "_ms_cache", None)
+        if got is not None and now - got[0] < self.MONTH_SHARE_GAP:
+            return got[1]
+        out = None
+        try:
+            s9 = self._month_stat(0)
+            if s9 and s9["total"] >= 60:
+                out = {"k": "%04d-%02d" % (s9["y"], s9["mo"]),
+                       "t": int(s9["total"] // 60),
+                       "d": int(s9["days"]),
+                       "b": int(s9["top_sec"] // 60),
+                       "g": int(s9["goal_days"])}
+        except Exception:
+            out = None
+        self._ms_cache = (now, out)
+        return out
+
+    def _month_awards(self):
+        """시상식 데이터 — 지금 알고 있는 전원의 값으로 부문별 순위.
+
+        남들의 '월간' 기록은 아직 서로 안 나누므로(신호에 누적값만 실린다)
+        1차는 누적 기준이다. 레벨 상승(+N)만 지난달 스냅샷이 있으면 센다.
+        """
+        who = dict(self._room_who_get() or {})
+        me = who.setdefault(self.char, {})
+        if isinstance(me, dict):
+            me = dict(me)
+            me["lv"] = self._level()      # 내 것은 신호 캐시보다 싱싱하게
+            me.setdefault("n", self.us.get("room_nick")
+                          or self.ROOM_NAME.get(self.char, "나"))
+            who[self.char] = me
+        prev_pre, _y, _mo = self._month_key(1)
+        snap = (_load_json(self._month_snap_path()) or {}).get(prev_pre)
+        pre_now, _y2, _mo2 = self._month_key(0)
+        base = ((_load_json(self._month_snap_path()) or {})
+                .get(pre_now, {}).get("rows", {}))
+
+        def name_of(slot, v):
+            return (str(v.get("n") or "").strip()
+                    or self.ROOM_NAME.get(slot, slot))
+
+        def top(field, n=3):
+            rows = []
+            for slot, v in who.items():
+                if not isinstance(v, dict):
+                    continue
+                try:
+                    val = float(v.get(field))
+                except (TypeError, ValueError):
+                    continue
+                rows.append((slot, name_of(slot, v), val))
+            rows.sort(key=lambda r: -r[2])
+            return rows[:n]
+
+        lv3 = top("lv", 3)
+        ups = {}
+        for slot, _nm, val in lv3:
+            old = None
+            if isinstance(base.get(slot), dict):
+                old = base[slot].get("lv")
+            if old is not None:
+                try:
+                    ups[slot] = max(0, int(val) - int(old))
+                except (TypeError, ValueError):
+                    pass
+        lv_sum = 0
+        for _s9, _n9, v9 in top("lv", 99):
+            lv_sum += int(v9)
+        # 이달의 노력왕·개근왕 — 신호로 나눈 월간 요약(ms)이 이번 달인
+        # 사람들만. 내 것은 신호를 안 거치고 직접 넣는다 (늘 최신).
+        mine_ms = self._safe_str(self._month_share) or None
+        m_top = m_days = m_goal = None
+        pre_now2 = "%04d-%02d" % (self._month_key(0)[1],
+                                  self._month_key(0)[2])
+        for slot, v in who.items():
+            if not isinstance(v, dict):
+                continue
+            ms9 = (mine_ms if slot == self.char
+                   else v.get("ms") if isinstance(v.get("ms"), dict)
+                   else None)
+            if not (isinstance(ms9, dict) and ms9.get("k") == pre_now2):
+                continue
+            nm9 = name_of(slot, v)
+            try:
+                t9 = int(ms9.get("t") or 0)
+                d9 = int(ms9.get("d") or 0)
+            except (TypeError, ValueError):
+                continue
+            if t9 >= 1 and (m_top is None or t9 > m_top[2]):
+                m_top = (slot, nm9, t9)
+            if d9 >= 1 and (m_days is None or d9 > m_days[2]):
+                m_days = (slot, nm9, d9)
+            try:
+                g9 = int(ms9.get("g") or 0)
+            except (TypeError, ValueError):
+                g9 = 0
+            if g9 >= 1 and (m_goal is None or g9 > m_goal[2]):
+                m_goal = (slot, nm9, g9)
+        return {"lv": lv3, "lv_up": ups,
+                "wgb": top("wgb", 1), "g2b": top("g2b", 1),
+                "ctb": top("ctb", 1), "count": len(who),
+                "m_top": m_top, "m_days": m_days,
+                "m_goal": m_goal, "lv_sum": lv_sum}
+
+    def _seat_photo(self, slot, h, hard=False):
+        """그 캐릭터의 앉은 모습을 높이 h 로 (없으면 None).
+
+        hard 는 색상키 창용 — 리사이즈로 생긴 반투명 가장자리를
+        이분화한다. 안 하면 키 색과 섞여 캐릭터 둘레에 까만 픽셀이
+        남는다 (지뢰 65 계열, 제보)."""
+        p = self._room_art_file(slot, "seat.png")
+        if not p:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            w9 = max(1, round(im.width * (h / float(im.height))))
+            im = im.resize((w9, int(h)), Image.LANCZOS)
+            if hard:
+                a9 = im.getchannel("A").point(
+                    lambda v: 255 if v >= 128 else 0)
+                im.putalpha(a9)
+            return ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+
+    MONTH_HELLO = ("이번 달도 수고했어!", "정말 열심히 그렸다!",
+                   "수고했어! 최고야!", "고생 많았어!")
+
+    def _monthly_mini(self, win):
+        """정산 창 오른쪽 위 모서리에 걸치는 내 캐릭터 — 박수 모션.
+
+        색상키 투명한 작은 창이라 캐릭터가 정말 '창 밖으로 삐져나온'
+        모습이 된다 (요청). 콩콩 뛰며 양옆에서 '짝!' 반짝이 번갈아
+        터진다 — 박수. 정산 창을 옮기면 <Configure> 로 따라오고,
+        자식 Toplevel 이라 정산 창이 닫히면 같이 사라진다.
+        맥은 색상키 대신 판 색 배경으로 물러난다 (걸침만 남는다).
+        """
+        u = self._ui
+        cd = self.card
+        mw, mh = int(u(268)), int(u(158))
+        top = tk.Toplevel(win)
+        top.overrideredirect(True)
+        bg = TRANSPARENT
+        try:
+            if not IS_MAC:
+                top.attributes("-transparentcolor", TRANSPARENT)
+            else:
+                bg = cd["panel"]
+        except Exception:
+            bg = cd["panel"]
+        # 창 자체 배경·테두리도 키 색으로 — 안 하면 캔버스 밖 1px 이
+        # 기본색으로 남아 캐릭터 옆에 얇은 선이 보인다 (제보)
+        try:
+            top.configure(bg=bg, bd=0, highlightthickness=0)
+        except Exception:
+            pass
+        cv9 = tk.Canvas(top, width=mw, height=mh, bg=bg,
+                        highlightthickness=0, bd=0)
+        cv9.pack()
+        keep9 = {}
+        me9 = self._seat_photo(self.char, u(86), hard=True)
+        cxm = u(58)                    # 캐릭터는 왼쪽 — 말풍선이 오른쪽
+        #                                (창 바깥)으로 뻗어 X 버튼을 안 가린다
+        base9 = mh - u(4)
+        mid9 = None
+        if me9 is not None:
+            keep9["me"] = me9
+            mid9 = cv9.create_image(cxm, base9, image=me9, anchor="s")
+        _y2, mo2 = self._month_key(0)[1:]
+        say9 = self.MONTH_HELLO[(_y2 * 12 + mo2) % len(self.MONTH_HELLO)]
+        # 말풍선은 캐릭터 머리 **바로 위 가운데** (요청). 창 전체를
+        # 아래로 내렸으므로 타이틀바의 X 를 가리지 않는다.
+        st9 = cv9.create_text(cxm + u(6), base9 - u(86) - u(16),
+                              text=say9,
+                              font=self._uf(9, True), fill=cd["text"])
+        sb9 = cv9.bbox(st9)
+        if sb9:
+            line9 = self._tint(cd["fill"], 0.55)
+            # 색상키 창에서 _rr_soft 는 반투명 가장자리가 키 색과 섞여
+            # 까만 테가 남는다 (지뢰 65, 제보) — 캐릭터 말풍선과 같은
+            # _soft_shape(섞기 하한 55%)로 그린다.
+            bw9 = int(sb9[2] - sb9[0] + u(16))
+            bh9 = int(sb9[3] - sb9[1] + u(10))
+            soft9 = self._soft_shape(bw9, bh9, int(u(11)), "#ffffff",
+                                     line9)
+            if soft9 is not None:
+                keep9["bub"] = soft9
+                cv9.create_image(sb9[0] - u(8) - 1, sb9[1] - u(5) - 1,
+                                 image=soft9, anchor="nw")
+            else:
+                self._rr(cv9, sb9[0] - u(8), sb9[1] - u(5),
+                         sb9[2] + u(8), sb9[3] + u(5), u(11),
+                         fill="#ffffff", outline=line9, width=1)
+            cv9.tag_raise(st9)
+            # 꼬리 — 말풍선 아래 가운데에서 머리를 향해
+            tx9 = cxm + u(2)
+            cv9.create_polygon(tx9 - u(5), sb9[3] + u(3),
+                               tx9 + u(5), sb9[3] + u(3),
+                               tx9, sb9[3] + u(10),
+                               fill="#ffffff", outline=line9, width=1)
+
+        def spark9(x9, y9, r9, col9):
+            w9 = r9 * 0.3
+            cv9.create_polygon(x9, y9 - r9, x9 + w9, y9 - w9, x9 + r9, y9,
+                               x9 + w9, y9 + w9, x9, y9 + r9, x9 - w9,
+                               y9 + w9, x9 - r9, y9, x9 - w9, y9 - w9,
+                               fill=col9, outline="", tags="clap")
+
+        anim9 = {"after": None, "t0": time.time()}
+
+        def tick9():
+            if not top.winfo_exists():
+                return
+            try:
+                t9 = time.time() - anim9["t0"]
+                ph9 = (t9 % 0.8) / 0.8
+                if mid9 is not None:
+                    bob9 = -u(4) * math.sin(ph9 * math.pi)
+                    cv9.coords(mid9, cxm, base9 + bob9)
+                cv9.delete("clap")
+                if ph9 < 0.55:            # 짝! — 좌우 번갈아
+                    side9 = -1 if (int(t9 / 0.8) % 2 == 0) else 1
+                    q9 = ph9 / 0.55
+                    xx9 = cxm + side9 * u(46)
+                    yc9 = base9 - u(44)
+                    r9 = (u(8) + u(5) * q9) * (1.0 - q9 * 0.35)
+                    spark9(xx9, yc9, r9, "#ffd27a")
+                    spark9(xx9 + side9 * u(8), yc9 + u(8), r9 * 0.55,
+                           "#f9a8bc")
+            except Exception:
+                pass
+            # 자리도 매 박자 재확인 — <Configure> 한 줄만 믿었더니 창을
+            # 옮긴 직후의 이벤트를 놓쳐 기본 자리에 굳은 채로 남았다
+            # (실측: 창은 Dell 로 갔는데 미니만 (-169,-83)). 가드 덕에
+            # 안 바뀌면 아무 일도 안 한다.
+            place9()
+            anim9["after"] = top.after(80, tick9)
+
+        anim9["after"] = top.after(200, tick9)
+
+        def gone9(_e=None):
+            # 지뢰 20 — 닫힐 때 예약 프레임을 거둔다
+            if anim9["after"] is not None:
+                try:
+                    top.after_cancel(anim9["after"])
+                except Exception:
+                    pass
+                anim9["after"] = None
+        top.bind("<Destroy>", lambda e: gone9() if e.widget is top
+                 else None)
+        top._keep = keep9              # PhotoImage 붙들기 (GC 방지)
+
+        last9 = [None]
+
+        def place9(_e=None):
+            # **자리가 실제로 바뀔 때만** 옮긴다. Configure 마다 무조건
+            # geometry+lift 를 하면 그 lift 가 다시 Configure 를 낳아
+            # 이벤트 폭풍이 된다 (검사의 update() 가 영영 안 끝났다 —
+            # 지뢰 15 의 '필요할 때만 밀어 넣기'와 같은 이야기).
+            try:
+                if not (top.winfo_exists() and win.winfo_exists()):
+                    return
+                if win.winfo_width() < 60:
+                    return             # 창 크기 확정 전 — 좌표가 엉터리다
+                wx9 = (win.winfo_rootx() + win.winfo_width()
+                       - int(cxm + u(30)))
+                # 캐릭터를 타이틀바 아래로 내린다 — 말풍선이 머리 위에
+                # 있어도 X 단추를 안 가린다 (제보 반영)
+                wy9 = win.winfo_rooty() + int(u(6))
+                if last9[0] == (wx9, wy9):
+                    return
+                top.geometry("%dx%d+%d+%d" % (mw, mh, wx9, wy9))
+                last9[0] = (wx9, wy9)
+                # **lift 를 geometry 바로 뒤에 부르면 안 된다** — Tk 가
+                # 미뤄 둔 이동을 버려 미니가 옛 자리에 굳는다 (지뢰 15,
+                # 실측으로 확정: geometry 만 부르면 옮겨지고, lift 가
+                # 붙으면 안 옮겨졌다). 다음 idle 로 미룬다.
+                top.after_idle(lambda: top.lift(win)
+                               if top.winfo_exists() else None)
+            except Exception:
+                self._log_error("monthly_mini_place")
+
+        place9()
+        win.bind("<Configure>", place9, add="+")
+        self._monthly_miniref = top
+
+    def _monthly_win(self):
+        """월말정산 창 — 영수증 한 장에 총 시간·잔디·품목 줄·바코드.
+
+        처음 판은 아래가 텍스트 카드 8칸이라 눈에 안 들어왔다 (피드백).
+        지금은 흰 영수증 종이(아래끝 톱니) 위에 품목 줄(아이콘 배지 +
+        점선 리더 + 굵은 값)로 늘어놓고, 끝에 바코드를 찍는다. 바코드
+        무늬는 달·이름 해시라 같은 달은 늘 같다 (hash() 는 프로세스마다
+        달라지므로 hashlib 을 쓴다).
+        """
+        got = getattr(self, "_monthly_winref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        cd, u = self.card, self._ui
+        W = u(340)
+        win = tk.Toplevel(self.root)
+        self._monthly_winref = win
+        self._monthly_off = 0
+        self._monthly_tab = 0            # 0=내 정산, 1=방 시상식
+        self._safe("month_snap", self._month_snap_note)
+        win.title("월말정산")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=u(700), bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        line = self._tint(cd["fill"], 0.72)
+        px = u(20)                    # 종이 좌우 여백
+        ip = u(18)                    # 종이 안 여백
+        WD = ("월", "화", "수", "목", "금", "토", "일")
+        keep = {}                     # PhotoImage 붙들기 (GC 방지)
+
+        def hm(sec):
+            h9, m9 = int(sec) // 3600, (int(sec) % 3600) // 60
+            return ("%d시간 %d분" % (h9, m9)) if h9 else "%d분" % m9
+
+        def num(v):
+            v = int(v)
+            return ("%.1f만" % (v / 10000.0)) if v >= 10000 \
+                else "{:,}".format(v)
+
+        def grass_color(sec):
+            if sec < 60:
+                return "#f3f0f5"
+            step = min(3, int(sec // self.MONTH_GRASS))
+            return (self._tint(cd["fill"], 0.66),
+                    self._tint(cd["fill"], 0.42),
+                    self._tint(cd["fill"], 0.2),
+                    cd["fill"])[step]
+
+        def dotline(yy):
+            for x9 in range(int(px + ip), int(W - px - ip), int(u(9))):
+                cv.create_line(x9, yy, x9 + u(4), yy,
+                               fill=self._tint(cd["fill"], 0.6))
+
+        def paper_and_teeth(py0, yy):
+            """종이(맨 뒤)와 아래끝 톱니 — 두 탭이 같이 쓴다."""
+            bg = cv.create_rectangle(px, py0, W - px, yy, fill="#ffffff",
+                                     outline="")
+            cv.tag_lower(bg)
+            tooth = u(9)
+            try:
+                edge = self._receipt_edge(W - px * 2, tooth)
+                keep["edge"] = edge
+                cv.create_image(px, yy, image=edge, anchor="nw")
+            except Exception:
+                pass
+            cv.configure(height=yy + tooth + u(16))
+
+        def barcode(yy, code):
+            """진짜 바코드처럼 — 불규칙 굵기·좁은 갭, 양끝은 가드 바."""
+            seed = hashlib.md5(code.encode("utf-8")).digest()
+            bx0, bx1 = W / 2 - u(80), W / 2 + u(80)
+            h9, ink9 = u(24), "#3f3b45"
+
+            def bar(x9, w9, tall=False):
+                cv.create_rectangle(x9, yy, x9 + w9,
+                                    yy + h9 + (u(3) if tall else 0),
+                                    fill=ink9, outline="")
+
+            bar(bx0, u(1.6), True)               # 왼쪽 가드
+            bar(bx0 + u(3), u(1.6), True)
+            xb = bx0 + u(7)
+            k9 = 0
+            while xb < bx1 - u(8):
+                b9 = seed[k9 % len(seed)]
+                k9 += 1
+                wbar = u(0.9) + u(0.75) * (b9 % 4)
+                gap9 = u(1.1) + u(0.7) * ((b9 >> 4) % 3)
+                bar(xb, wbar)
+                xb += wbar + gap9
+            bar(bx1 - u(5), u(1.6), True)        # 오른쪽 가드
+            bar(bx1 - u(2), u(1.6), True)
+
+        def leader_row(ry, ini, bg9, ink9, lab9, val9, big=False):
+            """품목 줄 하나 — 이니셜 배지 + 점선 리더 + 굵은 값.
+
+            big 은 시상식용 — 전체적으로 작고 얇다는 피드백에 라벨까지
+            굵고 크게 키운다."""
+            br9 = u(10) if big else u(9)
+            bx9 = px + ip + br9
+            self._oval(cv, bx9 - br9, ry - br9, bx9 + br9, ry + br9,
+                       fill=bg9, outline="")
+            cv.create_text(bx9, ry, text=ini,
+                           font=self._uf(8 if big else 7, True),
+                           fill=ink9)
+            t1 = cv.create_text(bx9 + br9 + u(8), ry, anchor="w",
+                                text=lab9,
+                                font=self._uf(9, True) if big
+                                else self._uf(8),
+                                fill=cd["sub"])
+            t2 = cv.create_text(W - px - ip, ry, anchor="e", text=val9,
+                                font=self._uf(11 if big else 9, True),
+                                fill=cd["text"])
+            b1, b2 = cv.bbox(t1), cv.bbox(t2)
+            if b1 and b2 and b2[0] - b1[2] > u(16):
+                ly = ry + u(3)
+                for x9 in range(int(b1[2] + u(8)),
+                                int(b2[0] - u(8)), int(u(6))):
+                    cv.create_line(x9, ly, x9 + u(2), ly, fill="#d8d2dc")
+
+        def draw_awards(py0):
+            """방 시상식 — 금·은·동 단상, 색종이, 그린 왕관, 폭죽.
+
+            폭죽은 fx_tick(별도 after 루프)이 "awfx" 태그만 지우고 다시
+            그린다 — 전체를 다시 그리면 아깝다 (지뢰 82)."""
+            aw = self._month_awards()
+            _, y9, mo9 = self._month_key(0)
+            yy = py0 + u(26)
+            # 제목 — 양옆에 그린 왕관 (문자 왕관이 징그럽다는 피드백)
+            tt0 = cv.create_text(W / 2, yy, text="%d월의 방 시상식" % mo9,
+                                 font=self._uf(14, True), fill=cd["text"])
+            cr8 = self._room_hat_img(int(u(15)))
+            bb8 = cv.bbox(tt0)
+            if cr8 is not None and bb8:
+                keep["crt1"] = cr8
+                cv.create_image(bb8[0] - u(10), yy, image=cr8, anchor="e")
+                cv.create_image(bb8[2] + u(10), yy, image=cr8, anchor="w")
+            yy += u(20)
+            # 인원 알약
+            n_t = "우리 방 %d명의 기록" % aw["count"]
+            nw9 = u(9) * len(n_t) * 0.62 + u(24)
+            self._rr_soft(cv, W / 2 - nw9 / 2, yy - u(9),
+                          W / 2 + nw9 / 2, yy + u(9), u(9),
+                          fill=self._tint(cd["fill"], 0.85),
+                          outline="", width=0)
+            cv.create_text(W / 2, yy, text=n_t, font=self._uf(8, True),
+                           fill=self._shade(cd["fill"], 0.32))
+            yy += u(16)
+            dotline(yy)
+            yy += u(16)
+            lv3 = aw["lv"]
+            if not lv3:
+                cv.create_text(W / 2, yy + u(30),
+                               text="친구들 소식이 아직 없어요",
+                               font=self._uf(9), fill=cd["sub"])
+                yy += u(70)
+                self._monthly_fx_at = None
+                paper_and_teeth(py0, yy)
+                return
+            cv.create_text(W / 2, yy, text="레벨 TOP 3",
+                           font=self._uf(10, True), fill=cd["sub"])
+            yy += u(10)
+            base_y = yy + u(164)
+            # 종이 위 색종이 — 달·이름 해시로 자리가 정해져 늘 같다
+            cf_seed = hashlib.md5(("cf-%04d-%02d" % (y9, mo9))
+                                  .encode()).digest()
+            cf_cols = ("#f9c6d0", "#ffe2a8", "#bfe3c9", "#c9d8f5",
+                       "#e6d1f2")
+            for i9 in range(14):
+                b0 = cf_seed[i9 % len(cf_seed)]
+                b1 = cf_seed[(i9 * 3 + 1) % len(cf_seed)]
+                fx9 = px + ip + (b0 / 255.0) * (W - (px + ip) * 2)
+                fy9 = yy + u(6) + (b1 / 255.0) * u(120)
+                c9 = cf_cols[i9 % len(cf_cols)]
+                if i9 % 3 == 0:
+                    self._oval(cv, fx9 - u(2), fy9 - u(2), fx9 + u(2),
+                               fy9 + u(2), fill=c9, outline="")
+                else:
+                    ang9 = (b0 % 6) - 3
+                    cv.create_line(fx9 - u(3), fy9 + ang9, fx9 + u(3),
+                                   fy9 - ang9, fill=c9,
+                                   width=int(max(2, u(2.6))),
+                                   capstyle="round")
+            # 금·은·동 단상 — 순위가 색으로 바로 읽힌다
+            PODIUM = (("#ffe4a8", "#e5b96b"),      # 1등 금
+                      ("#e9edf4", "#bfcada"),      # 2등 은
+                      ("#f6ddc9", "#d9ab84"))      # 3등 동
+            spots = ((0, W / 2, u(92), u(38)),
+                     (1, W / 2 - u(100), u(66), u(24)),
+                     (2, W / 2 + u(100), u(66), u(14)))
+            self._monthly_fx_at = []
+            for rank, sx, ph9, bh9 in spots:
+                if rank >= len(lv3):
+                    continue
+                slot9, nm9, val9 = lv3[rank]
+                pc9, po9 = PODIUM[rank]
+                self._rr_soft(cv, sx - u(42), base_y - bh9, sx + u(42),
+                              base_y, u(6), fill=pc9, outline="", width=0)
+                # 순위 — 흰 동그라미 배지
+                self._oval(cv, sx - u(9), base_y - bh9 / 2 - u(9),
+                           sx + u(9), base_y - bh9 / 2 + u(9),
+                           fill="#ffffff", outline=po9, width=2)
+                cv.create_text(sx, base_y - bh9 / 2, text="%d" % (rank + 1),
+                               font=self._uf(10, True), fill=po9)
+                img9 = self._seat_photo(slot9, ph9)
+                if img9 is not None:
+                    keep["seat%d" % rank] = img9
+                    cv.create_image(sx, base_y - bh9 - u(2), image=img9,
+                                    anchor="s")
+                if rank == 0:
+                    cr9 = self._room_hat_img(int(u(26)))
+                    if cr9 is not None:
+                        keep["crown"] = cr9
+                        cv.create_image(sx, base_y - bh9 - ph9 - u(2),
+                                        image=cr9, anchor="s")
+                # 폭죽이 터질 자리 — 각자 머리 위 (요청: 셋 다)
+                self._monthly_fx_at.append(
+                    (sx, base_y - bh9 - ph9 - u(30 if rank == 0 else 8)))
+                nm8 = nm9 if len(nm9) <= 6 else nm9[:6] + "…"
+                cv.create_text(sx, base_y + u(11), text=nm8,
+                               font=self._uf(11 if rank == 0 else 10, True),
+                               fill="#a2793c" if rank == 0 else cd["text"])
+                up9 = aw["lv_up"].get(slot9)
+                cv.create_text(sx, base_y + u(25),
+                               text="Lv.%d" % int(val9)
+                               + (" (+%d)" % up9 if up9 else ""),
+                               font=self._uf(8, True), fill=cd["sub"])
+            yy = base_y + u(38)
+            dotline(yy)
+            yy += u(19)
+            cv.create_text(W / 2, yy, text="이달의 왕들",
+                           font=self._uf(10, True), fill=cd["sub"])
+            yy += u(18)
+            # 부문 줄 — 값 앞에 그린 왕관 미니 그림
+            champs = []
+            mt9 = aw.get("m_top")
+            if mt9:
+                mm9 = int(mt9[2])
+                champs.append(("달", "#e6f0e2", "#4d7d55", "이달의 노력왕",
+                               "%s · %d시간 %d분"
+                               % (mt9[1], mm9 // 60, mm9 % 60)))
+            md9 = aw.get("m_days")
+            if md9:
+                champs.append(("근", "#fbe9f1", "#a75f83", "이달의 개근왕",
+                               "%s · %d일 출석" % (md9[1], int(md9[2]))))
+            mg9 = aw.get("m_goal")
+            if mg9:
+                champs.append(("목", "#fff3d6", "#a2793c", "이달의 목표왕",
+                               "%s · %d일 달성" % (mg9[1], int(mg9[2]))))
+            for field, ini, bg9, ink9, lab9 in (
+                    ("wgb", "수", "#ffe9ef", "#b3556e", "수박게임"),
+                    ("g2b", "2", "#fdf0dc", "#a2793c", "2048"),
+                    ("ctb", "타", "#dbeaff", "#4a6c9b", "컬러타일")):
+                rows9 = aw[field]
+                if rows9:
+                    _s9, nm9, val9 = rows9[0]
+                    champs.append((ini, bg9, ink9, lab9,
+                                   "%s · " % nm9
+                                   + "{:,}점".format(int(val9))))
+            rh = u(31)
+            cr7 = self._room_hat_img(int(u(13)))
+            for i, (ini, bg9, ink9, lab9, val9) in enumerate(champs):
+                ry = yy + i * rh + rh / 2
+                leader_row(ry, ini, bg9, ink9, lab9, val9, big=True)
+                if cr7 is not None:
+                    keep["crm"] = cr7
+                    # 값 글자 왼쪽에 작은 왕관 (문자 ♛ 대신)
+                    got9 = [it for it in cv.find_all()
+                            if cv.type(it) == "text"
+                            and cv.itemcget(it, "text") == val9]
+                    if got9:
+                        b9 = cv.bbox(got9[-1])
+                        cv.create_image(b9[0] - u(4), ry, image=cr7,
+                                        anchor="e")
+            yy += len(champs) * rh + u(6)
+            dotline(yy)
+            yy += u(14)
+            cv.create_text(px + ip, yy + u(6), anchor="w", text="TOTAL",
+                           font=self._uf(10, True), fill=cd["sub"])
+            cv.create_text(W - px - ip, yy + u(6), anchor="e",
+                           text="다 함께 Lv.%s"
+                           % "{:,}".format(aw.get("lv_sum") or 0),
+                           font=self._uf(13, True), fill=cd["text"])
+            yy += u(36)
+            barcode(yy, "AWARDS-%04d-%02d" % (y9, mo9))
+            yy += u(33)
+            cv.create_text(W / 2, yy, text="AWARDS-%04d%02d · 다음 달의"
+                           " 왕은 누구?" % (y9, mo9),
+                           font=self._uf(6), fill=cd["sub"])
+            yy += u(14)
+            paper_and_teeth(py0, yy)
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            cv.delete("all")
+            keep.clear()
+            off = self._monthly_off
+            s9 = self._month_stat(off)
+            _, y, mo = self._month_key(off)
+            name = self.cfg.get("name") or "나"
+            self._monthly_nav = []
+            self._monthly_tabs = []
+            tab = getattr(self, "_monthly_tab", 0)
+            # 탭 두 개 — 내 정산 / 방 시상식
+            for i9, lab9 in enumerate(("\ub0b4 \uc815\uc0b0",
+                                       "\ubc29 \uc2dc\uc0c1\uc2dd")):
+                on9 = (tab == i9)
+                tx0 = W / 2 - u(78) + i9 * u(80)
+                tx1 = tx0 + u(76)
+                self._rr_soft(cv, tx0, u(8), tx1, u(32), u(12),
+                              fill=cd["fill"] if on9 else "#ffffff",
+                              outline="" if on9 else line,
+                              width=0 if on9 else 1)
+                cv.create_text((tx0 + tx1) / 2, u(20), text=lab9,
+                               font=self._uf(8, on9),
+                               fill="#ffffff" if on9 else cd["sub"])
+                self._monthly_tabs.append(((tx0, u(8), tx1, u(32)), i9))
+            if tab == 1:
+                draw_awards(u(44))
+                return
+            # 달 네비는 타이틀 양옆으로 옮겼다 (요청) — 상단 줄 없음
+            py0 = u(44)               # 종이 윗변 (탭 바로 아래)
+            yy = py0 + u(26)
+            if s9 is None:
+                bg0 = cv.create_rectangle(px, py0, W - px, py0 + u(140),
+                                          fill="#ffffff", outline="")
+                cv.tag_lower(bg0)
+                cv.create_text(W / 2, py0 + u(70),
+                               text="이 달에는 기록이 없어요",
+                               font=self._uf(10), fill=cd["sub"])
+                cv.configure(height=py0 + u(180))
+                return
+            # ── 상호 + 기간 (영수증 머리) — 타이틀은 정중앙 (요청).
+            # 내 캐릭터는 창 오른쪽 위 모서리에 걸치는 별도 미니 창으로.
+            tcx = W / 2
+            tt7 = cv.create_text(tcx, yy, text="\u273f %s의 %d월 정산 \u273f"
+                                 % (name, mo),
+                                 font=self._uf(11, True), fill=cd["text"])
+            if off > 0:
+                cv.create_text(tcx, yy - u(15), text="%d년" % y,
+                               font=self._uf(7), fill=cd["sub"])
+            # 달 넘기기 ‹ › — 타이틀 바로 양옆 (요청)
+            bb7 = cv.bbox(tt7)
+            can_prev = self._month_has(off + 1)
+            for sign, on9 in ((-1, can_prev), (1, off > 0)):
+                ax7 = (bb7[0] - u(13)) if sign < 0 else (bb7[2] + u(13))
+                cv.create_text(ax7, yy, text="\u2039" if sign < 0
+                               else "\u203a", font=self._uf(14, True),
+                               fill=cd["fill"] if on9 else "#e4dfe8")
+                if on9:
+                    self._monthly_nav.append(
+                        ((ax7 - u(13), yy - u(16),
+                          ax7 + u(13), yy + u(16)), -sign))
+            yy += u(20)
+            cv.create_text(tcx, yy, text="%04d.%02d.01 ~ %02d.%02d"
+                           % (y, mo, mo, s9["n"]),
+                           font=self._uf(7), fill=cd["sub"])
+            yy += u(16)
+            dotline(yy)
+            yy += u(20)
+            # ── 총 시간 ──────────────────────────────────────────
+            cv.create_text(W / 2, yy, text="이번 달 작업 시간" if off == 0
+                           else "이 달의 작업 시간",
+                           font=self._uf(8), fill=cd["sub"])
+            yy += u(24)
+            cv.create_text(W / 2, yy, text=hm(s9["total"]),
+                           font=self._uf(21, True), fill=cd["text"])
+            yy += u(22)
+            p9 = self._month_stat(off + 1)
+            if p9:
+                d9 = round((s9["total"] - p9["total"]) / 3600.0, 1)
+                if d9 == int(d9):
+                    d9 = int(d9)             # +72.0 대신 +72
+                cv.create_text(W / 2, yy, text="지난달보다 %+g시간" % d9,
+                               font=self._uf(8),
+                               fill="#5f8352" if d9 >= 0 else "#8c4351")
+                yy += u(16)
+            dotline(yy)
+            yy += u(14)
+            # ── 잔디 달력 ────────────────────────────────────────
+            cell = (W - (px + ip) * 2 - u(5) * 6) / 7.0
+            for i, wd in enumerate(WD):
+                cv.create_text(px + ip + i * (cell + u(5)) + cell / 2,
+                               yy + u(6), text=wd, font=self._uf(7),
+                               fill=cd["sub"])
+            gy = yy + u(15)
+            first_wd = time.localtime(time.mktime(
+                (y, mo, 1, 12, 0, 0, 0, 0, -1))).tm_wday
+            for d in range(1, s9["n"] + 1):
+                idx = first_wd + d - 1
+                c9, r9 = idx % 7, idx // 7
+                x0 = px + ip + c9 * (cell + u(5))
+                y0 = gy + r9 * (cell + u(5))
+                sec = s9["work"].get(d, 0.0)
+                self._rr_soft(cv, x0, y0, x0 + cell, y0 + cell, u(6),
+                              fill=grass_color(sec), outline="", width=0)
+                if d == s9["top_day"] and sec >= 60:
+                    cv.create_text(x0 + cell / 2, y0 + cell / 2,
+                                   text="\u2605", font=self._uf(8),
+                                   fill="#ffffff")
+            rows_n = (first_wd + s9["n"] + 6) // 7
+            yy = gy + rows_n * (cell + u(5)) + u(10)
+            dotline(yy)
+            yy += u(12)
+            # ── 품목 줄 (영수증 리스트) ───────────────────────────
+            top_t = time.localtime(time.mktime(
+                (y, mo, s9["top_day"], 12, 0, 0, 0, 0, -1)))
+            vals = [
+                ("작업한 날", "%d일 · 연속 %d일"
+                 % (s9["days"], s9["streak"])),
+                ("최고 기록", "%d일(%s) %s" % (
+                    s9["top_day"], WD[top_t.tm_wday], hm(s9["top_sec"]))),
+                ("펜 획", num(s9["strokes"]) + "번"),
+                ("클릭", num(s9["clicks"]) + "번"),
+                ("되돌리기", num(s9["undo"]) + "번"),
+                ("그린 거리", ("%.1fkm" % (s9["dist"] / 1000.0))
+                 if s9["dist"] >= 1000 else "%dm" % round(s9["dist"])),
+                ("목표 채운 날", "%d일 · %g시간 기준"
+                 % (s9["goal_days"], s9["goal"])),
+                ("레벨", "+%d" % s9["lv_up"]),
+            ]
+            rh = u(28)
+            br9 = u(9)
+            for i, (lab9, val9) in enumerate(vals):
+                ic, bg9, ink9 = self.MONTH_ROWS[i]
+                if bg9 is None:              # 펜 획은 테마색 배지
+                    bg9 = self._tint(cd["fill"], 0.66)
+                    ink9 = self._shade(cd["fill"], 0.3)
+                ry = yy + i * rh + rh / 2
+                bx9 = px + ip + br9
+                self._oval(cv, bx9 - br9, ry - br9, bx9 + br9, ry + br9,
+                           fill=bg9, outline="")
+                cv.create_text(bx9, ry, text=ic, font=self._uf(8),
+                               fill=ink9)
+                t1 = cv.create_text(bx9 + br9 + u(8), ry, anchor="w",
+                                    text=lab9, font=self._uf(8),
+                                    fill=cd["sub"])
+                t2 = cv.create_text(W - px - ip, ry, anchor="e", text=val9,
+                                    font=self._uf(10, True),
+                                    fill=cd["text"])
+                # 점선 리더 — 항목명 끝에서 값 앞까지 (영수증 특유의 점점점)
+                b1, b2 = cv.bbox(t1), cv.bbox(t2)
+                if b1 and b2 and b2[0] - b1[2] > u(16):
+                    ly = ry + u(3)
+                    for x9 in range(int(b1[2] + u(8)),
+                                    int(b2[0] - u(8)), int(u(6))):
+                        cv.create_line(x9, ly, x9 + u(2), ly,
+                                       fill="#d8d2dc")
+            yy += len(vals) * rh + u(6)
+            dotline(yy)
+            yy += u(14)
+            # ── TOTAL ────────────────────────────────────────────
+            cv.create_text(px + ip, yy + u(6), anchor="w", text="TOTAL",
+                           font=self._uf(10, True), fill=cd["sub"])
+            cv.create_text(W - px - ip, yy + u(6), anchor="e",
+                           text="%d:%02d" % (int(s9["total"]) // 3600,
+                                             (int(s9["total"]) % 3600)
+                                             // 60),
+                           font=self._uf(14, True), fill=cd["text"])
+            yy += u(36)
+            # ── 바코드 — 달·이름으로 무늬가 정해진다 (매번 같다) ──
+            barcode(yy, "%s-%04d-%02d" % (name, y, mo))
+            yy += u(33)
+            cv.create_text(W / 2, yy, text="%s-%04d%02d \u00b7 다음 달도"
+                           " 함께 그려요" % (self.char.replace(
+                               "parts_", "").upper(), y, mo),
+                           font=self._uf(6), fill=cd["sub"])
+            yy += u(14)
+            # ── 종이(맨 뒤) + 아래끝 톱니 ─────────────────────────
+            bg = cv.create_rectangle(px, py0, W - px, yy, fill="#ffffff",
+                                     outline="")
+            cv.tag_lower(bg)
+            tooth = u(9)
+            try:
+                edge = self._receipt_edge(W - px * 2, tooth)
+                keep["edge"] = edge
+                cv.create_image(px, yy, image=edge, anchor="nw")
+            except Exception:
+                pass
+            cv.configure(height=yy + tooth + u(16))
+
+        def on_click(e):
+            for box9, t9 in getattr(self, "_monthly_tabs", []):
+                if box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]:
+                    if t9 != getattr(self, "_monthly_tab", 0):
+                        self._safe("ui_click", self._ui_click)
+                        self._monthly_tab = t9
+                        draw()
+                    return
+            for box9, d9 in getattr(self, "_monthly_nav", []):
+                if box9[0] <= e.x <= box9[2] and box9[1] <= e.y <= box9[3]:
+                    self._safe("ui_click", self._ui_click)
+                    self._monthly_off = max(0, self._monthly_off + d9)
+                    draw()
+                    return
+
+        draw()
+        cv.bind("<Button-1>", lambda e: self._safe("monthly_click",
+                                                   on_click, e))
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+        # ── 1등 폭죽 — 시상식 탭이 보일 때만 "awfx" 태그를 갱신한다 ──
+        fxs = {"after": None, "t0": time.time()}
+
+        # _oval/_fx_spark 에는 태그 인자가 없어서, 그리기 전후의
+        # 캔버스 항목 차이에 "awfx" 태그를 일괄로 붙인다.
+        def fx_tick():
+            if not win.winfo_exists():
+                return
+            before9 = set(cv.find_all())
+            try:
+                at9 = getattr(self, "_monthly_fx_at", None)
+                cv.delete("awfx")
+                if getattr(self, "_monthly_tab", 0) == 1 and at9:
+                    t9 = (time.time() - fxs["t0"]) % 2.4
+                    for i8, spot8 in enumerate(at9 if isinstance(at9, list)
+                                               else [at9]):
+                        q9 = (t9 - (0.0, 0.9, 1.7)[i8 % 3]) / 1.1
+                        if not (0.0 < q9 < 1.0):
+                            continue
+                        e9 = 1.0 - (1.0 - q9) ** 2
+                        cx9 = spot8[0]
+                        cy9 = spot8[1] - u(10) * e9
+                        r9 = u(6) + u(26) * e9
+                        cols9 = ("#f9a8bc", "#ffd27a", "#9fd8ae",
+                                 "#a9c4f2", "#d8b8ee", "#f6b7d2")
+                        for k9 in range(6):
+                            a9 = k9 * (math.tau / 6) + q9 * 1.2
+                            sz9 = max(1.5, u(3.2) * (1.0 - q9 * 0.6))
+                            xx9 = cx9 + math.cos(a9) * r9
+                            yy9 = cy9 + math.sin(a9) * r9 * 0.85
+                            if k9 % 2:
+                                self._fx_spark(cv, xx9, yy9, sz9 * 1.9,
+                                               cols9[k9])
+                            else:
+                                self._oval(cv, xx9 - sz9, yy9 - sz9,
+                                           xx9 + sz9, yy9 + sz9,
+                                           fill=cols9[k9], outline="")
+                    for it9 in set(cv.find_all()) - before9:
+                        cv.addtag_withtag("awfx", it9)
+            except Exception:
+                pass
+            fxs["after"] = win.after(90, fx_tick)
+
+        fxs["after"] = win.after(240, fx_tick)
+
+        # ── 내 캐릭터 미니 창 — 정산 창 오른쪽 위 모서리에 살짝 걸친다
+        # (요청: "창 밖에 걸쳐지게"). 색상키 투명이라 캐릭터와 말풍선만
+        # 떠 보인다. 창을 옮기면 따라온다.
+        self._safe("monthly_mini", self._monthly_mini, win)
+
+        def gone(_e=None):
+            # 지뢰 20 — 예약해 둔 폭죽 프레임을 거둔다
+            if fxs["after"] is not None:
+                try:
+                    win.after_cancel(fxs["after"])
+                except Exception:
+                    pass
+                fxs["after"] = None
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
 
     def _room_help(self):
         """홈 사용법 창 — 메뉴의 '?' (요청)."""
@@ -36410,6 +37438,8 @@ class Mascot:
                     self._safe("room_draw", self._room_draw)
                     if act9 == "deco":
                         self._safe("room_deco", self._room_deco_win)
+                    elif act9 == "monthly":
+                        self._safe("monthly", self._monthly_win)
                     else:
                         self._room_game_open(act9)
                     return
