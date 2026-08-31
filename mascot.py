@@ -8761,32 +8761,33 @@ class Mascot:
                 self._char_lay.place_above(self._main_hwnd)
             except Exception:
                 pass
-        # 편지 — 책상 봉투를 누르면 쪽지함이 열리고, 캐릭터 어디를 눌러도
-        # 봉투·도착 말풍선은 들어간다 (요청 — 한 번 눌러야 꺼진다)
-        mb0 = getattr(self, "_mail_box", None)
-        if mb0 and mb0[0] <= e.x <= mb0[2] and mb0[1] <= e.y <= mb0[3]:
-            self._note_desk_ack()
-            self._safe("ui_click", self._ui_click)
-            # 창을 여는 일은 다음 차례로 (지뢰 15류 — 클릭 처리 중 창 생성 금지)
-            self.root.after_idle(
-                lambda: self._safe("note_win", self._note_win))
-            self._press = None
-            return
-        if self._safe_str(self._note_desk_new):
-            # 그려진 프레임과 무관하게, 안 들어간 봉투가 있으면 들인다
-            # (지뢰 24 — 내부 깃발이 아니라 판정식으로)
-            self._safe("note_ack", self._note_desk_ack)
+        # 편지 — 봉투·도착 말풍선이 떠 있는 동안에는 캐릭터 어디를
+        # 눌러도 **쪽지함이 열리면서** 함께 들어간다. 처음엔 '누르면
+        # 끄기만'이었는데, 봉투만 사라지고 아무것도 안 열려 고장으로
+        # 보였다 (개 제보 — 기대와 어긋난 설계).
         mw0 = getattr(self, "_mail_bub", None)
-        if mw0 and self.bubble and self.bubble[0] == mw0:
+        mail_on0 = bool(self._safe_str(self._note_desk_new)
+                        or (mw0 and self.bubble
+                            and self.bubble[0] == mw0))
+        if mail_on0:
             bb0 = getattr(self, "_bubble_btn", None)
             if not (bb0 and bb0[0] <= e.x <= bb0[2]
                     and bb0[1] <= e.y <= bb0[3]):
-                # '열어 보기' 단추가 아닌 곳 — 말풍선만 내리고 계속 간다
-                self.bubble = None
-                self._bubble_hold = None
-                self._bubble_act = None
-                self._bubble_btn = None
-                self._mail_bub = None
+                # '열어 보기' 단추 자리는 기존 경로가 연다 — 그 밖의 모든
+                # 자리는 여기서 연다 (봉투·캐릭터·책상 어디든)
+                self._safe("note_ack", self._note_desk_ack)
+                if mw0 and self.bubble and self.bubble[0] == mw0:
+                    self.bubble = None
+                    self._bubble_hold = None
+                    self._bubble_act = None
+                    self._bubble_btn = None
+                    self._mail_bub = None
+                self._safe("ui_click", self._ui_click)
+                # 창을 여는 일은 다음 차례로 (지뢰 15류)
+                self.root.after_idle(
+                    lambda: self._safe("note_win", self._note_win))
+                self._press = None
+                return
         # 여백 직접 조정 중 — 누른 자리를 기준으로 위아래 끌기를 시작한다.
         # 다른 반응(쓰다듬·슬라임·창 옮기기)은 모두 건너뛴다.
         if self._gap_adj:
