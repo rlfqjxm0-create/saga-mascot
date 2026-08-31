@@ -892,6 +892,8 @@ DEFAULT_SETTINGS = {
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
     "monthly_shown": "",  # 월말정산을 보여 준 마지막 달 ("YYYY-MM")
+    "pomo_edit": False,   # 뽀모도로 창의 시간 조절 칸을 펼쳐 두었는가
+    "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
     "pomo_long": 15,      # 네 번째 뒤 긴 휴식(분)
@@ -17158,10 +17160,33 @@ class Mascot:
             return 0
 
     def _pomo_set_done(self):
-        """한 세트를 끝냈다 — 오늘 몫으로 하나 센다."""
+        """한 세트(사이클 전체)를 끝냈다 — 오늘 몫으로 하나 센다."""
         self.us["pomo_sets"] = {"day": self._my_workday(),
                                 "n": self._pomo_sets() + 1}
         self._safe("pomo_sets_save", self._save_settings)
+
+    def _pomo_runs(self):
+        """오늘 끝낸 집중 횟수.
+
+        세트(사이클 전체)는 두 시간이 넘어 웬만해선 안 오른다 — 25분
+        집중을 여러 번 해도 '아직 없어요'로 보였다 (제보). 집중 한 번을
+        따로 세어 둘 다 보여 준다. 하루 경계는 세트와 같은 작업일.
+        """
+        d = self.us.get("pomo_runs")
+        if not isinstance(d, dict):
+            return 0
+        if str(d.get("day") or "") != self._my_workday():
+            return 0
+        try:
+            return max(0, int(d.get("n") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _pomo_run_done(self):
+        """집중 한 번을 끝냈다 (건너뛰기는 세지 않는다)."""
+        self.us["pomo_runs"] = {"day": self._my_workday(),
+                                "n": self._pomo_runs() + 1}
+        self._safe("pomo_runs_save", self._save_settings)
 
     def _pomo_mins(self, phase):
         """그 구간의 길이(분). 사람이 창에서 바꿔 두었으면 그 값.
@@ -17253,6 +17278,8 @@ class Mascot:
         st = self._pomo()
         ph = st["phase"]
         if ph == "focus":
+            if say:                    # 건너뛰기(say=False)는 안 센다
+                self._safe("pomo_runs", self._pomo_run_done)
             st["round"] = int(st["round"]) + 1
             nxt = "long" if st["round"] % self.POMO_ROUNDS == 0 else "short"
             line = (self.POMO_LINES["long"] if nxt == "long"
@@ -17338,24 +17365,60 @@ class Mascot:
         if got is not None and got.winfo_exists():
             got.lift()
             return
-        cd, u = self.card, self._ui
-        # 시간 바꾸는 칸(집중·짧은 휴식·긴 휴식)이 들어가 그만큼 더 높다
-        W, H = u(300), u(440)
+        cd = self.card
+        # 기준 크기 — 실제로는 창 크기에 맞춰 배율(zoom)로 늘리고 줄인다
+        BASE_W = 300
+        try:
+            zoom0 = max(0.7, min(2.2, float(self.us.get("pomo_zoom") or 1)))
+        except (TypeError, ValueError):
+            zoom0 = 1.0
+        zst = {"z": zoom0, "save": 0.0}
+
+        def u(v):                       # 배율이 들어간 눈금 (지역)
+            return self._ui(v) * zst["z"]
+
+        def base_h():
+            """지금 구성의 내용 높이 (배율 1 기준 눈금)."""
+            ty1 = 186 + (100 if self.us.get("pomo_edit") else 20)
+            return ty1 + 28 + 40 + 30 + 42 + 32
+
+        W, H = u(BASE_W), u(base_h())
         win = tk.Toplevel(self.root)
         self._pomo_winref = win
         win.title("뽀모도로")
         win.configure(bg=cd["panel"])
-        win.resizable(False, False)
+        win.resizable(True, True)       # 모서리를 끌어 크기 조절 (요청)
+        win.minsize(int(self._ui(BASE_W) * 0.7), int(self._ui(base_h()) * 0.7))
         self._keep_front(win, focus=False)
         cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
                        highlightthickness=0, bd=0)
-        cv.pack()
+        cv.pack(fill="both", expand=True)
         line = self._tint(cd["fill"], 0.55)
-        pad = u(16)
+        pad = None                      # draw 안에서 배율에 맞춰 다시 잡는다
 
         def draw():
             if not win.winfo_exists():
                 return
+            nonlocal pad, W
+            # 창 크기에 맞는 배율 — 가로·세로 중 작은 쪽에 맞춰 다 보이게
+            cw9 = max(1, cv.winfo_width())
+            ch9 = max(1, cv.winfo_height())
+            if cw9 > 10 and ch9 > 10:
+                z9 = min(cw9 / float(self._ui(BASE_W)),
+                         ch9 / float(self._ui(base_h())))
+                zst["z"] = max(0.7, min(2.2, z9))
+                # 정해진 배율을 기억한다. **<Configure> 에 기대지 않는다**
+                # — 그 이벤트가 안 오는 경우가 있었다(실측). 창을 끌면
+                # beat(0.5초)가 어차피 다시 그리므로 여기가 확실하다.
+                now8 = time.time()
+                if (now8 - zst["save"] > 0.5
+                        and abs(float(self.us.get("pomo_zoom") or 1)
+                                - zst["z"]) > 0.02):
+                    zst["save"] = now8
+                    self.us["pomo_zoom"] = round(zst["z"], 3)
+                    self._safe("pomo_zoom_save", self._save_settings)
+            W = u(BASE_W)
+            pad = u(16)
             cv.delete("all")
             st = self._pomo()
             left = self._pomo_left(st)
@@ -17386,17 +17449,29 @@ class Mascot:
                 self._oval(cv, cx - r, u(152) - r, cx + r, u(152) + r,
                                fill=cd["fill"] if i < done else "#ffffff",
                                outline=line, width=1)
-            # ── 시간 바꾸기 (요청 — 창 안에서 바로) ─────────────────
+            # ── 시간 바꾸기 — 우상단 아이콘으로 여닫는다 (요청) ─────
             # 누르는 자리는 아래 단추와 한 목록에 모은다. 목록을 여기서
             # 비우고 단추 쪽에서는 비우지 않는다 (비우면 이 자리가 사라진다).
             self._pomo_hits = []
-            ty0, ty1 = u(186), u(286)
-            self._rr_soft(cv, pad, ty0, W - pad, ty1, u(18),
-                          fill="#ffffff", outline=line, width=1)
+            edit9 = bool(self.us.get("pomo_edit"))
+            ty0 = u(186)
+            ty1 = ty0 + (u(100) if edit9 else 0)
             rows = (("focus", "집중"), ("short", "짧은 휴식"),
                     ("long", "긴 휴식"))
+            if not edit9:
+                # 접혀 있을 때는 지금 길이를 한 줄로만 알려 준다
+                cv.create_text(W / 2, ty0 + u(10),
+                               text="%d분 집중 · %d분 휴식 · 네 번째엔 %d분"
+                               % (self._pomo_mins("focus"),
+                                  self._pomo_mins("short"),
+                                  self._pomo_mins("long")),
+                               font=self._uf(8), fill=cd["sub"])
+                ty1 = ty0 + u(20)
+            if edit9:
+                self._rr_soft(cv, pad, ty0, W - pad, ty1, u(18),
+                              fill="#ffffff", outline=line, width=1)
             rh = (ty1 - ty0) / len(rows)
-            for i, (ph9, lab9) in enumerate(rows):
+            for i, (ph9, lab9) in enumerate(rows if edit9 else ()):
                 ry = ty0 + rh * (i + 0.5)
                 cur = self._pomo_mins(ph9)
                 lo9, hi9 = self.POMO_RANGE[ph9]
@@ -17425,14 +17500,15 @@ class Mascot:
                              ("len", ph9, sign * stp)))
                 cv.create_text(W - pad - u(47), ry, text="%d분" % cur,
                                font=self._uf(10, True), fill=cd["text"])
-            cv.create_text(W / 2, u(298),
+            cv.create_text(W / 2, ty1 + u(12),
                            text="시간이 되면 알려 주고 같이 몸을 펴요",
                            font=self._uf(8), fill=cd["sub"])
             # 스티커는 여기까지의 그림 위, **단추 아래** (단추를 가리면
             # 누를 수가 없다 — 홈과 같은 규칙)
             self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
             # 단추 셋
-            by0, by1 = u(314), u(354)
+            by0 = ty1 + u(28)
+            by1 = by0 + u(40)
             bw = (W - pad * 2 - u(16)) / 3.0
             for i, (lab, act) in enumerate(
                     ((("멈춤" if st["on"] else "시작"), "toggle"),
@@ -17450,29 +17526,65 @@ class Mascot:
                 self._pomo_hits.append((x0, by0, x1, by1, act))
             # 오늘 끝낸 세트 — 하루는 새벽 6시로 나뉜다
             sets = self._pomo_sets()
-            sy0, sy1 = H - u(58), H - u(30)
+            sy0 = by1 + u(30)          # 위에 '오늘' 라벨이 들어간다
+            sy1 = sy0 + u(42)
             self._rr_soft(cv, pad, sy0, W - pad, sy1, u(13),
                           fill="#ffffff", outline=line, width=1)
-            cv.create_text(pad + u(14), (sy0 + sy1) / 2, anchor="w",
-                           text="오늘 끝낸 세트", font=self._uf(9),
-                           fill=cd["sub"])
-            cv.create_text(W - pad - u(14), (sy0 + sy1) / 2, anchor="e",
-                           text=("%d번" % sets) if sets else "아직 없어요",
-                           font=self._uf(10, True),
-                           fill=cd["text"] if sets else cd["sub"])
-            cv.create_text(W / 2, H - u(14),
+            runs = self._pomo_runs()
+            # 집중(25분 한 번)과 세트(사이클 전체)를 **배지 둘**로.
+            # 글자만 늘어놓으니 눈에 안 들어왔다 (피드백) — 아이콘 +
+            # 큰 숫자 + 작은 라벨을 알약 안에 담는다.
+            cv.create_text(W / 2, sy0 - u(11), text="오늘",
+                           font=self._uf(8, True), fill=cd["sub"])
+            bw8 = (W - pad * 2 - u(10)) / 2.0
+            for i8, (ic8, lab8, val8, bg8, ink8) in enumerate((
+                    ("◔", "집중", runs, "#ffe9ef", "#b3556e"),
+                    ("✔", "세트", sets, "#eaf6df", "#5f8352"))):
+                x8 = pad + i8 * (bw8 + u(10))
+                on8 = val8 > 0
+                self._rr_soft(cv, x8, sy0, x8 + bw8, sy1, u(13),
+                              fill="#ffffff" if on8 else "#faf8fb",
+                              outline=line, width=1)
+                # 왼쪽 동그라미 아이콘
+                r8 = u(11)
+                cx8 = x8 + u(16) + r8
+                cy8 = (sy0 + sy1) / 2
+                self._oval(cv, cx8 - r8, cy8 - r8, cx8 + r8, cy8 + r8,
+                           fill=bg8 if on8 else "#f1eef3", outline="")
+                cv.create_text(cx8, cy8, text=ic8, font=self._uf(9, True),
+                               fill=ink8 if on8 else "#c9c3ce")
+                # 큰 숫자 + 라벨
+                cv.create_text(cx8 + r8 + u(11), cy8 + u(1), anchor="w",
+                               text="%d" % val8,
+                               font=self._uf(15, True),
+                               fill=cd["text"] if on8 else "#c9c3ce")
+                cv.create_text(x8 + bw8 - u(13), cy8 + u(2), anchor="e",
+                               text=lab8, font=self._uf(8),
+                               fill=cd["sub"] if on8 else "#c9c3ce")
+            cv.create_text(W / 2, sy1 + u(16),
                            text="창을 닫아도 계속 돌아가요",
                            font=self._uf(8), fill=cd["sub"])
-            # 꾸미기(스티커) — 오른쪽 위 작은 동그라미
-            bx, br = W - u(24), u(13)
+            # 꾸미기(스티커)는 **왼쪽 위**, 시간 조절은 **오른쪽 위**
+            # (요청 — 제목 양옆)
+            br = u(13)
+            sx8 = u(24)
             on_stk = (self._stk_edit == "pomo")
-            self._safe("soft_btn", self._soft_dot, cv, bx, u(26), br,
+            self._safe("soft_btn", self._soft_dot, cv, sx8, u(26), br,
                        cd["fill"] if on_stk else "#ffffff",
                        outline=line, width=1, shadow=True)
-            cv.create_text(bx, u(26), text="✿", font=self._uf(10, True),
+            cv.create_text(sx8, u(26), text="✿", font=self._uf(10, True),
                            fill="#ffffff" if on_stk else cd["sub"])
-            self._pomo_stk_btn = (bx - br - u(3), u(26) - br - u(3),
-                                  bx + br + u(3), u(26) + br + u(3))
+            self._pomo_stk_btn = (sx8 - br - u(3), u(26) - br - u(3),
+                                  sx8 + br + u(3), u(26) + br + u(3))
+            tx8 = W - u(24)
+            self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
+                       cd["fill"] if edit9 else "#ffffff",
+                       outline=line, width=1, shadow=True)
+            # 시계 모양 — BMP 안 글자만 쓴다 (맥 Tk 는 BMP 밖에서 죽는다)
+            cv.create_text(tx8, u(26), text="\u23f1", font=self._uf(10, True),
+                           fill="#ffffff" if edit9 else cd["sub"])
+            self._pomo_time_btn = (tx8 - br - u(3), u(26) - br - u(3),
+                                   tx8 + br + u(3), u(26) + br + u(3))
 
         def on_click(e):
             if self._safe("stk_press", self._stk_press, "pomo", e.x, e.y):
@@ -17481,6 +17593,15 @@ class Mascot:
             if sb and sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]:
                 self._safe("ui_click", self._ui_click)
                 self._safe("stk_win", self._stk_win, "pomo")
+                return
+            tb = getattr(self, "_pomo_time_btn", None)
+            if tb and tb[0] <= e.x <= tb[2] and tb[1] <= e.y <= tb[3]:
+                # 시간 조절 칸 여닫기 (상태는 설정에 남는다)
+                self._safe("ui_click", self._ui_click)
+                self.us["pomo_edit"] = not bool(self.us.get("pomo_edit"))
+                self._safe("pomo_edit_save", self._save_settings)
+                fit_win()               # 접힘/펼침에 맞춰 창 높이도
+                draw()
                 return
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
@@ -17504,8 +17625,25 @@ class Mascot:
             draw()
             self._pomo_after = win.after(500, beat)
 
+        def fit_win():
+            """지금 구성에 딱 맞게 창 높이를 맞춘다 (열 때·여닫을 때)."""
+            try:
+                if win.winfo_exists():
+                    win.geometry("%dx%d" % (int(u(BASE_W)), int(u(base_h()))))
+            except Exception:
+                pass
+
+        def on_resize(e=None):
+            """크기가 바뀌면 곧바로 다시 그린다 (저장은 draw 가 맡는다)."""
+            if e is not None and e.widget is not win:
+                return
+            draw()
+
+        fit_win()
         draw()
         self._pomo_draw = draw
+        self._pomo_fit = fit_win
+        win.bind("<Configure>", on_resize, add="+")
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
         cv.bind("<B1-Motion>", lambda e: self._safe(
             "stk_move", self._stk_move, "pomo", e.x, e.y))
