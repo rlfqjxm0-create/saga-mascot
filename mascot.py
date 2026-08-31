@@ -894,6 +894,7 @@ DEFAULT_SETTINGS = {
     "monthly_shown": "",  # 월말정산을 보여 준 마지막 달 ("YYYY-MM")
     "pomo_edit": False,   # 뽀모도로 창의 시간 조절 칸을 펼쳐 두었는가
     "pomo_hruns": None,   # 오늘 성공한 하드모드 집중 {"day","n"}
+    "pomo_week": True,    # 뽀모도로 창의 '이번 주' 그래프를 펴 두었는가
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
@@ -6600,6 +6601,7 @@ class Mascot:
         self._hd_sheet = None             # 실루엣용 마지막 매끈 시트
         self._guard_dim = None            # 감시 때 화면을 어둡게 하는 레이어
         self._pomo_bar_last = None        # 카드 위 뽀모 줄의 직전 상태
+        self._pomo_wk_off = 0             # '이번 주' 그래프의 몇 주 전인가
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
         self._snack_on = None            # 책상에 놓인 간식 (눌러야 없어진다)
@@ -10183,6 +10185,23 @@ class Mascot:
             "undo": int(cur.get("undo", 0)) + int(s_.get("undo", 0)),
             "dist": round(float(cur.get("dist", 0.0)) + dist, 2),
         }
+        # 뽀모도로(집중·세트·하드 성공) — 카운터가 이미 '하루 누적'이라
+        # max 로 덮어쓴다 (지뢰 32). 위 dict 리터럴이 아는 키만 남기므로
+        # 지난 값도 여기서 되살려야 한다. 카운터의 day 가 이 key 와 다르면
+        # (이미 새 날로 넘어간 카운터) 옛 값만 지킨다.
+        row9 = days[key]
+        for us_k, h_k in (("pomo_runs", "po_r"), ("pomo_sets", "po_s"),
+                          ("pomo_hruns", "po_h")):
+            old9 = int(cur.get(h_k) or 0)
+            d9 = self.us.get(us_k)
+            n9 = 0
+            if isinstance(d9, dict) and str(d9.get("day") or "") == key:
+                try:
+                    n9 = max(0, int(d9.get("n") or 0))
+                except (TypeError, ValueError):
+                    n9 = 0
+            if n9 or old9:
+                row9[h_k] = max(old9, n9)
         for k in sorted(days)[:-self.HIST_DAYS]:      # 오래된 것부터 버린다
             days.pop(k, None)
         # 누적 거리는 따로 든다. 날짜 기록은 60일이 지나면 버려지는데,
@@ -17452,6 +17471,40 @@ class Mascot:
     HARD_WATCH = ("흠…… 다 보고 있어.", "팔짱 끼고 기다리는 중.",
                   "그림이 기다리고 있잖아!")
 
+    def _pomo_week(self, off=0):
+        """이레치 집중 횟수 — [(요일 글자, n, 오늘인가)].
+
+        off 는 몇 주 전인가 (0 = 오늘로 끝나는 최근 7일). 지난 날은
+        하루 기록(po_r), 오늘은 라이브 카운터가 싱싱하다.
+        """
+        days = self._hist_load() or {}
+        today = self._my_workday()
+        t0 = (time.mktime(time.strptime(today, "%Y-%m-%d")) + 12 * 3600
+              - int(off) * 7 * 86400)
+        out = []
+        wd_s = "월화수목금토일"
+        for i in range(6, -1, -1):
+            lt = time.localtime(t0 - i * 86400)
+            key = time.strftime("%Y-%m-%d", lt)
+            n = int((days.get(key) or {}).get("po_r") or 0)
+            if key == today:
+                n = max(n, self._pomo_runs())
+            out.append((wd_s[lt.tm_wday], n, key == today))
+        return out
+
+    def _pomo_hard_badge(self):
+        """홈 '빡집중' 배지를 보일 상태.
+
+        감시(_pomo_hard_active)는 집중 구간에서만 돌지만, 배지는 하드모드
+        **세션이 살아 있는 동안** 유지한다 (요청 — 잠깐 멈춰도 안 꺼지게).
+        '처음으로'나 사이클 종료로 세션이 끝나면(left 0·꺼짐) 내려간다.
+        """
+        if not self._pomo_hard_gate():
+            return False
+        st = self._pomo()
+        return bool(st.get("hard")
+                    and (st["on"] or float(st.get("left") or 0) > 0))
+
     def _pomo_hard_gate(self):
         """하드모드 기능이 이 캐릭터에 열려 있는가.
 
@@ -18177,6 +18230,7 @@ class Mascot:
         if got is not None and got.winfo_exists():
             got.lift()
             return
+        self._pomo_wk_off = 0             # 새로 열면 '이번 주'부터
         cd = self.card
         # 기준 크기 — 실제로는 창 크기에 맞춰 배율(zoom)로 늘리고 줄인다
         BASE_W = 300
@@ -18189,10 +18243,17 @@ class Mascot:
         def u(v):                       # 배율이 들어간 눈금 (지역)
             return self._ui(v) * zst["z"]
 
+        def uf(size, bold=False):
+            """배율을 따라가는 글꼴 — 창을 줄이면 글자도 줄어 안 겹친다."""
+            return self._uf(max(6, int(round(size * zst["z"]))), bold)
+
         def base_h():
             """지금 구성의 내용 높이 (배율 1 기준 눈금)."""
             ty1 = 186 + (100 if self.us.get("pomo_edit") else 20)
-            return ty1 + 28 + 40 + 30 + 42 + 32
+            wk = 0
+            if self.cfg.get("pomo_stats", True):   # '이번 주' (기본 켜짐)
+                wk = 34 + (72 if self.us.get("pomo_week", True) else 0)
+            return ty1 + 28 + 40 + 30 + 44 + wk + 32
 
         W, H = u(BASE_W), u(base_h())
         win = tk.Toplevel(self.root)
@@ -18246,7 +18307,10 @@ class Mascot:
             self._rr_soft(cv, W / 2 - u(38), u(60), W / 2 + u(38), u(84),
                           u(12), fill=self._tint(tone, 0.78), outline="",
                           width=0)
-            cv.create_text(W / 2, u(72), text=name, font=self._uf(10, True),
+            # 알약 정중앙 — Tk 는 한글 글리프가 상자 위쪽에 몰려 그대로
+            # 두면 글자가 위로 떠 보인다 (피드백). 살짝 내린다.
+            cv.create_text(W / 2, u(72) - u(0.5), text=name,
+                           font=uf(10, True),
                            fill=self._shade(tone, 0.25))
             cv.create_text(W / 2, u(118), text="%d:%02d" % (int(left) // 60,
                                                             int(left) % 60),
@@ -18339,52 +18403,131 @@ class Mascot:
             # 오늘 끝낸 세트 — 하루는 새벽 6시로 나뉜다
             sets = self._pomo_sets()
             sy0 = by1 + u(30)          # 위에 '오늘' 라벨이 들어간다
-            sy1 = sy0 + u(42)
-            self._rr_soft(cv, pad, sy0, W - pad, sy1, u(13),
-                          fill="#ffffff", outline=line, width=1)
+            sy1 = sy0 + u(44)
             runs = self._pomo_runs()
-            # 집중(25분 한 번)과 세트(사이클 전체)를 **배지 둘**로.
-            # 글자만 늘어놓으니 눈에 안 들어왔다 (피드백) — 아이콘 +
-            # 큰 숫자 + 작은 라벨을 알약 안에 담는다.
+            # 배지 셋만 — 감싸는 바깥 카드는 직선 변이 배지 사이로
+            # 삐져나와 '이어진 줄'로 보였다 (피드백). 글자는 굵고 크게,
+            # 안쪽 여백은 어느 배율에서도 같은 눈금으로 잰다.
             cv.create_text(W / 2, sy0 - u(11), text="오늘",
-                           font=self._uf(8, True), fill=cd["sub"])
+                           font=uf(9, True), fill=cd["sub"])
             rows8 = [("◔", "집중", runs, "#ffe9ef", "#b3556e"),
                      ("✔", "세트", sets, "#eaf6df", "#5f8352")]
             if self._pomo_hard_gate():
                 rows8.append(("", "하드", self._pomo_hruns(),
                               "#fff0e2", "#c96f2a"))
             n8 = len(rows8)
-            gap8 = u(10 if n8 == 2 else 7)
+            gap8 = u(8)
             bw8 = (W - pad * 2 - gap8 * (n8 - 1)) / float(n8)
+            ip8 = u(9)                     # 배지 안쪽 좌우 여백 (동일)
+            fl8 = uf(9, True)              # 라벨 — 굵고 한 단계 크게
+            fn8 = uf(15, True)             # 숫자
             for i8, (ic8, lab8, val8, bg8, ink8) in enumerate(rows8):
                 x8 = pad + i8 * (bw8 + gap8)
                 on8 = val8 > 0
-                self._rr_soft(cv, x8, sy0, x8 + bw8, sy1, u(13),
+                self._rr_soft(cv, x8, sy0, x8 + bw8, sy1, u(14),
                               fill="#ffffff" if on8 else "#faf8fb",
                               outline=line, width=1)
-                # 왼쪽 동그라미 아이콘 — 셋일 때는 여백을 좁힌다
-                r8 = u(11 if n8 == 2 else 9)
-                cx8 = x8 + u(16 if n8 == 2 else 9) + r8
+                r8 = min(u(11), (sy1 - sy0) / 2 - u(6))
                 cy8 = (sy0 + sy1) / 2
+                cx8 = x8 + ip8 + r8
                 self._oval(cv, cx8 - r8, cy8 - r8, cx8 + r8, cy8 + r8,
                            fill=bg8 if on8 else "#f1eef3", outline="")
                 if lab8 == "하드":       # 불꽃은 그림으로 (BMP 밖 금지)
                     self._flame_icon(cv, cx8, cy8, r8 * 1.5, lit=on8)
                 else:
-                    cv.create_text(cx8, cy8, text=ic8,
-                                   font=self._uf(9 if n8 == 2 else 8, True),
+                    cv.create_text(cx8, cy8 + u(1), text=ic8,
+                                   font=uf(9, True),
                                    fill=ink8 if on8 else "#c9c3ce")
-                # 큰 숫자 + 라벨
-                cv.create_text(cx8 + r8 + u(11 if n8 == 2 else 7),
-                               cy8 + u(1), anchor="w",
-                               text="%d" % val8,
-                               font=self._uf(15 if n8 == 2 else 13, True),
+                # 라벨은 오른쪽 여백에 딱 붙이고, 숫자는 아이콘과 라벨
+                # 사이의 정중앙 — 배율이 줄어도 서로 안 겹친다
+                lw8 = self._mw(lab8, fl8)
+                lx8 = x8 + bw8 - ip8
+                nx8 = (cx8 + r8 + (lx8 - lw8)) / 2
+                cv.create_text(nx8, cy8 - u(1), text="%d" % val8,
+                               font=fn8,
                                fill=cd["text"] if on8 else "#c9c3ce")
-                cv.create_text(x8 + bw8 - u(13 if n8 == 2 else 8),
-                               cy8 + u(2), anchor="e",
-                               text=lab8, font=self._uf(8),
+                cv.create_text(lx8, cy8 - u(1), anchor="e", text=lab8,
+                               font=fl8,
                                fill=cd["sub"] if on8 else "#c9c3ce")
-            cv.create_text(W / 2, sy1 + u(16),
+            # ── 이번 주 — 요일별 집중 미니 그래프 (요청, 게이트) ────
+            wy1 = sy1
+            if self.cfg.get("pomo_stats", True):
+                open9 = bool(self.us.get("pomo_week", True))
+                off9 = max(0, int(getattr(self, "_pomo_wk_off", 0) or 0))
+                hy = sy1 + u(22)
+                # 제목은 '오늘'과 같은 **가로 정중앙** — 토글 화살표는
+                # 기준에 안 넣고 글자 바로 옆에 붙인다 (피드백)
+                ttl9 = ("이번 주" if off9 == 0 else
+                        ("지난주" if off9 == 1 else "%d주 전" % off9))
+                f_h9 = uf(9, True)
+                cv.create_text(W / 2, hy, text=ttl9, font=f_h9,
+                               fill=cd["sub"])
+                tw9 = self._mw(ttl9, f_h9)
+                cv.create_text(W / 2 + tw9 / 2 + u(9), hy,
+                               text="▴" if open9 else "▾",
+                               font=f_h9, fill=cd["sub"])
+                self._pomo_hits.append((W / 2 - tw9 / 2 - u(8),
+                                        hy - u(10),
+                                        W / 2 + tw9 / 2 + u(17),
+                                        hy + u(10), ("week",)))
+                if open9:
+                    # ‹ › — 지난주 넘기기 (요청). 끝에 닿으면 회색
+                    for tx9, ch9, on9, d9 in (
+                            (pad + u(8), "‹", off9 < 8, 1),
+                            (W - pad - u(8), "›", off9 > 0, -1)):
+                        cv.create_text(tx9, hy, text=ch9, font=uf(12, True),
+                                       fill=cd["text"] if on9
+                                       else "#d8d2dc")
+                        if on9:
+                            self._pomo_hits.append(
+                                (tx9 - u(10), hy - u(11), tx9 + u(10),
+                                 hy + u(11), ("wkoff", d9)))
+                wy1 = hy + u(12)
+                if open9:
+                    gy0 = wy1
+                    gy1 = gy0 + u(72)
+                    self._rr_soft(cv, pad, gy0, W - pad, gy1, u(13),
+                                  fill="#ffffff", outline=line, width=1)
+                    wk9 = self._safe_str(self._pomo_week, off9) or []
+                    if wk9:
+                        gw = (W - pad * 2 - u(20)) / float(len(wk9))
+                        mx9 = max([n for _w, n, _t in wk9] + [1])
+                        base_y = gy1 - u(16)
+                        top_y = gy0 + u(22)
+                        for i7, (wd7, n7, is_t) in enumerate(wk9):
+                            cx7 = pad + u(10) + gw * (i7 + 0.5)
+                            if n7 > 0:
+                                bh7 = (u(6) + (base_y - top_y - u(6))
+                                       * (n7 / float(mx9)))
+                                bw7 = min(gw * 0.52, u(14))
+                                self._rr_soft(
+                                    cv, cx7 - bw7 / 2, base_y - bh7,
+                                    cx7 + bw7 / 2, base_y, bw7 / 2,
+                                    fill=cd["fill"] if is_t
+                                    else self._tint(cd["fill"], 0.55),
+                                    outline="", width=0)
+                                cv.create_text(
+                                    cx7, base_y - bh7 - u(7),
+                                    text="%d" % n7,
+                                    font=uf(8, True),
+                                    fill=self._shade(cd["fill"], 0.2))
+                                if n7 == mx9:     # 이 주의 최고엔 별
+                                    cv.create_text(
+                                        cx7, base_y - bh7 - u(16),
+                                        text="★", font=uf(6),
+                                        fill="#e8b64c")
+                            else:                 # 안 한 날은 작은 씨앗
+                                self._oval(cv, cx7 - u(2.2),
+                                           base_y - u(2.2),
+                                           cx7 + u(2.2), base_y + u(2.2),
+                                           fill="#e8e2ec", outline="")
+                            cv.create_text(cx7, gy1 - u(8), text=wd7,
+                                           font=uf(8, True if is_t
+                                                   else False),
+                                           fill=cd["fill"] if is_t
+                                           else cd["sub"])
+                    wy1 = gy1
+            cv.create_text(W / 2, wy1 + u(16),
                            text="창을 닫아도 계속 돌아가요",
                            font=self._uf(8), fill=cd["sub"])
             # 꾸미기(스티커)는 **왼쪽 위**, 시간 조절은 **오른쪽 위**
@@ -18458,6 +18601,21 @@ class Mascot:
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                     self._safe("ui_click", self._ui_click)
+                    if isinstance(act, tuple) and act[0] == "wkoff":
+                        # 지난주 넘기기 — 창을 여는 동안만 기억한다
+                        off0 = max(0, int(getattr(self, "_pomo_wk_off", 0)
+                                          or 0))
+                        self._pomo_wk_off = max(0, min(8, off0 + act[1]))
+                        draw()
+                        return
+                    if isinstance(act, tuple) and act[0] == "week":
+                        # '이번 주' 접었다 폈다 (상태는 설정에 남는다)
+                        self.us["pomo_week"] = not bool(
+                            self.us.get("pomo_week", True))
+                        self._safe("pomo_week_save", self._save_settings)
+                        fit_win()
+                        draw()
+                        return
                     if isinstance(act, tuple) and act[0] == "len":
                         # 시간 바꾸기 (− / +)
                         _, ph9, d9 = act
@@ -22658,8 +22816,9 @@ class Mascot:
                 out["cal"] = self._stamp_pack()
             except Exception:
                 pass
-        if self._pomo_hard_active():
-            out["hm"] = 1               # 하드모드 집중 중 (홈의 '빡집중')
+        if self._pomo_hard_badge():
+            out["hm"] = 1               # 하드모드 세션 중 (홈의 '빡집중' —
+            #                             멈춤·휴식에도 유지, 요청)
         if self.cfg.get("chips"):
             ch9 = self._chip()
             if ch9 != "online":
@@ -35937,7 +36096,8 @@ class Mascot:
         pre, y, mo = self._month_key(off)
         n = self._month_len(y, mo)
         work = {}                               # 일(1~n) → 초
-        st = {"strokes": 0, "clicks": 0, "undo": 0, "dist": 0.0, "keys": 0}
+        st = {"strokes": 0, "clicks": 0, "undo": 0, "dist": 0.0, "keys": 0,
+              "po_r": 0, "po_s": 0, "po_h": 0}   # 뽀모도로 (아래 루프가 합산)
         for d in range(1, n + 1):
             key = "%s-%02d" % (pre, d)
             row = days.get(key)
@@ -35951,6 +36111,14 @@ class Mascot:
                 st[k] += float(row.get(k) or 0)
         if not work and off == 0:
             work[int(self._my_workday()[8:10])] = float(self._today_secs())
+        if off == 0:
+            # 오늘 뽀모도로는 기록보다 라이브 카운터가 싱싱하다 — 그 차이만
+            # 더한다 (기록엔 마지막 _hist_add 시점 값이 들어 있다)
+            row9 = days.get(self._my_workday()) or {}
+            for h_k, live9 in (("po_r", self._pomo_runs()),
+                               ("po_s", self._pomo_sets()),
+                               ("po_h", self._pomo_hruns())):
+                st[h_k] += max(0, int(live9) - int(row9.get(h_k) or 0))
         if not any(v >= 60 for v in work.values()):
             return None
         total = sum(work.values())
@@ -36757,10 +36925,21 @@ class Mascot:
                  % (s9["goal_days"], s9["goal"])),
                 ("레벨", "+%d" % s9["lv_up"]),
             ]
+            rows_ic = list(self.MONTH_ROWS)
+            # 뽀모도로 품목 (요청 — 지금은 내 도로롱만: config 게이트).
+            # 이 달에 한 번이라도 돌렸을 때만 줄이 선다.
+            po_r, po_s = int(s9.get("po_r") or 0), int(s9.get("po_s") or 0)
+            po_h = int(s9.get("po_h") or 0)
+            if self.cfg.get("pomo_stats", True) and (po_r or po_s):
+                v9 = "집중 %d번 · 세트 %d번" % (po_r, po_s)
+                if po_h:
+                    v9 += " · 하드 %d" % po_h
+                vals.insert(6, ("뽀모도로", v9))
+                rows_ic.insert(6, ("⏱", "#fff0e2", "#c96f2a"))
             rh = u(28)
             br9 = u(9)
             for i, (lab9, val9) in enumerate(vals):
-                ic, bg9, ink9 = self.MONTH_ROWS[i]
+                ic, bg9, ink9 = rows_ic[i]
                 if bg9 is None:              # 펜 획은 테마색 배지
                     bg9 = self._tint(cd["fill"], 0.66)
                     ink9 = self._shade(cd["fill"], 0.3)
