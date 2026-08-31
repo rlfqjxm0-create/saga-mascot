@@ -891,6 +891,7 @@ DEFAULT_SETTINGS = {
     "font_pct": 100,      # 타이머·말풍선 글자 크기(%) — 100%가 가장 큼
     "work_apps_only": True,   # 작업 프로그램이 앞에 있을 때만 시간 측정
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
+    "monthly_shown": "",  # 월말정산을 보여 준 마지막 달 ("YYYY-MM")
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
     "pomo_long": 15,      # 네 번째 뒤 긴 휴식(분)
@@ -6579,6 +6580,7 @@ class Mascot:
         self._sos_told = False            # 캐릭터가 안 보인다고 알렸는가
         self._sos_tried = False           # 파츠를 다시 받아 봤는가 (한 번만)
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
+        self._monthly_at = 0.0            # 월말정산 팝업을 마지막에 본 시각
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
         self._snack_on = None            # 책상에 놓인 간식 (눌러야 없어진다)
@@ -16599,6 +16601,8 @@ class Mascot:
             # 캐릭터가 안 보이는 채로 굳지 않게 (지뢰 14 의 최악형).
             # 이것도 _safe 로 감싸면 안 된다 — 구조하는 쪽이 같이 꺼진다.
             self._char_sos(now)
+            # 달이 바뀌면 지난달 정산을 한 번 띄운다 (놓쳐도 다음에)
+            self._monthly_tick(now)
         except Exception:
             pass
         self._room_dead = self._safe_off("room")
@@ -34796,12 +34800,83 @@ class Mascot:
     MONTHLY_OPEN = "2026-09-01"
 
     def _monthly_on(self):
+        """월말정산이 열렸는가.
+
+        **달력 날짜(자정)로 본다** — 작업일(_my_workday)은 사람마다
+        '하루 바뀌는 시각' 설정(0~12시)이 달라서, 그걸 쓰면 같은 날인데
+        누구는 자정에 누구는 낮 12시에 열린다 (실측으로 최대 12시간 차).
+        공개 시점은 전원이 같아야 하므로 설정을 안 타는 값을 쓴다.
+        """
         if self.cfg.get("monthly"):
             return True
         try:
-            return self._my_workday() >= self.MONTHLY_OPEN
+            return time.strftime("%Y-%m-%d") >= self.MONTHLY_OPEN
         except Exception:
             return False
+
+    @staticmethod
+    def _month_prev_key():
+        """직전 **달력** 달 ("YYYY-MM") — 9월 1일이면 2026-08."""
+        t = time.localtime()
+        y9, mo9 = t.tm_year, t.tm_mon - 1
+        if mo9 < 1:
+            y9, mo9 = y9 - 1, 12
+        return "%04d-%02d" % (y9, mo9)
+
+    def _monthly_due(self):
+        """아직 안 보여 준 '지난달 정산'이 있으면 그 달 열쇠.
+
+        깃발이 아니라 **어디까지 보여 줬나**를 저장하고 견준다 (지뢰 30).
+        그래서 그 순간 안 켜져 있었어도, 나중에 켜면 그때 뜬다.
+        """
+        if not self._monthly_on():
+            return None
+        tgt = self._month_prev_key()
+        # 공개 이전 달은 안 띄운다. 기준은 **공개일이 속한 달의 직전 달**
+        # — 9/1 에 열리면 첫 정산은 8월이다. 공개 달(2026-09)로 자르면
+        # 정작 보여 줘야 할 8월이 막힌다 (검사가 잡았다).
+        y0, m0 = int(self.MONTHLY_OPEN[:4]), int(self.MONTHLY_OPEN[5:7]) - 1
+        if m0 < 1:
+            y0, m0 = y0 - 1, 12
+        if tgt < "%04d-%02d" % (y0, m0):
+            return None
+        if str(self.us.get("monthly_shown") or "") >= tgt:
+            return None                # 이미 봤다
+        return tgt
+
+    MONTHLY_POP_WAIT = 25.0      # 켠 뒤 이만큼 지나서 (시작을 안 방해)
+    MONTHLY_POP_GAP = 20.0       # 이 간격으로만 확인한다 (싸게)
+
+    def _monthly_tick(self, now):
+        """달이 바뀌면 지난달 정산을 한 번 띄운다.
+
+        켜 둔 채로 자정을 넘겨도, 그때 꺼져 있다가 나중에 켜도 똑같이
+        뜬다 — '봤다'를 달 단위로 저장하기 때문이다.
+        """
+        if now - getattr(self, "_monthly_at", 0.0) < self.MONTHLY_POP_GAP:
+            return
+        self._monthly_at = now
+        if now - self._born_at < self.MONTHLY_POP_WAIT:
+            return
+        if self._fs_hidden or self._sleeping:
+            return                     # 게임·영상 위에 띄우지 않는다
+        tgt = self._monthly_due()
+        if not tgt:
+            return
+        # **여는 순간 읽음으로 찍는다** (지뢰 30) — 그리다 터져도 다시
+        # 안 뜬다. 저장이 실패해도 메모리 값은 올린다(최악이 한 번 더).
+        self.us["monthly_shown"] = tgt
+        self._safe("monthly_save", self._save_settings)
+        # 그 달을 보여 줄 수 있는 자리를 찾는다 — _month_key 는 작업일
+        # 기준이라 자정~06시 사이에는 off=0 이 이미 지난달이다.
+        off = 0
+        for k9 in range(3):
+            if self._month_key(k9)[0] == tgt:
+                off = k9
+                break
+        self._safe("monthly_say", self._say,
+                   "%s월 정산이 나왔어요!" % int(tgt[5:7]), 6.0)
+        self._safe("monthly_pop", self._monthly_win, off)
 
     def _month_key(self, off=0):
         """off달 전의 (yyyy-mm 접두, 연, 월). off=0 은 이번 달.
@@ -35217,8 +35292,11 @@ class Mascot:
         win.bind("<Configure>", place9, add="+")
         self._monthly_miniref = top
 
-    def _monthly_win(self):
+    def _monthly_win(self, off=0):
         """월말정산 창 — 영수증 한 장에 총 시간·잔디·품목 줄·바코드.
+
+        off 는 처음 보여 줄 달 (0=이번 달). 달이 바뀌어 저절로 뜨는
+        팝업은 '지난달'을 가리키는 자리로 연다.
 
         처음 판은 아래가 텍스트 카드 8칸이라 눈에 안 들어왔다 (피드백).
         지금은 흰 영수증 종이(아래끝 톱니) 위에 품목 줄(아이콘 배지 +
@@ -35238,7 +35316,7 @@ class Mascot:
         W = u(340)
         win = tk.Toplevel(self.root)
         self._monthly_winref = win
-        self._monthly_off = 0
+        self._monthly_off = max(0, int(off or 0))
         self._monthly_tab = 0            # 0=내 정산, 1=방 시상식
         self._safe("month_snap", self._month_snap_note)
         win.title("월말정산")
