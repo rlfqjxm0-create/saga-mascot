@@ -893,6 +893,7 @@ DEFAULT_SETTINGS = {
     "work_apps": "clipstudiopaint.exe, photoshop.exe, blender.exe, illustrator.exe, afterfx.exe, animate.exe, sai2.exe, sai.exe, krita.exe, medibangpaintpro.exe, firealpaca.exe, aseprite.exe, zbrush.exe, substance painter.exe, maya.exe, 3dsmax.exe, cinema 4d.exe",
     "monthly_shown": "",  # 월말정산을 보여 준 마지막 달 ("YYYY-MM")
     "pomo_edit": False,   # 뽀모도로 창의 시간 조절 칸을 펼쳐 두었는가
+    "pomo_hruns": None,   # 오늘 성공한 하드모드 집중 {"day","n"}
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
@@ -6583,6 +6584,22 @@ class Mascot:
         self._sos_tried = False           # 파츠를 다시 받아 봤는가 (한 번만)
         self._born_at = time.time()       # 켠 시각 (얼마나 돌았나)
         self._monthly_at = 0.0            # 월말정산 팝업을 마지막에 본 시각
+        self._hd_at = 0.0                 # 하드모드 감시를 마지막에 돈 시각
+        self._hd_round = 0.0              # 지금 감시 중인 집중 구간 (end 값)
+        self._hd_off0 = None              # 딴짓이 시작된 시각
+        self._hd_bad = 0.0                # 이번 집중의 딴짓 누적(초)
+        self._hd_nag = 0                  # 잔소리 단계
+        self._hd_fail = False             # 이번 집중 실패 확정
+        self._hd_guard_shown = False      # 감시 캐릭터를 띄웠는가 (스트릭당 1회)
+        self._pomo_guardref = None        # 감시 캐릭터 창
+        self._hd_layer = None             # 빨간 깜빡임 레이어 (실패면 False)
+        self._hd_flash_on = False         # 지금 켜져(보여) 있는가
+        self._hd_flash_im = None          # 카드 크기의 빨간 그림 (캐시)
+        self._hd_flash_key = None         # 그 그림의 (w, h)
+        self._hd_flash_xy = None          # 마지막으로 올린 화면 좌표
+        self._hd_sheet = None             # 실루엣용 마지막 매끈 시트
+        self._guard_dim = None            # 감시 때 화면을 어둡게 하는 레이어
+        self._pomo_bar_last = None        # 카드 위 뽀모 줄의 직전 상태
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
         self._snack_on = None            # 책상에 놓인 간식 (눌러야 없어진다)
@@ -8446,7 +8463,7 @@ class Mascot:
         if os.path.isdir(pomo_dir):
             vol = float(self.us.get("poke_volume", 40))
             got = {}
-            for nm in ("start", "end"):
+            for nm in ("start", "end", "hard", "hard2"):
                 one = os.path.join(pomo_dir, nm + ".wav")
                 if not os.path.isfile(one):
                     continue
@@ -10626,15 +10643,27 @@ class Mascot:
         self._chip_imgs[key] = got
         return got or None
 
-    def _yt_bar(self):
-        """카드 위 줄(음악·환경음)이 요구하는 여백. 아무것도 없으면 0.
+    POMO_TOP_EXTRA = 30          # 재생 단추 줄 **위**에 뽀모 아이콘이 설 때
 
-        환경음 알약과 노래 버튼은 같은 줄에 나란히 놓으므로 여백은 한 번만
-        잡는다 — 둘 중 하나라도 있으면 그 줄이 선다.
+    def _yt_music_row(self):
+        """재생 단추 줄이 서 있는가 (개인 노래·모두의 플리)."""
+        if not getattr(self, "timer_on", False):
+            return False
+        # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
+        if not (self.us.get("yt_url") or getattr(self, "_pl_on", False)):
+            return False
+        return bool(self._yt_on())
+
+    def _yt_bar_music(self):
+        """음악·환경음이 요구하는 여백 (예전의 _yt_bar 그대로).
+
+        음악 단추의 표시 조건이 이 값이다 — 뽀모도로 몫까지 합친
+        _yt_bar 를 그대로 보게 하면 **뽀모만 돌아도 음악 단추가 같은
+        자리에 그려져** 시계 클릭을 가로챈다 (검사가 잡았다).
         """
         if self._amb_on_any():
             return YT_BAR
-        if not self.timer_on:
+        if not getattr(self, "timer_on", False):
             return 0
         # 모두의 플레이리스트로 틀었을 때도 이 줄이 선다. 그 경우 주소가
         # us["yt_url"] 에 안 들어가서, 개인 노래를 한 번도 안 넣은 사람은
@@ -10643,6 +10672,23 @@ class Mascot:
         if not (self.us.get("yt_url") or getattr(self, "_pl_on", False)):
             return 0
         return YT_BAR if self._yt_on() else 0
+
+    def _yt_bar(self):
+        """카드 위 줄(음악·환경음·뽀모도로)이 요구하는 여백. 없으면 0.
+
+        같은 줄에 나란히 놓으므로 여백은 한 번만 잡는다. 단 **재생 단추
+        줄이 있으면 뽀모 아이콘은 그 위에 한 줄 더** 선다 (요청).
+        """
+        base9 = self._yt_bar_music()
+        pomo9 = (bool(getattr(self, "timer_on", False))
+                 and self._pomo_running())
+        if not pomo9:
+            return base9
+        if self._yt_music_row():
+            return base9 + self.POMO_TOP_EXTRA
+        # 하드모드 불꽃이 시계 위로 솟는다 — 여기 여유가 없으면 불꽃
+        # 윗부분이 창에 잘린다 (제보)
+        return (base9 or YT_BAR) + 12
 
     def _amb_on_any(self):
         """환경음이 하나라도 돌고 있는가 (카드 위 알약을 띄울지).
@@ -11060,7 +11106,7 @@ class Mascot:
         곡이 하나라 지금처럼 재생/멈춤 하나만.
         """
         self._pl_ctl = []
-        if not self._yt_bar():
+        if not self._yt_bar_music():   # 뽀모만 도는 줄에는 음악 단추 없음
             return
         c, cd = self.canvas, self.card
         g = self._card_geom()
@@ -13371,15 +13417,16 @@ class Mascot:
         big = bool(getattr(self, "_bubble_big", False))
         # **글꼴을 줄이지 않는다** (요청). 창 폭에 안 들어가면 줄을 나눠
         # 말풍선이 아래로 자란다 — 긴 말이 깨알같이 작아지던 것을 고쳤다.
-        font = self._cf_n(max(6, round((11 if big else 9)
+        # 기본 크기도 한 단계 키웠다 (요청 — 9/11 → 11/13pt, 여백도 함께).
+        font = self._cf_n(max(6, round((13 if big else 11)
                                        * getattr(self, "font_k", 1.0))))
         lines = self._wrap_lines(text, font, self.W - 46)
         text = "\n".join(lines)
         lh = self._mh(font) + (4 if len(lines) > 1 else 0)
         w = max(max(self._mw(ln, font) for ln in lines)
-                + (42 if big else 34), 74)
-        h0 = max(44 if big else 36, self._mh(font) + (26 if big else 20))
-        h = max(h0, lh * len(lines) + (26 if big else 20))
+                + (48 if big else 40), 84)
+        h0 = max(50 if big else 42, self._mh(font) + (30 if big else 24))
+        h = max(h0, lh * len(lines) + (30 if big else 24))
         # 단추가 붙는 말풍선 — 글자 아래에 자리를 더 낸다. 지금 떠 있는
         # 말과 짝이 맞을 때만 (다른 말로 바뀌었으면 단추는 따라가지 않는다)
         act = getattr(self, "_bubble_act", None)
@@ -13391,7 +13438,7 @@ class Mascot:
             bh = self._mh(bf) + 12
             w = max(w, bw + 28)
             h += bh + 8
-        w = min(w, max(74, self.W - 10))   # 창보다 넓어지면 좌우가 잘린다
+        w = min(w, max(84, self.W - 10))   # 창보다 넓어지면 좌우가 잘린다
         cx = self.card_cx
         if time.time() < self.hat_until:      # 고깔모자를 가리지 않게 옆으로
             cx += 42
@@ -15700,16 +15747,53 @@ class Mascot:
 
     LV_PAD = 4                   # 칭호 알약과 카드 윗변 사이 여백
 
-    def _draw_pomo_badge(self, bx, by, br, now):
-        """뽀모도로가 도는 동안만 뜨는 작은 시계 — 카드 오른쪽 위.
+    def _draw_pomo_top(self, now):
+        """카드 **위** 뽀모도로 아이콘 (요청 — 창 안이 아니라 음악 줄처럼).
+
+        · 아무것도 없으면 카드 위 정중앙
+        · 환경음 알약이 있으면 그 옆
+        · 재생 단추 줄이 있으면 그 줄 **위**, 가로 정중앙
+        하드모드 집중 중에는 시계가 불탄다 — 시계 뒤로 불꽃이 솟고
+        테두리·바늘이 주황이 된다 (요청).
+        """
+        if not (self._pomo_running() and self.timer_on):
+            return
+        c = self.canvas
+        g = self._card_geom()
+        mid = (g["x0"] + g["x1"]) / 2
+        r = 14.0
+        if self._yt_music_row():
+            bx, by = mid, g["y0"] - YT_BAR - 16    # 재생 줄 위 정중앙
+        elif self._amb_on_any():
+            ab = getattr(self, "_amb_btn", None)   # 환경음 알약 옆 (요청)
+            if ab:
+                bx, by = ab[2] + r + 6, (ab[1] + ab[3]) / 2
+            else:
+                bx, by = mid + 34, g["y0"] - 24
+        else:
+            bx, by = mid, g["y0"] - 24             # 혼자면 정중앙
+        hard9 = self._pomo_hard_active()
+        if hard9:
+            # 불타는 시계 — 불꽃을 시계 뒤에 먼저 (위로 솟아 보인다)
+            fl9 = self._flame_img(int(r * 2.4))
+            if fl9 is not None:
+                # 창 위로 넘치면 그만큼만 내린다 (윗부분 잘림 방지 — 제보)
+                fy9 = max(fl9.height() / 2 + 1, by - r * 0.95)
+                c.create_image(bx, fy9, image=fl9)
+        self._safe("pomo_badge", self._draw_pomo_badge, bx, by, r, now,
+                   hard9)
+        self._pomo_badge = (bx, by, r)
+
+    def _draw_pomo_badge(self, bx, by, br, now, hard=False):
+        """뽀모도로가 도는 동안만 뜨는 작은 시계.
 
         색상키 창이라 반투명을 못 쓴다 (지뢰 65) — 불투명한 동그라미에
         바늘 두 개를 긋는다. 바늘은 남은 시간에 따라 돈다.
         """
         c, cd = self.canvas, self.card
-        col = self._shade(cd["fill"], 0.15)
-        self._oval(c, bx - br, by - br, bx + br, by + br,
-                   fill="#ffffff", outline=col, width=2)
+        col = "#e8842f" if hard else self._shade(cd["fill"], 0.15)
+        self._soft_circle(c, bx, by, br, "#fff6ea" if hard else "#ffffff",
+                          col)
         # 분침 — 이번 구간이 얼마나 남았나 (한 바퀴 = 그 구간 전체)
         st = self._pomo()
         # `_pomo_len` 은 **이미 초**다. 여기서 60 을 또 곱하고 있어서
@@ -15827,13 +15911,7 @@ class Mascot:
             r = 5 + pulse * 0.5
             self._oval(c, px - r, py - r, px + r, py + r, fill=dot, outline="")
 
-        # 뽀모도로가 도는 동안 카드 오른쪽 위에 작은 시계 — 누르면 창이 열린다.
-        # 레벨 줄은 가운데 정렬이라 이 자리는 비어 있다.
-        self._pomo_badge = None
-        if self._pomo_running():
-            bx, by, br = x1 - 13, g["y0"] + 13, 9
-            self._safe("pomo_badge", self._draw_pomo_badge, bx, by, br, now)
-            self._pomo_badge = (bx, by, br)
+        # 뽀모도로 시계는 카드 **위** 줄로 옮겼다 (_draw_pomo_top — 요청).
 
         if self.has_clock and self.clock_open:
             # 세로 카드: 상태(위) → 시계(가운데) → 시간(아래) — 모두 정중앙 정렬
@@ -16206,6 +16284,10 @@ class Mascot:
         # 시트가 못 알아본 그림은 진짜 캔버스로 넘어간다 (안 보이는 것보다
         # 낫다). 0이 아니면 그만큼 캐릭터 위에 떠 있다는 뜻이라 검사가 본다.
         self._smooth_spill = sheet.spill
+        # 하드모드 빨간 깜빡임이 캐릭터 실루엣을 알 수 있게 마지막 시트를
+        # 들고 있는다 (게이트 밖 캐릭터는 참조도 안 남긴다 — 비용 0)
+        if self._pomo_hard_gate():
+            self._hd_sheet = sheet.im
         lay = self._char_lay
         if lay is None:
             return
@@ -17117,10 +17199,12 @@ class Mascot:
                 "phase": str(d.get("phase") or "focus"),
                 "end": float(d.get("end") or 0.0),
                 "left": float(d.get("left") or 0.0),
-                "round": int(d.get("round") or 0)}
+                "round": int(d.get("round") or 0),
+                "hard": bool(d.get("hard"))}
 
     def _pomo_save(self, st):
         self.us["pomo"] = {"on": bool(st["on"]), "phase": st["phase"],
+                           "hard": bool(st.get("hard")),
                            "end": round(float(st["end"]), 1),
                            "left": round(float(st["left"]), 1),
                            "round": int(st["round"])}
@@ -17278,7 +17362,14 @@ class Mascot:
         st = self._pomo()
         ph = st["phase"]
         if ph == "focus":
-            if say:                    # 건너뛰기(say=False)는 안 센다
+            hard9 = self._pomo_hard_active(st)
+            if say and hard9 and not self._hd_fail:
+                # 하드모드 성공 — 불꽃 하나
+                self._safe("pomo_hruns", self._pomo_hrun_done)
+                self._safe("hard_ok_say", self._say,
+                           "하드모드 성공! 정말 대단해!", 5.0, True)
+            if say and not (hard9 and self._hd_fail):
+                # 하드모드 실패면 일반 집중으로도 안 센다 (벌칙)
                 self._safe("pomo_runs", self._pomo_run_done)
             st["round"] = int(st["round"]) + 1
             nxt = "long" if st["round"] % self.POMO_ROUNDS == 0 else "short"
@@ -17346,8 +17437,634 @@ class Mascot:
         if snd is not None:
             self._safe("pomo_snd", snd.play)
 
+    # ── 하드모드 (config "pomo_hard" — 지금은 내 도로롱만) ──────────
+    # 집중 구간에 작업 프로그램이 아닌 창이 앞에 오면: 5초에 잔소리
+    # (계속되면 점점 단호) · 10초에 화면 한가운데 감시 캐릭터 · 딴짓
+    # 누적이 집중 길이의 10% 를 넘으면 그 집중은 실패.
+
+    HARD_NAG_AT = 5.0            # 첫 잔소리까지 (초)
+    HARD_GUARD_AT = 10.0         # 감시 캐릭터 등장까지 (초)
+    HARD_NAG_GAP = 15.0          # 잔소리 사이 간격
+    HARD_FAIL_RATE = 0.10        # 실패 기준 — 집중 길이의 10%
+    HARD_NAGS = ("지금은 집중 시간이야!",
+                 "집중! 그림으로 돌아와!",
+                 "…계속 이러면 이번 집중은 실패야.")
+    HARD_WATCH = ("흠…… 다 보고 있어.", "팔짱 끼고 기다리는 중.",
+                  "그림이 기다리고 있잖아!")
+
+    def _pomo_hard_gate(self):
+        """하드모드 기능이 이 캐릭터에 열려 있는가.
+
+        처음엔 내 도로롱만 열었다가 전체에 풀었다 (요청) — 기본 켜짐,
+        config 에 false 를 적으면 그 캐릭터만 닫힌다.
+        """
+        return bool(self.cfg.get("pomo_hard", True))
+
+    def _pomo_hard_active(self, st=None):
+        """지금 하드모드 감시가 도는 중인가 — 집중 구간에서만."""
+        if not self._pomo_hard_gate():
+            return False
+        st = st or self._pomo()
+        return bool(st.get("hard") and st["on"] and st["phase"] == "focus")
+
+    def _pomo_hard_snd(self, warn=False):
+        """하드모드 알림음.
+
+        기본은 hard.wav(일반 알림), 딴짓이 심해지면(단호한 잔소리·감시
+        캐릭터·실패) hard2.wav(경고). 없는 쪽은 있는 쪽으로 물러난다.
+        """
+        got = self.pomosnd if isinstance(self.pomosnd, dict) else {}
+        if warn:
+            snd = got.get("hard2") or got.get("hard")
+        else:
+            snd = got.get("hard") or got.get("hard2")
+        snd = snd or got.get("start") or self.roomsnd
+        if snd is not None:
+            self._safe("hard_snd", snd.play)
+
+    def _pomo_hruns(self):
+        """오늘 성공한 하드모드 집중 수 (작업일 경계)."""
+        d = self.us.get("pomo_hruns")
+        if not isinstance(d, dict):
+            return 0
+        if str(d.get("day") or "") != self._my_workday():
+            return 0
+        try:
+            return max(0, int(d.get("n") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _pomo_hrun_done(self):
+        self.us["pomo_hruns"] = {"day": self._my_workday(),
+                                 "n": self._pomo_hruns() + 1}
+        self._safe("pomo_hruns_save", self._save_settings)
+
+    def _pomo_hard_tick(self, now):
+        """하드모드 감시 — 초 단위면 충분해서 1초에 한 번만 돈다."""
+        if now - self._hd_at < 1.0:
+            return
+        dt = min(3.0, now - self._hd_at) if self._hd_at else 1.0
+        self._hd_at = now
+        st = self._pomo()
+        if not self._pomo_hard_active(st):
+            self._hd_round = 0.0
+            self._hd_off0 = None
+            self._hd_guard_shown = False
+            self._pomo_guard_close()
+            return
+        # 새 집중 구간이 시작됐으면 판을 리셋 (end 가 구간마다 다르다)
+        if st["end"] != self._hd_round:
+            self._hd_round = st["end"]
+            self._hd_bad = 0.0
+            self._hd_off0 = None
+            self._hd_nag = 0
+            self._hd_fail = False
+            self._hd_guard_shown = False
+            self._pomo_guard_close()
+        # 앞 창 판정 — 캐릭터 자신을 눌렀을 때는 직전 판정 유지.
+        # 판정이 터지면 '작업 중'으로 본다 (지뢰 110 — _safe_str 로 감싸면
+        # 오류가 곧 딴짓이 되어 애먼 잔소리를 한다).
+        try:
+            work = bool(self._fg_is_work(now))
+            if not work and self._fg_is_self():
+                # 캐릭터 타이머 자신을 조작하는 것은 딴짓이 아니다 (요청).
+                # _fg_is_work 는 자기 창에서 '직전 판정 유지'라, 딴짓하다
+                # 캐릭터를 누르면 딴짓이 이어지는 것으로 세고 있었다.
+                work = True
+        except Exception:
+            work = True
+        if work:
+            if self._hd_off0 is not None:
+                self._hd_off0 = None
+                self._hd_nag = 0
+                self._hd_guard_shown = False
+                self._pomo_guard_close()
+            return
+        # 딴짓 중 ------------------------------------------------------
+        if self._hd_off0 is None:
+            self._hd_off0 = now
+        off_for = now - self._hd_off0
+        self._hd_bad += dt
+        # 실패 판정 (한 번만 통보 — 감시는 계속한다)
+        limit = self._pomo_len("focus") * self.HARD_FAIL_RATE
+        if not self._hd_fail and self._hd_bad > limit:
+            self._hd_fail = True
+            self._say("딴짓이 너무 길었어… 이번 집중은 실패야.", 6.0,
+                      big=True)
+            self._pomo_hard_snd(warn=True)
+        # 잔소리 — 5초부터, 15초 간격으로 점점 단호하게
+        if off_for >= self.HARD_NAG_AT:
+            due = self.HARD_NAG_AT + self._hd_nag * self.HARD_NAG_GAP
+            if off_for >= due:
+                line = self.HARD_NAGS[min(self._hd_nag,
+                                          len(self.HARD_NAGS) - 1)]
+                self._say(line, 5.0, big=True)
+                # 세 번째부터는 경고음 (점점 단호 — 요청)
+                self._pomo_hard_snd(warn=self._hd_nag >= 2)
+                self._hd_nag += 1
+        # 감시 캐릭터 — 10초부터, 스트릭당 한 번 (닫으면 다시 안 온다)
+        if off_for >= self.HARD_GUARD_AT and not self._hd_guard_shown:
+            self._hd_guard_shown = True
+            self._safe("pomo_guard", self._pomo_guard_open)
+
+    @staticmethod
+    def _guard_arm_flat(path):
+        """팔 파츠를 '전체 외곽선이 둘린 수평 팔'로 만든다 (실패하면 None).
+
+        팔 파츠는 몸에 붙는 쪽에 외곽선이 없어 그대로 겹치면 선이 엉킨다
+        (X자 팔짱용). 실루엣과 채움색·선색은 파츠에서 그대로 얻고,
+        외곽선만 실루엣 둘레에 새로 두른다. 축은 알파 분포의 주축(PCA)
+        으로 재서 수평으로 눕힌다 — 캐릭터마다 파츠가 누운 방향이 달라도
+        따라간다.
+        """
+        try:
+            im = Image.open(path).convert("RGBA")
+            im = im.crop(im.getbbox())
+            # 채움색·선색 — 밝은 픽셀 / 어두운 픽셀 평균
+            fr = fg = fb = fn = 0
+            sr = sg = sb = sn = 0
+            px = im.load()
+            for y in range(0, im.height, 2):
+                for x in range(0, im.width, 2):
+                    r, g, b, a = px[x, y]
+                    if a < 200:
+                        continue
+                    lum = 0.299 * r + 0.587 * g + 0.114 * b
+                    if lum >= 130:
+                        fr += r
+                        fg += g
+                        fb += b
+                        fn += 1
+                    else:
+                        sr += r
+                        sg += g
+                        sb += b
+                        sn += 1
+            fill = ((fr // fn, fg // fn, fb // fn, 255) if fn
+                    else (255, 252, 252, 255))
+            stroke = ((sr // sn, sg // sn, sb // sn, 255) if sn
+                      else (40, 32, 40, 255))
+            a0 = im.getchannel("A").point(lambda v: 255 if v >= 96 else 0)
+            r9 = max(2, int(round(min(im.size) * 0.09)))
+            pad = r9 + 2
+            big = Image.new("RGBA", (im.width + pad * 2,
+                                     im.height + pad * 2), (0, 0, 0, 0))
+            a2 = Image.new("L", big.size, 0)
+            a2.paste(a0, (pad, pad))
+            lay = Image.new("RGBA", big.size, stroke)
+            lay.putalpha(a2.filter(ImageFilter.MaxFilter(2 * r9 + 1)))
+            big.alpha_composite(lay)
+            lay2 = Image.new("RGBA", big.size, fill)
+            lay2.putalpha(a2)
+            big.alpha_composite(lay2)
+            # 주축 각도 (알파 분포의 공분산)
+            aa = big.getchannel("A")
+            W, H = aa.size
+            pp = aa.load()
+            step = max(1, min(W, H) // 64)
+            s = sx = sy = 0.0
+            pts = []
+            for y in range(0, H, step):
+                for x in range(0, W, step):
+                    w = pp[x, y]
+                    if w >= 32:
+                        pts.append((x, y, w))
+                        s += w
+                        sx += w * x
+                        sy += w * y
+            if s > 0:
+                mx, my = sx / s, sy / s
+                sxx = syy = sxy = 0.0
+                for x, y, w in pts:
+                    dx, dy2 = x - mx, y - my
+                    sxx += w * dx * dx
+                    syy += w * dy2 * dy2
+                    sxy += w * dx * dy2
+                ang = math.degrees(0.5 * math.atan2(2 * sxy, sxx - syy))
+                big = big.rotate(ang, resample=Image.BICUBIC, expand=True)
+            return big.crop(big.getbbox())
+        except Exception:
+            return None
+
+    def _guard_compose(self):
+        """파츠로 팔짱 낀 전신을 합성 — 팔은 **원본 크기 그대로, 회전만**
+        (요청). 실패하면 None (seat 폴백).
+
+        seat.png 는 펜·키보드 손이 구워져 있어 뺄 수 없다 (지뢰 39).
+        책상·몸·머리 합성판(_tilt_base_awake)은 이미 있으니, 그 사이에
+        arm_right 를 X자로 끼워 다시 쌓는다. 펜 파츠는 아예 안 그린다
+        (요청). 머리를 맨 위에 얹으므로 팔 어깨 쪽(외곽선이 없는 끝)은
+        저절로 가려진다.
+        """
+        if getattr(self, "_tilt_base_awake", None) is None:
+            return None
+        lay9 = self.layout
+        if not all(isinstance(lay9.get(n), dict)
+                   for n in ("desk", "body_open", "arm_right")):
+            return None
+        ap9 = os.path.join(self.dir, "arm_right.png")
+        if not os.path.isfile(ap9):
+            return None
+        s, p9 = self.s, self.TILT_PAD
+        W9, H9 = int(self.W), int(self.H)
+        im = Image.new("RGBA", (W9, H9), (0, 0, 0, 0))
+        for nm in ("desk", "body_open"):
+            if self._pil_cache.get(nm) is None:
+                return None
+
+        def put9(nm):
+            x9, y9 = lay9[nm]["pos"]
+            im.alpha_composite(self._pil_cache[nm],
+                               (round(x9 * s), round(y9 * s)))
+
+        put9("body_open")
+        put9("desk")                # 몸통 → 책상 → 팔 → 머리 순 (요청)
+        aw9, ah9 = lay9["arm_right"]["size"]
+        arm0 = Image.open(ap9).convert("RGBA").resize(
+            (max(1, round(aw9 * s)), max(1, round(ah9 * s))),
+            Image.LANCZOS)
+        bx9 = lay9["body_open"]["pos"][0]
+        bw9 = lay9["body_open"]["size"][0]
+        cxg = (bx9 + bw9 / 2) * s
+        cyg = (lay9["desk"]["pos"][1] - 30) * s
+        # 오른팔(원본 방향: 어깨 오른쪽 위 → 손 왼쪽 아래)이 아래,
+        # 반전한 왼팔이 위 — 눈으로 맞춘 값 (proto_guard2)
+        for ang9, flip9, dx9 in ((-14, False, 34), (14, True, -34)):
+            a9 = (arm0.transpose(Image.FLIP_LEFT_RIGHT) if flip9
+                  else arm0)
+            a9 = a9.rotate(ang9, resample=Image.BICUBIC, expand=True)
+            im.alpha_composite(a9, (int(cxg - a9.width / 2 + dx9 * s),
+                                    int(cyg - a9.height / 2 + 6 * s)))
+        im.alpha_composite(
+            self._tilt_base_awake.crop((p9, p9, p9 + W9, p9 + H9)), (0, 0))
+        return im
+
+    def _guard_photo(self, h):
+        """감시 캐릭터 — 팔짱 낀 앉은 모습 (요청).
+
+        1순위: 파츠 합성(_guard_compose — 펜 없음·원본 팔 X자).
+        2순위: seat.png 에 파츠 재외곽선 팔을 얹은 것.
+        3순위: 팔짱 없는 seat 그대로.
+        """
+        ck = ("guard", int(h))
+        got = self._soft_cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            base9 = self._guard_compose()
+        except Exception:
+            base9 = None
+        if base9 is not None:
+            try:
+                bb9 = base9.getbbox()
+                if bb9:
+                    im = base9.crop(bb9)
+                    w9 = max(1, round(im.width * (h / float(im.height))))
+                    im = im.resize((w9, int(h)), Image.LANCZOS)
+                    a9 = im.getchannel("A").point(
+                        lambda v: 255 if v >= 128 else 0)
+                    im.putalpha(a9)        # 색상키 창용 이분화 (지뢰 65)
+                    got = ImageTk.PhotoImage(im)
+                    if len(self._soft_cache) > self.SOFT_MAX:
+                        for old in list(self._soft_cache)[:
+                                                          self.SOFT_MAX // 2]:
+                            self._soft_cache.pop(old, None)
+                    self._soft_cache[ck] = got
+                    return got
+            except Exception:
+                pass
+        p = self._room_art_file(self.char, "seat.png")
+        if not p:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            try:
+                W0, H0 = im.size
+                S9 = 3
+                big = im.resize((W0 * S9, H0 * S9), Image.LANCZOS)
+                d9 = ImageDraw.Draw(big)
+                try:
+                    meta = _load_json(os.path.join(os.path.dirname(p),
+                                                   "seat_meta.json"), {})
+                    dr = float((meta or {}).get("desk") or 0.78)
+                except Exception:
+                    dr = 0.78
+                dy = H0 * dr
+                flat = None
+                for nm9 in ("arm_right.png", "arm_key.png"):
+                    ap9 = os.path.join(os.path.dirname(p), nm9)
+                    if os.path.isfile(ap9):
+                        flat = self._guard_arm_flat(ap9)
+                        if flat is not None:
+                            break
+                cxg = W0 * 0.5 * S9
+                cyg = (dy + H0 * 0.030) * S9
+                if flat is not None:
+                    # 진짜 팔 파츠로 X자 (요청) — 길이·굵기를 책상 폭에
+                    # 맞추고 ±24도로 겹친다
+                    L9 = max(1, int(W0 * 0.56 * S9))
+                    T9 = max(1, int(W0 * 0.135 * S9))
+                    a1 = flat.resize((L9, T9), Image.LANCZOS)
+                    for ang9, flip9 in ((-24, False), (24, True)):
+                        arm9 = (a1.transpose(Image.FLIP_LEFT_RIGHT)
+                                if flip9 else a1)
+                        arm9 = arm9.rotate(ang9, resample=Image.BICUBIC,
+                                           expand=True)
+                        big.alpha_composite(
+                            arm9, (int(cxg - arm9.width / 2),
+                                   int(cyg - arm9.height / 2)))
+                else:
+                    # 파츠가 없으면 그림체를 흉내 낸 캡슐로 물러난다
+                    lw9 = max(2.0, W0 * 0.020)
+                    ink9 = (40, 32, 40, 255)
+
+                    def capsule(ax, ay, bx, by, t):
+                        for col9, tt in ((ink9, t),
+                                         ((255, 252, 252, 255),
+                                          t - lw9 * 2)):
+                            d9.line([(ax * S9, ay * S9),
+                                     (bx * S9, by * S9)],
+                                    fill=col9, width=int(tt * S9))
+                            for px, py in ((ax, ay), (bx, by)):
+                                rr = tt * S9 / 2
+                                d9.ellipse([px * S9 - rr, py * S9 - rr,
+                                            px * S9 + rr, py * S9 + rr],
+                                           fill=col9)
+
+                    t9 = W0 * 0.165
+                    capsule(W0 * 0.24, dy + H0 * 0.008,
+                            W0 * 0.60, dy + H0 * 0.070, t9)
+                    capsule(W0 * 0.76, dy + H0 * 0.008,
+                            W0 * 0.40, dy + H0 * 0.070, t9)
+                im = big.resize((W0, H0), Image.LANCZOS)
+            except Exception:
+                pass                       # 팔짱만 포기 — seat 그대로
+            w9 = max(1, round(im.width * (h / float(im.height))))
+            im = im.resize((w9, int(h)), Image.LANCZOS)
+            a9 = im.getchannel("A").point(lambda v: 255 if v >= 128 else 0)
+            im.putalpha(a9)                # 색상키 창용 이분화 (지뢰 65)
+            got = ImageTk.PhotoImage(im)
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:   # 지뢰 18·42
+            for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old, None)
+        self._soft_cache[ck] = got
+        return got
+
+    def _pomo_guard_close(self):
+        """감시 창만 거둔다 — _hd_guard_shown 은 건드리지 않는다.
+
+        여기서 깃발을 지우면 사용자가 클릭으로 닫는 순간 다음 틱에 곧바로
+        다시 떠 버린다. 깃발은 딴짓이 끝났을 때(리셋 자리)만 지운다.
+        """
+        dim9 = getattr(self, "_guard_dim", None)
+        if dim9 is not None and dim9 is not False:
+            try:
+                dim9.hide()
+            except Exception:
+                pass
+        top = getattr(self, "_pomo_guardref", None)
+        if top is not None:
+            try:
+                if top.winfo_exists():
+                    top.destroy()
+            except Exception:
+                pass
+            self._pomo_guardref = None
+
+    def _pomo_guard_open(self):
+        """화면 한가운데 감시 캐릭터 — 느낌표와 감시 말풍선. 클릭하면
+        사라진다 (타이머 캐릭터와는 별개의 색상키 투명 창)."""
+        got = getattr(self, "_pomo_guardref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    return
+            except Exception:
+                pass
+        u = self._ui
+        cd = self.card
+        line9 = self._tint(cd["fill"], 0.55)
+        # 크기를 먼저 셈한다 — 캐릭터가 '헉' 할 만큼 크고 (요청),
+        # 말풍선은 머리 바로 위에 꼬리로 이어 붙는다.
+        CH9 = u(350)                       # 캐릭터 키
+        f9 = self._uf(14, True)
+        say9 = self.HARD_WATCH[int(time.time()) % len(self.HARD_WATCH)]
+        tw9 = self._mw(say9, f9)
+        bh9 = int(self._mh(f9) + u(18))
+        bw9 = int(tw9 + u(30))
+        tl9 = u(13)                        # 꼬리 높이
+        mw = int(max(u(430), bw9 + u(24)))
+        mh = int(u(12) + bh9 + tl9 + u(10) + CH9 + u(8))
+        top = tk.Toplevel(self.root)
+        self._pomo_guardref = top
+        top.overrideredirect(True)
+        bg = TRANSPARENT
+        try:
+            if not IS_MAC:
+                top.attributes("-transparentcolor", TRANSPARENT)
+            else:
+                bg = cd["panel"]
+        except Exception:
+            bg = cd["panel"]
+        try:
+            top.configure(bg=bg, bd=0, highlightthickness=0)
+            top.attributes("-topmost", True)
+        except Exception:
+            pass
+        cv9 = tk.Canvas(top, width=mw, height=mh, bg=bg,
+                        highlightthickness=0, bd=0)
+        cv9.pack()
+        keep9 = {}
+        me9 = (self._safe_str(self._guard_photo, CH9)
+               or self._seat_photo(self.char, CH9, hard=True))
+        # _safe_str 은 None 을 "" 로 바꾼다 (지뢰 63) — truthy 로 거른다
+        if not me9:
+            me9 = None
+        cxm = mw / 2
+        base9 = mh - u(8)
+        ytop9 = base9 - CH9                # 캐릭터 머리 위끝 언저리
+        if me9 is not None:
+            keep9["me"] = me9
+            cv9.create_image(cxm, base9, image=me9, anchor="s")
+        # 말풍선 — 몸통과 꼬리를 한 실루엣으로 (지뢰 123 — 선으로 이으면
+        # 이음매·테두리 끊김·뭉툭한 끝이 한꺼번에 온다)
+        ybb9 = ytop9 + u(12) - tl9         # 몸통 아랫변 (꼬리끝이 머리에 닿게)
+        ybt9 = ybb9 - bh9
+        bx09 = cxm - bw9 / 2
+        soft9 = self._soft_shape(bw9, bh9, min(bh9 / 2, u(16)), "#ffffff",
+                                 line9,
+                                 tail=(bw9 / 2 - u(9), bw9 / 2 + u(9),
+                                       bw9 / 2 - u(2), tl9))
+        if soft9 is not None:
+            keep9["bub"] = soft9
+            cv9.create_image(bx09 - 1, ybt9 - 1, image=soft9, anchor="nw")
+        else:                              # PIL 실패 — Tk 도형으로
+            self._rr(cv9, bx09, ybt9, bx09 + bw9, ybb9, u(14),
+                     fill="#ffffff", outline=line9, width=2)
+            cv9.create_polygon(cxm - u(9), ybb9 - 1, cxm + u(9), ybb9 - 1,
+                               cxm - u(2), ybb9 + tl9,
+                               fill="#ffffff", outline=line9, width=1)
+        cv9.create_text(cxm, ybt9 + bh9 / 2, text=say9, font=f9,
+                        fill=cd["text"])
+        top._keep = keep9
+        anim9 = {"after": None, "t0": time.time()}
+
+        def tick9():
+            if not top.winfo_exists():
+                return
+            try:
+                t9 = time.time() - anim9["t0"]
+                cv9.delete("bang")
+                # 느낌표 — 머리 옆에서 통통 (주황, 도형이라 맥에서도 같다)
+                bob9 = abs(math.sin(t9 * 3.4)) * u(10)
+                bx9 = cxm + u(118)
+                by9 = ytop9 + u(52) - bob9
+                cv9.create_line(bx9, by9 - u(36), bx9, by9 - u(14),
+                                width=int(u(8)), capstyle="round",
+                                fill="#f2a13c", tags="bang")
+                # 색상키 창이라 반투명 가장자리를 못 쓴다 (지뢰 65) —
+                # 작은 점이라 Tk 원 그대로 둔다
+                cv9.create_oval(bx9 - u(4.2), by9 - u(4.2),
+                                bx9 + u(4.2), by9 + u(4.2),
+                                fill="#f2a13c", outline="", tags="bang")
+            except Exception:
+                pass
+            anim9["after"] = top.after(70, tick9)
+
+        anim9["after"] = top.after(60, tick9)
+
+        def gone9(_e=None):
+            if anim9["after"] is not None:      # 지뢰 20
+                try:
+                    top.after_cancel(anim9["after"])
+                except Exception:
+                    pass
+                anim9["after"] = None
+        top.bind("<Destroy>", lambda e: gone9() if e.widget is top
+                 else None)
+        cv9.bind("<Button-1>", lambda _e: self._pomo_guard_close())
+        # 주 화면 한가운데
+        try:
+            sw9 = top.winfo_screenwidth()
+            sh9 = top.winfo_screenheight()
+            top.geometry("%dx%d+%d+%d" % (mw, mh, (sw9 - mw) // 2,
+                                          (sh9 - mh) // 2))
+        except Exception:
+            pass
+        # 캐릭터 빼고 화면 전체를 살짝 어둡게 (요청 — 캐릭터가 잘 보이게).
+        # FxLayer 는 클릭이 통과하므로 (WS_EX_TRANSPARENT) 어두워도 하던
+        # 일은 그대로 할 수 있고, 캐릭터를 누르면 같이 걷힌다.
+        if not IS_MAC:
+            try:
+                dim9 = self._guard_dim
+                if dim9 is None:
+                    dim9 = FxLayer(self.root)
+                    self._guard_dim = dim9
+                if getattr(dim9, "ok", False):
+                    dim9.show(Image.new("RGBA",
+                                        (int(top.winfo_screenwidth()),
+                                         int(top.winfo_screenheight())),
+                                        (0, 0, 0, 110)), 0, 0)
+                    # 덮개가 감시 캐릭터까지 덮지 않게 — 창을 그 위로.
+                    # geometry 직후의 lift 는 이동을 버린다 (지뢰 15)
+                    top.after_idle(top.lift)
+            except Exception:
+                pass
+        self._pomo_hard_snd(warn=True)
+
+    def _hd_flash_tick(self, now):
+        """딴짓 중 타이머 카드에 빨간 반투명 깜빡임 (요청 — 윈도우 전용).
+
+        색상키 창은 반투명을 못 내므로 (지뢰 65) 파티클과 같은
+        UpdateLayeredWindow 레이어(FxLayer)를 카드 자리에 하나 더 얹는다.
+        깜빡임은 켜짐/꺼짐 토글이라 푸시가 1초에 한 번뿐이다. 레이어를
+        못 만들면 다시 해 보지 않는다 (지뢰 119).
+        """
+        want = (IS_WIN and self._hd_off0 is not None
+                and self._pomo_hard_active()
+                and (now % 1.0) < 0.55)
+        lay = self._hd_layer
+        if not want:
+            if self._hd_flash_on and lay is not None and lay is not False:
+                lay.hide()
+                self._hd_flash_on = False
+            return
+        if lay is None:
+            try:
+                lay = FxLayer(self.root)
+            except Exception:
+                lay = False
+            self._hd_layer = lay
+        if not getattr(lay, "ok", False):
+            return
+        g9 = self._card_geom()
+        w9 = int(round(g9["x1"] - g9["x0"]))
+        h9 = int(round(g9["y1"] - g9["y0"]))
+        if w9 <= 0 or h9 <= 0:
+            return
+        # 카드 조각 — 모서리를 매끈하게 (3배로 그려 줄인 것, 크기별 캐시)
+        if self._hd_flash_im is None or self._hd_flash_key != (w9, h9):
+            S9 = 3
+            p9 = Image.new("RGBA", (w9 * S9, h9 * S9), (0, 0, 0, 0))
+            ImageDraw.Draw(p9).rounded_rectangle(
+                [0, 0, w9 * S9 - 1, h9 * S9 - 1], radius=16 * S9,
+                fill=(255, 64, 64, 84))
+            self._hd_flash_im = p9.resize((w9, h9), Image.LANCZOS)
+            self._hd_flash_key = (w9, h9)
+        x9 = self.root.winfo_rootx()
+        y9 = self.root.winfo_rooty()
+        if not self._hd_flash_on or self._hd_flash_xy != (x9, y9):
+            # 카드 + **캐릭터 실루엣**을 한 장에 (요청 — '캐릭터 타이머
+            # 전체'. 할 일·마감 말풍선은 딴 창이라 저절로 빠진다).
+            # 실루엣은 매끈 시트의 알파에서 얻는다 — 색상키 경로(시트
+            # 없음)에서는 카드만 깜빡인다.
+            W9, H9 = max(1, int(self.W)), max(1, int(self.H))
+            im9 = Image.new("RGBA", (W9, H9), (0, 0, 0, 0))
+            im9.paste(self._hd_flash_im,
+                      (int(round(g9["x0"])), int(round(g9["y0"]))))
+            sh9 = self._hd_sheet
+            if sh9 is not None and sh9.size == (W9, H9):
+                try:
+                    a9 = sh9.getchannel("A").point(
+                        lambda v: 84 if v > 24 else 0)
+                    red9 = Image.new("RGBA", (W9, H9), (255, 64, 64, 0))
+                    red9.putalpha(a9)
+                    im9 = Image.alpha_composite(im9, red9)
+                except Exception:
+                    pass
+            # 말풍선은 빨갛게 하지 않는다 (요청 — 잔소리가 읽혀야 한다).
+            # ImageDraw 는 섞지 않고 픽셀을 갈아 끼우므로 (0,0,0,0) 이
+            # 그 자리를 도려낸다. +18 은 꼬리 몫.
+            bb9 = getattr(self, "_bubble_box", None)
+            if bb9:
+                try:
+                    ImageDraw.Draw(im9).rectangle(
+                        [bb9[0] - 4, bb9[1] - 4, bb9[2] + 4, bb9[3] + 18],
+                        fill=(0, 0, 0, 0))
+                except Exception:
+                    pass
+            lay.show(im9, x9, y9)
+            self._hd_flash_on = True
+            self._hd_flash_xy = (x9, y9)
+
     def _pomo_tick(self, now):
         """구간이 끝났는지 본다 (프레임마다 — 값 비교뿐이라 싸다)."""
+        # 카드 위 줄이 서고 접히는 것을 따라 창 높이를 다시 잡는다
+        # (환경음 토글과 같은 이유 — 지뢰 145: 카드만 움직이고 oy 가
+        # 안 따라가면 캐릭터가 밀린다)
+        bar9 = (bool(self.timer_on and self._pomo_running()),
+                self._yt_music_row())
+        if bar9 != self._pomo_bar_last:
+            self._pomo_bar_last = bar9
+            self._safe("card", self._relayout_card)
+        if self._pomo_hard_gate():
+            try:                       # 감시는 판정과 분리 — 죽어도 타이머는 돈다
+                self._pomo_hard_tick(now)
+                self._hd_flash_tick(now)
+            except Exception:
+                self._log_error("pomo_hard")
         st = self._pomo()
         if not st["on"] or st["end"] <= 0:
             return
@@ -17358,6 +18075,101 @@ class Mascot:
         got = getattr(self, "_pomo_draw", None)
         if got is not None:
             self._safe("pomo_draw", got)
+
+    def _flame_img(self, h, lit=True):
+        """불꽃 그림 한 장 (캐시) — 4배로 그려 줄인다. 실패하면 None.
+
+        폴리곤 두 장짜리 옛 판은 '못생겼다'(피드백). 베지어 실루엣으로
+        혀가 굽은 겉불꽃 + 속불꽃 + 심지 세 겹을 그린다. 이모지 불꽃은
+        BMP 밖이라 맥 Tk 가 죽으니 (지뢰 4) 그림으로만 만든다.
+        """
+        h = max(8, int(round(h)))
+        ck = ("flame", h, bool(lit))
+        got = self._soft_cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            S = 4
+            W2 = max(6, int(round(h * 0.80)))
+            im = Image.new("RGBA", (W2 * S, h * S), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+
+            def bez(p0, p1, p2, p3, n=14):
+                out9 = []
+                for i9 in range(n + 1):
+                    t9 = i9 / float(n)
+                    m9 = 1.0 - t9
+                    out9.append((m9 ** 3 * p0[0] + 3 * m9 * m9 * t9 * p1[0]
+                                 + 3 * m9 * t9 * t9 * p2[0] + t9 ** 3 * p3[0],
+                                 m9 ** 3 * p0[1] + 3 * m9 * m9 * t9 * p1[1]
+                                 + 3 * m9 * t9 * t9 * p2[1]
+                                 + t9 ** 3 * p3[1]))
+                return out9
+
+            def sil(cx9, top9, w9, h9):
+                """불꽃 실루엣 — 끝이 오른쪽으로 살짝 휜 물방울 + 왼쪽
+                오목한 혀."""
+                tip = (cx9 + w9 * 0.10, top9)
+                pts9 = []
+                pts9 += bez(tip, (cx9 + w9 * 0.40, top9 + h9 * 0.16),
+                            (cx9 + w9 * 0.52, top9 + h9 * 0.34),
+                            (cx9 + w9 * 0.50, top9 + h9 * 0.56))
+                pts9 += bez((cx9 + w9 * 0.50, top9 + h9 * 0.56),
+                            (cx9 + w9 * 0.48, top9 + h9 * 0.86),
+                            (cx9 + w9 * 0.30, top9 + h9),
+                            (cx9, top9 + h9))
+                pts9 += bez((cx9, top9 + h9),
+                            (cx9 - w9 * 0.30, top9 + h9),
+                            (cx9 - w9 * 0.48, top9 + h9 * 0.86),
+                            (cx9 - w9 * 0.50, top9 + h9 * 0.56))
+                pts9 += bez((cx9 - w9 * 0.50, top9 + h9 * 0.56),
+                            (cx9 - w9 * 0.54, top9 + h9 * 0.28),
+                            (cx9 - w9 * 0.12, top9 + h9 * 0.36),
+                            (cx9 - w9 * 0.16, top9 + h9 * 0.16))
+                pts9 += bez((cx9 - w9 * 0.16, top9 + h9 * 0.16),
+                            (cx9 - w9 * 0.18, top9 + h9 * 0.05),
+                            (cx9 - w9 * 0.02, top9 + h9 * 0.04), tip)
+                return pts9
+
+            HS, WS = h * S, W2 * S
+            cx0 = WS * 0.5
+            col = "#ff8a2a" if lit else "#c9c3ce"
+            core = "#ffc93c" if lit else "#e6e1ea"
+            hot = "#fff3bd" if lit else "#f4f1f7"
+            d.polygon(sil(cx0, HS * 0.02, WS * 0.94, HS * 0.96), fill=col)
+            d.polygon(sil(cx0, HS * 0.36, WS * 0.58, HS * 0.62), fill=core)
+            d.polygon(sil(cx0, HS * 0.64, WS * 0.30, HS * 0.34), fill=hot)
+            got = ImageTk.PhotoImage(im.resize((W2, h), Image.LANCZOS))
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:   # 지뢰 18·42
+            for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old, None)
+        self._soft_cache[ck] = got
+        return got
+
+    def _flame_icon(self, cv, cx, cy, h, lit=True, tags="dyn"):
+        """작은 불꽃 — h 는 픽셀 높이. 그림이 안 되면 폴리곤으로 물러난다.
+
+        폴백의 outline="" 필수 (지뢰 139 — width=0 폴리곤은 맥에서 검정
+        헤어라인).
+        """
+        got = self._flame_img(h, lit)
+        if got is not None:
+            cv.create_image(cx, cy, image=got, tags=tags)
+            return
+        fw, fh = h * 0.7, h
+        col = "#f2812c" if lit else "#c9c3ce"
+        core = "#ffd166" if lit else "#eee9f1"
+        cv.create_polygon(cx, cy - fh * 0.5, cx + fw * 0.42,
+                          cy - fh * 0.05, cx + fw * 0.3, cy + fh * 0.32,
+                          cx, cy + fh * 0.42, cx - fw * 0.3, cy + fh * 0.32,
+                          cx - fw * 0.42, cy - fh * 0.05,
+                          fill=col, outline="", smooth=True, tags=tags)
+        cv.create_polygon(cx, cy - fh * 0.15, cx + fw * 0.2,
+                          cy + fh * 0.18, cx, cy + fh * 0.35,
+                          cx - fw * 0.2, cy + fh * 0.18,
+                          fill=core, outline="", smooth=True, tags=tags)
 
     def _pomo_win(self):
         """뽀모도로 창 — 환경음 창과 같은 결로 캔버스에 둥근 카드."""
@@ -17536,29 +18348,40 @@ class Mascot:
             # 큰 숫자 + 작은 라벨을 알약 안에 담는다.
             cv.create_text(W / 2, sy0 - u(11), text="오늘",
                            font=self._uf(8, True), fill=cd["sub"])
-            bw8 = (W - pad * 2 - u(10)) / 2.0
-            for i8, (ic8, lab8, val8, bg8, ink8) in enumerate((
-                    ("◔", "집중", runs, "#ffe9ef", "#b3556e"),
-                    ("✔", "세트", sets, "#eaf6df", "#5f8352"))):
-                x8 = pad + i8 * (bw8 + u(10))
+            rows8 = [("◔", "집중", runs, "#ffe9ef", "#b3556e"),
+                     ("✔", "세트", sets, "#eaf6df", "#5f8352")]
+            if self._pomo_hard_gate():
+                rows8.append(("", "하드", self._pomo_hruns(),
+                              "#fff0e2", "#c96f2a"))
+            n8 = len(rows8)
+            gap8 = u(10 if n8 == 2 else 7)
+            bw8 = (W - pad * 2 - gap8 * (n8 - 1)) / float(n8)
+            for i8, (ic8, lab8, val8, bg8, ink8) in enumerate(rows8):
+                x8 = pad + i8 * (bw8 + gap8)
                 on8 = val8 > 0
                 self._rr_soft(cv, x8, sy0, x8 + bw8, sy1, u(13),
                               fill="#ffffff" if on8 else "#faf8fb",
                               outline=line, width=1)
-                # 왼쪽 동그라미 아이콘
-                r8 = u(11)
-                cx8 = x8 + u(16) + r8
+                # 왼쪽 동그라미 아이콘 — 셋일 때는 여백을 좁힌다
+                r8 = u(11 if n8 == 2 else 9)
+                cx8 = x8 + u(16 if n8 == 2 else 9) + r8
                 cy8 = (sy0 + sy1) / 2
                 self._oval(cv, cx8 - r8, cy8 - r8, cx8 + r8, cy8 + r8,
                            fill=bg8 if on8 else "#f1eef3", outline="")
-                cv.create_text(cx8, cy8, text=ic8, font=self._uf(9, True),
-                               fill=ink8 if on8 else "#c9c3ce")
+                if lab8 == "하드":       # 불꽃은 그림으로 (BMP 밖 금지)
+                    self._flame_icon(cv, cx8, cy8, r8 * 1.5, lit=on8)
+                else:
+                    cv.create_text(cx8, cy8, text=ic8,
+                                   font=self._uf(9 if n8 == 2 else 8, True),
+                                   fill=ink8 if on8 else "#c9c3ce")
                 # 큰 숫자 + 라벨
-                cv.create_text(cx8 + r8 + u(11), cy8 + u(1), anchor="w",
+                cv.create_text(cx8 + r8 + u(11 if n8 == 2 else 7),
+                               cy8 + u(1), anchor="w",
                                text="%d" % val8,
-                               font=self._uf(15, True),
+                               font=self._uf(15 if n8 == 2 else 13, True),
                                fill=cd["text"] if on8 else "#c9c3ce")
-                cv.create_text(x8 + bw8 - u(13), cy8 + u(2), anchor="e",
+                cv.create_text(x8 + bw8 - u(13 if n8 == 2 else 8),
+                               cy8 + u(2), anchor="e",
                                text=lab8, font=self._uf(8),
                                fill=cd["sub"] if on8 else "#c9c3ce")
             cv.create_text(W / 2, sy1 + u(16),
@@ -17585,6 +18408,19 @@ class Mascot:
                            fill="#ffffff" if edit9 else cd["sub"])
             self._pomo_time_btn = (tx8 - br - u(3), u(26) - br - u(3),
                                    tx8 + br + u(3), u(26) + br + u(3))
+            # 하드모드 켜고 끄기 — 시간 조절 아이콘 **바로 왼쪽**에 같은
+            # 크기로 (요청 — 1~2px 여유만 두고 붙인다)
+            self._pomo_hard_btn = None
+            if self._pomo_hard_gate():
+                hx8 = tx8 - br * 2 - u(2)
+                hard_on = bool(st.get("hard"))
+                self._safe("soft_btn", self._soft_dot, cv, hx8, u(26), br,
+                           "#ffe3c4" if hard_on else "#ffffff",
+                           outline="#e8a34c" if hard_on else line,
+                           width=1, shadow=True)
+                self._flame_icon(cv, hx8, u(26), u(18), lit=hard_on)
+                self._pomo_hard_btn = (hx8 - br - u(3), u(26) - br - u(3),
+                                       hx8 + br + u(3), u(26) + br + u(3))
 
         def on_click(e):
             if self._safe("stk_press", self._stk_press, "pomo", e.x, e.y):
@@ -17601,6 +18437,22 @@ class Mascot:
                 self.us["pomo_edit"] = not bool(self.us.get("pomo_edit"))
                 self._safe("pomo_edit_save", self._save_settings)
                 fit_win()               # 접힘/펼침에 맞춰 창 높이도
+                draw()
+                return
+            hb = getattr(self, "_pomo_hard_btn", None)
+            if hb and hb[0] <= e.x <= hb[2] and hb[1] <= e.y <= hb[3]:
+                self._safe("ui_click", self._ui_click)
+                st9 = self._pomo()
+                if st9["on"]:
+                    # 도는 중에 끄면 벌써 딴짓한 판이 무효가 된다 — 잠근다
+                    self._say("하드모드는 타이머를 멈춘 뒤에 바꿀 수 있어!",
+                              4.0)
+                else:
+                    st9["hard"] = not st9.get("hard")
+                    self._pomo_save(st9)
+                    self._say("하드모드 켰어! 집중 중에 딴짓하면 알지?"
+                              if st9["hard"] else "하드모드 껐어. 편하게 하자.",
+                              4.0)
                 draw()
                 return
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
@@ -18811,6 +19663,9 @@ class Mascot:
             self._pl_ctl = []
             self._safe("music_btn", self._draw_music_btn)
             self._safe("amb_btn", self._draw_amb_btn)
+            # 뽀모 시계도 이 줄에 — 자리는 구역 밖에서 지운다 (같은 이유)
+            self._pomo_badge = None
+            self._safe("pomo_top", self._draw_pomo_top, now)
             # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
             # 남으면 점이 안 보이는데도 그 자리를 누르면 창이 뜬다
             self._dot_btn = None
@@ -21803,6 +22658,8 @@ class Mascot:
                 out["cal"] = self._stamp_pack()
             except Exception:
                 pass
+        if self._pomo_hard_active():
+            out["hm"] = 1               # 하드모드 집중 중 (홈의 '빡집중')
         if self.cfg.get("chips"):
             ch9 = self._chip()
             if ch9 != "online":
@@ -23854,7 +24711,7 @@ class Mascot:
         who = [(q.get("slot"), q.get("n"), q.get("lv"), q.get("ti"),
                 q.get("t"), q.get("p"), q.get("s"), q.get("cdh"),
                 q.get("m"), q.get("gm"), q.get("gd"), q.get("dl"),
-                q.get("cp"))
+                q.get("cp"), q.get("hm"))
                for q in self.room_people]
         fresh = [k for k, v in self._room_flash.items()
                  if v > time.time() - 1.6]
@@ -25098,7 +25955,12 @@ class Mascot:
             lv = int(p.get("lv") or 0)
             head = ("Lv.%d  %s" % (lv, name)) if lv > 0 else name
             ink = P["sub"] if off else P["ink"]
-            hw2 = self._room_tw(cv, head, f_name)
+            # 하드모드 집중 중 — 이름 알약 안 왼쪽에 불꽃 (카드 보기의
+            # '빡집중' 배지와 같은 신호. 심플엔 자리가 없어 불꽃만 —
+            # 지뢰 147: 그리는 경로가 둘이면 하나가 빠진다)
+            hm2 = bool(p.get("hm")) and not off
+            fw2 = 15 * k if hm2 else 0
+            hw2 = self._room_tw(cv, head, f_name) + fw2
             sg = p.get("sg") if isinstance(p.get("sg"), dict) else None
             tagt = ""
             if sg and self._song_ok(sg.get("u")):
@@ -25109,7 +25971,10 @@ class Mascot:
                           tx + hw2 + 9 * k, cyc - 5 * k, 11 * k,
                           fill="#ffffff", outline=self._tint(col, 0.4),
                           width=1.5)
-            cv.create_text(tx, cyc - 16 * k, anchor="w", text=head,
+            if hm2:
+                self._flame_icon(cv, tx + 4 * k, cyc - 16 * k, 16 * k,
+                                 tags="dyn")
+            cv.create_text(tx + fw2, cyc - 16 * k, anchor="w", text=head,
                            font=f_name, fill=ink, tags="dyn")
             # 칭호는 이름 아래, 한마디는 일반모드처럼 말풍선으로.
             # 안 켰어도 칭호를 그대로 둔다 — '안 켰어요'는 말풍선이 맡는다
@@ -26965,6 +27830,33 @@ class Mascot:
         self._chip_icons[ck] = got
         return got or None
 
+    def _room_hard_tag(self, cv, px0, py0, k, kx0):
+        """홈 카드 이름 알약 왼쪽의 '빡집중' 배지 — 불꽃 + 글자.
+
+        불꽃은 도형으로 그린다 (이모지는 BMP 밖이라 맥 Tk 가 죽는다)."""
+        f9 = (UI_FONT, max(5, int(round(7 * k))), "bold")
+        txt = "빡집중"
+        tw0 = self._room_tw(cv, txt, f9)
+        h9 = 16 * k
+        fw = 11 * k                         # 불꽃 폭
+        x1 = px0 - 6 * k
+        room = x1 - (kx0 + 4 * k)
+        if tw0 + fw + 14 * k > room:
+            txt = ""                        # 좁으면 불꽃만
+            tw0 = 0
+        w9 = tw0 + fw + (12 * k if txt else 8 * k)
+        x0 = x1 - w9
+        if x0 < kx0 + 2 * k:
+            return
+        cy = py0 + h9 / 2 + 4 * k
+        self._rr(cv, x0, cy - h9 / 2, x1, cy + h9 / 2, h9 / 2,
+                 fill="#fff0e2", outline="#e8a34c", width=max(1, int(k)))
+        fx = x0 + 5 * k + fw / 2
+        self._flame_icon(cv, fx, cy, h9 * 0.82, tags="dyn")
+        if txt:
+            cv.create_text(x0 + 8 * k + fw, cy, anchor="w", text=txt,
+                           font=f9, fill="#a35c1f", tags="dyn")
+
     def _room_chip_tag(self, cv, p, px0, py0, k, col, kx0, slot=""):
         """홈 카드의 상태 칩 — 이름 알약 왼쪽에 그림 + 짧은 낱말.
 
@@ -26972,6 +27864,10 @@ class Mascot:
         마찬가지다 — 옛 판이 새 상태를 보내와도 조용히 넘어간다.
         낱말이 짧아 잘릴 일이 거의 없다 (정 좁으면 그림만 남긴다).
         """
+        # 하드모드 집중 중이면 상태 칩보다 '빡집중'이 먼저다 (요청)
+        if (p or {}).get("hm"):
+            self._room_hard_tag(cv, px0, py0, k, kx0)
+            return
         key = str((p or {}).get("cp") or "")
         if not key or key == "online" or key not in self.CHIP_KEYS:
             return
