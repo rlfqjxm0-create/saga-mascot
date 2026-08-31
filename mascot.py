@@ -5994,6 +5994,9 @@ class Mascot:
                 os.path.join(self.state_dir, UPDATE_READ)):
             # 설치 직후 — 지난 소식을 '못 본 것'으로 세우지 않는다
             self._safe("update_read", self._update_mark_read)
+        # 지난 날 도장이 남은 뽀모도로 카운터를 기록으로 옮긴다 — 06시
+        # 경계를 꺼진 채 넘긴 날은 _day_roll 이 이 일을 못 한다.
+        self._safe("pomo_flush", self._pomo_hist_flush)
         # 펜 추적 진단 (config의 pen_diag를 켠 캐릭터만). 어느 화면으로
         # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
         self._diag_left = self.PEN_DIAG_MAX if self.cfg.get("pen_diag") else 0
@@ -12281,6 +12284,10 @@ class Mascot:
                 auto9 = self._safe_str(self._brief_data, prev9) or None
             # 지난 하루를 그 날짜로 남긴다 (기록은 덮어쓰기라 겹치지 않는다)
             self._safe("history", self._hist_add, prev9)
+        # 뽀모도로 카운터는 날짜 도장이 있어 위의 '1분 이상' 문과 무관하게
+        # 옮긴다 — 경계를 꺼진 채 넘기면 _today_secs 가 0이라 어제
+        # 뽀모도로가 통째로 사라졌다 (월요일 세트 사건).
+        self._safe("pomo_flush", self._pomo_hist_flush)
         self.day_key = key
         self.day_base = self.work_secs
         self.zero_at = self.work_secs       # 카드도 오늘치부터
@@ -17353,6 +17360,7 @@ class Mascot:
 
     def _pomo_set_done(self):
         """한 세트(사이클 전체)를 끝냈다 — 오늘 몫으로 하나 센다."""
+        self._safe("pomo_flush", self._pomo_hist_flush)
         self.us["pomo_sets"] = {"day": self._my_workday(),
                                 "n": self._pomo_sets() + 1}
         self._safe("pomo_sets_save", self._save_settings)
@@ -17376,6 +17384,9 @@ class Mascot:
 
     def _pomo_run_done(self):
         """집중 한 번을 끝냈다 (건너뛰기는 세지 않는다)."""
+        # 어제 도장이 남은 카운터를 여기서 덮으면 그 값이 영영 사라진다
+        # — 덮기 전에 기록으로 옮긴다.
+        self._safe("pomo_flush", self._pomo_hist_flush)
         self.us["pomo_runs"] = {"day": self._my_workday(),
                                 "n": self._pomo_runs() + 1}
         self._safe("pomo_runs_save", self._save_settings)
@@ -17560,20 +17571,78 @@ class Mascot:
     HARD_WATCH = ("흠…… 다 보고 있어.", "팔짱 끼고 기다리는 중.",
                   "그림이 기다리고 있잖아!")
 
+    def _pomo_hist_flush(self):
+        """지난 날 도장이 남은 뽀모도로 카운터를 그 날짜 기록으로 옮긴다.
+
+        _day_roll 의 기록 옮기기는 '어제 1분 이상 일했나'(_today_secs)를
+        보는데, 06시 경계를 꺼진 채 넘기고 다시 켜면 재시작 직후의 그
+        값이 0이라 어제 뽀모도로가 통째로 사라졌다 (월요일 세트 사건 —
+        06:01 부팅 로그가 증거). 카운터에는 날짜 도장이 있으니 그 날짜로
+        직접 넣는다. max 덮어쓰기라 몇 번을 불러도 같다 (지뢰 32).
+        옮긴 카운터는 지운다 — 어차피 지난 날이라 화면에서는 0으로
+        읽히고, 남겨 두면 부를 때마다 파일을 다시 쓴다.
+        """
+        if not self.cfg.get("history"):
+            return
+        today = self._my_workday()
+        pend = {}
+        for us_k, h_k in (("pomo_runs", "po_r"), ("pomo_sets", "po_s"),
+                          ("pomo_hruns", "po_h")):
+            d9 = self.us.get(us_k)
+            if not isinstance(d9, dict):
+                continue
+            day9 = str(d9.get("day") or "")
+            try:
+                n9 = max(0, int(d9.get("n") or 0))
+            except (TypeError, ValueError):
+                n9 = 0
+            # 미래 날짜는 시계가 뒤로 간 것 — 오염으로 보고 버린다
+            if n9 and len(day9) == 10 and day9 < today:
+                pend.setdefault(day9, {})[(us_k, h_k)] = n9
+        if not pend:
+            return
+        path = self._hist_path()
+        d = _load_json(path)
+        if _load_failed(path):
+            self._log_error("pomo_flush_locked")
+            return                      # 파일이 있는데 못 읽었다 (지뢰 92)
+        if not isinstance(d, dict):
+            d = {}
+        days = d.get("days") if isinstance(d.get("days"), dict) else {}
+        for day9, got in pend.items():
+            row = days.get(day9) or {}
+            for (_us_k, h_k), n9 in got.items():
+                row[h_k] = max(int(row.get(h_k) or 0), n9)
+            days[day9] = row
+        for k in sorted(days)[:-self.HIST_DAYS]:
+            days.pop(k, None)
+        try:
+            _save_json(path, {"days": days,
+                              "cum_m": float(d.get("cum_m", 0.0) or 0.0)})
+        except Exception:
+            return                      # 저장 실패면 카운터를 지키고 다음에
+        for day9, got in pend.items():
+            for us_k, _h_k in got:
+                self.us[us_k] = None
+        self._safe("pomo_flush_save", self._save_settings)
+
     def _pomo_week(self, off=0):
         """이레치 집중 횟수 — [(요일 글자, n, 오늘인가)].
 
-        off 는 몇 주 전인가 (0 = 오늘로 끝나는 최근 7일). 지난 날은
-        하루 기록(po_r), 오늘은 라이브 카운터가 싱싱하다.
+        주는 **월요일에 시작하는 달력 주**다 (요청 — 요일이 늘 같은
+        자리에 온다). off 는 몇 주 전인가 (0 = 오늘이 든 주). 지난 날은
+        하루 기록(po_r), 오늘은 라이브 카운터가 싱싱하다. 오늘 뒤의
+        요일은 아직 0이라 씨앗점으로 보인다.
         """
         days = self._hist_load() or {}
         today = self._my_workday()
-        t0 = (time.mktime(time.strptime(today, "%Y-%m-%d")) + 12 * 3600
-              - int(off) * 7 * 86400)
+        lt9 = time.strptime(today, "%Y-%m-%d")
+        mon = (time.mktime(lt9) + 12 * 3600
+               - lt9.tm_wday * 86400 - int(off) * 7 * 86400)
         out = []
         wd_s = "월화수목금토일"
-        for i in range(6, -1, -1):
-            lt = time.localtime(t0 - i * 86400)
+        for i in range(7):
+            lt = time.localtime(mon + i * 86400)
             key = time.strftime("%Y-%m-%d", lt)
             n = int((days.get(key) or {}).get("po_r") or 0)
             if key == today:
@@ -17637,6 +17706,7 @@ class Mascot:
             return 0
 
     def _pomo_hrun_done(self):
+        self._safe("pomo_flush", self._pomo_hist_flush)
         self.us["pomo_hruns"] = {"day": self._my_workday(),
                                  "n": self._pomo_hruns() + 1}
         self._safe("pomo_hruns_save", self._save_settings)
