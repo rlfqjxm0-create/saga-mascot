@@ -895,6 +895,8 @@ DEFAULT_SETTINGS = {
     "pomo_edit": False,   # 뽀모도로 창의 시간 조절 칸을 펼쳐 두었는가
     "pomo_hruns": None,   # 오늘 성공한 하드모드 집중 {"day","n"}
     "pomo_week": True,    # 뽀모도로 창의 '이번 주' 그래프를 펴 두었는가
+    "note_sent": None,    # 오늘 보낸 쪽지 수 {"day","n"} (하루 상한)
+    "note_desk_ack": 0,   # 책상 봉투를 어디까지 봤나 (쪽지 번호)
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
@@ -6602,6 +6604,14 @@ class Mascot:
         self._guard_dim = None            # 감시 때 화면을 어둡게 하는 레이어
         self._pomo_bar_last = None        # 카드 위 뽀모 줄의 직전 상태
         self._pomo_wk_off = 0             # '이번 주' 그래프의 몇 주 전인가
+        self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
+        self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
+        self._notes_mem = None            # 받은 쪽지 캐시 (파일은 한 번만)
+        self._notes_sent_mem = None       # 보낸 쪽지 캐시
+        self._note_winref = None          # 쪽지함 창
+        self._nw = None                   # 쪽지함 창 상태 (view·peer·page)
+        self._mail_box = None             # 책상 봉투의 클릭 자리
+        self._mail_bub = None             # 편지 도착 말풍선의 글 (붙잡음 판별)
         self._snack_cache = {}           # 크기별로 만들어 둔 간식 그림
         self._hand_cache = {}            # 쓰담 손 그림 (크기·각도별)
         self._snack_on = None            # 책상에 놓인 간식 (눌러야 없어진다)
@@ -8750,6 +8760,32 @@ class Mascot:
                 self._char_lay.place_above(self._main_hwnd)
             except Exception:
                 pass
+        # 편지 — 책상 봉투를 누르면 쪽지함이 열리고, 캐릭터 어디를 눌러도
+        # 봉투·도착 말풍선은 들어간다 (요청 — 한 번 눌러야 꺼진다)
+        mb0 = getattr(self, "_mail_box", None)
+        if mb0 and mb0[0] <= e.x <= mb0[2] and mb0[1] <= e.y <= mb0[3]:
+            self._note_desk_ack()
+            self._safe("ui_click", self._ui_click)
+            # 창을 여는 일은 다음 차례로 (지뢰 15류 — 클릭 처리 중 창 생성 금지)
+            self.root.after_idle(
+                lambda: self._safe("note_win", self._note_win))
+            self._press = None
+            return
+        if self._safe_str(self._note_desk_new):
+            # 그려진 프레임과 무관하게, 안 들어간 봉투가 있으면 들인다
+            # (지뢰 24 — 내부 깃발이 아니라 판정식으로)
+            self._safe("note_ack", self._note_desk_ack)
+        mw0 = getattr(self, "_mail_bub", None)
+        if mw0 and self.bubble and self.bubble[0] == mw0:
+            bb0 = getattr(self, "_bubble_btn", None)
+            if not (bb0 and bb0[0] <= e.x <= bb0[2]
+                    and bb0[1] <= e.y <= bb0[3]):
+                # '열어 보기' 단추가 아닌 곳 — 말풍선만 내리고 계속 간다
+                self.bubble = None
+                self._bubble_hold = None
+                self._bubble_act = None
+                self._bubble_btn = None
+                self._mail_bub = None
         # 여백 직접 조정 중 — 누른 자리를 기준으로 위아래 끌기를 시작한다.
         # 다른 반응(쓰다듬·슬라임·창 옮기기)은 모두 건너뛴다.
         if self._gap_adj:
@@ -19997,6 +20033,7 @@ class Mascot:
         self._snack_box = None      # 구역 밖에서 지운다 (지뢰 14)
         self._safe("snack_on", self._draw_snack_on, now)
         self._safe("fortune_open", self._draw_fortune_open, now)
+        self._safe("mail_desk", self._draw_mail_desk, now)
         self._safe("char_fx", self._draw_char_fx, now)
         # 여기까지가 시트다 — 캐릭터와 **그 위에 얹는 것들**(zzZ·모자·간식·
         # 말풍선·반응)을 한 장에 모아 레이어 창에 올린다. 레이어는 본체 창
@@ -22903,6 +22940,1056 @@ class Mascot:
             self.room_net = None
         self.room_people = []
 
+    # ── 쪽지 (편지 주고받기) ─────────────────────────────────────────
+    # 친구끼리 자유 글 한 줄을 주고받는다 — 동물의숲 편지 감성 (요청).
+    # 서버는 note_migrate.sql 의 함수 둘(note_send/note_take)뿐이고,
+    # 내용은 방 코드로 봉인되어 서버는 못 읽는다. 쪽지는 서버에 30일
+    # 남으므로 받는 사람이 꺼져 있어도 다음에 켤 때 받는다.
+
+    NOTE_MAX = 200               # 글자 수
+    NOTE_DAY_MAX = 10            # 하루에 보낼 수 있는 수
+    NOTE_POLL = 300.0            # 새 쪽지 확인 간격 (지뢰 47 — 느리게)
+    NOTE_POLL_OPEN = 45.0        # 쪽지함이 떠 있을 때
+    NOTE_KEEP = 100              # 받은/보낸 보관 수
+    NOTE_PAPER = (255, 251, 240, 255)     # 크림색 편지지
+    NOTE_PLINE = (232, 214, 196, 255)     # 괘선
+    NOTE_BORD = (238, 196, 186, 255)      # 레이스 테두리
+    NOTE_INK = "#7a6052"                  # 편지 잉크
+    NOTE_HEAD = "#8a6a52"                 # To./From.
+
+    def _notes_on(self):
+        """쪽지 기능이 켜져 있는가 — 홈(방)이 켜져 있어야 한다."""
+        return bool(self._room_on() and self.cfg.get("notes", True))
+
+    def _notes_path(self):
+        return os.path.join(self.state_dir, ".notes_in.json")
+
+    def _notes_sent_path(self):
+        return os.path.join(self.state_dir, ".notes_sent.json")
+
+    def _notes_get(self):
+        """받은 쪽지 {"last","read","list"} — 파일은 한 번만 읽는다."""
+        if self._notes_mem is None:
+            d = _load_json(self._notes_path(), {})
+            if not isinstance(d, dict):
+                d = {}
+            lst = d.get("list")
+            d["list"] = [r for r in (lst if isinstance(lst, list) else [])
+                         if isinstance(r, dict)]
+            try:
+                d["last"] = max(0, int(d.get("last") or 0))
+            except (TypeError, ValueError):
+                d["last"] = 0
+            rd = d.get("rd")
+            d["rd"] = [int(v) for v in (rd if isinstance(rd, list) else [])
+                       if isinstance(v, (int, float))]
+            self._notes_mem = d
+        return self._notes_mem
+
+    def _notes_save(self):
+        d = self._notes_mem
+        if d is None or _load_failed(self._notes_path()):
+            return               # 못 읽은 파일에 덮어쓰지 않는다 (지뢰 92)
+        try:
+            _save_json(self._notes_path(), d)     # 지뢰 35
+        except Exception:
+            pass
+
+    def _note_unread(self):
+        """안 읽은 쪽지 수.
+
+        읽음은 **읽은 번호 목록**으로 센다 — 워터마크 하나로 두면 최신
+        편지를 여는 순간 옛 편지까지 읽음이 되어 버린다 (검사가 잡았다).
+        목록은 받은 쪽지에 있는 번호만 남겨 상한이 저절로 잡힌다.
+        """
+        d = self._notes_get()
+        rd = set(d.get("rd") or [])
+        return sum(1 for r in d["list"] if int(r.get("id") or 0) not in rd)
+
+    def _note_mark_read(self, rid):
+        """읽음은 여는 순간 (지뢰 30). 목록에 없는 번호는 정리한다."""
+        d = self._notes_get()
+        rid = int(rid or 0)
+        rd = set(d.get("rd") or [])
+        rd.add(rid)
+        keep = set(int(r.get("id") or 0) for r in d["list"])
+        d["rd"] = sorted(rd & keep)
+        self._notes_save()
+
+    def _notes_sent_get(self):
+        if self._notes_sent_mem is None:
+            lst = _load_json(self._notes_sent_path(), [])
+            self._notes_sent_mem = [r for r in
+                                    (lst if isinstance(lst, list) else [])
+                                    if isinstance(r, dict)]
+        return self._notes_sent_mem
+
+    def _notes_sent_save(self):
+        if self._notes_sent_mem is None \
+                or _load_failed(self._notes_sent_path()):
+            return
+        try:
+            _save_json(self._notes_sent_path(),
+                       self._notes_sent_mem[-self.NOTE_KEEP:])
+        except Exception:
+            pass
+
+    def _note_today_sent(self):
+        d = self.us.get("note_sent")
+        if not isinstance(d, dict) \
+                or str(d.get("day") or "") != self._my_workday():
+            return 0
+        try:
+            return max(0, int(d.get("n") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _note_sent_mark(self):
+        self.us["note_sent"] = {"day": self._my_workday(),
+                                "n": self._note_today_sent() + 1}
+        self._safe("note_sent_save", self._save_settings)
+
+    @staticmethod
+    def _note_ago(ts):
+        """받은 시각 → '10분 전' 같은 말."""
+        try:
+            dt = max(0.0, time.time() - float(ts or 0))
+        except (TypeError, ValueError):
+            return ""
+        if dt < 90:
+            return "방금"
+        if dt < 3600:
+            return "%d분 전" % int(dt // 60)
+        if dt < 86400:
+            return "%d시간 전" % int(dt // 3600)
+        if dt < 86400 * 2:
+            return "어제"
+        if dt < 86400 * 30:
+            return "%d일 전" % int(dt // 86400)
+        return time.strftime("%m월 %d일", time.localtime(ts))
+
+    def _note_poll(self, now):
+        """쪽지 큐 소화 + 느린 폴링. 통신 바퀴에서 돈다 (지뢰 97)."""
+        if not self._notes_on():
+            return
+        q = self._note_q
+        changed = False
+        while q:                          # 앞에서 꺼내 비운다 (지뢰 26)
+            it = q.pop(0)
+            kind = it[0]
+            if kind == "in":
+                d = self._notes_get()
+                seen = set(int(r.get("id") or 0) for r in d["list"])
+                fresh = []
+                hearts = []
+                for r in it[1]:
+                    rid = int(r.get("id") or 0)
+                    d["last"] = max(int(d.get("last") or 0), rid)
+                    if rid in seen:
+                        continue
+                    if r.get("k") == "hr":
+                        d["list"].append(r)
+                        hearts.append(r)
+                        # 내 보낸함에서 그 편지를 찾아 하트를 단다
+                        # (열쇠는 보낼 때 찍은 시각 — 서버 번호는 보낸
+                        # 쪽이 모른다)
+                        try:
+                            rts9 = float(r.get("rts") or 0)
+                        except (TypeError, ValueError):
+                            rts9 = 0.0
+                        for s9 in self._notes_sent_get():
+                            if (s9.get("to") == r.get("f")
+                                    and abs(float(s9.get("ts") or 0)
+                                            - rts9) < 2.0):
+                                s9["hr"] = 1
+                        self._notes_sent_save()
+                    elif r.get("t"):
+                        d["list"].append(r)
+                        fresh.append(r)
+                d["list"] = d["list"][-self.NOTE_KEEP:]
+                self._notes_save()
+                if fresh or hearts:
+                    changed = True
+                    if not self.us.get("room_mute"):
+                        if fresh:
+                            nm = self.ROOM_NAME.get(
+                                str(fresh[-1].get("f") or ""), "친구")
+                            word = ("%s 님의 편지가 도착했어요!" % nm
+                                    if len(fresh) == 1 else
+                                    "편지가 %d통 도착했어요!" % len(fresh))
+                        else:
+                            nm = self.ROOM_NAME.get(
+                                str(hearts[-1].get("f") or ""), "친구")
+                            word = "%s 님이 편지에 하트를 보냈어요 ♥" % nm
+                        # 캐릭터를 눌러야 꺼진다 (요청 — hold)
+                        self._say(word, 8.0, big=True, btn="열어 보기",
+                                  act=self._note_win, hold=True)
+                        self._mail_bub = word
+                        self._safe("note_snd", self._sparkle_sound)
+            elif kind == "sent_ok":
+                lst = self._notes_sent_get()
+                lst.append({"to": it[1], "t": it[2], "ts": time.time()})
+                self._notes_sent_save()
+                self._note_sent_mark()
+                if self._nw is not None:
+                    self._nw["status"] = "봉투를 보냈어요!"
+                    self._nw["view"] = "list"
+                    self._nw["dirty"] = True
+            elif kind == "hr_ok":
+                d9 = self._notes_get()
+                for r9 in d9["list"]:
+                    if int(r9.get("id") or 0) == int(it[1] or 0):
+                        r9["hrd"] = 1
+                self._notes_save()
+                if self._nw is not None:
+                    self._nw["status"] = "하트를 보냈어요 ♥"
+                    self._nw["status_at"] = time.time()
+                    self._nw["dirty"] = True
+            elif kind == "sent_err":
+                if self._nw is not None:
+                    self._nw["status"] = "지금은 보낼 수 없어요 — 잠시 뒤에 다시 해 봐요"
+                    self._nw["dirty"] = True
+        if changed:
+            self._room_key_last = None    # 홈 메뉴의 빨간 점
+            if self._nw is not None:
+                self._nw["dirty"] = True
+        try:
+            open9 = (self._note_winref is not None
+                     and self._note_winref.winfo_exists())
+        except Exception:
+            open9 = False
+        gap9 = self.NOTE_POLL_OPEN if open9 else self.NOTE_POLL
+        if now - self._note_at < gap9:
+            return
+        self._note_at = now
+        threading.Thread(target=self._note_fetch, daemon=True).start()
+
+    def _note_fetch(self):
+        """서버에서 내 앞으로 온 쪽지를 가져온다 (스레드)."""
+        try:
+            net = self.room_net
+            if net is None:
+                return
+            d = self._notes_get()
+            rows = net._rpc("note_take",
+                            {"p_room": net.room, "p_slot": self.char,
+                             "p_after": int(d.get("last") or 0)}) or []
+            out = []
+            for r in rows:
+                rid = int(r.get("id") or 0)
+                b = _room_open_blob(net.key, r.get("blob", ""))
+                row = {"id": rid}
+                if isinstance(b, dict):
+                    row["f"] = str(b.get("f") or "")[:40]
+                    row["t"] = str(b.get("t") or "")[:self.NOTE_MAX]
+                    if b.get("k"):
+                        row["k"] = str(b.get("k"))[:8]
+                    if b.get("rts") is not None:
+                        row["rts"] = b.get("rts")
+                    try:
+                        row["ts"] = float(b.get("ts") or 0)
+                    except (TypeError, ValueError):
+                        row["ts"] = 0.0
+                out.append(row)          # 못 여는 것도 last 는 전진한다
+            if out:
+                self._note_q.append(("in", out))
+        except Exception:
+            pass                          # 다음 폴링에 다시
+
+    def _note_send_go(self, to_slot, text):
+        """쪽지를 보낸다 (스레드로). (됐는가, 안 됐으면 왜)를 돌려준다."""
+        text = str(text or "").strip()[:self.NOTE_MAX]
+        if not text:
+            return False, "내용을 적어 주세요"
+        if not self._notes_on() or self.room_net is None:
+            return False, "홈이 켜져 있어야 보낼 수 있어요"
+        if self._note_today_sent() >= self.NOTE_DAY_MAX:
+            return False, "오늘은 여기까지 — 내일 또 보내요"
+        net = self.room_net
+        to9 = str(to_slot or "")[:40]
+        blob = _room_seal(net.key, {"f": self.char, "t": text,
+                                    "ts": time.time()})
+
+        def go():
+            try:
+                net._rpc("note_send", {"p_room": net.room, "p_to": to9,
+                                       "p_blob": blob})
+                self._note_q.append(("sent_ok", to9, text))
+            except Exception:
+                self._note_q.append(("sent_err",))
+
+        threading.Thread(target=go, daemon=True).start()
+        return True, None
+
+    # ── 쪽지 그림 자산 — 전부 3~4배로 그려 줄인다 (계단 방지) ────────
+    def _note_cache(self, key, maker):
+        got = self._soft_cache.get(key)
+        if got is not None:
+            return got
+        try:
+            got = maker()
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:      # 지뢰 18·42
+            for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old, None)
+        self._soft_cache[key] = got
+        return got
+
+    @staticmethod
+    def _note_rgb(c):
+        return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) + (255,)
+
+    @staticmethod
+    def _note_draw_heart(d, cx, cy, w, col):
+        r = w / 4.0
+        hy = cy - r * 0.55
+        for sx in (-1, 1):
+            d.ellipse([cx + sx * r - r, hy - r, cx + sx * r + r, hy + r],
+                      fill=col)
+        d.polygon([cx - r * 1.94, hy + r * 0.30,
+                   cx + r * 1.94, hy + r * 0.30,
+                   cx, hy + r * 2.15], fill=col)
+
+    def _note_heart(self, w, col):
+        def mk():
+            S = 4
+            W9 = int(w * S)
+            im = Image.new("RGBA", (W9 + 8, W9 + 8), (0, 0, 0, 0))
+            self._note_draw_heart(ImageDraw.Draw(im), (W9 + 8) / 2,
+                                  (W9 + 8) / 2 + W9 * 0.05, W9,
+                                  self._note_rgb(col))
+            return ImageTk.PhotoImage(
+                im.resize(((W9 + 8) // S, (W9 + 8) // S), Image.LANCZOS))
+        return self._note_cache(("nheart", int(w), col), mk)
+
+    def _note_env_pil(self, w, h, col, sealed=True, seal_k=0.30):
+        """봉투 PIL 한 장 — 빗선은 몸통 실루엣으로 잘라낸다."""
+        S = 4
+        W9, H9 = int(w * S), int(h * S)
+        im = Image.new("RGBA", (W9 + 4, H9 + 8), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        y0 = 4
+        lw = max(2, int(1.2 * S))
+        body = self._note_rgb(self._tint(col, 0.88 if sealed else 0.94))
+        edge = self._note_rgb(self._tint(col, 0.45 if sealed else 0.62))
+        d.rounded_rectangle([2, y0, W9 + 1, y0 + H9],
+                            radius=int(h * 0.14 * S),
+                            fill=body, outline=edge, width=lw)
+        cx = (W9 + 3) / 2
+        fy = y0 + H9 * 0.58
+        lay = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        dl = ImageDraw.Draw(lay)
+        dl.line([3, y0 + 3, cx, fy], fill=edge, width=lw)
+        dl.line([W9 + 1, y0 + 3, cx, fy], fill=edge, width=lw)
+        mk9 = Image.new("L", im.size, 0)
+        ImageDraw.Draw(mk9).rounded_rectangle(
+            [2 + lw, y0 + lw, W9 + 1 - lw, y0 + H9 - lw],
+            radius=max(1, int(h * 0.14 * S) - lw), fill=255)
+        lay.putalpha(Image.composite(
+            lay.getchannel("A"), Image.new("L", im.size, 0), mk9))
+        im.alpha_composite(lay)
+        if sealed:
+            self._note_draw_heart(d, cx, fy - h * 0.03 * S,
+                                  h * seal_k * S,
+                                  self._note_rgb("#e8688c"))
+        return im.resize(((W9 + 4) // S, (H9 + 8) // S),
+                         Image.LANCZOS)
+
+    def _note_env(self, w, h, col, sealed=True, seal_k=0.30):
+        def mk():
+            return ImageTk.PhotoImage(
+                self._note_env_pil(w, h, col, sealed, seal_k))
+        return self._note_cache(("nenv", int(w), int(h), col, sealed,
+                                 round(seal_k, 2)), mk)
+
+    def _note_stamp(self, sz, col, slot=None):
+        """우표 — 흰 바탕 + 절취공 테두리 + 색 패널 안 캐릭터 얼굴."""
+        def mk():
+            S = 4
+            D = int(sz * 2 * S)
+            mg = int(sz * 0.42 * S)
+            T = D + mg * 2
+            im = Image.new("RGBA", (T, T), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            d.rectangle([0, 0, T - 1, T - 1], fill=(255, 253, 250, 255))
+            n = 6
+            pr = T / (n * 2.0) * 0.62
+            hole = Image.new("L", (T, T), 255)
+            dh = ImageDraw.Draw(hole)
+            for i in range(n + 1):
+                c = i * T / n
+                for pos in ((c, 0), (c, T - 1), (0, c), (T - 1, c)):
+                    dh.ellipse([pos[0] - pr, pos[1] - pr,
+                                pos[0] + pr, pos[1] + pr], fill=0)
+            d.rectangle([mg, mg, T - mg - 1, T - mg - 1],
+                        fill=self._note_rgb(self._tint(col, 0.80)))
+            p9 = self._room_art_file(slot, "seat.png") if slot else None
+            drew = False
+            if p9:
+                try:
+                    ch = Image.open(p9).convert("RGBA")
+                    bb = ch.getbbox()
+                    if bb:
+                        ch = ch.crop(bb)
+                    ch = ch.crop((0, 0, ch.width, int(ch.height * 0.68)))
+                    k = max(D / ch.width, D / ch.height) * 1.06
+                    ch = ch.resize((max(1, int(ch.width * k)),
+                                    max(1, int(ch.height * k))),
+                                   Image.LANCZOS)
+                    lay = Image.new("RGBA", (T, T), (0, 0, 0, 0))
+                    lay.alpha_composite(
+                        ch, ((T - ch.width) // 2,
+                             mg + max(0, (D - ch.height) // 2)))
+                    mk9 = Image.new("L", (T, T), 0)
+                    ImageDraw.Draw(mk9).rectangle(
+                        [mg, mg, T - mg - 1, T - mg - 1], fill=255)
+                    lay.putalpha(Image.composite(
+                        lay.getchannel("A"), Image.new("L", (T, T), 0),
+                        mk9))
+                    im.alpha_composite(lay)
+                    drew = True
+                except Exception:
+                    pass
+            if not drew:
+                self._note_draw_heart(d, T / 2, T / 2 + S, D * 0.5,
+                                      self._note_rgb(self._shade(col, 0.05)))
+            d.rectangle([mg, mg, T - mg - 1, T - mg - 1],
+                        outline=self._note_rgb(self._tint(col, 0.45)),
+                        width=S)
+            im.putalpha(Image.composite(
+                im.getchannel("A"), Image.new("L", (T, T), 0), hole))
+            return ImageTk.PhotoImage(
+                im.resize((T // S, T // S), Image.LANCZOS))
+        return self._note_cache(("nstamp", int(sz), col, slot), mk)
+
+    def _note_paper(self, w, h):
+        """편지지 — 크림 바탕, 네 모서리 하트, 사이를 잇는 점 사슬."""
+        def mk():
+            u = self._ui
+            S = 3
+            W9, H9 = int(w * S), int(h * S)
+            im = Image.new("RGBA", (W9, H9), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            d.rounded_rectangle([0, 0, W9 - 1, H9 - 1],
+                                radius=int(u(14) * S),
+                                fill=self.NOTE_PAPER,
+                                outline=self.NOTE_BORD, width=S)
+            rr = int(u(1.8) * S)
+            inset = int(u(8) * S)
+            hw = int(u(6) * S)
+            cx0, cx1 = inset + hw, W9 - inset - hw
+            cy0, cy1 = inset + hw, H9 - inset - hw
+            gapw = int(u(10) * S)
+
+            def chain(a, b, fixed, horiz):
+                n = max(2, int(round((b - a) / gapw)))
+                for i in range(1, n):
+                    t = a + (b - a) * i / n
+                    x9, y9 = (t, fixed) if horiz else (fixed, t)
+                    d.ellipse([x9 - rr, y9 - rr, x9 + rr, y9 + rr],
+                              fill=self.NOTE_BORD)
+
+            chain(cx0 + hw, cx1 - hw, inset, True)
+            chain(cx0 + hw, cx1 - hw, H9 - inset, True)
+            chain(cy0 + hw, cy1 - hw, inset, False)
+            chain(cy0 + hw, cy1 - hw, W9 - inset, False)
+            for cxh, cyh in ((cx0, cy0), (cx1, cy0), (cx0, cy1),
+                             (cx1, cy1)):
+                self._note_draw_heart(d, cxh, cyh + hw * 0.1, hw * 1.7,
+                                      self.NOTE_BORD)
+            return ImageTk.PhotoImage(
+                im.resize((W9 // S, H9 // S), Image.LANCZOS))
+        return self._note_cache(("npaper", int(w), int(h)), mk)
+
+    def _note_portrait(self, slot, r, ring=None):
+        """동그란 초상 — 흰 원 + 캐릭터 (+고르면 테마색 링)."""
+        def mk():
+            S = 3
+            R = int(r * S)
+            pad = int(r * 0.28 * S)
+            D = R * 2 + pad * 2
+            im = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            line9 = self._note_rgb(self._tint(self.card["fill"], 0.55))
+            if ring:
+                d.ellipse([0, 0, D - 1, D - 1],
+                          fill=self._note_rgb(self._tint(ring, 0.72)))
+            d.ellipse([pad, pad, D - pad - 1, D - pad - 1],
+                      fill=(255, 255, 255, 255), outline=line9, width=S)
+            p9 = self._room_art_file(slot, "seat.png")
+            if p9:
+                ch = Image.open(p9).convert("RGBA")
+                hh = int(R * 1.74)
+                ww = max(1, round(ch.width * hh / ch.height))
+                ch = ch.resize((ww, hh), Image.LANCZOS)
+                mk9 = Image.new("L", (D, D), 0)
+                ImageDraw.Draw(mk9).ellipse(
+                    [pad + S, pad + S, D - pad - S - 1, D - pad - S - 1],
+                    fill=255)
+                lay = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+                lay.alpha_composite(ch, (D // 2 - ww // 2,
+                                         D - pad - int(S * 1.5) - hh
+                                         + int(R * 0.16)))
+                lay.putalpha(Image.composite(
+                    lay.getchannel("A"), Image.new("L", (D, D), 0), mk9))
+                im.alpha_composite(lay)
+            return ImageTk.PhotoImage(
+                im.resize((D // S, D // S), Image.LANCZOS))
+        return self._note_cache(("nport", slot, int(r), ring), mk)
+
+    def _note_heart_go(self, note):
+        """편지에 하트 하나 — 답장 대신 보내는 가벼운 반응 (요청).
+
+        같은 편지에는 한 번만. 상대의 보낸함에서 그 편지에 하트가 달리고
+        말풍선으로도 알려 준다. 열쇠는 편지에 찍힌 보낸 시각(ts)이다 —
+        서버 번호는 보낸 쪽이 모른다.
+        """
+        if not isinstance(note, dict) or note.get("hrd"):
+            return False, "이미 하트를 보냈어요"
+        if not self._notes_on() or self.room_net is None:
+            return False, "홈이 켜져 있어야 보낼 수 있어요"
+        net = self.room_net
+        to9 = str(note.get("f") or "")[:40]
+        blob = _room_seal(net.key, {"f": self.char, "k": "hr",
+                                    "rts": note.get("ts"),
+                                    "ts": time.time()})
+        rid9 = int(note.get("id") or 0)
+
+        def go():
+            try:
+                net._rpc("note_send", {"p_room": net.room, "p_to": to9,
+                                       "p_blob": blob})
+                self._note_q.append(("hr_ok", rid9))
+            except Exception:
+                self._note_q.append(("sent_err",))
+
+        threading.Thread(target=go, daemon=True).start()
+        return True, None
+
+    def _note_desk_new(self):
+        """책상 봉투를 보일까 — 아직 확인 안 한 번호가 있는가 (지뢰 30)."""
+        if not self._notes_on():
+            return False
+        try:
+            ack = int(self.us.get("note_desk_ack") or 0)
+        except (TypeError, ValueError):
+            ack = 0
+        d = self._notes_get()
+        return any(int(r.get("id") or 0) > ack for r in d["list"])
+
+    def _note_desk_ack(self):
+        """캐릭터를 눌렀다 — 봉투를 들인다 (번호는 큰 쪽으로만)."""
+        d = self._notes_get()
+        top9 = max([int(r.get("id") or 0) for r in d["list"]] or [0])
+        try:
+            cur9 = int(self.us.get("note_desk_ack") or 0)
+        except (TypeError, ValueError):
+            cur9 = 0
+        if top9 > cur9:
+            self.us["note_desk_ack"] = top9
+            self._safe("note_ack_save", self._save_settings)
+
+    def _mail_photo(self, h):
+        """책상 봉투 그림 — 지금 경로(매끈/색상키)에 맞는 한 벌만 (지뢰 119)."""
+        key = ("maildesk", int(h), bool(self._smooth))
+        got = self._soft_cache.get(key)
+        if got is not None:
+            return got
+        try:
+            im = self._note_env_pil(h * 1.5, h, self.card["fill"],
+                                    sealed=True, seal_k=0.30)
+            got = self._pic(im)
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:
+            for old9 in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old9, None)
+        self._soft_cache[key] = got
+        return got
+
+    def _draw_mail_desk(self, now):
+        """새 편지가 오면 책상 위에 봉투가 놓인다 (요청).
+
+        캐릭터를 한 번 누르면 들어간다 — 누른 번호를 기억하는 계산식이라
+        새 편지가 또 오면 다시 나온다. 누르면 쪽지함이 열린다.
+        """
+        self._mail_box = None
+        if not self._note_desk_new():
+            return
+        k = max(1.0, self.cw_px / 260.0)
+        top = self.oy + self.ch_px * 0.13
+        mid = self.oy + self.ch_px * 0.44
+        cx, land, r = self._desk_spot(k, top, mid)
+        if cx is None:
+            cx = self.ox + self.cw_px / 2
+        cx -= r * 2.35                 # 간식·포춘쿠키 자리와 안 겹치게 왼쪽
+        img = self._mail_photo(int(44 * k))
+        if img is None:
+            return
+        bob = math.sin(now * 2.1) * 1.6 * k
+        y9 = land + r * 1.16 + bob
+        self.canvas.create_image(cx, y9, image=img, anchor="s")
+        self._mail_box = (cx - 34 * k, y9 - 50 * k, cx + 34 * k, y9 + 4 * k)
+
+    def _note_win(self):
+        """쪽지함 — 창 하나에서 목록↔편지 읽기↔쓰기를 오간다 (요청).
+
+        디자인은 동물의숲 편지: 봉투 목록, 편지지 읽기, 편지지에 바로
+        쓰기. 그림 자산은 전부 PIL 로 구워 계단이 없다.
+        """
+        got = getattr(self, "_note_winref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(330)), int(u(560))
+        win = tk.Toplevel(self.root)
+        self._note_winref = win
+        win.title("쪽지함")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        nw = {"view": "list", "tab": "in", "page": 0, "peer": None,
+              "fpage": 0, "note": None, "status": "", "status_at": 0.0,
+              "dirty": True, "keep": [], "after": None, "sig": None}
+        self._nw = nw
+        # 글 상자 — 부모는 캔버스 (지뢰 22: 창이 부모면 삐져나온다)
+        box = tk.Text(cv, width=1, height=1, bd=0, relief="flat",
+                      bg="#fffbf0", fg=self.NOTE_INK,
+                      insertbackground=self.NOTE_INK, wrap="char",
+                      font=self._uf(10), highlightthickness=0)
+        nw["box"] = box
+        peers = [s9 for s9 in self.ROOM_ALL if s9 != self.char]
+        self._note_hits = []
+
+        def keep(im):
+            nw["keep"].append(im)
+            return im
+
+        def hit(x0, y0, x1, y1, act):
+            self._note_hits.append((x0, y0, x1, y1, act))
+
+        def back_btn(x, y):
+            self._safe("dot", self._soft_dot, cv, x, y, u(13), "#ffffff",
+                       outline=line, width=1.4, shadow=True)
+            cv.create_text(x - u(1), y, text="‹", font=self._uf(14, True),
+                           fill=cd["text"])
+            hit(x - u(16), y - u(16), x + u(16), y + u(16), ("back",))
+
+        def pill_btn(x0, y0, x1, y1, lab, main, act):
+            self._rr_soft(cv, x0, y0, x1, y1, (y1 - y0) / 2,
+                          fill=cd["fill"] if main else "#ffffff",
+                          outline="" if main else line,
+                          width=0 if main else 1.4)
+            cv.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=lab,
+                           font=self._uf(10, True),
+                           fill="#ffffff" if main else cd["sub"])
+            hit(x0, y0, x1, y1, act)
+
+        def d_list():
+            d = self._notes_get()
+            read9 = set(d.get("rd") or [])
+            im9 = self._note_env(u(30), u(21), cd["fill"], seal_k=0.22)
+            if im9:
+                cv.create_image(W / 2 - u(46), u(30), image=keep(im9))
+            cv.create_text(W / 2 + u(8), u(30), text="쪽지함",
+                           font=self._uf(14, True), fill=cd["text"])
+            tw, th = u(92), u(26)
+            n_un = self._note_unread()
+            rows_in = list(reversed(d["list"]))
+            rows_sent = list(reversed(self._notes_sent_get()))
+            for i, (lab, key9) in enumerate((("받은 쪽지", "in"),
+                                             ("보낸 쪽지", "sent"))):
+                on = (nw["tab"] == key9)
+                if key9 == "in" and n_un:
+                    lab += " %d" % n_un
+                x0 = W / 2 - tw - u(5) + i * (tw + u(10))
+                self._rr_soft(cv, x0, u(52), x0 + tw, u(52) + th, th / 2,
+                              fill=cd["fill"] if on else "#ffffff",
+                              outline="" if on else line,
+                              width=0 if on else 1)
+                cv.create_text(x0 + tw / 2, u(52) + th / 2, text=lab,
+                               font=self._uf(9, True),
+                               fill="#ffffff" if on else cd["sub"])
+                hit(x0, u(52), x0 + tw, u(52) + th, ("tab", key9))
+            rows = rows_in if nw["tab"] == "in" else rows_sent
+            per = 4
+            pages = max(1, (len(rows) + per - 1) // per)
+            nw["page"] = max(0, min(nw["page"], pages - 1))
+            page_rows = rows[nw["page"] * per:(nw["page"] + 1) * per]
+            ry = u(94)
+            if not rows:
+                im9 = self._note_env(u(56), u(40), cd["fill"],
+                                     sealed=False)
+                if im9:
+                    cv.create_image(W / 2, u(200), image=keep(im9))
+                cv.create_text(W / 2, u(244),
+                               text="아직 주고받은 쪽지가 없어요"
+                               if nw["tab"] == "in"
+                               else "아직 보낸 쪽지가 없어요",
+                               font=self._uf(9), fill=cd["sub"])
+            for r in page_rows:
+                rh = u(84)
+                if nw["tab"] == "in" and r.get("k") == "hr":
+                    # 하트 반응 — 편지가 아니라 가벼운 한 칸
+                    slot9 = str(r.get("f") or "")
+                    rh = u(56)
+                    unread9 = int(r.get("id") or 0) not in read9
+                    self._rr_soft(cv, u(14), ry + u(2), W - u(14),
+                                  ry + rh - u(2), u(14),
+                                  fill="#fff5f7" if unread9 else "#ffffff",
+                                  outline=self._tint("#e8688c", 0.5)
+                                  if unread9 else line,
+                                  width=1.4 if unread9 else 1)
+                    hh9 = self._note_heart(u(16), "#e8688c")
+                    if hh9:
+                        cv.create_image(u(34), ry + rh / 2,
+                                        image=keep(hh9))
+                    cv.create_text(u(52), ry + rh / 2 - u(1), anchor="w",
+                                   text="%s 님이 내 편지를 좋아해요"
+                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   font=self._uf(9, True),
+                                   fill=cd["text"])
+                    cv.create_text(W - u(24), ry + rh - u(14), anchor="e",
+                                   text=self._note_ago(r.get("ts")),
+                                   font=self._uf(7), fill=cd["sub"])
+                    hit(u(10), ry, W - u(10), ry + rh, ("hrread", r))
+                    ry += rh + u(10)
+                    continue
+                if nw["tab"] == "in":
+                    slot9 = str(r.get("f") or "")
+                    col9 = self._room_tone(slot9)
+                    sealed = int(r.get("id") or 0) not in read9
+                    ew, eh = u(208), u(64)
+                    ex1 = W - u(14)
+                    im9 = self._note_env(ew, eh, col9, sealed=sealed)
+                    if im9:
+                        cv.create_image(ex1 - ew / 2, ry + rh / 2,
+                                        image=keep(im9))
+                    cv.create_text(u(16), ry + rh / 2 - u(9), anchor="w",
+                                   text="From. %s"
+                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   font=self._uf(10, True),
+                                   fill=self._shade(col9, 0.15))
+                    cv.create_text(u(16), ry + rh / 2 + u(12), anchor="w",
+                                   text=self._note_ago(r.get("ts")),
+                                   font=self._uf(7), fill=cd["sub"])
+                    st9 = self._note_stamp(u(12), col9, slot9)
+                    if st9:
+                        cv.create_image(ex1 - u(24), ry + u(30),
+                                        image=keep(st9))
+                    cv.create_text(ex1 - u(15), ry + rh - u(20),
+                                   anchor="e",
+                                   text="열어 보기 ›" if sealed else "읽음",
+                                   font=self._uf(8, sealed),
+                                   fill=self._shade(cd["fill"], 0.1)
+                                   if sealed else "#c9c3ce")
+                    hit(u(10), ry, W - u(10), ry + rh, ("open", r))
+                else:
+                    slot9 = str(r.get("to") or "")
+                    col9 = self._room_tone(slot9)
+                    self._rr_soft(cv, u(14), ry + u(4), W - u(14),
+                                  ry + rh - u(4), u(14), fill="#ffffff",
+                                  outline=line, width=1)
+                    cv.create_text(u(28), ry + u(22), anchor="w",
+                                   text="To. %s"
+                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   font=self._uf(10, True),
+                                   fill=self._shade(col9, 0.15))
+                    cv.create_text(W - u(28), ry + u(23), anchor="e",
+                                   text=self._note_ago(r.get("ts")),
+                                   font=self._uf(7), fill=cd["sub"])
+                    txt9 = str(r.get("t") or "")
+                    if len(txt9) > 24:
+                        txt9 = txt9[:24] + "…"
+                    cv.create_text(u(28), ry + u(48), anchor="w",
+                                   text=txt9, font=self._uf(9),
+                                   fill=cd["text"])
+                    if r.get("hr"):          # 상대가 하트를 눌렀다
+                        hh9 = self._note_heart(u(14), "#e8688c")
+                        if hh9:
+                            cv.create_image(W - u(32), ry + u(48),
+                                            image=keep(hh9))
+                ry += rh + u(10)
+            if pages > 1:
+                py9 = H - u(84)
+                cv.create_text(W / 2, py9, text="%d / %d"
+                               % (nw["page"] + 1, pages),
+                               font=self._uf(8), fill=cd["sub"])
+                for tx9, ch9, on9, d9 in ((W / 2 - u(52), "‹",
+                                           nw["page"] > 0, -1),
+                                          (W / 2 + u(52), "›",
+                                           nw["page"] < pages - 1, 1)):
+                    cv.create_text(tx9, py9, text=ch9,
+                                   font=self._uf(13, True),
+                                   fill=cd["text"] if on9 else "#d8d2dc")
+                    if on9:
+                        hit(tx9 - u(12), py9 - u(12), tx9 + u(12),
+                            py9 + u(12), ("page", d9))
+            by0 = H - u(58)
+            pill_btn(u(46), by0, W - u(46), by0 + u(38), "편지 쓰기",
+                     True, ("write", None))
+            hm9 = self._note_heart(u(11), "#ffffff")
+            if hm9:
+                cv.create_image(u(74), by0 + u(19), image=keep(hm9))
+            cv.create_text(W / 2, H - u(11),
+                           text="쪽지는 30일 뒤에 살짝 사라져요",
+                           font=self._uf(7), fill=cd["sub"])
+
+        def d_read():
+            r = nw["note"] or {}
+            slot9 = str(r.get("f") or "")
+            nm9 = self.ROOM_NAME.get(slot9, slot9)
+            col9 = self._room_tone(slot9)
+            back_btn(u(26), u(26))
+            cv.create_text(W / 2, u(26), text="%s의 편지" % nm9,
+                           font=self._uf(11, True), fill=cd["text"])
+            pw, ph = u(298), u(330)
+            pp9 = self._note_paper(pw, ph)
+            if pp9:
+                cv.create_image(W / 2, u(48) + ph / 2, image=keep(pp9))
+            st9 = self._note_stamp(u(14), col9, slot9)
+            if st9:
+                cv.create_image(W - u(48), u(88), image=keep(st9))
+            cv.create_text(u(46), u(86), anchor="w",
+                           text="To. %s"
+                           % self.ROOM_NAME.get(self.char,
+                                                self.cfg.get("name", "나")),
+                           font=self._uf(12, True), fill=self.NOTE_HEAD)
+            f9 = self._uf(10)
+            lines = self._wrap_lines(str(r.get("t") or ""), f9, pw - u(60))
+            lines = lines[:6]
+            for i, ln in enumerate(lines):
+                yy = u(134) + i * u(30)
+                cv.create_text(u(40), yy, anchor="w", text=ln, font=f9,
+                               fill=self.NOTE_INK)
+                cv.create_line(u(38), yy + u(11), W - u(38), yy + u(11),
+                               fill="#e8d6c4")
+            fy9 = u(134) + max(3, len(lines)) * u(30) + u(28)
+            cv.create_text(W - u(44), fy9, anchor="e",
+                           text="From. %s" % nm9,
+                           font=self._uf(10, True), fill=self.NOTE_HEAD)
+            cv.create_text(W - u(44), fy9 + u(18), anchor="e",
+                           text=self._note_ago(r.get("ts")),
+                           font=self._uf(7), fill=cd["sub"])
+            by0 = H - u(64)
+            # 하트 — 답장 대신 가볍게 (요청, 편지 하나에 한 번)
+            hearted = bool(r.get("hrd"))
+            self._safe("dot", self._soft_dot, cv, u(30), by0 + u(18),
+                       u(16), "#ffe9f0" if hearted else "#ffffff",
+                       outline="#e8688c" if hearted else line,
+                       width=1.4, shadow=True)
+            hh9 = self._note_heart(u(15),
+                                   "#e8688c" if hearted else "#d8bfc8")
+            if hh9:
+                cv.create_image(u(30), by0 + u(19), image=keep(hh9))
+            hit(u(12), by0, u(48), by0 + u(36), ("heart",))
+            pill_btn(u(54), by0, W / 2 + u(14), by0 + u(36), "답장 쓰기",
+                     True, ("write", slot9))
+            pill_btn(W / 2 + u(24), by0, W - u(20), by0 + u(36),
+                     "목록으로", False, ("back",))
+
+        def d_write():
+            back_btn(u(26), u(24))
+            cv.create_text(W / 2, u(24), text="누구에게 보낼까요?",
+                           font=self._uf(10, True), fill=cd["text"])
+            per = 5
+            pages = max(1, (len(peers) + per - 1) // per)
+            nw["fpage"] = max(0, min(nw["fpage"], pages - 1))
+            page9 = peers[nw["fpage"] * per:(nw["fpage"] + 1) * per]
+            if nw["peer"] not in peers:
+                nw["peer"] = page9[0] if page9 else None
+            fx0 = W / 2 - (len(page9) - 1) * u(27)
+            for i, slot9 in enumerate(page9):
+                cx = fx0 + i * u(54)
+                on = (slot9 == nw["peer"])
+                pt9 = self._note_portrait(slot9, u(15),
+                                          ring=cd["fill"] if on else None)
+                if pt9:
+                    cv.create_image(cx, u(58), image=keep(pt9))
+                cv.create_text(cx, u(86),
+                               text=self.ROOM_NAME.get(slot9, slot9),
+                               font=self._uf(8, on),
+                               fill=cd["text"] if on else cd["sub"])
+                hit(cx - u(24), u(36), cx + u(24), u(94), ("peer", slot9))
+            for tx9, ch9, on9, d9 in ((u(16), "‹", nw["fpage"] > 0, -1),
+                                      (W - u(16), "›",
+                                       nw["fpage"] < pages - 1, 1)):
+                cv.create_text(tx9, u(58), text=ch9,
+                               font=self._uf(15, True),
+                               fill=cd["text"] if on9 else "#d8d2dc")
+                if on9:
+                    hit(tx9 - u(12), u(40), tx9 + u(12), u(76),
+                        ("fpage", d9))
+            cv.create_text(W / 2, u(100), text="%d / %d"
+                           % (nw["fpage"] + 1, pages),
+                           font=self._uf(7), fill=cd["sub"])
+            pw3, ph3 = u(298), u(300)
+            pp9 = self._note_paper(pw3, ph3)
+            if pp9:
+                cv.create_image(W / 2, u(112) + ph3 / 2, image=keep(pp9))
+            nm9 = self.ROOM_NAME.get(nw["peer"], nw["peer"] or "?")
+            cv.create_text(u(44), u(146), anchor="w", text="To. %s" % nm9,
+                           font=self._uf(12, True), fill=self.NOTE_HEAD)
+            st9 = self._note_stamp(u(13), self.card["fill"], self.char) \
+                if self._room_art_file(self.char, "seat.png") else None
+            if st9:
+                cv.create_image(W - u(50), u(150), image=keep(st9))
+            # 글 상자 (부모=캔버스). 괘선은 상자 아래엔 안 긋는다 —
+            # 위젯이 불투명이라 어차피 안 보인다
+            cv.create_window(u(40), u(170), anchor="nw", window=nw["box"],
+                             width=int(pw3 - u(48)), height=int(u(120)))
+            try:
+                cur9 = len(nw["box"].get("1.0", "end-1c"))
+            except Exception:
+                cur9 = 0
+            cv.create_text(W - u(44), u(112) + ph3 - u(18), anchor="e",
+                           text="%d/%d" % (cur9, self.NOTE_MAX),
+                           font=self._uf(7),
+                           fill="#c96f6f" if cur9 > self.NOTE_MAX
+                           else cd["sub"])
+            cv.create_text(W - u(48), u(112) + ph3 - u(44), anchor="e",
+                           text="From. %s"
+                           % self.ROOM_NAME.get(self.char,
+                                                self.cfg.get("name", "나")),
+                           font=self._uf(10, True), fill=self.NOTE_HEAD)
+            by3 = H - u(62)
+            pill_btn(u(70), by3, W - u(70), by3 + u(38), "보내기", True,
+                     ("send",))
+            env9 = self._note_env(u(20), u(14), cd["fill"], seal_k=0.34)
+            if env9:
+                cv.create_image(u(98), by3 + u(19), image=keep(env9))
+            cv.create_text(W / 2, H - u(11),
+                           text="하루에 열 번까지 · 친구가 다음에 켤 때도 받아요",
+                           font=self._uf(7), fill=cd["sub"])
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            nw["keep"] = []
+            self._note_hits = []
+            cv.delete("all")
+            view = nw["view"]
+            if view == "read":
+                d_read()
+            elif view == "write":
+                d_write()
+            else:
+                d_list()
+            if nw["status"]:
+                # 아래 단추들 위에 작은 토스트로 (단추와 안 겹치게)
+                f9 = self._uf(8, True)
+                tw9 = self._mw(nw["status"], f9)
+                ty9 = H - u(80)
+                self._rr_soft(cv, W / 2 - tw9 / 2 - u(12), ty9 - u(11),
+                              W / 2 + tw9 / 2 + u(12), ty9 + u(11),
+                              u(11), fill="#ffffff",
+                              outline=self._tint(cd["fill"], 0.5),
+                              width=1.2)
+                cv.create_text(W / 2, ty9, text=nw["status"], font=f9,
+                               fill=self._shade(cd["fill"], 0.1))
+
+        def on_click(e):
+            for x0, y0, x1, y1, act in list(self._note_hits):
+                if not (x0 <= e.x <= x1 and y0 <= e.y <= y1):
+                    continue
+                self._safe("ui_click", self._ui_click)
+                k9 = act[0]
+                if k9 == "back":
+                    nw["view"] = "list"
+                elif k9 == "tab":
+                    nw["tab"] = act[1]
+                    nw["page"] = 0
+                elif k9 == "page":
+                    nw["page"] += act[1]
+                elif k9 == "fpage":
+                    nw["fpage"] += act[1]
+                elif k9 == "peer":
+                    nw["peer"] = act[1]
+                elif k9 == "heart":
+                    ok9, why9 = self._note_heart_go(nw["note"])
+                    nw["status"] = ("하트 보내는 중…" if ok9
+                                    else (why9 or "보낼 수 없어요"))
+                    nw["status_at"] = time.time()
+                elif k9 == "hrread":
+                    self._note_mark_read(act[1].get("id"))
+                    self._room_key_last = None
+                elif k9 == "open":
+                    nw["note"] = act[1]
+                    nw["view"] = "read"
+                    self._note_mark_read(act[1].get("id"))
+                    self._room_key_last = None
+                elif k9 == "write":
+                    nw["view"] = "write"
+                    if act[1]:
+                        nw["peer"] = act[1]
+                        pi9 = peers.index(act[1]) if act[1] in peers else 0
+                        nw["fpage"] = pi9 // 5
+                    nw["status"] = ""
+                elif k9 == "send":
+                    txt9 = ""
+                    try:
+                        txt9 = nw["box"].get("1.0", "end-1c")
+                    except Exception:
+                        pass
+                    ok9, why9 = self._note_send_go(nw["peer"], txt9)
+                    if ok9:
+                        nw["status"] = "보내는 중…"
+                        try:
+                            nw["box"].delete("1.0", "end")
+                        except Exception:
+                            pass
+                    else:
+                        nw["status"] = why9 or "보낼 수 없어요"
+                    nw["status_at"] = time.time()
+                nw["dirty"] = True
+                draw()
+                return
+
+        def beat():
+            if not win.winfo_exists():
+                return
+            # 상태 문구는 잠시 뒤 걷는다
+            if nw["status"] and nw["status_at"] \
+                    and time.time() - nw["status_at"] > 4.0 \
+                    and nw["status"] != "보내는 중…":
+                nw["status"] = ""
+                nw["dirty"] = True
+            if nw["status"] == "봉투를 보냈어요!" and not nw["status_at"]:
+                nw["status_at"] = time.time()
+            # 쓰기 화면은 글자 수가 자주 바뀐다 — 그때만 매박자 다시
+            if nw["dirty"] or nw["view"] == "write":
+                nw["dirty"] = False
+                draw()
+            nw["after"] = win.after(600, beat)
+
+        def gone(_e=None):
+            if nw.get("after") is not None:     # 지뢰 20
+                try:
+                    win.after_cancel(nw["after"])
+                except Exception:
+                    pass
+                nw["after"] = None
+            if self._nw is nw:
+                self._nw = None
+
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
+        cv.bind("<Button-1>", lambda e: self._safe("note_click",
+                                                   on_click, e))
+        draw()
+        nw["after"] = win.after(600, beat)
+        # 열자마자 한 번 새로 받아 온다
+        self._note_at = 0.0
+
     def _room_tick(self, now):
         """방과 주고받기 — 그리는 쪽은 절대 기다리지 않는다."""
         if not self._room_on():
@@ -22914,6 +24001,9 @@ class Mascot:
             self._room_start()
         if self.room_net is None:
             return
+        # 쪽지 — 화면이 안 바뀌어도 반드시 처리해야 하는 것은 통신
+        # 바퀴에 둔다 (지뢰 97)
+        self._safe("note_poll", self._note_poll, now)
         # 홈 창이 닫혀 있으면 천천히 — 명단은 창이 떠 있을 때만 쓴다
         # 멈춰 있으면 스스로 다시 시작한다. 한 번도 성공하지 못한 채
         # 오래 지났으면 통신층이 그 자리에 걸린 것이다 — 맥에서 주소 조회가
@@ -24884,6 +25974,7 @@ class Mascot:
                 self._inbox_open, self._inbox_scroll,
                 len(self._inbox_get().get("list") or []), self._inbox_unread(),
                 self._sent_total(), self._goal_open,
+                int(self._note_unread() > 0),
                 bool(ts and time.time() - ts[1] < self.ROOM_TOAST),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
@@ -34602,6 +35693,8 @@ class Mascot:
                           "#8c4351" if mute9 else P["sub"]))
             # 사용법 — 알림 끄기 아래에 (요청). 화면에서는 맨 아래다.
             # '?' 한 글자는 무엇인지 안 읽혀서 이름을 적는다 (요청).
+            if self._notes_on():
+                rows9.append(("쪽지함", "notes", "#fdeef2", "#b3556e"))
             rows9.append(("설명서", "help", "#eef3fa", "#5b6f8c"))
             # 위로 펼쳐지므로 **거꾸로** 그린다 — 그래야 화면에서 위에서
             # 아래로 목록 차례(미니게임 → 꾸미기 → 알림 끄기)가 된다
@@ -34615,6 +35708,11 @@ class Mascot:
                 cv.create_text(gx0 + bw / 2, yy9 + bw / 2, text=label9,
                                justify="center", font=self._uf(7, True),
                                fill=ink9, tags=("dyn", "ui"))
+                if act9 == "notes" and self._note_unread():
+                    # 안 읽은 쪽지 — 단추 오른쪽 위 빨간 점
+                    self._oval(cv, gx0 + bw - 11 * k, yy9 + 2 * k,
+                               gx0 + bw - 3 * k, yy9 + 10 * k,
+                               fill="#e8556c", outline="")
                 self._room_menu_items.append(
                     ((gx0, yy9, gx0 + bw, yy9 + bw), act9))
                 if act9 == "games" and self._room_games_open:
@@ -38731,6 +39829,8 @@ class Mascot:
                         self._safe("room_deco", self._room_deco_win)
                     elif act9 == "monthly":
                         self._safe("monthly", self._monthly_win)
+                    elif act9 == "notes":
+                        self._safe("note_win", self._note_win)
                     else:
                         self._room_game_open(act9)
                     return
