@@ -897,6 +897,7 @@ DEFAULT_SETTINGS = {
     "pomo_week": True,    # 뽀모도로 창의 '이번 주' 그래프를 펴 두었는가
     "note_sent": None,    # 오늘 보낸 쪽지 수 {"day","n"} (하루 상한)
     "note_desk_ack": 0,   # 책상 봉투를 어디까지 봤나 (쪽지 번호)
+    "news_seen": None,    # 업데이트 안내 중 '본 장'의 판 번호 목록
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
@@ -15329,6 +15330,14 @@ class Mascot:
         """
         pages = self._update_pages()
         self._update_notes = []
+        # 안 본 지난 안내 — 새 노트가 옛 노트를 덮어 못 볼 수 있으니
+        # 화살표에 빨간 점을 띄운다 (요청). '어느 판을 봤나' 목록으로
+        # 계산한다. 처음에는 읽은 번호까지를 본 것으로 친다 (이행).
+        if not isinstance(self.us.get("news_seen"), list):
+            rv9 = self._safe_str(self._update_read_ver) or 0
+            self.us["news_seen"] = sorted(
+                int(g.get("ver") or 0) for g in pages
+                if 0 < int(g.get("ver") or 0) <= int(rv9 or 0))
         if not pages and mark:
             # 사람이 메뉴에서 직접 열었는데 쌓인 안내가 없는 경우.
             # 그냥 돌아가면 '눌러도 아무 일이 안 일어난다'가 된다 (개 제보).
@@ -15368,7 +15377,36 @@ class Mascot:
                         highlightthickness=0)
         bar.pack(fill="x")
         hits = []
-        state = {"content": 0, "saved_at": 0.0}
+        state = {"content": 0, "saved_at": 0.0, "watch": bool(mark)}
+
+        def seen_set():
+            got = self.us.get("news_seen")
+            out9 = set()
+            for v in (got if isinstance(got, list) else []):
+                try:
+                    out9.add(int(v))
+                except (TypeError, ValueError):
+                    pass
+            return out9
+
+        def see(ver):
+            """이 장을 봤다 — 저절로 뜬 창은 사람이 넘기기 전엔 안 찍는다
+            (지뢰 30: 자리 비운 사이 떴을 수 있다)."""
+            if not state["watch"]:
+                return
+            try:
+                ver = int(ver or 0)
+            except (TypeError, ValueError):
+                return
+            if not ver:
+                return
+            ss = seen_set()
+            if ver in ss:
+                return
+            ss.add(ver)
+            keep9 = set(int(g.get("ver") or 0) for g in pages)
+            self.us["news_seen"] = sorted(ss & keep9)[-60:]
+            self._safe("news_seen_save", self._save_settings)
 
         F_TITLE = self._uf(10, True)
         F_BODY = self._uf(9)
@@ -15500,6 +15538,14 @@ class Mascot:
                 sub += "   (%d / %d)" % (i + 1, len(pages))
             cv.create_text(W / 2, y + u(46), text=sub,
                            font=self._uf(9), fill=cd["sub"])
+            see(pages[i].get("ver"))
+            ss9 = seen_set()
+            un_l = any(0 < int(g.get("ver") or 0)
+                       and int(g.get("ver") or 0) not in ss9
+                       for g in pages[:i])
+            un_r = any(0 < int(g.get("ver") or 0)
+                       and int(g.get("ver") or 0) not in ss9
+                       for g in pages[i + 1:])
             if len(pages) > 1:               # 지난 안내로 넘기는 화살표
                 # 선 두 개만 그렸더니 눈에 안 띄어 '지난 것을 볼 수 있다'는
                 # 걸 아무도 몰랐다. 누를 수 있는 동그란 단추로 만든다.
@@ -15516,6 +15562,11 @@ class Mascot:
                         cv.create_line(cx - sign * u(3), cy + dy,
                                        cx + sign * u(3), cy, width=3 if on else 2,
                                        capstyle="round", fill=col)
+                    # 안 본 지난 안내가 그쪽에 있다 — 빨간 점 (요청)
+                    if on and (un_l if sign < 0 else un_r):
+                        self._oval(cv, cx + rad - u(7), cy - rad - u(1),
+                                   cx + rad + u(3), cy - rad + u(9),
+                                   fill="#e8556c", outline="")
                     if on:
                         hits.append((cx - u(16), cy - u(16), cx + u(16),
                                      cy + u(16),
@@ -15639,6 +15690,7 @@ class Mascot:
             win.destroy()
 
         def flip(d):
+            state["watch"] = True
             page[0] += d
             render()
 
@@ -22242,6 +22294,11 @@ class Mascot:
     ROOM_ALL = tuple(c["slot"] for c in CHARS if c.get("gift", True))
     ROOM_TINT = dict((c["slot"], c["tint"]) for c in CHARS)
     ROOM_NAME = dict((c["slot"], c["name"]) for c in CHARS)
+    # 쪽지 받는 사람 목록 — 선물 캐릭터에 더해 **에나(내 도로롱)**도
+    # 들어간다. 버그 제보·건의를 쪽지로 받는 창구다 (요청). 에나가 맨 앞.
+    NOTE_ALL = tuple(c["slot"] for c in CHARS
+                     if not c.get("gift", True)) + \
+        tuple(c["slot"] for c in CHARS if c.get("gift", True))
     ROOM_SIZE = dict((c["slot"], c["size"]) for c in CHARS if c.get("size"))
     ROOM_COLS, ROOM_CW, ROOM_CH, ROOM_TOP = 3, 230, 248, 84
     # 칸 아래에 잡아 두는 자리 (보낼 사람 안내 + 반응 단추 줄).
@@ -22853,6 +22910,8 @@ class Mascot:
                 out["cal"] = self._stamp_pack()
             except Exception:
                 pass
+        if self.cfg.get("notes", True):
+            out["nt"] = 1               # 쪽지를 받을 수 있는 판이다
         if self._pomo_hard_badge():
             out["hm"] = 1               # 하드모드 세션 중 (홈의 '빡집중' —
             #                             멈춤·휴식에도 유지, 요청)
@@ -22956,6 +23015,17 @@ class Mascot:
     NOTE_BORD = (238, 196, 186, 255)      # 레이스 테두리
     NOTE_INK = "#7a6052"                  # 편지 잉크
     NOTE_HEAD = "#8a6a52"                 # To./From.
+
+    def _note_name(self, slot):
+        """쪽지에 보여 줄 이름 — 방에서 쓰는 별명이 있으면 그것.
+
+        기본 이름표(ROOM_NAME)는 도로롱이 둘이라(내 것·선물본) 별명이
+        갈라 준다. 별명을 아직 못 봤으면 이름표로 물러난다.
+        """
+        w = (self._room_who_get() or {}).get(slot)
+        if isinstance(w, dict) and w.get("n"):
+            return str(w["n"])[:12]
+        return self.ROOM_NAME.get(slot, str(slot))
 
     def _notes_on(self):
         """쪽지 기능이 켜져 있는가 — 홈(방)이 켜져 있어야 한다."""
@@ -23112,14 +23182,12 @@ class Mascot:
                     changed = True
                     if not self.us.get("room_mute"):
                         if fresh:
-                            nm = self.ROOM_NAME.get(
-                                str(fresh[-1].get("f") or ""), "친구")
+                            nm = self._note_name(str(fresh[-1].get("f") or "")) or "친구"
                             word = ("%s 님의 편지가 도착했어요!" % nm
                                     if len(fresh) == 1 else
                                     "편지가 %d통 도착했어요!" % len(fresh))
                         else:
-                            nm = self.ROOM_NAME.get(
-                                str(hearts[-1].get("f") or ""), "친구")
+                            nm = self._note_name(str(hearts[-1].get("f") or "")) or "친구"
                             word = "%s 님이 편지에 하트를 보냈어요 ♥" % nm
                         # 캐릭터를 눌러야 꺼진다 (요청 — hold)
                         self._say(word, 8.0, big=True, btn="열어 보기",
@@ -23568,7 +23636,29 @@ class Mascot:
                       insertbackground=self.NOTE_INK, wrap="char",
                       font=self._uf(10), highlightthickness=0)
         nw["box"] = box
-        peers = [s9 for s9 in self.ROOM_ALL if s9 != self.char]
+        def peers_now():
+            """쪽지를 받을 수 있는 사람만 — 새 판임을 알린(nt) 사람.
+
+            업데이트 전 친구에게 보내면 봉투가 30일을 하염없이 기다린다
+            (요청 — 목록에서 아예 뺀다). 방 명단·캐시 어느 쪽에서든 nt
+            를 본 적이 있으면 나온다.
+            """
+            who9 = self._room_who_get() or {}
+            live9 = {}
+            for q9 in (self.room_people or []):
+                if q9.get("nt"):
+                    live9[str(q9.get("slot") or "")] = 1
+            # 내게 편지를 보낸 적 있는 사람은 확실히 새 판이다
+            got9 = set(str(r.get("f") or "")
+                       for r in self._notes_get()["list"])
+            return [s9 for s9 in self.NOTE_ALL
+                    if s9 != self.char
+                    and (live9.get(s9) or s9 in got9
+                         or int((who9.get(s9) if isinstance(
+                             who9.get(s9), dict) else {}).get("nt")
+                             or 0) == 1)]
+
+        peers = peers_now()
         self._note_hits = []
 
         def keep(im):
@@ -23656,7 +23746,7 @@ class Mascot:
                                         image=keep(hh9))
                     cv.create_text(u(52), ry + rh / 2 - u(1), anchor="w",
                                    text="%s 님이 내 편지를 좋아해요"
-                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   % self._note_name(slot9),
                                    font=self._uf(9, True),
                                    fill=cd["text"])
                     cv.create_text(W - u(24), ry + rh - u(14), anchor="e",
@@ -23676,8 +23766,7 @@ class Mascot:
                         cv.create_image(ex1 - ew / 2, ry + rh / 2,
                                         image=keep(im9))
                     cv.create_text(u(16), ry + rh / 2 - u(9), anchor="w",
-                                   text="From. %s"
-                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   text="From. %s" % self._note_name(slot9),
                                    font=self._uf(10, True),
                                    fill=self._shade(col9, 0.15))
                     cv.create_text(u(16), ry + rh / 2 + u(12), anchor="w",
@@ -23701,8 +23790,7 @@ class Mascot:
                                   ry + rh - u(4), u(14), fill="#ffffff",
                                   outline=line, width=1)
                     cv.create_text(u(28), ry + u(22), anchor="w",
-                                   text="To. %s"
-                                   % self.ROOM_NAME.get(slot9, slot9),
+                                   text="To. %s" % self._note_name(slot9),
                                    font=self._uf(10, True),
                                    fill=self._shade(col9, 0.15))
                     cv.create_text(W - u(28), ry + u(23), anchor="e",
@@ -23748,7 +23836,7 @@ class Mascot:
         def d_read():
             r = nw["note"] or {}
             slot9 = str(r.get("f") or "")
-            nm9 = self.ROOM_NAME.get(slot9, slot9)
+            nm9 = self._note_name(slot9)
             col9 = self._room_tone(slot9)
             back_btn(u(26), u(26))
             cv.create_text(W / 2, u(26), text="%s의 편지" % nm9,
@@ -23761,9 +23849,7 @@ class Mascot:
             if st9:
                 cv.create_image(W - u(48), u(88), image=keep(st9))
             cv.create_text(u(46), u(86), anchor="w",
-                           text="To. %s"
-                           % self.ROOM_NAME.get(self.char,
-                                                self.cfg.get("name", "나")),
+                           text="To. %s" % self._note_name(self.char),
                            font=self._uf(12, True), fill=self.NOTE_HEAD)
             f9 = self._uf(10)
             lines = self._wrap_lines(str(r.get("t") or ""), f9, pw - u(60))
@@ -23802,6 +23888,14 @@ class Mascot:
             back_btn(u(26), u(24))
             cv.create_text(W / 2, u(24), text="누구에게 보낼까요?",
                            font=self._uf(10, True), fill=cd["text"])
+            peers[:] = peers_now()
+            if not peers:
+                cv.create_text(W / 2, u(70),
+                               text="아직 편지를 받을 수 있는 친구가 없어요",
+                               font=self._uf(9), fill=cd["sub"])
+                cv.create_text(W / 2, u(90),
+                               text="친구가 업데이트를 받으면 여기에 나타나요",
+                               font=self._uf(8), fill=cd["sub"])
             per = 5
             pages = max(1, (len(peers) + per - 1) // per)
             nw["fpage"] = max(0, min(nw["fpage"], pages - 1))
@@ -23817,7 +23911,7 @@ class Mascot:
                 if pt9:
                     cv.create_image(cx, u(58), image=keep(pt9))
                 cv.create_text(cx, u(86),
-                               text=self.ROOM_NAME.get(slot9, slot9),
+                               text=self._note_name(slot9),
                                font=self._uf(8, on),
                                fill=cd["text"] if on else cd["sub"])
                 hit(cx - u(24), u(36), cx + u(24), u(94), ("peer", slot9))
@@ -23837,7 +23931,7 @@ class Mascot:
             pp9 = self._note_paper(pw3, ph3)
             if pp9:
                 cv.create_image(W / 2, u(112) + ph3 / 2, image=keep(pp9))
-            nm9 = self.ROOM_NAME.get(nw["peer"], nw["peer"] or "?")
+            nm9 = self._note_name(nw["peer"]) if nw["peer"] else "?"
             cv.create_text(u(44), u(146), anchor="w", text="To. %s" % nm9,
                            font=self._uf(12, True), fill=self.NOTE_HEAD)
             st9 = self._note_stamp(u(13), self.card["fill"], self.char) \
@@ -23858,9 +23952,7 @@ class Mascot:
                            fill="#c96f6f" if cur9 > self.NOTE_MAX
                            else cd["sub"])
             cv.create_text(W - u(48), u(112) + ph3 - u(44), anchor="e",
-                           text="From. %s"
-                           % self.ROOM_NAME.get(self.char,
-                                                self.cfg.get("name", "나")),
+                           text="From. %s" % self._note_name(self.char),
                            font=self._uf(10, True), fill=self.NOTE_HEAD)
             by3 = H - u(62)
             pill_btn(u(70), by3, W - u(70), by3 + u(38), "보내기", True,
@@ -24297,6 +24389,9 @@ class Mascot:
             # 것이 남에게 계속 보인다 (_room_who_get 은 날짜와 무관한
             # 값만 두는 자리다 — 그 독스트링이 그렇게 못 박고 있다).
             dl = str(q.get("dl") or "")[:10]
+            # 쪽지 가능 표식 — 새 판만 싣는다. 한 번 1이 되면 지킨다
+            # (판을 되돌리는 일은 없다)
+            nt9 = 1 if (q.get("nt") or cur.get("nt")) else 0
             # 꼬들 오늘 결과 — 날짜가 안에 있어 묵으면 저절로 안 쓰인다.
             # **온 것이 dict 이면 그것이 최신이다** (빈 것 = 아직 안 풀었다
             # ·지웠다). 열쇠가 아예 없을 때만 기존 것을 지킨다 — 옛 판이나
@@ -24350,6 +24445,7 @@ class Mascot:
                     or int(cur.get("g2b") or 0) != gb2
                     or str(cur.get("rm") or "") != rm
                     or str(cur.get("dl") or "") != dl
+                    or int(cur.get("nt") or 0) != nt9
                     or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
                     or float(cur.get("lvd") or 0) != lvd
@@ -24368,6 +24464,8 @@ class Mascot:
                     row2["rmg"] = rmg
                 if dl:
                     row2["dl"] = dl
+                if nt9:
+                    row2["nt"] = 1
                 if kd9:
                     row2["kd"] = kd9
                 if ms9:
