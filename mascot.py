@@ -23726,7 +23726,7 @@ class Mascot:
                                text="아직 주고받은 쪽지가 없어요"
                                if nw["tab"] == "in"
                                else "아직 보낸 쪽지가 없어요",
-                               font=self._uf(9), fill=cd["sub"])
+                               font=self._uf(9, True), fill=cd["sub"])
             for r in page_rows:
                 rh = u(84)
                 if nw["tab"] == "in" and r.get("k") == "hr":
@@ -23751,7 +23751,7 @@ class Mascot:
                                    fill=cd["text"])
                     cv.create_text(W - u(24), ry + rh - u(14), anchor="e",
                                    text=self._note_ago(r.get("ts")),
-                                   font=self._uf(7), fill=cd["sub"])
+                                   font=self._uf(8, True), fill=cd["sub"])
                     hit(u(10), ry, W - u(10), ry + rh, ("hrread", r))
                     ry += rh + u(10)
                     continue
@@ -23771,7 +23771,7 @@ class Mascot:
                                    fill=self._shade(col9, 0.15))
                     cv.create_text(u(16), ry + rh / 2 + u(12), anchor="w",
                                    text=self._note_ago(r.get("ts")),
-                                   font=self._uf(7), fill=cd["sub"])
+                                   font=self._uf(8, True), fill=cd["sub"])
                     st9 = self._note_stamp(u(12), col9, slot9)
                     if st9:
                         cv.create_image(ex1 - u(24), ry + u(30),
@@ -23779,7 +23779,7 @@ class Mascot:
                     cv.create_text(ex1 - u(15), ry + rh - u(20),
                                    anchor="e",
                                    text="열어 보기 ›" if sealed else "읽음",
-                                   font=self._uf(8, sealed),
+                                   font=self._uf(8, True),
                                    fill=self._shade(cd["fill"], 0.1)
                                    if sealed else "#c9c3ce")
                     hit(u(10), ry, W - u(10), ry + rh, ("open", r))
@@ -23795,7 +23795,7 @@ class Mascot:
                                    fill=self._shade(col9, 0.15))
                     cv.create_text(W - u(28), ry + u(23), anchor="e",
                                    text=self._note_ago(r.get("ts")),
-                                   font=self._uf(7), fill=cd["sub"])
+                                   font=self._uf(8, True), fill=cd["sub"])
                     txt9 = str(r.get("t") or "")
                     if len(txt9) > 24:
                         txt9 = txt9[:24] + "…"
@@ -23831,7 +23831,7 @@ class Mascot:
                 cv.create_image(u(74), by0 + u(19), image=keep(hm9))
             cv.create_text(W / 2, H - u(11),
                            text="쪽지는 30일 뒤에 살짝 사라져요",
-                           font=self._uf(7), fill=cd["sub"])
+                           font=self._uf(8, True), fill=cd["sub"])
 
         def d_read():
             r = nw["note"] or {}
@@ -23866,7 +23866,7 @@ class Mascot:
                            font=self._uf(10, True), fill=self.NOTE_HEAD)
             cv.create_text(W - u(44), fy9 + u(18), anchor="e",
                            text=self._note_ago(r.get("ts")),
-                           font=self._uf(7), fill=cd["sub"])
+                           font=self._uf(8, True), fill=cd["sub"])
             by0 = H - u(64)
             # 하트 — 답장 대신 가볍게 (요청, 편지 하나에 한 번)
             hearted = bool(r.get("hrd"))
@@ -23887,15 +23887,15 @@ class Mascot:
         def d_write():
             back_btn(u(26), u(24))
             cv.create_text(W / 2, u(24), text="누구에게 보낼까요?",
-                           font=self._uf(10, True), fill=cd["text"])
+                           font=self._uf(11, True), fill=cd["text"])
             peers[:] = peers_now()
             if not peers:
                 cv.create_text(W / 2, u(70),
                                text="아직 편지를 받을 수 있는 친구가 없어요",
-                               font=self._uf(9), fill=cd["sub"])
+                               font=self._uf(9, True), fill=cd["sub"])
                 cv.create_text(W / 2, u(90),
                                text="친구가 업데이트를 받으면 여기에 나타나요",
-                               font=self._uf(8), fill=cd["sub"])
+                               font=self._uf(8, True), fill=cd["sub"])
             per = 5
             pages = max(1, (len(peers) + per - 1) // per)
             nw["fpage"] = max(0, min(nw["fpage"], pages - 1))
@@ -23912,8 +23912,9 @@ class Mascot:
                     cv.create_image(cx, u(58), image=keep(pt9))
                 cv.create_text(cx, u(86),
                                text=self._note_name(slot9),
-                               font=self._uf(8, on),
-                               fill=cd["text"] if on else cd["sub"])
+                               font=self._uf(9, True),
+                               fill=cd["text"] if on
+                               else self._shade(cd["sub"], 0.12))
                 hit(cx - u(24), u(36), cx + u(24), u(94), ("peer", slot9))
             for tx9, ch9, on9, d9 in ((u(16), "‹", nw["fpage"] > 0, -1),
                                       (W - u(16), "›",
@@ -23926,7 +23927,7 @@ class Mascot:
                         ("fpage", d9))
             cv.create_text(W / 2, u(100), text="%d / %d"
                            % (nw["fpage"] + 1, pages),
-                           font=self._uf(7), fill=cd["sub"])
+                           font=self._uf(8, True), fill=cd["sub"])
             pw3, ph3 = u(298), u(300)
             pp9 = self._note_paper(pw3, ph3)
             if pp9:
@@ -23948,21 +23949,25 @@ class Mascot:
                 cur9 = 0
             cv.create_text(W - u(44), u(112) + ph3 - u(18), anchor="e",
                            text="%d/%d" % (cur9, self.NOTE_MAX),
-                           font=self._uf(7),
+                           font=self._uf(8, True),
                            fill="#c96f6f" if cur9 > self.NOTE_MAX
                            else cd["sub"])
             cv.create_text(W - u(48), u(112) + ph3 - u(44), anchor="e",
                            text="From. %s" % self._note_name(self.char),
                            font=self._uf(10, True), fill=self.NOTE_HEAD)
-            by3 = H - u(62)
+            # 편지지 바로 아래에 붙인다 — 밑에 붕 뜬 여백이 컸다 (피드백)
+            by3 = u(112) + ph3 + u(18)
             pill_btn(u(70), by3, W - u(70), by3 + u(38), "보내기", True,
                      ("send",))
             env9 = self._note_env(u(20), u(14), cd["fill"], seal_k=0.34)
             if env9:
                 cv.create_image(u(98), by3 + u(19), image=keep(env9))
-            cv.create_text(W / 2, H - u(11),
-                           text="하루에 열 번까지 · 친구가 다음에 켤 때도 받아요",
-                           font=self._uf(7), fill=cd["sub"])
+            left9 = max(0, self.NOTE_DAY_MAX - self._note_today_sent())
+            cv.create_text(W / 2, by3 + u(56),
+                           text=("오늘 보낼 수 있는 편지 %d통 · 친구가 "
+                                 "다음에 켤 때도 받아요" % left9) if left9
+                           else "오늘은 다 썼어요 — 내일 또 보내요",
+                           font=self._uf(8, True), fill=cd["sub"])
 
         def draw():
             if not win.winfo_exists():
