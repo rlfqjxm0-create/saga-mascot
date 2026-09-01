@@ -23686,7 +23686,10 @@ class Mascot:
                         self._safe("note_snd", self._sparkle_sound)
             elif kind == "sent_ok":
                 lst = self._notes_sent_get()
-                lst.append({"to": it[1], "t": it[2], "ts": time.time()})
+                row9 = {"to": it[1], "t": it[2], "ts": time.time()}
+                if len(it) > 3 and isinstance(it[3], dict):
+                    row9["re"] = it[3]       # 답장이면 원문도 같이
+                lst.append(row9)
                 self._notes_sent_save()
                 self._note_sent_mark()
                 if self._nw is not None:
@@ -23754,8 +23757,13 @@ class Mascot:
         except Exception:
             pass                          # 다음 폴링에 다시
 
-    def _note_send_go(self, to_slot, text):
-        """쪽지를 보낸다 (스레드로). (됐는가, 안 됐으면 왜)를 돌려준다."""
+    def _note_send_go(self, to_slot, text, re=None):
+        """쪽지를 보낸다 (스레드로). (됐는가, 안 됐으면 왜)를 돌려준다.
+
+        `re` 는 '이 편지에 대한 답장'이라는 표시 — 받은 편지 하나다.
+        보낸함에 같이 적어 두어, 나중에 위아래로 이어 보여 준다 (요청).
+        서버로는 안 보낸다 (내 화면에서만 쓰는 값이다).
+        """
         text = str(text or "").strip()[:self.NOTE_MAX]
         if not text:
             return False, "내용을 적어 주세요"
@@ -23767,12 +23775,19 @@ class Mascot:
         to9 = str(to_slot or "")[:40]
         blob = _room_seal(net.key, {"f": self.char, "t": text,
                                     "ts": time.time()})
+        # 보낸함에 적을 '무엇에 대한 답장인가' — 원문 편지는 통째로
+        # 들고 있을 것 없이 보여 줄 값만 뽑는다 (파일이 커지지 않게)
+        re9 = None
+        if isinstance(re, dict) and re.get("t"):
+            re9 = {"f": str(re.get("f") or "")[:40],
+                   "t": str(re.get("t") or "")[:self.NOTE_MAX],
+                   "ts": re.get("ts")}
 
         def go():
             try:
                 net._rpc("note_send", {"p_room": net.room, "p_to": to9,
                                        "p_blob": blob})
-                self._note_q.append(("sent_ok", to9, text))
+                self._note_q.append(("sent_ok", to9, text, re9))
             except Exception:
                 self._note_q.append(("sent_err",))
 
@@ -24135,7 +24150,7 @@ class Mascot:
         nw = {"view": "list", "tab": "in", "page": 0, "peer": None,
               "fpage": 0, "note": None, "status": "", "status_at": 0.0,
               "dirty": True, "keep": [], "after": None, "sig": None,
-              "rscroll": 0}
+              "rscroll": 0, "re": None, "sc_re": 0, "sc_me": 0}
         self._nw = nw
         # 글 상자 — 부모는 캔버스 (지뢰 22: 창이 부모면 삐져나온다)
         box = tk.Text(cv, width=1, height=1, bd=0, relief="flat",
@@ -24328,6 +24343,12 @@ class Mascot:
                         if hh9:
                             cv.create_image(W - u(32), ry + u(48),
                                             image=keep(hh9))
+                    if r.get("re"):          # 답장으로 보낸 것
+                        cv.create_text(W - u(28), ry + rh - u(22),
+                                       anchor="e", text="답장 ›",
+                                       font=self._uf(8, True),
+                                       fill=self._shade(cd["fill"], 0.1))
+                    hit(u(10), ry, W - u(10), ry + rh, ("sopen", r))
                 ry += rh + u(10)
             if pages > 1:
                 py9 = H - u(84)
@@ -24353,6 +24374,118 @@ class Mascot:
             cv.create_text(W / 2, H - u(11),
                            text="쪽지는 30일 뒤에 살짝 사라져요",
                            font=self._uf(8, True), fill=cd["sub"])
+
+        def sheet(x0, y0, w, h, head, head_col, body, foot, foot_col,
+                  stamp_slot, stamp_col, ts, vis, key, small=False):
+            """편지지 한 장 — 받은 편지·보낸 편지가 같은 길로 그려진다.
+
+            `key` 는 스크롤 자리를 담아 둘 이름이다. 한 화면에 편지가 둘
+            (받은 것 + 내 답장) 올 수 있어 자리를 따로 들어야 한다.
+            """
+            pp = self._note_paper(int(w), int(h))
+            if pp:
+                cv.create_image(x0 + w / 2, y0 + h / 2, image=keep(pp))
+            cv.create_text(x0 + u(22), y0 + u(26), anchor="w", text=head,
+                           font=self._uf(11 if small else 12, True),
+                           fill=head_col)
+            st = self._note_stamp(u(12 if small else 14), stamp_col,
+                                  stamp_slot)
+            if st:
+                cv.create_image(x0 + w - u(26), y0 + u(28), image=keep(st))
+            f9 = self._uf(9 if small else 10)
+            lh9 = u(26 if small else 30)
+            all9 = self._wrap_lines(body, f9, w - u(56), max_lines=0)
+            off_max = max(0, len(all9) - vis)
+            nw[key] = max(0, min(int(nw.get(key) or 0), off_max))
+            off9 = nw[key]
+            lines = all9[off9:off9 + vis]
+            for i, ln in enumerate(lines):
+                yy = y0 + u(56) + i * lh9
+                cv.create_text(x0 + u(18), yy, anchor="w", text=ln,
+                               font=f9, fill=self.NOTE_INK)
+                cv.create_line(x0 + u(16), yy + u(11),
+                               x0 + w - u(16), yy + u(11), fill="#e8d6c4")
+            if off_max:                       # 길면 스크롤 막대 (요청)
+                ax = x0 + w - u(10)
+                bw9 = u(3)
+                ty0, ty1 = y0 + u(50), y0 + h - u(50)
+                self._rr_soft(cv, ax - bw9, ty0, ax + bw9, ty1, bw9,
+                              fill="#f0e4d6", outline="")
+                span9 = max(1.0, ty1 - ty0)
+                th9 = max(u(24), span9 * len(lines) / float(len(all9)))
+                tt9 = ty0 + (span9 - th9) * (off9 / float(off_max))
+                self._rr_soft(cv, ax - bw9, tt9, ax + bw9, tt9 + th9, bw9,
+                              fill=self._tint(cd["fill"], 0.15), outline="")
+                if off9 > 0:
+                    hit(ax - u(12), ty0, ax + u(12), tt9,
+                        ("scroll", key, -len(lines)))
+                if off9 < off_max:
+                    hit(ax - u(12), tt9 + th9, ax + u(12), ty1,
+                        ("scroll", key, len(lines)))
+            cv.create_text(x0 + w - u(22), y0 + h - u(38), anchor="e",
+                           text=foot, font=self._uf(10, True),
+                           fill=foot_col)
+            cv.create_text(x0 + w - u(22), y0 + h - u(20), anchor="e",
+                           text=ts, font=self._uf(8, True), fill=cd["sub"])
+
+        def d_sent():
+            """보낸 편지 열어 보기 (요청).
+
+            답장으로 보낸 것이면 **위에 받은 편지, 아래에 내 답장**을
+            같이 보여 준다. 이어 붙일 정보(re)는 보낼 때 적어 두므로
+            그 전에 보낸 편지들은 내 편지 한 장으로만 보인다.
+            """
+            r = nw["note"] or {}
+            slot9 = str(r.get("to") or "")
+            nm9 = self._note_name(slot9)
+            col9 = self._room_tone(slot9)
+            re9 = r.get("re") if isinstance(r.get("re"), dict) else None
+            back_btn(u(26), u(26))
+            cv.create_text(W / 2, u(26),
+                           text="%s에게 보낸 %s" % (nm9,
+                                                   "답장" if re9 else "편지"),
+                           font=self._uf(11, True), fill=cd["text"])
+            px = W / 2 - u(149)
+            if re9:
+                cv.create_text(u(30), u(52), anchor="w", text="받은 편지",
+                               font=self._uf(9, True), fill=cd["sub"])
+                sheet(px, u(62), u(298), u(176),
+                      "From. %s" % nm9, self._shade(col9, 0.15),
+                      str(re9.get("t") or ""), "받음", cd["sub"],
+                      slot9, col9, self._note_ago(re9.get("ts")),
+                      3, "sc_re", small=True)
+                cv.create_text(W / 2, u(250), text="↓  내 답장",
+                               font=self._uf(9, True),
+                               fill=self._tint(cd["fill"], 0.1))
+                sheet(px, u(266), u(298), u(214),
+                      "To. %s" % nm9, self._shade(col9, 0.15),
+                      str(r.get("t") or ""),
+                      "From. %s" % self._note_name(self.char),
+                      self.NOTE_HEAD, self.char, cd["fill"],
+                      self._note_ago(r.get("ts")), 4, "sc_me")
+            else:
+                sheet(px, u(48), u(298), u(330),
+                      "To. %s" % nm9, self._shade(col9, 0.15),
+                      str(r.get("t") or ""),
+                      "From. %s" % self._note_name(self.char),
+                      self.NOTE_HEAD, self.char, cd["fill"],
+                      self._note_ago(r.get("ts")), 6, "sc_me")
+            by0 = H - u(64)
+            if r.get("hr"):        # 상대가 하트를 눌렀다
+                hh9 = self._note_heart(u(15), "#e8688c")
+                self._safe("dot", self._soft_dot, cv, u(30), by0 + u(18),
+                           u(16), "#ffe9f0", outline="#e8688c",
+                           width=1.4, shadow=True)
+                if hh9:
+                    cv.create_image(u(30), by0 + u(19), image=keep(hh9))
+                bx9 = u(54)
+            else:
+                bx9 = u(20)
+            pill_btn(bx9, by0, W / 2 + u(14), by0 + u(36),
+                     "또 답장하기" if re9 else "다시 쓰기", True,
+                     ("write", slot9))
+            pill_btn(W / 2 + u(24), by0, W - u(20), by0 + u(36),
+                     "목록으로", False, ("back",))
 
         def d_read():
             r = nw["note"] or {}
@@ -24527,6 +24660,8 @@ class Mascot:
             view = nw["view"]
             if view == "read":
                 d_read()
+            elif view == "sent":
+                d_sent()
             elif view == "write":
                 d_write()
             else:
@@ -24578,7 +24713,27 @@ class Mascot:
                 elif k9 == "rscroll":
                     nw["rscroll"] = max(0, int(nw.get("rscroll") or 0)
                                         + act[1])
+                elif k9 == "scroll":          # 보낸 편지 화면 (편지지 둘)
+                    nw[act[1]] = max(0, int(nw.get(act[1]) or 0) + act[2])
+                elif k9 == "sopen":
+                    nw["note"] = act[1]
+                    nw["view"] = "sent"
+                    nw["sc_re"] = nw["sc_me"] = 0
                 elif k9 == "write":
+                    # 받은 편지에서 눌렀으면 '무엇에 대한 답장인지'를
+                    # 들고 간다 — 보낸함에서 위아래로 같이 보여 준다.
+                    # 보낸 편지 화면의 '또 답장하기'는 그 편지가 답장이던
+                    # 원문을 그대로 이어 간다.
+                    src9 = nw.get("note") or {}
+                    if not act[1]:
+                        nw["re"] = None       # 목록에서 새로 쓰기
+                    elif nw["view"] == "read":
+                        nw["re"] = dict(src9)
+                    elif nw["view"] == "sent" and isinstance(
+                            src9.get("re"), dict):
+                        nw["re"] = dict(src9["re"])
+                    else:
+                        nw["re"] = None
                     nw["view"] = "write"
                     if act[1]:
                         nw["peer"] = act[1]
@@ -24591,7 +24746,10 @@ class Mascot:
                         txt9 = nw["box"].get("1.0", "end-1c")
                     except Exception:
                         pass
-                    ok9, why9 = self._note_send_go(nw["peer"], txt9)
+                    re9 = nw.get("re")
+                    if re9 and str(re9.get("f") or "") != nw["peer"]:
+                        re9 = None            # 받는 사람을 바꿨다
+                    ok9, why9 = self._note_send_go(nw["peer"], txt9, re9)
                     if ok9:
                         nw["status"] = "보내는 중…"
                         try:
@@ -24633,12 +24791,19 @@ class Mascot:
                 self._nw = None
 
         def on_wheel(e):
-            """긴 편지 넘기기 — 읽기 화면에서만. 맥은 delta 가 ±1~3,
-            윈도우는 ±120 이라 부호만 본다."""
-            if nw["view"] != "read":
-                return
+            """긴 편지 넘기기 — 읽기·보낸편지 화면에서. 맥은 delta 가
+            ±1~3, 윈도우는 ±120 이라 부호만 본다."""
             d9 = -1 if getattr(e, "delta", 0) > 0 else 1
-            nw["rscroll"] = max(0, int(nw.get("rscroll") or 0) + d9)
+            if nw["view"] == "read":
+                key9 = "rscroll"
+            elif nw["view"] == "sent":
+                # 편지지가 둘이면 커서가 있는 쪽을 넘긴다
+                key9 = ("sc_re" if (isinstance((nw.get("note") or {})
+                                               .get("re"), dict)
+                                    and e.y < u(250)) else "sc_me")
+            else:
+                return
+            nw[key9] = max(0, int(nw.get(key9) or 0) + d9)
             nw["dirty"] = True
             draw()
 

@@ -1,7 +1,7 @@
 {
- "version": 1788275793,
+ "version": 1788278207,
  "files": {
-  "mascot.py": "2d5065f42b73d07cd026a005f00e7fa9ec11263a120eeea107a9ce96bbfb6347",
+  "mascot.py": "208048a98f6073ce8d5b067858a60a3e40adf08b54560e73832d2a9d7fc5ee47",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -582,11 +582,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "긴 편지에 스크롤 막대가 생겼어요 — 남은 양이 한눈에 보여요",
-  "답장을 쓸 때도 편지지 줄선이 보여요",
-  "빡집중 깜빡임이 말풍선 모양대로 비켜 가요 — 둘레가 깔끔해졌어요",
-  "캐릭터 말풍선이 할 일·마감 목록에 가리지 않아요",
-  "에나(도로롱)가 타이머를 꺼도 홈에 자리가 남아요"
- ]
+ "notes": [],
+ "silent": true
 }
