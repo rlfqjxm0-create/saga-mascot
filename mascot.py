@@ -22765,6 +22765,14 @@ class Mascot:
     ROOM_ART = dict((c["slot"], (c["repo"], c.get("art") or c["slot"]))
                     for c in CHARS)
     ROOM_ALL = tuple(c["slot"] for c in CHARS if c.get("gift", True))
+    # 방에 **자리를 잡아 두는** 사람들 — 선물본에 더해 소스로 도는 내
+    # 도로롱까지 전부. ROOM_ALL 에는 선물본만 있어서, 내 도로롱은 지금
+    # 켜 있을 때만 남의 홈에 보이고 끄면 칸이 통째로 사라졌다 (제보:
+    # "내가 접속하지 않았을 때 위주로 홈에서 사라진다"). 다른 사람은
+    # 꺼져도 '아직 안 켠 사람' 칸이 남는데 나만 안 남던 것이다.
+    # **ROOM_ALL 을 넓히지 않는 이유**: 수박게임 얼굴 목록(_wg_faces)이
+    # 그 표를 쓴다 — 사람이 늘면 판 구성이 달라진다.
+    ROOM_SEATS = tuple(c["slot"] for c in CHARS)
     ROOM_TINT = dict((c["slot"], c["tint"]) for c in CHARS)
     ROOM_NAME = dict((c["slot"], c["name"]) for c in CHARS)
     # 쪽지 받는 사람 목록 — 선물 캐릭터에 더해 **에나(내 도로롱)**도
@@ -24133,8 +24141,22 @@ class Mascot:
         box = tk.Text(cv, width=1, height=1, bd=0, relief="flat",
                       bg="#fffbf0", fg=self.NOTE_INK,
                       insertbackground=self.NOTE_INK, wrap="char",
-                      font=self._uf(10), highlightthickness=0)
+                      font=self._uf(10), highlightthickness=0,
+                      padx=0, pady=0, spacing1=0, spacing3=0)
         nw["box"] = box
+        # 편지지 줄선 — 답장을 쓸 때만 줄이 사라졌다 (제보). 글 상자가
+        # 불투명이라 캔버스에 그린 괘선이 그대로 가려지기 때문이다.
+        # Tk 는 위젯 배경에 그림을 못 깔지만, **상자 안에 얇은 띠 위젯을
+        # 얹는 것**은 된다. 글줄 높이만큼 띄워 놓으면 줄선이 된다.
+        # (Text 는 줄 단위로 굴러가므로 스크롤해도 안 어긋난다.)
+        try:
+            lh9 = max(8, int(self._mh(self._uf(10))))
+            for i9 in range(max(1, int(u(120) // lh9))):
+                tk.Frame(box, bg="#e8d6c4", height=1, bd=0,
+                         highlightthickness=0).place(
+                    x=0, relwidth=1.0, y=(i9 + 1) * lh9 - 1)
+        except Exception:
+            pass
         def peers_now():
             """쪽지를 받을 수 있는 사람만 — 새 판임을 알린(nt) 사람.
 
@@ -24368,16 +24390,25 @@ class Mascot:
                 cv.create_line(u(38), yy + u(11), W - u(38), yy + u(11),
                                fill="#e8d6c4")
             if off_max:
-                # 오른쪽 여백의 작은 화살표 — 눌러도 넘어간다
+                # 스크롤 막대 — 화살표만으로는 '아래에 더 있다'가 안
+                # 읽혔다 (제보). 손잡이 길이가 곧 '얼마나 남았나'다.
                 ax = W / 2 + u(135)
-                for ch9, on9, d9, ay in (("▴", off9 > 0, -1, u(140)),
-                                         ("▾", off9 < off_max, 1, u(288))):
-                    cv.create_text(ax, ay, text=ch9,
-                                   font=self._uf(10, True),
-                                   fill=cd["fill"] if on9 else "#e4d8ca")
-                    if on9:
-                        hit(ax - u(14), ay - u(14), ax + u(14),
-                            ay + u(14), ("rscroll", d9))
+                bw9 = u(3)
+                ty0, ty1 = u(132), u(300)
+                self._rr_soft(cv, ax - bw9, ty0, ax + bw9, ty1, bw9,
+                              fill="#f0e4d6", outline="")
+                span9 = ty1 - ty0
+                th9 = max(u(26), span9 * len(lines) / float(len(all9)))
+                tt9 = ty0 + (span9 - th9) * (off9 / float(off_max))
+                self._rr_soft(cv, ax - bw9, tt9, ax + bw9, tt9 + th9, bw9,
+                              fill=self._tint(cd["fill"], 0.15), outline="")
+                # 손잡이 위/아래를 누르면 한 화면씩 넘어간다
+                if off9 > 0:
+                    hit(ax - u(12), ty0, ax + u(12), tt9,
+                        ("rscroll", -len(lines)))
+                if off9 < off_max:
+                    hit(ax - u(12), tt9 + th9, ax + u(12), ty1,
+                        ("rscroll", len(lines)))
             fy9 = u(134) + max(3, len(lines)) * u(30) + u(28)
             cv.create_text(W - u(44), fy9, anchor="e",
                            text="From. %s" % nm9,
@@ -39084,7 +39115,7 @@ class Mascot:
             seats.append(dict(self._room_state_now(), slot=self.char, age=0))
         # 서버는 '최근에 신호한 순'으로 준다. 그대로 쓰면 5초마다 자리가
         # 뒤바뀌어 보인다 — 정해진 차례로 다시 세운다.
-        order = dict((sl, i) for i, sl in enumerate(self.ROOM_ALL))
+        order = dict((sl, i) for i, sl in enumerate(self.ROOM_SEATS))
         seen = self._room_seen_get()
         day = self._my_workday()
         rest = []
@@ -39128,7 +39159,7 @@ class Mascot:
                                       q.get("slot") or ""))
         here = set(q.get("slot") or "" for q in seats)
         now9 = time.time()
-        for slot in self.ROOM_ALL:
+        for slot in self.ROOM_SEATS:
             if slot in here:
                 continue
             # 명단에서 사라진 지 150초 안이면 마지막 모습 그대로 —
