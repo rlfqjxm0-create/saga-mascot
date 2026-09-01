@@ -18292,9 +18292,17 @@ class Mascot:
         st = self._pomo()
         rest = dict((str(q.get("slot") or ""), q)
                     for q in (self.room_people or []))
+        # **누가 같이 하는지는 방 신호로 안다.** 초대한 사람만 명단을
+        # 들고 있어서, 참가자끼리는 서로 안 보였다 (사가 제보 —
+        # '방에 나밖에 안 보여'). 같은 세션 번호를 싣고 있으면 한 팀이다.
+        mem = [s for s in (tm.get("members") or {}) if s != self.char]
+        for sl9, q9 in rest.items():
+            b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
+            if (b9 and str(b9.get("i") or "") == str(tm["sid"])
+                    and sl9 != self.char and sl9 not in mem):
+                mem.append(sl9)
         out = []
-        for sl in [self.char] + [s for s in tm.get("members") or {}
-                                 if s != self.char]:
+        for sl in [self.char] + mem:
             vow = str((tm["members"].get(sl) or {}).get("v") or "")
             if sl == self.char:
                 vow = str(tm.get("vow") or "")
@@ -19063,6 +19071,94 @@ class Mascot:
         if now >= st["end"]:
             self._pomo_next()
 
+    def _team_vow_win(self):
+        """각오 한마디 고치기 — 참가자 줄에서 **내 칸을 눌렀을 때** (요청).
+
+        머리 위 말풍선이 곧 이 글이다. 고치면 그 자리에서 남들에게도 간다.
+        """
+        got = getattr(self, "_tm_vow_winref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(250)), int(u(132))
+        win = tk.Toplevel(self.root)
+        self._tm_vow_winref = win
+        win.title("각오 한마디")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=True)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        cv.create_text(W / 2, u(24), text="각오 한마디",
+                       font=self._uf(11, True), fill=cd["text"])
+        cv.create_text(W / 2, u(42), text="머리 위 말풍선에 보여요",
+                       font=self._uf(8, True), fill=cd["sub"])
+        self._rr_soft(cv, u(16), u(54), W - u(16), u(84), u(15),
+                      fill="#fffdf7", outline=line, width=1)
+        box = tk.Entry(cv, bd=0, relief="flat", bg="#fffdf7",
+                       fg=cd["text"], justify="center",
+                       font=self._uf(10), highlightthickness=0)
+        box.insert(0, str((self._tm or {}).get("vow")
+                          or self.us.get("pomo_vow") or ""))
+        cv.create_window(u(28), u(69), anchor="w", window=box,
+                         width=int(W - u(56)), height=int(u(22)))
+        try:
+            box.focus_set()
+            box.select_range(0, "end")
+        except Exception:
+            pass
+        hits = []
+
+        def save(_e=None):
+            vow = ""
+            try:
+                vow = box.get().strip()[:self.TEAM_VOW_N]
+            except Exception:
+                vow = ""
+            self.us["pomo_vow"] = vow
+            self._safe("vow_save", self._save_settings)
+            if self._tm:
+                self._tm["vow"] = vow
+                m9 = self._tm.get("members") or {}
+                if self.char in m9:
+                    m9[self.char]["v"] = vow
+                self._safe("room_push", self._room_push_now)
+            self._pomo_redraw()
+            win.destroy()
+
+        by = u(94)
+        for i, (lab, on, fn) in enumerate((("저장", True, save),
+                                           ("취소", False, win.destroy))):
+            bw = (W - u(48)) / 2
+            x0 = u(16) + i * (bw + u(16))
+            self._rr_soft(cv, x0, by, x0 + bw, by + u(26), u(13),
+                          fill=cd["fill"] if on else "#ffffff",
+                          outline="" if on else line, width=1)
+            cv.create_text(x0 + bw / 2, by + u(13), text=lab,
+                           font=self._uf(10, True),
+                           fill="#ffffff" if on else cd["sub"])
+            hits.append((x0, by, x0 + bw, by + u(26), fn))
+
+        def on_click(e):
+            for x0, y0, x1, y1, fn in hits:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    fn()
+                    return
+
+        cv.bind("<Button-1>", lambda e: self._safe("vow_click", on_click, e))
+        box.bind("<Return>", save)
+        win.bind("<Return>", save)      # 글 상자 밖에 초점이 있어도
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._place_near(win)
+
     def _team_win_open(self):
         """초대 창 — 같이 할 사람을 고르고 각오를 적는다 (요청).
 
@@ -19392,6 +19488,7 @@ class Mascot:
         wait = (tm.get("state") != "run")
         ox8 = getattr(self, "_pomo_ox", 0.0)
         WW8 = max(W, cv.winfo_width())
+        self._tm_vow_box = []          # 잘린 각오 (커서를 올리면 다 보인다)
         cv.create_text(pad - ox8 + u(9), y0, anchor="w",
                        text="같이 기다리는 중" if wait else "같이 하는 중",
                        font=uf(9, True), fill=cd["sub"])
@@ -19426,15 +19523,29 @@ class Mascot:
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
             f8 = uf(7, True)
             if vow:
-                tw8 = self._mw(vow, f8)
-                bw8 = min(gw - u(6), tw8 + u(14))
+                # 긴 각오는 말풍선 밖으로 새어 나왔다 (제보) — 칸에 맞게
+                # 자르고, 커서를 올리면 전부 보여 준다 (홈 말풍선과 같은
+                # 결). 자른 자리와 원문을 같이 들고 있다가 아래에서 그린다.
+                lim8 = gw - u(6)
+                show8 = vow
+                if self._mw(show8, f8) + u(14) > lim8:
+                    while show8 and self._mw(show8 + "…", f8) + u(14) > lim8:
+                        show8 = show8[:-1]
+                    show8 = (show8 + "…") if show8 else "…"
+                tw8 = self._mw(show8, f8)
+                bw8 = min(lim8, tw8 + u(14))
                 by0, by1 = cy0 + u(8) + dy, cy0 + u(30) + dy
                 self._rr_soft(cv, cx - bw8 / 2, by0, cx + bw8 / 2, by1,
                               u(9), fill="#fffdf7",
                               outline=self._tint(fg, 0.45), width=1,
                               tail=(cx, u(6)))
-                cv.create_text(cx, (by0 + by1) / 2, text=vow, font=f8,
+                cv.create_text(cx, (by0 + by1) / 2, text=show8, font=f8,
                                fill=self._shade(fg, 0.15))
+                if show8 != vow:
+                    # 커서가 올라오면 통째로 보여 줄 자리 (그리기는 맨 뒤)
+                    self._tm_vow_box.append(
+                        (cx - bw8 / 2, by0, cx + bw8 / 2, by1, cx,
+                         (by0 + by1) / 2, vow, fg))
             ph = self._seat_photo(
                 slot, u(46) * self.ROOM_SIZE.get(slot, 1.0))
             if ph is not None:
@@ -19453,8 +19564,20 @@ class Mascot:
                           u(8), fill=bg, outline="")
             cv.create_text(cx, cy0 + u(106), text=stt, font=f8, fill=fg)
             nm9 = self._note_name(slot)
-            cv.create_text(cx, cy0 + u(125), text=nm9, font=uf(8, True),
-                           fill=cd["text"])
+            if slot == self.char:
+                # 내 칸을 누르면 각오를 고친다 (요청). 누를 수 있다는 걸
+                # 알 수 있게 이름 옆에 작은 연필을 둔다.
+                nw9 = self._mw(nm9, uf(8, True))
+                cv.create_text(cx - u(5), cy0 + u(125), text=nm9,
+                               font=uf(8, True), fill=cd["text"])
+                cv.create_text(cx + nw9 / 2 + u(2), cy0 + u(125),
+                               text="✎", font=uf(8), fill=cd["sub"])
+                self._pomo_hits.append(
+                    (cx - gw * 0.42, cy0 + u(4), cx + gw * 0.42,
+                     cy0 + u(132), "tmvow"))
+            else:
+                cv.create_text(cx, cy0 + u(125), text=nm9,
+                               font=uf(8, True), fill=cd["text"])
             gx0, gx1 = cx - gw * 0.30, cx + gw * 0.30
             self._rr_soft(cv, gx0, cy0 + u(135), gx1, cy0 + u(139), u(2),
                           fill="#f0ecf2", outline="")
@@ -19463,6 +19586,32 @@ class Mascot:
                               gx0 + (gx1 - gx0) * fr, cy0 + u(139), u(2),
                               fill=fg, outline="")
         return y0 + u(12) + rows * ch + (rows - 1) * u(8)
+
+    def _team_vow_hover(self, cv, u, uf, W, pad):
+        """커서가 올라간 각오 말풍선을 통째로 보여 준다 (요청).
+
+        홈 말풍선과 같은 결이다. 잘린 것만 대상이고, 창 밖으로 나가지
+        않게 좌우로 밀어 넣는다.
+        """
+        pos = getattr(self, "_pomo_mouse", None)
+        boxes = getattr(self, "_tm_vow_box", None)
+        if not (pos and boxes):
+            return
+        mx, my = pos
+        for x0, y0, x1, y1, cx, cy, vow, fg in boxes:
+            if not (x0 - u(4) <= mx <= x1 + u(4)
+                    and y0 - u(4) <= my <= y1 + u(4)):
+                continue
+            f8 = uf(7, True)
+            tw8 = self._mw(vow, f8)
+            bw8 = min(W - pad * 2, tw8 + u(14))
+            bx = min(max(cx - bw8 / 2, pad), W - pad - bw8)
+            self._rr_soft(cv, bx, y0, bx + bw8, y1, u(9),
+                          fill="#fffdf7", outline=self._shade(fg, 0.1),
+                          width=1.4, tail=(cx, u(6)))
+            cv.create_text(bx + bw8 / 2, cy, text=vow, font=f8,
+                           fill=self._shade(fg, 0.15))
+            return
 
     def _team_fx_draw(self, cv, u, W, H, t):
         """완주 축하 — 색종이와 폭죽 (창 안에서만, 3초)."""
@@ -19825,8 +19974,16 @@ class Mascot:
                               fill=cd["fill"] if main else "#f2edf4",
                               outline="" if main else line,
                               width=0 if main else 1)
+                # 글자가 단추 밖으로 삐져나오지 않게 칸에 맞춰 줄인다
+                # (제보 — '오늘은 여기까지'가 넘쳤다). 창을 줄이면 글자도
+                # 같이 작아진다.
+                fb9 = uf(9, bool(main))
+                for s9 in range(9, 5, -1):
+                    fb9 = uf(s9, bool(main))
+                    if self._mw(lab, fb9) <= (x1 - x0) - u(10):
+                        break
                 cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
-                               font=self._uf(9, True if main else False),
+                               font=fb9,
                                fill="#ffffff" if main else cd["text"])
                 if act != "none":
                     self._pomo_hits.append((x0, by0, x1, by1, act))
@@ -19968,6 +20125,11 @@ class Mascot:
                                      and time.time() - self._tm_say[1] < 4.0)
                                  else "창을 닫아도 계속 돌아가요"),
                            font=self._uf(8), fill=cd["sub"])
+            # 잘린 각오 위에 커서가 있으면 통째로 보여 준다 (요청).
+            # **맨 나중에** 그려야 옆 칸에 안 가린다.
+            if self._tm:
+                self._safe("team_vow_hover", self._team_vow_hover, cv, u,
+                           uf, W, pad)
             # 다 같이 완주 — 색종이·폭죽 (요청)
             if self._tm and time.time() - self._tm_fx < 3.2:
                 self._safe("team_fx", self._team_fx_draw, cv, u, W, H,
@@ -20140,6 +20302,8 @@ class Mascot:
                         draw()
                     elif act == "tminv":      # 더 부르기
                         self._safe("team_win", self._team_win_open)
+                    elif act == "tmvow":      # 내 칸 — 각오 고치기 (요청)
+                        self._safe("vow_win", self._team_vow_win)
                     elif act == "tmrest":     # 나만 잠깐 쉬기 (요청)
                         self._tm_rest = not self._tm_rest
                         self._tm_say = (
@@ -20180,6 +20344,12 @@ class Mascot:
         self._pomo_draw = draw
         self._pomo_fit = fit_win
         win.bind("<Configure>", on_resize, add="+")
+        def on_move9(e):
+            """커서 자리 — 잘린 각오를 호버로 펴는 데 쓴다 (그리기 눈금)."""
+            self._pomo_mouse = (e.x - getattr(self, "_pomo_ox", 0.0), e.y)
+
+        cv.bind("<Motion>", lambda e: self._safe("pomo_move", on_move9, e))
+        cv.bind("<Leave>", lambda _e: setattr(self, "_pomo_mouse", None))
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
         cv.bind("<B1-Motion>", lambda e: self._safe(
             "stk_move", self._stk_move, "pomo", e.x, e.y))
