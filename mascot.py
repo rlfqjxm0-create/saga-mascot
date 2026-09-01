@@ -6002,6 +6002,7 @@ class Mascot:
         self._bubble_act = None      # 말풍선 속 단추 (글자, 이름, 할 일)
         self._bubble_btn = None      # 그 단추가 그려진 자리 (x0,y0,x1,y1)
         self._bubble_box = None      # 말풍선 전체 자리 (눌러서 끄는 말풍선)
+        self._bubble_shape = None    # 그 말풍선의 **모양** (꼬리까지 — 도려내기용)
         self._bubble_hold = None     # 눌러야 꺼지는 말 (오늘의 운세)
         self._bubble_cookie = None   # 그 말풍선 안의 깐 포춘쿠키 (지뢰 13)
         self._gap_adj = False        # '여백 직접 조정' 모드 (끌어서 맞추기)
@@ -9011,6 +9012,7 @@ class Mascot:
                 self.bubble = None
                 self._bubble_hold = None
                 self._bubble_box = None
+                self._bubble_shape = None
                 self._safe("ui_click", self._ui_click)
                 self._press = None
                 return
@@ -13631,6 +13633,74 @@ class Mascot:
         arc(x0 + r, y0 + r, 180, 270)               # 좌상
         return pts
 
+    def _bubble_scr(self):
+        """지금 떠 있는 캐릭터 말풍선의 **화면 좌표** 상자 (없으면 None).
+
+        `_bubble_box` 는 창 안 좌표라 패널(딴 창)과 견주려면 옮겨야 한다.
+        꼬리 몫으로 아래를 조금 더 잡는다.
+        """
+        bb = getattr(self, "_bubble_box", None)
+        if not (bb and self.can_talk and self.bubble):
+            return None
+        try:
+            x9 = self.root.winfo_rootx()
+            y9 = self.root.winfo_rooty()
+        except Exception:
+            return None
+        return (bb[0] + x9, bb[1] + y9, bb[2] + x9, bb[3] + y9 + 14)
+
+    @staticmethod
+    def _panel_overlap(p, box):
+        """패널 창이 그 상자와 겹치는가 (화면 좌표)."""
+        try:
+            if p.hidden():
+                return False
+            t = p.top
+            px, py = t.winfo_rootx(), t.winfo_rooty()
+            pw, ph = t.winfo_width(), t.winfo_height()
+        except Exception:
+            return False
+        return not (box[2] <= px or box[0] >= px + pw
+                    or box[3] <= py or box[1] >= py + ph)
+
+    def _panel_demote(self, p):
+        """패널을 우리 창 **뒤로** 내린다 — 말풍선이 겹칠 때만 (요청).
+
+        평소에는 패널이 위다 (캐릭터를 누르면 본체가 앞으로 나와 할 일이
+        사라져 보이기 때문 — 지뢰 15). 하지만 캐릭터 말풍선이 패널에
+        겹치면 반대로 말풍선이 안 읽힌다. 겹치는 동안만 뒤집는다.
+
+        우리 창의 투명한 자리는 그대로 비쳐 보이고 클릭도 통과하므로
+        (색상키 창·알파 레이어 둘 다) 패널이 통째로 가려지지는 않는다.
+        매끈 경로에서는 말풍선이 **몸 레이어 창**에 그려지므로 그 창을
+        기준으로 내려야 한다.
+        """
+        try:
+            if IS_WIN:
+                h = p._hwnd()
+                own = self._main_hwnd
+                lay = getattr(self, "_char_lay", None)
+                if lay is not None and getattr(lay, "hwnd", 0):
+                    own = lay.hwnd
+                if h and own:
+                    u9 = ctypes.windll.user32
+                    # **'항상 위'가 아닌 창 뒤에 넣으면 안 된다** — 윈도우는
+                    # 그때 넣는 창의 '항상 위'를 벗겨 버린다. 패널이 다른
+                    # 프로그램 뒤로 가라앉고 스스로 못 돌아온다. 캐릭터의
+                    # '항상 위'는 사용자가 끌 수 있으므로 반드시 확인한다.
+                    top_p = u9.GetWindowLongW(h, -20) & 0x8      # WS_EX_TOPMOST
+                    top_o = u9.GetWindowLongW(own, -20) & 0x8
+                    if top_p and not top_o:
+                        return                  # 못 내린다 — 그냥 둔다
+                    # 둘째 인자는 '이 창 뒤에 놓아라' 다 (지뢰 23)
+                    u9.SetWindowPos(h, own, 0, 0, 0, 0,
+                                    0x1 | 0x2 | 0x10)
+                    return
+            # 맥은 덧레이어가 본체 창에 얹혀 있어 본체만 올리면 된다
+            self.root.lift()
+        except Exception:
+            pass
+
     BUBBLE_UP = 0           # 말풍선 아래끝을 카드 아래끝에서 얼마나 (요청)
 
     def _draw_bubble(self, yo):
@@ -13641,6 +13711,7 @@ class Mascot:
         """
         if not (self.can_talk and self.bubble):
             self._bubble_box = None
+            self._bubble_shape = None
             return
         text = self.bubble[0]
         if text != self._bubble_text_last:
@@ -13703,6 +13774,10 @@ class Mascot:
         # 눌러서 끄는 말풍선(오늘의 운세)이 쓸 자리. 화면에 그린 값 그대로라
         # 내부 깃발이 아니다 (지뢰 24).
         self._bubble_box = (x0, by - h, x1, by)
+        # 하드모드 빨간 깜빡임이 이 말풍선만 빼고 덮는다 (요청). 상자로
+        # 도려내면 말풍선 둘레까지 네모지게 벗겨져 지저분하다 (제보) —
+        # **그리는 것과 같은 모양**을 넘겨 그대로 도려내게 한다.
+        self._bubble_shape = (x0, by - h, x1, by, 13, cx + 4, 17, 13)
         # 옅은 그림자 없음 — 할 일·마감 말풍선과 같은 이유 (어두운 바탕에서
         # 바깥쪽 흰 테로 보인다). 캐릭터 말풍선만 남겨 두면 혼자 달라 보인다.
         tx = cx + 4 - x0                      # 꼬리 자리 (몸통 왼쪽 기준)
@@ -17018,10 +17093,21 @@ class Mascot:
             # 놓친 경우를 위해 짧은 주기로도 다시 올려 둔다.
             if now - self._panel_z > 0.5:
                 self._panel_z = now
+                try:
+                    bub9 = self._bubble_scr()
+                except Exception:
+                    bub9 = None
                 for _p in (self.todo_panel, self.due_panel):
                     # 우클릭 메뉴가 떠 있는 동안은 건드리지 않는다 —
                     # 안 그러면 앞에 뜬 메뉴를 0.5초 안에 도로 덮는다 (제보)
-                    if _p is not None and not getattr(_p, "menu_open", False):
+                    if _p is None or getattr(_p, "menu_open", False):
+                        continue
+                    # 캐릭터 말풍선이 이 패널을 덮는 자리면 **패널을 내려서**
+                    # 말풍선이 위로 오게 한다 (요청 — 가려서 읽기 힘들다).
+                    # 겹칠 때만 하므로 평소 순서는 그대로다 (지뢰 15).
+                    if bub9 and self._panel_overlap(_p, bub9):
+                        self._safe("panel_down", self._panel_demote, _p)
+                    else:
                         _p.raise_above()
             if self.due_panel is not None:
                 self._safe("due", self._due_tick)
@@ -18453,13 +18539,19 @@ class Mascot:
                     pass
             # 말풍선은 빨갛게 하지 않는다 (요청 — 잔소리가 읽혀야 한다).
             # ImageDraw 는 섞지 않고 픽셀을 갈아 끼우므로 (0,0,0,0) 이
-            # 그 자리를 도려낸다. +18 은 꼬리 몫.
-            bb9 = getattr(self, "_bubble_box", None)
-            if bb9:
+            # 그 자리를 도려낸다. **네모로 도려내면 안 된다** — 말풍선
+            # 둘레까지 네모지게 벗겨져 지저분해 보인다 (제보). 그리는
+            # 것과 같은 모양(꼬리 포함)으로 판다.
+            sh9 = getattr(self, "_bubble_shape", None)
+            if sh9:
                 try:
-                    ImageDraw.Draw(im9).rectangle(
-                        [bb9[0] - 4, bb9[1] - 4, bb9[2] + 4, bb9[3] + 18],
-                        fill=(0, 0, 0, 0))
+                    d9 = ImageDraw.Draw(im9)
+                    pts9 = self._bubble_pts(*sh9)
+                    d9.polygon(pts9, fill=(0, 0, 0, 0))
+                    # 테두리의 매끈한 가장자리 몫으로 한 겹 더 (선을 그으면
+                    # 다각형이 그만큼 바깥으로 자란다)
+                    d9.line(list(pts9) + list(pts9[:2]), fill=(0, 0, 0, 0),
+                            width=3, joint="curve")
                 except Exception:
                     pass
             lay.show(im9, x9, y9)
@@ -18540,21 +18632,24 @@ class Mascot:
                 self._hd_layer = False
                 return
             # 카드 조각 + 말풍선 도려냄 — 크기나 말풍선이 바뀔 때만 다시
-            bb9 = getattr(self, "_bubble_box", None)
-            key9 = (w9, h9, None if not bb9 else
-                    tuple(int(v) for v in bb9))
+            sh9 = getattr(self, "_bubble_shape", None)
+            key9 = (w9, h9, None if not sh9 else
+                    tuple(int(v) for v in sh9))
             if cv9 is not None and self._hd_flash_key != key9:
                 self._hd_flash_key = key9
                 cv9.configure(width=w9, height=h9)
                 cv9.delete("all")
                 self._rr(cv9, 0, 0, w9, h9, 16, fill="#ff4040", outline="")
-                if bb9:
+                if sh9:
                     # 말풍선은 빨갛게 하지 않는다 (요청 — 잔소리가
-                    # 읽혀야 한다). 키 색이 곧 구멍이다. +18 은 꼬리 몫.
-                    cv9.create_rectangle(
-                        bb9[0] - g9["x0"] - 4, bb9[1] - g9["y0"] - 4,
-                        bb9[2] - g9["x0"] + 4, bb9[3] - g9["y0"] + 18,
-                        fill=MAC_KEY, outline="")
+                    # 읽혀야 한다). 키 색이 곧 구멍이고, **네모가 아니라
+                    # 그리는 것과 같은 모양**으로 판다 (제보).
+                    p9 = list(self._bubble_pts(*sh9))
+                    for i9 in range(0, len(p9), 2):
+                        p9[i9] -= g9["x0"]
+                        p9[i9 + 1] -= g9["y0"]
+                    cv9.create_polygon(p9, fill=MAC_KEY, outline=MAC_KEY,
+                                       width=3)
             x9 = self.root.winfo_rootx() + int(round(g9["x0"]))
             y9 = self.root.winfo_rooty() + int(round(g9["y0"]))
             if self._hd_flash_xy != (x9, y9, w9, h9):
