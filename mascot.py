@@ -18154,6 +18154,13 @@ class Mascot:
                             "s": self._pomo_mins("short"),
                             "l": self._pomo_mins("long")}}
         self._tm_focus = [0.0, 0.0]
+        # 대기실에서도 **불꽃이 켜져 있어야** 한다 (제보 — 하드모드로
+        # 불렀는데 캐릭터 타이머에 안 걸린 것처럼 보였다). 시계는 아직
+        # 안 돌지만 다음 집중이 하드라는 것을 지금 적어 둔다.
+        st9 = self._pomo()
+        if bool(st9.get("hard")) != (mode == "hard"):
+            st9["hard"] = (mode == "hard")
+            self._pomo_save(st9)
         self._safe("team_save", self._team_save)
         return self._tm
 
@@ -18206,14 +18213,19 @@ class Mascot:
         tm["state"] = "run"
         if isinstance(x.get("l"), dict):
             tm["len"] = x["l"]
+        if x.get("m"):
+            tm["mode"] = str(x["m"])       # 방장이 도중에 바꿀 수 있다
         st = self._pomo()
-        st.update({"on": True, "phase": str(x.get("p") or "focus"),
-                   "left": 0.0, "round": int(x.get("r") or 0),
+        ph9, end9 = str(x.get("p") or "focus"), float(x.get("e") or 0.0)
+        same9 = (st["phase"] == ph9 and abs(st["end"] - end9) < 1.0)
+        st.update({"on": True, "phase": ph9, "left": 0.0,
+                   "round": int(x.get("r") or 0),
                    "hard": (str(x.get("m") or "") == "hard"
                             or tm.get("mode") == "hard"),
-                   "end": float(x.get("e") or 0.0)})
+                   "end": end9})
         self._pomo_save(st)
-        self._tm_focus = [0.0, 0.0]
+        if not same9:                      # 구간이 그대로면 비율은 지킨다
+            self._tm_focus = [0.0, 0.0]
         self._safe("team_save", self._team_save)
         self._safe("card", self._relayout_card)
         self._pomo_redraw()
@@ -18238,6 +18250,11 @@ class Mascot:
                         {"i": inv["sid"], "v": self._tm["vow"]})
         self._tm_inv = None
         self._tm_open = False
+        # 대기실에서도 불꽃이 켜져 있게 (방장이 시작하면 그때 시계가 돈다)
+        st9 = self._pomo()
+        if bool(st9.get("hard")) != (self._tm["mode"] == "hard"):
+            st9["hard"] = (self._tm["mode"] == "hard")
+            self._pomo_save(st9)
         self._safe("team_save", self._team_save)
         self._say("%s 님과 같이 하기로 했어요!"
                   % self._note_name(inv["from"]), 4.0, True)
@@ -18376,6 +18393,27 @@ class Mascot:
                 self._safe("card", self._relayout_card)
                 self._pomo_redraw()
                 return
+        # 방장이 도중에 모드를 바꿀 수 있다 (요청). 돌고 있으면 tms 로
+        # 오지만 **대기실에서는 신호가 없으므로** 방장 자리에서 직접 읽는다.
+        if not self._team_host():
+            host9 = str(self._tm.get("host") or "")
+            for q9 in (self.room_people or []):
+                if str(q9.get("slot") or "") != host9:
+                    continue
+                b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
+                if (b9 and str(b9.get("i") or "") == self._tm["sid"]
+                        and b9.get("m")
+                        and str(b9["m"]) != self._tm.get("mode")):
+                    self._tm["mode"] = str(b9["m"])
+                    hard9 = (self._tm["mode"] == "hard")
+                    if bool(st.get("hard")) != hard9:
+                        st["hard"] = hard9
+                        self._pomo_save(st)
+                    self._safe("team_save", self._team_save)
+                    self._tm_say = (("다 같이 하드모드!" if hard9
+                                     else "다 같이 보통 모드로"), now)
+                    self._pomo_redraw()
+                break
         if self._tm_rest:
             return                  # 쉬는 동안은 비율도 안 깎인다
         if st["on"] and st["phase"] == "focus":
@@ -20440,7 +20478,27 @@ class Mascot:
             if hb and hb[0] <= e.x <= hb[2] and hb[1] <= e.y <= hb[3]:
                 self._safe("ui_click", self._ui_click)
                 st9 = self._pomo()
-                if st9["on"]:
+                if self._tm:
+                    # 같이하는 중 — **방장만** 바꾼다 (요청). 바꾸면 그
+                    # 자리에서 모두에게 간다 (시계는 그대로 흐른다).
+                    if not self._team_host():
+                        self._say("모드는 부른 사람만 바꿀 수 있어요", 4.0)
+                    else:
+                        hard9 = not (self._tm.get("mode") == "hard")
+                        self._tm["mode"] = "hard" if hard9 else "norm"
+                        st9["hard"] = hard9
+                        self._pomo_save(st9)
+                        self._safe("team_save", self._team_save)
+                        if self._tm.get("state") == "run":
+                            self._safe("team_mode", self._team_bcast, "tms",
+                                       self._team_step_blob())
+                        self._tm_say = (("다 같이 하드모드!" if hard9
+                                         else "다 같이 보통 모드로"),
+                                        time.time())
+                        self._say("다 같이 하드모드로 바꿨어!" if hard9
+                                  else "다 같이 보통 모드로 바꿨어.", 4.0)
+                        self._safe("room_push", self._room_push_now)
+                elif st9["on"]:
                     # 도는 중에 끄면 벌써 딴짓한 판이 무효가 된다 — 잠근다
                     self._say("하드모드는 타이머를 멈춘 뒤에 바꿀 수 있어!",
                               4.0)
