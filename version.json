@@ -1,7 +1,7 @@
 {
- "version": 1788288535,
+ "version": 1788304301,
  "files": {
-  "mascot.py": "0cc0c7262acb4059abba2c05565854f7e9c65e0d6723a12ed3140c0a69f44aa3",
+  "mascot.py": "ec538ff6a7bffffdc024ca390e44454a0cbf67cd490f068c00788caf1410d3c3",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -582,12 +582,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "같이 뽀모도로 — 여럿이 있으면 한 칸 안에 다 같이 앉아요 (예전엔 칸이 나뉘어 혼자 하는 것처럼 보였어요)",
-  "부른 사람이 '오늘은 여기까지'를 누르면 모두에게 수고했다는 인사와 폭죽이 터져요. 남은 사람은 하던 뽀모도로를 그대로 이어가요",
-  "이미 어느 방에서 같이하는 중에 다른 초대를 받으면, 누구와 하는 중인지 알려 주고 '참여 / 거절'을 고를 수 있어요",
-  "같이하는 동안에는 홈 상태 칩이 '같작업'으로 바뀌어요. 그 칩을 누르면 '참여 / 아니오'가 떠서 중간에도 낄 수 있어요",
-  "타이머를 껐다 켜도 같이하던 방으로 돌아와요 (2분 안에 그 방이 살아 있으면)",
-  "하드모드로 부르면 대기실에서부터 캐릭터 타이머에도 하드모드가 걸려요"
- ]
+ "notes": [],
+ "silent": true
 }

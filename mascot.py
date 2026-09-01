@@ -836,6 +836,10 @@ BORDER_W = 3
 # 검사는 거의 다 '캔버스에 무엇이 올라갔나'로 확인하는데, 매끈 경로에서는
 # 몸이 캔버스에 없고 캐시도 PIL 을 담아 그 확인이 통째로 어긋난다.
 SMOOTH_OFF = False
+# 검사(enatest)가 연동 파일(.mascot_live 등)을 임시 폴더로 돌릴 때 쓴다.
+# 제품에서는 None — 진짜 에이전트 폴더를 그대로 쓴다. __init__ 끝에서
+# 첫 tick 이 바로 돌므로, 만든 뒤에 ws_path 를 바꾸는 방식은 늦다.
+WS_LINK_DIR = None
 LV_ROW = 22                      # 카드 맨 위 레벨·칭호 줄의 높이
 # 레벨 줄 아래 칸들을 이만큼 끌어올린다. 상태·시간 줄은 카드 윗변에서 20px
 # 떨어지게 짜여 있는데, 위에 레벨 줄이 생기면서 그 여백이 겹쳐 넓어 보였다
@@ -5837,6 +5841,11 @@ class Mascot:
         # 연동 모드 = 게이지 대신 시계 토글 카드. 비연동(준사) = 목표 게이지 카드.
         ws = self.cfg.get("workspace_timer")
         self.ws_path = os.path.normpath(os.path.join(HERE, ws)) if ws else None
+        if self.ws_path and WS_LINK_DIR:
+            # 검사 격리 — 진짜 에이전트의 .mascot_live 를 쓰거나 지우면
+            # 에이전트가 '도로롱 죽음'으로 보고 종료한다 (지뢰 151)
+            self.ws_path = os.path.join(WS_LINK_DIR,
+                                        os.path.basename(self.ws_path))
         self._ws_data = None
         self._ws_read = 0.0
         self._ws_lost = False        # 기존 타이머가 꺼져 자체 측정으로 넘어갔는지
@@ -6713,6 +6722,9 @@ class Mascot:
         self._room_ask_btn = []    # 참여·아니오 자리
         self._pomo_mouse = None    # 뽀모 창 커서 (각오 호버)
         self._tm_back = 0.0        # 켤 때 되살린 방을 확인할 기한
+        self._tm_host_seen = 0.0   # 방장 자리를 마지막으로 본 시각 (참가자)
+        self._tm_rest_work = 0.0   # 쉬는 중인데 일하는 게 보인 시각 (자동 복귀)
+        self._tm_bye_arm = 0.0     # 방장 '오늘은 여기까지' 두 번 누르기
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
@@ -17841,6 +17853,12 @@ class Mascot:
         self._pomo_save({"on": True, "phase": "focus",
                          "end": time.time() + self._pomo_len("focus"),
                          "left": 0.0, "round": 0})
+        # 같이하기 방장이면 참가자도 같이 다시 돈다 (검토: 완주 뒤 참가자
+        # 시계가 0:00 에 굳어 있었다)
+        if self._team_host() and (self._tm or {}).get("state") == "run":
+            self._tm_focus = [0.0, 0.0]
+            self._safe("team_again", self._team_bcast, "tms",
+                       self._team_step_blob())
         self._safe("card", self._relayout_card)
         self._safe("pomo_say", self._pomo_alarm,
                    self.POMO_LINES["focus"], "focus", False)
@@ -17992,6 +18010,10 @@ class Mascot:
         if not self._pomo_hard_gate():
             return False
         st = st or self._pomo()
+        if self._tm and self._tm.get("state") != "run":
+            # 대기실 — 방 시계는 아직 안 돈다. 혼자 돌리던 집중 구간에
+            # 감시가 걸리던 것을 막는다 (검토).
+            return False
         return bool(st.get("hard") and st["on"] and st["phase"] == "focus")
 
     def _pomo_hard_snd(self, warn=False):
@@ -18102,6 +18124,73 @@ class Mascot:
         self._tm_back = time.time()
 
     TEAM_BACK = 120.0            # 되살린 방을 확인할 때까지 기다리는 시간
+    TEAM_HOST_GONE = 240.0       # 방장 자리가 이만큼 안 보이면 방이 죽은 것
+    TEAM_REINVITE = 45.0         # 답 없는 초대장을 다시 보내는 간격
+    TEAM_REST_BACK = 120.0       # '잠깐 쉬기' 중 이만큼 계속 일하면 자동 복귀
+    TEAM_BYE_ARM = 8.0           # 방장 마무리 — 두 번째 누름을 기다리는 시간
+
+    def _team_hard_enter(self, mode):
+        """방 모드로 하드 깃발을 덮기 전에 **혼자 하던 설정을 적어 둔다.**
+
+        방을 나가면 _team_hard_leave 가 되돌린다. 하드 방이 끝난 뒤 혼자
+        하는 뽀모도로가 하드로 이어지던 것(검토) — 방을 옮길 때는 이미
+        적어 둔 것이 있으니 다시 안 적는다.
+        """
+        st = self._pomo()
+        if self.us.get("pomo_hard_solo") is None:
+            self.us["pomo_hard_solo"] = bool(st.get("hard"))
+        hard = (mode == "hard")
+        if bool(st.get("hard")) != hard:
+            st["hard"] = hard
+            self._pomo_save(st)
+
+    def _team_hard_leave(self):
+        """방에서 나왔다 — 혼자 하던 하드 설정으로 되돌린다."""
+        solo = self.us.get("pomo_hard_solo")
+        self.us["pomo_hard_solo"] = None
+        if solo is None:
+            return
+        st = self._pomo()
+        if bool(st.get("hard")) != bool(solo):
+            st["hard"] = bool(solo)
+            self._pomo_save(st)
+
+    def _team_fold(self, note=None, say=None):
+        """세션을 접는다 — 나가기·방장 나감·방이 죽음 공용.
+
+        저장까지 한 번에 한다. 예전에는 방장이 나가서 접힐 때 저장을
+        안 해 죽은 방이 설정에 남았고, 다시 켜면 되살아났다 (검토).
+        """
+        self._tm = None
+        self._tm_open = False
+        self._tm_rest = False
+        self._tm_focus = [0.0, 0.0]
+        self._tm_back = 0.0
+        self._safe("team_hard", self._team_hard_leave)
+        self._safe("team_save", self._team_save)
+        if note:
+            self._tm_say = (note, time.time())
+        if say:
+            self._safe("fold_say", self._say, say, 5.0, True)
+        self._safe("card", self._relayout_card)
+        self._pomo_redraw()
+
+    def _team_mode_of(self, slot):
+        """그 사람이 앉은 방의 모드 — 방장 자리의 신호에서 읽는다.
+
+        참가자 신호에는 모드가 없으므로 방장(h)을 따라가 본다. 모르면 None.
+        """
+        rest = dict((str(q.get("slot") or ""), q)
+                    for q in (self.room_people or []))
+        b = (rest.get(slot) or {}).get("tm")
+        if not isinstance(b, dict):
+            return None
+        if b.get("m"):
+            return str(b["m"])
+        hb = (rest.get(str(b.get("h") or "")) or {}).get("tm")
+        if isinstance(hb, dict) and hb.get("m"):
+            return str(hb["m"])
+        return None
 
     def _team_blob(self):
         """방 신호에 실을 같이하기 값 (없으면 None). 작게 유지한다."""
@@ -18154,13 +18243,11 @@ class Mascot:
                             "s": self._pomo_mins("short"),
                             "l": self._pomo_mins("long")}}
         self._tm_focus = [0.0, 0.0]
+        self._tm_rest = False
         # 대기실에서도 **불꽃이 켜져 있어야** 한다 (제보 — 하드모드로
         # 불렀는데 캐릭터 타이머에 안 걸린 것처럼 보였다). 시계는 아직
         # 안 돌지만 다음 집중이 하드라는 것을 지금 적어 둔다.
-        st9 = self._pomo()
-        if bool(st9.get("hard")) != (mode == "hard"):
-            st9["hard"] = (mode == "hard")
-            self._pomo_save(st9)
+        self._team_hard_enter(mode)
         self._safe("team_save", self._team_save)
         return self._tm
 
@@ -18169,12 +18256,26 @@ class Mascot:
         tm = self._tm
         if not tm or not slot or slot == self.char:
             return False
+        if not self._team_host():
+            # 참가자가 보낸 초대는 방장이 수락을 못 받아 새 사람이 어느
+            # 명단에도 안 붙는다 (검토) — 보내는 쪽에서 막는다.
+            self._say("초대는 부른 사람만 보낼 수 있어요", 4.0)
+            return False
+        if slot in tm["members"]:
+            return False
         if len(tm["members"]) + len(tm["invited"]) >= self.TEAM_MAX:
             return False
         ok = self._team_send(slot, "tmi", {"i": tm["sid"],
                                            "m": tm.get("mode") or "norm"})
         if ok:
             tm["invited"][slot] = time.time()
+            # 지금 꺼져 있으면 초대장이 닿지 않는다 — 켤 때까지 다시
+            # 보내지만(_team_tick), 그 사실은 바로 알려 준다 (검토).
+            on9 = any(str(q.get("slot") or "") == slot
+                      for q in (self.room_people or []))
+            if not on9:
+                self._say("%s 님은 지금 타이머가 꺼져 있어요 — 켜면 "
+                          "초대장이 가요" % self._note_name(slot), 5.0)
         return ok
 
     def _team_start(self):
@@ -18213,16 +18314,31 @@ class Mascot:
         tm["state"] = "run"
         if isinstance(x.get("l"), dict):
             tm["len"] = x["l"]
-        if x.get("m"):
+        if x.get("m") and str(x["m"]) != tm.get("mode"):
             tm["mode"] = str(x["m"])       # 방장이 도중에 바꿀 수 있다
+            hard9 = (tm["mode"] == "hard")
+            self._safe("mode_say", self._say,
+                       "다 같이 하드모드로 바뀌었어! 딴짓하면 알지?"
+                       if hard9 else "다 같이 보통 모드로 바뀌었어.",
+                       5.0, True)
         st = self._pomo()
         ph9, end9 = str(x.get("p") or "focus"), float(x.get("e") or 0.0)
+        hard9 = (str(x.get("m") or "") == "hard" or tm.get("mode") == "hard")
+        if end9 <= 0:
+            # 방장이 사이클을 완주해 멈췄다 — 참가자도 멈춘다. 예전에는
+            # 무조건 on=True 로 앉혀 0:00 에 굳고 하드 감시가 영영 돌았다 (검토)
+            st.update({"on": False, "phase": "focus", "left": 0.0,
+                       "round": 0, "hard": hard9, "end": 0.0})
+            self._pomo_save(st)
+            self._tm_focus = [0.0, 0.0]
+            self._tm_say = ("한 사이클 다 했어요!", time.time())
+            self._safe("pomo_say", self._pomo_alarm,
+                       self.POMO_LINES["done"], "focus", True)
+            return
         same9 = (st["phase"] == ph9 and abs(st["end"] - end9) < 1.0)
         st.update({"on": True, "phase": ph9, "left": 0.0,
                    "round": int(x.get("r") or 0),
-                   "hard": (str(x.get("m") or "") == "hard"
-                            or tm.get("mode") == "hard"),
-                   "end": end9})
+                   "hard": hard9, "end": end9})
         self._pomo_save(st)
         if not same9:                      # 구간이 그대로면 비율은 지킨다
             self._tm_focus = [0.0, 0.0]
@@ -18235,6 +18351,22 @@ class Mascot:
         inv = self._tm_inv
         if not inv:
             return
+        # 그 방이 이미 끝났으면 들어가지 않는다 — 방장 자리가 보이는데
+        # 다른 세션이거나 같이하기가 아니면 끝난 방이다 (검토: 답 없는
+        # 대기실에 갇혔다). 방금 온 초대는 자리 신호가 아직 옛것일 수
+        # 있어 60초 지난 초대장만 이렇게 가른다. 그 전이면 일단 들어가고
+        # _team_tick 의 TEAM_BACK·'방장 안 보임' 검사가 정리한다.
+        old9 = time.time() - float(inv.get("at") or 0) > 60.0
+        for q9 in (self.room_people or [] if old9 else []):
+            if str(q9.get("slot") or "") != inv["from"]:
+                continue
+            b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
+            if not b9 or str(b9.get("i") or "") != str(inv["sid"]):
+                self._tm_inv = None
+                self._tm_open = False
+                self._say("그 방은 벌써 끝났어요", 4.0)
+                return
+            break
         if self._tm:
             # 이미 다른 방에 있었다 — 조용히 빠지고 옮긴다 (요청)
             self._team_bcast("tmo", {"i": self._tm["sid"]})
@@ -18246,15 +18378,15 @@ class Mascot:
                                     :self.TEAM_VOW_N], "at": time.time()}},
                     "invited": {}, "len": {}}
         self._tm_focus = [0.0, 0.0]
+        self._tm_rest = False          # 옛 방의 '쉬는 중'을 안 데려온다
+        self._tm_back = time.time()    # 끝난 방이면 잠시 뒤 접힌다
+        self._tm_host_seen = time.time()
         self._team_send(inv["from"], "tmy",
                         {"i": inv["sid"], "v": self._tm["vow"]})
         self._tm_inv = None
         self._tm_open = False
         # 대기실에서도 불꽃이 켜져 있게 (방장이 시작하면 그때 시계가 돈다)
-        st9 = self._pomo()
-        if bool(st9.get("hard")) != (self._tm["mode"] == "hard"):
-            st9["hard"] = (self._tm["mode"] == "hard")
-            self._pomo_save(st9)
+        self._team_hard_enter(self._tm["mode"])
         self._safe("team_save", self._team_save)
         self._say("%s 님과 같이 하기로 했어요!"
                   % self._note_name(inv["from"]), 4.0, True)
@@ -18277,6 +18409,8 @@ class Mascot:
         self._tm = None
         self._tm_rest = False
         self._tm_focus = [0.0, 0.0]
+        self._tm_back = 0.0
+        self._safe("team_hard", self._team_hard_leave)
         self._safe("team_save", self._team_save)
         self._tm_fx = time.time()          # 창에 색종이·폭죽
         self._tm_say = ("다들 수고했어요!", time.time())
@@ -18297,19 +18431,17 @@ class Mascot:
         if not tm:
             return
         if self._team_host() and not quiet:
+            if tm.get("state") != "run":
+                # 대기실 '그만두기' — 시작도 안 했는데 폭죽·수고 인사가
+                # 터지던 것(검토). 조용히 닫는다 (q=1 — 옛 판은 축하로 본다)
+                self._team_bcast("tmbye", {"i": tm["sid"], "q": 1})
+                self._team_fold(note="방을 닫았어요")
+                return
             self._team_bcast("tmbye", {"i": tm["sid"]})
             self._team_bye()
             return
         self._team_bcast("tmo", {"i": tm["sid"]})
-        self._tm = None
-        self._tm_open = False
-        self._tm_focus = [0.0, 0.0]
-        self._tm_rest = False
-        self._safe("team_save", self._team_save)
-        if not quiet:
-            self._tm_say = ("같이하기에서 나왔어요", time.time())
-        self._safe("card", self._relayout_card)
-        self._pomo_redraw()
+        self._team_fold(note=(None if quiet else "같이하기에서 나왔어요"))
 
     def _team_event(self, ev):
         """같이하기 신호를 받았다 (초대·수락·거절·나감·구간)."""
@@ -18321,6 +18453,13 @@ class Mascot:
             return
         tm = self._tm
         if k == "tmi":                       # 초대장이 왔다
+            # 방장이 답 없는 초대장을 되보낸다 — 같은 것이면 조용히 둔다
+            old9 = self._tm_inv or {}
+            if (old9.get("from") == f
+                    and str(old9.get("sid") or "") == str(x.get("i") or "")):
+                return
+            if tm and str(x.get("i") or "") == tm["sid"]:
+                return                       # 이미 그 방에 있다
             # **이미 다른 방에서 하는 중이어도 알린다** (요청) — 예전에는
             # 조용히 거절했다. 옮길지는 사람이 고른다.
             self._tm_inv = {"from": f, "sid": str(x.get("i") or ""),
@@ -18360,12 +18499,21 @@ class Mascot:
             tm["members"].pop(f, None)
             self._tm_say = ("%s 님이 오늘 작업을 마쳤어요"
                             % self._note_name(f), time.time())
-            if len(tm["members"]) <= 1 and not self._team_host():
-                self._tm = None              # 주인이 나가면 세션이 끝난다
-                self._tm_rest = False
+            if f == tm.get("host") and not self._team_host():
+                # 주인이 나가면 세션이 끝난다 — 저장까지 (검토: 안 하면
+                # 다시 켤 때 죽은 방이 되살아났다)
+                self._team_fold(note="%s 님이 방을 나갔어요"
+                                % self._note_name(f))
+                return
             self._pomo_redraw()
         elif k == "tmbye":                   # 방장이 다 같이 마무리
-            self._team_bye()
+            if x.get("q"):                   # 대기실을 닫았다 — 축하 없음
+                self._team_fold(note="%s 님이 방을 닫았어요"
+                                % self._note_name(f),
+                                say="%s 님이 같이하기 방을 닫았어요"
+                                % self._note_name(f))
+            else:
+                self._team_bye()
         elif k == "tms":                     # 구간이 넘어갔다
             self._team_apply(x)
 
@@ -18378,44 +18526,97 @@ class Mascot:
         if not self._tm:
             return
         st = self._pomo()
+        tm = self._tm
+        sid9 = str(tm["sid"])
+        host9 = str(tm.get("host") or "")
+        # 같은 세션 번호를 싣는 자리를 훑는다 — 명단·방장·모드가 다 여기서
+        # 나온다. **내 자리는 뺀다** (검토: 되살린 방의 '아무도 없음' 검사가
+        # 내 메아리에 속아 영영 안 접혔다).
+        seen9 = {}
+        for q9 in (self.room_people or []):
+            sl9 = str(q9.get("slot") or "")
+            b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
+            if sl9 and sl9 != self.char and b9 \
+                    and str(b9.get("i") or "") == sid9:
+                seen9[sl9] = b9
+        # 명단은 방 신호로 다시 세운다 — 방장이 재시작하면 명단이 나 혼자로
+        # 줄어 구간·마무리 신호가 아무에게도 안 가던 것(검토). 참가자도
+        # 같이 세워 두면 tmo 로 접을지 판단할 때 쓸 수 있다.
+        for sl9, b9 in seen9.items():
+            if sl9 not in tm["members"]:
+                tm["members"][sl9] = {"v": str(b9.get("v") or "")[
+                    :self.TEAM_VOW_N], "at": now}
+                tm["invited"].pop(sl9, None)
         back9 = getattr(self, "_tm_back", 0.0)
         if back9 and now - back9 > self.TEAM_BACK:
             self._tm_back = 0.0
-            sid9 = self._tm["sid"]
-            alive9 = any(
-                isinstance(q.get("tm"), dict)
-                and str((q.get("tm") or {}).get("i") or "") == sid9
-                for q in (self.room_people or []))
-            if not alive9:           # 그 방은 이미 끝났다 — 조용히 접는다
-                self._tm = None
-                self._tm_rest = False
-                self._safe("team_save", self._team_save)
-                self._safe("card", self._relayout_card)
-                self._pomo_redraw()
+            if not seen9:            # 그 방은 이미 끝났다 — 조용히 접는다
+                self._team_fold(note="그 방은 이미 끝났어요")
                 return
-        # 방장이 도중에 모드를 바꿀 수 있다 (요청). 돌고 있으면 tms 로
-        # 오지만 **대기실에서는 신호가 없으므로** 방장 자리에서 직접 읽는다.
         if not self._team_host():
-            host9 = str(self._tm.get("host") or "")
-            for q9 in (self.room_people or []):
-                if str(q9.get("slot") or "") != host9:
-                    continue
-                b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
-                if (b9 and str(b9.get("i") or "") == self._tm["sid"]
-                        and b9.get("m")
-                        and str(b9["m"]) != self._tm.get("mode")):
-                    self._tm["mode"] = str(b9["m"])
-                    hard9 = (self._tm["mode"] == "hard")
-                    if bool(st.get("hard")) != hard9:
-                        st["hard"] = hard9
-                        self._pomo_save(st)
-                    self._safe("team_save", self._team_save)
-                    self._tm_say = (("다 같이 하드모드!" if hard9
-                                     else "다 같이 보통 모드로"), now)
-                    self._pomo_redraw()
-                break
+            # 방장 자리가 오래 안 보이면 방이 죽은 것이다 (검토: 방장 앱이
+            # 죽어도 참가자는 '기다리는 중'에 영영 갇혔다). 명단은 창이
+            # 닫혀 있으면 120초마다 오므로 그보다 넉넉히 잡는다.
+            if host9 in seen9:
+                self._tm_host_seen = now
+            elif not self._tm_host_seen:
+                self._tm_host_seen = now
+            elif now - self._tm_host_seen > self.TEAM_HOST_GONE:
+                self._team_fold(note="%s 님이 안 보여서 접었어요"
+                                % self._note_name(host9),
+                                say="%s 님이 안 보여서 같이하기를 접었어요"
+                                % self._note_name(host9))
+                return
+            # 방장이 도중에 모드를 바꿀 수 있다 (요청). 돌고 있으면 tms 로
+            # 오지만 **대기실에서는 신호가 없으므로** 방장 자리에서 읽는다.
+            b9 = seen9.get(host9)
+            if (b9 and b9.get("m")
+                    and str(b9["m"]) != tm.get("mode")):
+                tm["mode"] = str(b9["m"])
+                hard9 = (tm["mode"] == "hard")
+                if bool(st.get("hard")) != hard9:
+                    st["hard"] = hard9
+                    self._pomo_save(st)
+                self._safe("team_save", self._team_save)
+                self._tm_say = (("다 같이 하드모드!" if hard9
+                                 else "다 같이 보통 모드로"), now)
+                self._safe("mode_say", self._say,
+                           "다 같이 하드모드로 바뀌었어! 딴짓하면 알지?"
+                           if hard9 else "다 같이 보통 모드로 바뀌었어.",
+                           5.0, True)
+                self._pomo_redraw()
+        elif tm.get("state") != "run" and tm.get("invited"):
+            # 답 없는 초대장은 되보낸다 — 상대가 꺼져 있었으면 처음 것은
+            # 서버에서 지워져 영영 안 닿았다 (검토). 받는 쪽은 같은 것이면
+            # 조용히 넘긴다 (tmi 처리).
+            for sl9, t9 in list(tm["invited"].items()):
+                if now - float(t9 or 0) > self.TEAM_REINVITE:
+                    tm["invited"][sl9] = now
+                    self._team_send(sl9, "tmi", {"i": sid9,
+                                                 "m": tm.get("mode") or "norm"})
         if self._tm_rest:
+            # '잠깐 쉬기'를 눌러 두고 그냥 그림을 그리면 영영 '쉬는 중'
+            # 이었다 (검토). 작업 프로그램이 앞에 있는 채로 오래 가면 스스로
+            # 돌아온다.
+            work9 = False
+            try:
+                work9 = bool(self._fg_is_work(now))
+            except Exception:
+                work9 = False
+            if not work9:
+                self._tm_rest_work = 0.0
+            elif not self._tm_rest_work:
+                self._tm_rest_work = now
+            elif now - self._tm_rest_work > self.TEAM_REST_BACK:
+                self._tm_rest = False
+                self._tm_rest_work = 0.0
+                self._tm_say = ("다시 집중!", now)
+                self._safe("rest_say", self._say,
+                           "다시 그리기 시작했네 — '쉬는 중'을 껐어!", 5.0)
+                self._safe("room_push", self._room_push_now)
+                self._pomo_redraw()
             return                  # 쉬는 동안은 비율도 안 깎인다
+        self._tm_rest_work = 0.0
         if st["on"] and st["phase"] == "focus":
             self._tm_focus[1] += dt
             work = True
@@ -18516,7 +18717,13 @@ class Mascot:
                 self._hd_nag = 0
                 self._hd_guard_shown = False
                 self._pomo_guard_close()
-            self._hd_round = st["end"]
+            if st["end"] != self._hd_round:
+                # 쉬는 사이에 구간이 넘어갔다 — 지난 구간의 딴짓·실패가
+                # 새 구간으로 새지 않게 여기서도 리셋한다 (검토)
+                self._hd_round = st["end"]
+                self._hd_bad = 0.0
+                self._hd_nag = 0
+                self._hd_fail = False
             return
         # 새 집중 구간이 시작됐으면 판을 리셋 (end 가 구간마다 다르다)
         if st["end"] != self._hd_round:
@@ -19328,13 +19535,19 @@ class Mascot:
         if self._tm:                      # 있던 방에서는 조용히 빠진다
             self._team_bcast("tmo", {"i": self._tm["sid"]})
         vow = str(self.us.get("pomo_vow") or "")[:self.TEAM_VOW_N]
-        self._tm = {"sid": sid, "host": host, "mode": "norm",
+        # 모드는 방장 자리의 신호에서 — 'norm' 으로 박아 두면 하드 방에
+        # 끼고도 불꽃이 꺼진 채였다 (검토). 수락 경로와 같은 규칙.
+        mode9 = self._team_mode_of(slot) or "norm"
+        self._tm = {"sid": sid, "host": host, "mode": mode9,
                     "state": "wait", "vow": vow,
                     "members": {host: {"v": "", "at": time.time()},
                                 self.char: {"v": vow, "at": time.time()}},
                     "invited": {}, "len": {}}
         self._tm_focus = [0.0, 0.0]
         self._tm_rest = False
+        self._tm_back = time.time()
+        self._tm_host_seen = time.time()
+        self._team_hard_enter(mode9)
         self._team_send(host, "tmy", {"i": sid, "v": vow})
         self._safe("team_save", self._team_save)
         self._safe("room_push", self._room_push_now)
@@ -19356,7 +19569,8 @@ class Mascot:
             self._room_team_ask = None
             return
         P = self._room_palette()
-        w9, h9 = 150 * k, 62 * k
+        hard9 = (self._team_mode_of(slot) == "hard")
+        w9, h9 = (182 if hard9 else 150) * k, 62 * k
         cx = (box[0] + box[2]) / 2
         x0 = max(6 * k, min(cx - w9 / 2,
                             (self.room_cv.winfo_width() or 800) - w9 - 6 * k))
@@ -19364,7 +19578,9 @@ class Mascot:
         self._rr_soft(cv, x0, y0, x0 + w9, y0 + h9, 12 * k,
                       fill="#ffffff", outline=P["sub"], width=1)
         cv.create_text(x0 + w9 / 2, y0 + 16 * k,
-                       text="%s 님네 방에 낄까요?" % self._note_name(slot),
+                       text=("%s 님네 하드모드 방에 낄까요?" if hard9
+                             else "%s 님네 방에 낄까요?")
+                       % self._note_name(slot),
                        font=(UI_FONT, max(6, int(round(8 * k))), "bold"),
                        fill=P["ink"], tags="dyn")
         bw = (w9 - 24 * k) / 2
@@ -19825,8 +20041,11 @@ class Mascot:
                 continue
             f8 = uf(7, True)
             tw8 = self._mw(vow, f8)
-            bw8 = min(W - pad * 2, tw8 + u(14))
-            bx = min(max(cx - bw8 / 2, pad), W - pad - bw8)
+            # 넓힌 창에서는 줄이 창 전체 폭을 쓴다 — 가둘 범위도 그만큼
+            # (검토: 기본 폭으로 가두면 끝 칸 말풍선이 가운데로 튀었다)
+            ox9 = getattr(self, "_pomo_ox", 0.0)
+            bw8 = min(W + 2 * ox9 - pad * 2, tw8 + u(14))
+            bx = min(max(cx - bw8 / 2, pad - ox9), W + ox9 - pad - bw8)
             self._rr_soft(cv, bx, y0, bx + bw8, y1, u(9),
                           fill="#fffdf7", outline=self._shade(fg, 0.1),
                           width=1.4, tail=(cx, u(6)))
@@ -20074,13 +20293,14 @@ class Mascot:
             # 누르는 자리는 옮기지 않고 클릭에서 그만큼 빼서 본다.
             self._pomo_ox = max(0.0, (max(W, cv.winfo_width()) - W) / 2.0)
             cv.delete("all")
+            self._pomo_keep = []           # 이번 프레임 그림만 붙든다 (지뢰 18)
             st = self._pomo()
             left = self._pomo_left(st)
             ph = st["phase"]
             name = {"focus": "집중", "short": "짧은 휴식",
                     "long": "긴 휴식"}.get(ph, "집중")
             cv.create_text(W / 2, u(26), text="뽀모도로",
-                           font=self._uf(13, True), fill=cd["text"])
+                           font=uf(13, True), fill=cd["text"])
             # 큰 카드 — 남은 시간
             self._rr_soft(cv, pad, u(46), W - pad, u(176), u(18),
                           fill="#ffffff", outline=line, width=1)
@@ -20095,7 +20315,7 @@ class Mascot:
                            fill=self._shade(tone, 0.25))
             cv.create_text(W / 2, u(118), text="%d:%02d" % (int(left) // 60,
                                                             int(left) % 60),
-                           font=self._uf(34, True), fill=cd["text"])
+                           font=uf(34, True), fill=cd["text"])
             # 몇 번째인가 — 동그라미 넷
             done = int(st["round"]) % self.POMO_ROUNDS
             if st["round"] and done == 0:
@@ -20122,7 +20342,7 @@ class Mascot:
                                % (self._pomo_mins("focus"),
                                   self._pomo_mins("short"),
                                   self._pomo_mins("long")),
-                               font=self._uf(8), fill=cd["sub"])
+                               font=uf(8), fill=cd["sub"])
                 ty1 = ty0 + u(20)
             if edit9:
                 self._rr_soft(cv, pad, ty0, W - pad, ty1, u(18),
@@ -20134,7 +20354,7 @@ class Mascot:
                 lo9, hi9 = self.POMO_RANGE[ph9]
                 stp = self.POMO_STEP[ph9]
                 cv.create_text(pad + u(14), ry, anchor="w", text=lab9,
-                               font=self._uf(9),
+                               font=uf(9),
                                fill=cd["text"] if ph9 == ph else cd["sub"])
                 # − 값 +  (맥에서 tk.Scale 은 못 쓴다 — 지뢰 4)
                 for sign, cx9 in ((-1, W - pad - u(78)), (1, W - pad - u(16))):
@@ -20156,10 +20376,10 @@ class Mascot:
                              cx9 + r9 + u(2), ry + r9 + u(2),
                              ("len", ph9, sign * stp)))
                 cv.create_text(W - pad - u(47), ry, text="%d분" % cur,
-                               font=self._uf(10, True), fill=cd["text"])
+                               font=uf(10, True), fill=cd["text"])
             cv.create_text(W / 2, ty1 + u(12),
                            text="시간이 되면 알려 주고 같이 몸을 펴요",
-                           font=self._uf(8), fill=cd["sub"])
+                           font=uf(8), fill=cd["sub"])
             # 스티커는 여기까지의 그림 위, **단추 아래** (단추를 가리면
             # 누를 수가 없다 — 홈과 같은 규칙)
             self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
@@ -20340,12 +20560,32 @@ class Mascot:
                 wy1 = self._safe_num(
                     self._team_row_draw, cv, u, uf, W, pad, line,
                     wy1 + u(24)) or (wy1 + u(24))
-            cv.create_text(W / 2, wy1 + u(16),
-                           text=(self._tm_say[0]
-                                 if (self._tm_say[1]
-                                     and time.time() - self._tm_say[1] < 4.0)
-                                 else "창을 닫아도 계속 돌아가요"),
-                           font=self._uf(8), fill=cd["sub"])
+            if self._tm_say[1] and time.time() - self._tm_say[1] < 4.0:
+                foot9 = self._tm_say[0]
+            elif (self._tm and self._team_host()
+                    and self._tm.get("state") != "run"
+                    and self._tm.get("invited")):
+                # 답 없는 초대가 있으면 누가 아직인지 보여 준다 (검토:
+                # 상대가 꺼져 있으면 초대가 증발해도 알 길이 없었다)
+                on9 = set(str(q.get("slot") or "")
+                          for q in (self.room_people or []))
+                bits9 = []
+                for sl9 in list(self._tm["invited"])[:4]:
+                    nm9 = self._note_name(sl9)
+                    bits9.append(nm9 if sl9 in on9 else nm9 + "(꺼짐)")
+                foot9 = "답 기다리는 중 · " + ", ".join(bits9)
+            elif (self._tm and not self._team_host()
+                    and self._tm.get("state") != "run"):
+                foot9 = "%s 님이 시작하면 같이 돌아가요" % self._note_name(
+                    self._tm.get("host") or "")
+            elif (self._tm and self._team_host()
+                    and self._tm_bye_arm
+                    and time.time() - self._tm_bye_arm < self.TEAM_BYE_ARM):
+                foot9 = "한 번 더 누르면 모두 마무리해요"
+            else:
+                foot9 = "창을 닫아도 계속 돌아가요"
+            cv.create_text(W / 2, wy1 + u(16), text=foot9,
+                           font=uf(8), fill=cd["sub"])
             # 잘린 각오 위에 커서가 있으면 통째로 보여 준다 (요청).
             # **맨 나중에** 그려야 옆 칸에 안 가린다.
             if self._tm:
@@ -20363,7 +20603,7 @@ class Mascot:
             self._safe("soft_btn", self._soft_dot, cv, sx8, u(26), br,
                        cd["fill"] if on_stk else "#ffffff",
                        outline=line, width=1, shadow=True)
-            cv.create_text(sx8, u(26), text="✿", font=self._uf(10, True),
+            cv.create_text(sx8, u(26), text="✿", font=uf(10, True),
                            fill="#ffffff" if on_stk else cd["sub"])
             self._pomo_stk_btn = (sx8 - br - u(3), u(26) - br - u(3),
                                   sx8 + br + u(3), u(26) + br + u(3))
@@ -20372,7 +20612,7 @@ class Mascot:
                        cd["fill"] if edit9 else "#ffffff",
                        outline=line, width=1, shadow=True)
             # 시계 모양 — BMP 안 글자만 쓴다 (맥 Tk 는 BMP 밖에서 죽는다)
-            cv.create_text(tx8, u(26), text="\u23f1", font=self._uf(10, True),
+            cv.create_text(tx8, u(26), text="\u23f1", font=uf(10, True),
                            fill="#ffffff" if edit9 else cd["sub"])
             self._pomo_time_btn = (tx8 - br - u(3), u(26) - br - u(3),
                                    tx8 + br + u(3), u(26) + br + u(3))
@@ -20553,6 +20793,20 @@ class Mascot:
                         self._safe("room_push", self._room_push_now)
                         draw()
                     elif act == "tmout":      # 오늘은 여기까지
+                        # 방장이 돌고 있는 방에서 누르면 **전원 마무리**라
+                        # 두 번 눌러야 한다 (검토: 확인 없이 팀이 해산됐다)
+                        tm9 = self._tm or {}
+                        now9 = time.time()
+                        if (self._team_host() and tm9.get("state") == "run"
+                                and not (self._tm_bye_arm
+                                         and now9 - self._tm_bye_arm
+                                         < self.TEAM_BYE_ARM)):
+                            self._tm_bye_arm = now9
+                            self._tm_say = ("모두 마무리할까요? 한 번 더 "
+                                            "누르면 끝내요", now9)
+                            draw()
+                            return
+                        self._tm_bye_arm = 0.0
                         self._safe("team_out", self._team_leave)
                         fit_win()
                         draw()
@@ -20570,7 +20824,15 @@ class Mascot:
             """지금 구성에 딱 맞게 창 높이를 맞춘다 (열 때·여닫을 때)."""
             try:
                 if win.winfo_exists():
-                    win.geometry("%dx%d" % (int(u(BASE_W)), int(u(base_h()))))
+                    # 옆으로 넓혀 둔 폭은 지킨다 — 높이만 맞춘다 (검토:
+                    # 줄 수가 바뀌는 순간 기본 폭으로 되돌아가 '넓히면 한
+                    # 줄에 더'가 스스로 풀렸다)
+                    w9 = int(u(BASE_W))
+                    try:
+                        w9 = max(w9, int(win.winfo_width()))
+                    except Exception:
+                        pass
+                    win.geometry("%dx%d" % (w9, int(u(base_h()))))
             except Exception:
                 pass
 
@@ -20593,7 +20855,8 @@ class Mascot:
         cv.bind("<Leave>", lambda _e: setattr(self, "_pomo_mouse", None))
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
         cv.bind("<B1-Motion>", lambda e: self._safe(
-            "stk_move", self._stk_move, "pomo", e.x, e.y))
+            "stk_move", self._stk_move, "pomo",
+            e.x - getattr(self, "_pomo_ox", 0.0), e.y))
         cv.bind("<ButtonRelease-1>", lambda _e: self._safe(
             "stk_drop", self._stk_drop, "pomo"))
         cv.bind("<MouseWheel>", lambda e: self._safe(
@@ -25600,7 +25863,9 @@ class Mascot:
             return
         cd = self.card
         busy9 = str(self._tm_inv.get("busy") or "")
-        pw, ph = 168 * k, (92 * k if busy9 else 74 * k)
+        hard9 = (str(self._tm_inv.get("mode") or "") == "hard")
+        pw, ph = 168 * k, (92 * k if busy9 else 74 * k) + (14 * k if hard9
+                                                           else 0)
         x0, y0 = cx - pw / 2, y9 - hh - 10 * k - ph
         sh = self._soft_shape(int(pw), int(ph), 14 * k, "#ffffff",
                               cd["border"],
@@ -25618,6 +25883,13 @@ class Mascot:
             self.canvas.create_text(
                 cx, y0 + 32 * k, text="지금 %s 님 방에 있어요" % busy9,
                 font=self._cf_n(max(6, int(8 * k))), fill=cd["sub"])
+        if hard9:
+            # 하드모드 방인지 수락 전에 알려 준다 (검토: 모르고 들어가
+            # 갑자기 혼났다)
+            self.canvas.create_text(
+                cx, y0 + (46 if busy9 else 32) * k,
+                text="하드모드 · 딴짓하면 혼나요",
+                font=self._cf_n(max(6, int(8 * k)), True), fill="#c96f6f")
         bw, bh = pw * 0.42, 26 * k
         keep9 = []
         for i, (lab, on, act) in enumerate(
@@ -25873,7 +26145,7 @@ class Mascot:
                     cv.create_text(W - u(28), ry + u(23), anchor="e",
                                    text=self._note_ago(r.get("ts")),
                                    font=self._uf(8, True), fill=cd["sub"])
-                    txt9 = str(r.get("t") or "")
+                    txt9 = " ".join(str(r.get("t") or "").split())
                     if len(txt9) > 24:
                         txt9 = txt9[:24] + "…"
                     cv.create_text(u(28), ry + u(48), anchor="w",
@@ -26290,7 +26562,12 @@ class Mascot:
                     re9 = nw.get("re")
                     if re9 and str(re9.get("f") or "") != nw["peer"]:
                         re9 = None            # 받는 사람을 바꿨다
-                    ok9, why9 = self._note_send_go(nw["peer"], txt9, re9)
+                    if len(txt9.strip()) > self.NOTE_MAX:
+                        # 넘치면 조용히 잘려 나갔다 (검토) — 막고 말해 준다
+                        ok9, why9 = False, ("%d자까지만 보낼 수 있어요"
+                                            % self.NOTE_MAX)
+                    else:
+                        ok9, why9 = self._note_send_go(nw["peer"], txt9, re9)
                     if ok9:
                         nw["status"] = "보내는 중…"
                         try:
@@ -26351,8 +26628,12 @@ class Mascot:
         win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
         cv.bind("<Button-1>", lambda e: self._safe("note_click",
                                                    on_click, e))
-        cv.bind("<MouseWheel>", lambda e: self._safe("note_wheel",
-                                                     on_wheel, e))
+        # 윈도우 Tk 는 휠을 **포커스 위젯**에 준다 — 캔버스에만 걸면 창을
+        # 누른 뒤에는 안 온다 (검토). 창(toplevel)에 걸면 캔버스·글상자에
+        # 온 것도 bindtags 를 타고 올라와 한 번씩 들어온다 (둘 다 걸면
+        # 캔버스 것이 두 번 들어와 두 칸씩 넘어간다).
+        win.bind("<MouseWheel>", lambda e: self._safe("note_wheel",
+                                                      on_wheel, e))
         draw()
         nw["after"] = win.after(600, beat)
         # 열자마자 한 번 새로 받아 온다
