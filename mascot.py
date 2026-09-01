@@ -20265,8 +20265,8 @@ class Mascot:
                 # 집중 비율은 **토마토 한 알**로 (요청 — 얇은 막대는 뭘 재는지
                 # 안 읽혔다). 이름 정중앙 아래, 익을수록 민트 → 코랄.
                 # 커서를 올리면 아래에 숫자 게이지가 뜬다 (_team_vow_hover).
-                tsz = u(30)
-                tcx, tcy = cx, cy0 + u(149) + dy
+                tsz = u(24)                # 카드 아래에 붙지 않게 작게·위로
+                tcx, tcy = cx, cy0 + u(145) + dy
                 tim = self._safe_str(self._tomgauge_pic, tsz, fr)
                 if tim:
                     cv.create_image(tcx, tcy, image=tim)
