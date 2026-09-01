@@ -5997,6 +5997,11 @@ class Mascot:
         # 지난 날 도장이 남은 뽀모도로 카운터를 기록으로 옮긴다 — 06시
         # 경계를 꺼진 채 넘긴 날은 _day_roll 이 이 일을 못 한다.
         self._safe("pomo_flush", self._pomo_hist_flush)
+        # 같은 경계에서 빈 '작업 시간'은 백엔드 원본에서 메운다 (내 것만).
+        # 큐는 **부르기 전에** 만든다 — 스레드가 곧바로 넣고, 뒤에서
+        # 다시 만들면 담긴 것이 통째로 사라진다 (지뢰 13).
+        self._ahist_q = []           # 받아 온 지난 날 작업 시간
+        self._safe("agent_hist", self._agent_hist_sync)
         # 펜 추적 진단 (config의 pen_diag를 켠 캐릭터만). 어느 화면으로
         # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
         self._diag_left = self.PEN_DIAG_MAX if self.cfg.get("pen_diag") else 0
@@ -10270,6 +10275,93 @@ class Mascot:
         d = _load_json(self._hist_path())
         return float((d or {}).get("cum_m", 0.0)) if isinstance(d, dict) else 0.0
 
+    AGENT_SYNC_DAYS = 14         # 백엔드에서 며칠치를 뒤로 훑을지
+
+    def _agent_hist_sync(self):
+        """워크스페이스 백엔드에서 '지난 날' 작업 시간을 받아 기록을 메운다.
+
+        06시 경계를 꺼진 채 넘기면 `_day_roll` 이 어제를 통째로 건너뛰어
+        마스코트 기록만 빈다 (지뢰 150). 원본은 에이전트가 백엔드에
+        저장해 두므로 거기서 **큰 쪽으로만** 채운다.
+
+        안전한 이유가 셋이다 —
+        - **오늘은 절대 안 건드린다.** 경계·바닥·라이브 값이 얽힌 자리라
+          손대면 값이 부푼다 (지뢰 60·78·149). 지난 날은 확정된 값이다.
+        - 큰 쪽으로만 덮으므로 몇 번을 돌아도 같다 (지뢰 32).
+        - **연동(ws_path)이 있는 내 컴퓨터에서만** 돈다. 선물본에는
+          백엔드가 없어 이 길로 아예 안 들어온다 (config 게이트도 있다).
+
+        받아 오는 일만 스레드에서 하고 **기록에 쓰는 일은 본 줄기**에서
+        한다 — 같은 파일을 두 곳에서 쓰면 서로를 덮는다. 넘기는 길은
+        트레이와 같은 큐다. 스레드에서 `root.after` 를 부르면 tkinter 가
+        'main thread is not in main loop' 로 죽는다 (검사가 잡았다).
+        """
+        if self.ws_path is None or not self.cfg.get("agent_hist_sync"):
+            return
+        if not self.cfg.get("history"):
+            return
+        base = str(self.cfg.get("agent_api")
+                   or "http://127.0.0.1:8000/api").rstrip("/")
+        today = self._my_workday()
+        t0 = time.mktime(time.strptime(today, "%Y-%m-%d")) + 12 * 3600
+        days = self._hist_load() or {}
+        want = []
+        for i in range(1, self.AGENT_SYNC_DAYS + 1):
+            key = time.strftime("%Y-%m-%d", time.localtime(t0 - i * 86400))
+            want.append((key, int((days.get(key) or {}).get("work") or 0)))
+
+        def pull():
+            got = {}
+            for key, have in want:
+                try:
+                    with urllib.request.urlopen(
+                            "%s/work-timer/today?date=%s" % (base, key),
+                            timeout=3) as fp:
+                        d9 = json.loads(fp.read().decode("utf-8")) or {}
+                    n9 = int(d9.get("total_seconds") or 0)
+                except Exception:
+                    return          # 백엔드가 꺼져 있다 — 조용히 물러난다
+                if n9 > have:
+                    got[key] = n9
+            if got:
+                # 앞에서 꺼내 비우는 큐 (지뢰 26 — 목록을 갈아 끼우지 말 것)
+                self._ahist_q.append(got)
+
+        threading.Thread(target=pull, daemon=True).start()
+
+    def _agent_hist_tick(self):
+        """받아 온 것을 그리기 루프에서 기록에 넣는다 (스레드 분리)."""
+        while self._ahist_q:
+            self._agent_hist_put(self._ahist_q.pop(0))
+
+    def _agent_hist_put(self, got):
+        """받아 온 지난 날 작업 시간을 기록에 큰 쪽으로 넣는다."""
+        path = self._hist_path()
+        d = _load_json(path)
+        if _load_failed(path):
+            self._log_error("agent_hist_locked")
+            return                  # 파일이 있는데 못 읽었다 (지뢰 92)
+        if not isinstance(d, dict):
+            d = {}
+        days = d.get("days") if isinstance(d.get("days"), dict) else {}
+        today = self._my_workday()
+        n_put = 0
+        for key, secs in (got or {}).items():
+            if not (len(str(key)) == 10 and str(key) < today):
+                continue            # 오늘·미래는 손대지 않는다
+            row = days.get(key) or {}
+            if int(secs) > int(row.get("work") or 0):
+                row["work"] = int(secs)
+                days[key] = row
+                n_put += 1
+        if not n_put:
+            return
+        for k in sorted(days)[:-self.HIST_DAYS]:
+            days.pop(k, None)
+        _save_json(path, {"days": days,
+                          "cum_m": float(d.get("cum_m", 0.0) or 0.0)})
+        return n_put
+
     def _hist_summary(self):
         """브리핑에 붙일 요약 — 어제 대비 · 최근 7일 · 연속 일수."""
         days = self._hist_load()
@@ -12288,6 +12380,9 @@ class Mascot:
         # 옮긴다 — 경계를 꺼진 채 넘기면 _today_secs 가 0이라 어제
         # 뽀모도로가 통째로 사라졌다 (월요일 세트 사건).
         self._safe("pomo_flush", self._pomo_hist_flush)
+        # 어제 작업 시간이 비었으면 백엔드 원본에서 메운다 (내 것만).
+        # 여기서 부르면 '넘기고 나서' 어제가 지난 날이 되어 잡힌다.
+        self._safe("agent_hist", self._agent_hist_sync)
         self.day_key = key
         self.day_base = self.work_secs
         self.zero_at = self.work_secs       # 카드도 오늘치부터
@@ -15815,11 +15910,14 @@ class Mascot:
 
     BUBBLE_LINES = 6         # 말풍선이 커질 수 있는 최대 줄 수
 
-    def _wrap_lines(self, text, font, max_w):
+    def _wrap_lines(self, text, font, max_w, max_lines=None):
         """글꼴은 그대로 두고 줄을 나눈다 (요청 — 길면 말풍선이 커진다).
 
         띄어쓰기에서 끊는 것을 먼저 보고, 한 낱말이 통째로 넘치면 글자
         단위로 끊는다. 한글은 낱말이 짧아 대개 띄어쓰기에서 갈린다.
+        기본은 말풍선 상한(BUBBLE_LINES)으로 자른다 — **편지 읽기처럼
+        전문이 필요한 곳은 max_lines=0 을 줄 것.** 이 상한 때문에 200자
+        편지의 아랫부분이 조용히 사라졌다 (제보).
         """
         out = []
         for para in str(text).split("\n"):
@@ -15839,7 +15937,8 @@ class Mascot:
                     out.append(line[:cut])
                     line = line[cut:]
             out.append(line)
-        return out[:self.BUBBLE_LINES] or [""]
+        cap = self.BUBBLE_LINES if max_lines is None else int(max_lines)
+        return (out[:cap] if cap > 0 else out) or [""]
 
     def _fit(self, text, size, max_w, bold=False):
         """카드 안에 들어가는 가장 큰 글꼴.
@@ -19876,6 +19975,8 @@ class Mascot:
         self._bubble_btn = None
         if self._tray_q:
             self._safe("tray_tick", self._tray_tick)
+        if getattr(self, "_ahist_q", None):
+            self._safe("agent_hist_tick", self._agent_hist_tick)
         self._safe("stretch", self._stretch_tick, now, sleeping)
         self._safe("gesture", self._gest_tick, now, sleeping)
         self._safe("goal", self._goal_tick, now)
@@ -23699,7 +23800,8 @@ class Mascot:
         cv.pack()
         nw = {"view": "list", "tab": "in", "page": 0, "peer": None,
               "fpage": 0, "note": None, "status": "", "status_at": 0.0,
-              "dirty": True, "keep": [], "after": None, "sig": None}
+              "dirty": True, "keep": [], "after": None, "sig": None,
+              "rscroll": 0}
         self._nw = nw
         # 글 상자 — 부모는 캔버스 (지뢰 22: 창이 부모면 삐져나온다)
         box = tk.Text(cv, width=1, height=1, bd=0, relief="flat",
@@ -23923,14 +24025,33 @@ class Mascot:
                            text="To. %s" % self._note_name(self.char),
                            font=self._uf(12, True), fill=self.NOTE_HEAD)
             f9 = self._uf(10)
-            lines = self._wrap_lines(str(r.get("t") or ""), f9, pw - u(60))
-            lines = lines[:6]
+            all9 = self._wrap_lines(str(r.get("t") or ""), f9, pw - u(60),
+                                    max_lines=0)      # 편지는 전문을 다
+            # 여섯 줄만 자르면 200자 편지의 아랫부분이 사라진다 (제보).
+            # 길면 넘겨 본다 — 휠·화살표 둘 다.
+            VIS = 6
+            off_max = max(0, len(all9) - VIS)
+            nw["rscroll"] = max(0, min(int(nw.get("rscroll") or 0),
+                                       off_max))
+            off9 = nw["rscroll"]
+            lines = all9[off9:off9 + VIS]
             for i, ln in enumerate(lines):
                 yy = u(134) + i * u(30)
                 cv.create_text(u(40), yy, anchor="w", text=ln, font=f9,
                                fill=self.NOTE_INK)
                 cv.create_line(u(38), yy + u(11), W - u(38), yy + u(11),
                                fill="#e8d6c4")
+            if off_max:
+                # 오른쪽 여백의 작은 화살표 — 눌러도 넘어간다
+                ax = W / 2 + u(135)
+                for ch9, on9, d9, ay in (("▴", off9 > 0, -1, u(140)),
+                                         ("▾", off9 < off_max, 1, u(288))):
+                    cv.create_text(ax, ay, text=ch9,
+                                   font=self._uf(10, True),
+                                   fill=cd["fill"] if on9 else "#e4d8ca")
+                    if on9:
+                        hit(ax - u(14), ay - u(14), ax + u(14),
+                            ay + u(14), ("rscroll", d9))
             fy9 = u(134) + max(3, len(lines)) * u(30) + u(28)
             cv.create_text(W - u(44), fy9, anchor="e",
                            text="From. %s" % nm9,
@@ -24094,8 +24215,12 @@ class Mascot:
                 elif k9 == "open":
                     nw["note"] = act[1]
                     nw["view"] = "read"
+                    nw["rscroll"] = 0        # 새 편지는 첫 줄부터
                     self._note_mark_read(act[1].get("id"))
                     self._room_key_last = None
+                elif k9 == "rscroll":
+                    nw["rscroll"] = max(0, int(nw.get("rscroll") or 0)
+                                        + act[1])
                 elif k9 == "write":
                     nw["view"] = "write"
                     if act[1]:
@@ -24150,9 +24275,21 @@ class Mascot:
             if self._nw is nw:
                 self._nw = None
 
+        def on_wheel(e):
+            """긴 편지 넘기기 — 읽기 화면에서만. 맥은 delta 가 ±1~3,
+            윈도우는 ±120 이라 부호만 본다."""
+            if nw["view"] != "read":
+                return
+            d9 = -1 if getattr(e, "delta", 0) > 0 else 1
+            nw["rscroll"] = max(0, int(nw.get("rscroll") or 0) + d9)
+            nw["dirty"] = True
+            draw()
+
         win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
         cv.bind("<Button-1>", lambda e: self._safe("note_click",
                                                    on_click, e))
+        cv.bind("<MouseWheel>", lambda e: self._safe("note_wheel",
+                                                     on_wheel, e))
         draw()
         nw["after"] = win.after(600, beat)
         # 열자마자 한 번 새로 받아 온다
