@@ -18033,9 +18033,11 @@ class Mascot:
         """이 캐릭터에 '같이하기'가 열려 있는가.
 
         서로 있어야 되는 기능이라 **켜져 있다고 알린 사람만** 초대 목록에
-        나온다 (쪽지의 nt 와 같은 방식). 지금은 내 도로롱만 열어 두었다.
+        나온다 (쪽지의 nt 와 같은 방식). 처음엔 내 도로롱만 열어 두고
+        만들었고, 이제 전체에 풀었다 (요청) — 기본 켜짐이고 config 에
+        false 를 적으면 그 캐릭터만 닫힌다.
         """
-        return bool(self.cfg.get("pomo_team"))
+        return bool(self.cfg.get("pomo_team", True))
 
     def _team_on(self):
         """지금 초대를 주고받을 수 있는 상태인가."""
