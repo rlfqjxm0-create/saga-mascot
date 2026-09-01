@@ -6710,6 +6710,9 @@ class Mascot:
         self._tm_box = None        # 토마토 클릭 자리
         self._tm_btn = []          # 수락·거절 자리
         self._tm_focus = [0.0, 0.0]   # 이번 구간 (집중한 초, 흐른 초)
+        self._tm_focus_last = 0.0     # 직전 집중 구간의 비율 (휴식 때 보여 준다)
+        self._tomgauge_cache = {}       # 토마토 게이지 그림 (크기·익기 단계별)
+        self._tm_tom_box = []         # 토마토 자리 (커서를 올리면 게이지)
         self._tm_rest = False      # 나만 잠깐 쉬는 중 (방 시계는 그대로)
         self._tm_at = 0.0          # 같이하기 셈을 마지막에 돈 시각
         self._tm_fx = 0.0          # 완주 축하가 시작된 시각
@@ -17852,7 +17855,7 @@ class Mascot:
         # 같이하기 — 주인이 넘어가면 그 자리에서 모두에게 알린다.
         # 자리 신호(5초)에도 실리지만 그때까지 기다리면 축하가 어긋난다.
         if self._team_host() and (self._tm or {}).get("state") == "run":
-            self._tm_focus = [0.0, 0.0]
+            self._team_focus_reset()
             if done:
                 self._safe("team_end", self._team_bcast, "tms",
                            self._team_step_blob())
@@ -18127,9 +18130,103 @@ class Mascot:
         return bool(tm and tm.get("host") == self.char)
 
     def _team_focus_ratio(self):
-        """이번 구간에서 실제로 작업한 비율 (참가자 줄의 얇은 막대)."""
+        """이번 구간에서 실제로 작업한 비율 (참가자 줄의 토마토 게이지).
+
+        휴식 구간에는 아직 흐른 집중 시간이 없으므로 **직전 집중의 결과**를
+        그대로 보여 준다 (요청 — 빈 게이지가 왜 있는지 헷갈렸다).
+        """
         got, all9 = self._tm_focus
-        return max(0.0, min(1.0, got / all9)) if all9 > 1.0 else 0.0
+        if all9 > 1.0:
+            return max(0.0, min(1.0, got / all9))
+        return max(0.0, min(1.0, float(getattr(self, "_tm_focus_last", 0.0)
+                                       or 0.0)))
+
+    def _team_focus_reset(self):
+        """구간이 넘어간다 — 지난 집중의 비율을 남기고 새로 센다."""
+        got, all9 = self._tm_focus
+        if all9 > 1.0:
+            self._tm_focus_last = max(0.0, min(1.0, got / all9))
+        self._tm_focus = [0.0, 0.0]
+
+    TOMATO_RAMP = (("#a9e39c", "#5fbf62"), ("#ffcf7f", "#f0a23a"),
+                   ("#ff8a86", "#e8544e"))   # (몸, 테두리) 0% · 50% · 100%
+
+    def _tomgauge_pil(self, size, ripe):
+        """토마토 한 알 (RGBA, size px) — 집중 비율만큼 민트 → 살구 → 코랄로
+        익는다. 4배로 그려 줄여 가장자리가 매끈하다. 얼굴은 없다 (요청)."""
+        S = 4
+        W = int(size * S)
+
+        def hexc(h):
+            h = h.lstrip("#")
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+        def lerp(a, b, t):
+            return tuple(int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+        r0, r1, r2 = self.TOMATO_RAMP
+        if ripe < 0.5:
+            t = ripe / 0.5
+            base = lerp(hexc(r0[0]), hexc(r1[0]), t)
+            line = lerp(hexc(r0[1]), hexc(r1[1]), t)
+        else:
+            t = (ripe - 0.5) / 0.5
+            base = lerp(hexc(r1[0]), hexc(r2[0]), t)
+            line = lerp(hexc(r1[1]), hexc(r2[1]), t)
+        dark = lerp(base, (120, 80, 100), 0.16)
+        im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        cx, cy = W / 2.0, W * 0.56
+        rx, ry = W * 0.42, W * 0.37
+        d.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=base + (255,),
+                  outline=line + (255,), width=max(1, int(W * 0.035)))
+        # 아래쪽 어두운 반사 — 몸 안쪽에만
+        lo = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+        ImageDraw.Draw(lo).ellipse((cx - rx * 0.85, cy - ry * 0.1,
+                                    cx + rx * 0.85, cy + ry * 0.92),
+                                   fill=dark + (70,))
+        mask = Image.new("L", (W, W), 0)
+        ImageDraw.Draw(mask).ellipse((cx - rx + W * 0.02, cy - ry + W * 0.02,
+                                      cx + rx - W * 0.02, cy + ry - W * 0.02),
+                                     fill=255)
+        im.paste(Image.alpha_composite(im, lo), (0, 0), mask)
+        d = ImageDraw.Draw(im)
+        # 하이라이트 — 안쪽(아래)으로 (피드백)
+        d.ellipse((cx - rx * 0.58, cy - ry * 0.62, cx - rx * 0.20,
+                   cy - ry * 0.24), fill=(255, 255, 255, 150))
+        d.ellipse((cx - rx * 0.06, cy - ry * 0.64, cx + rx * 0.06,
+                   cy - ry * 0.50), fill=(255, 255, 255, 110))
+        # 꼭지 잎(다섯 갈래) + 줄기
+        leaf, leaf_line = hexc("#82d69c"), hexc("#4fb574")
+        pts = []
+        for i in range(10):
+            a = -math.pi / 2 + i * math.pi / 5
+            r = W * 0.20 if i % 2 == 0 else W * 0.085
+            pts.append((cx + r * math.cos(a),
+                        cy - ry * 0.72 + r * 0.55 * math.sin(a)))
+        d.polygon(pts, fill=leaf + (255,), outline=leaf_line + (255,),
+                  width=max(1, int(W * 0.03)))
+        d.rounded_rectangle((cx - W * 0.035, cy - ry * 0.72 - W * 0.19,
+                             cx + W * 0.035, cy - ry * 0.72),
+                            radius=W * 0.03, fill=leaf + (255,),
+                            outline=leaf_line + (255,),
+                            width=max(1, int(W * 0.025)))
+        return im.resize((int(size), int(size)), Image.LANCZOS)
+
+    def _tomgauge_pic(self, size, ratio):
+        """토마토 게이지 그림 (PhotoImage) — 5% 단위로 굽고 캐시한다."""
+        size = max(12, int(size))
+        step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
+        key = (size, step)
+        got = self._tomgauge_cache.get(key)
+        if got is not None:
+            return got
+        if len(self._tomgauge_cache) > 80:          # 지뢰 18 — 오래된 절반만
+            for k in list(self._tomgauge_cache)[:40]:
+                self._tomgauge_cache.pop(k, None)
+        ph = ImageTk.PhotoImage(self._tomgauge_pil(size, step / 20.0))
+        self._tomgauge_cache[key] = ph
+        return ph
 
     def _team_save(self):
         """지금 세션을 설정에 적어 둔다 (제보 — 타이머가 꺼지면 방에서
@@ -18418,7 +18515,7 @@ class Mascot:
                    "hard": hard9, "end": end9})
         self._pomo_save(st)
         if not same9:                      # 구간이 그대로면 비율은 지킨다
-            self._tm_focus = [0.0, 0.0]
+            self._team_focus_reset()
         self._safe("team_save", self._team_save)
         self._safe("card", self._relayout_card)
         self._pomo_redraw()
@@ -20043,6 +20140,7 @@ class Mascot:
         ox8 = getattr(self, "_pomo_ox", 0.0)
         WW8 = max(W, cv.winfo_width())
         self._tm_vow_box = []          # 잘린 각오 (커서를 올리면 다 보인다)
+        self._tm_tom_box = []          # 토마토 (커서를 올리면 게이지)
         cv.create_text(pad - ox8 + u(9), y0, anchor="w",
                        text="같이 기다리는 중" if wait else "같이 하는 중",
                        font=uf(9, True), fill=cd["sub"])
@@ -20073,7 +20171,7 @@ class Mascot:
                                     ("tmauto",)))
         ready9 = self._team_ready_set() if wait else set()
         cy0 = y0 + u(12)
-        ch = u(146)
+        ch = u(164)                    # 이름 아래 토마토 한 알 몫까지
         # 창을 옆으로 넓히면 남는 폭까지 쓴다 (요청). 화면 전체는 나중에
         # 정중앙으로 통째로 옮겨지므로(_pomo_ox) 그만큼 미리 빼 둔다 —
         # 그러면 옮긴 뒤 이 줄만 창 양끝까지 닿는다.
@@ -20163,13 +20261,19 @@ class Mascot:
             else:
                 cv.create_text(cx, cy0 + u(125), text=nm9,
                                font=uf(8, True), fill=cd["text"])
-            gx0, gx1 = cx - gw * 0.30, cx + gw * 0.30
-            self._rr_soft(cv, gx0, cy0 + u(135), gx1, cy0 + u(139), u(2),
-                          fill="#f0ecf2", outline="")
-            if fr > 0.01:
-                self._rr_soft(cv, gx0, cy0 + u(135),
-                              gx0 + (gx1 - gx0) * fr, cy0 + u(139), u(2),
-                              fill=fg, outline="")
+            if not wait:
+                # 집중 비율은 **토마토 한 알**로 (요청 — 얇은 막대는 뭘 재는지
+                # 안 읽혔다). 이름 정중앙 아래, 익을수록 민트 → 코랄.
+                # 커서를 올리면 아래에 숫자 게이지가 뜬다 (_team_vow_hover).
+                tsz = u(30)
+                tcx, tcy = cx, cy0 + u(149) + dy
+                tim = self._safe_str(self._tomgauge_pic, tsz, fr)
+                if tim:
+                    cv.create_image(tcx, tcy, image=tim)
+                    self._pomo_keep.append(tim)
+                    self._tm_tom_box.append(
+                        (tcx - tsz / 2, tcy - tsz / 2, tcx + tsz / 2,
+                         tcy + tsz / 2, tcx, tcy + tsz / 2, fr, fg))
         return y0 + u(12) + rows * ch + (rows - 1) * u(8)
 
     def _team_vow_hover(self, cv, u, uf, W, pad):
@@ -20179,8 +20283,8 @@ class Mascot:
         않게 좌우로 밀어 넣는다.
         """
         pos = getattr(self, "_pomo_mouse", None)
-        boxes = getattr(self, "_tm_vow_box", None)
-        if not (pos and boxes):
+        boxes = getattr(self, "_tm_vow_box", None) or []
+        if not pos:
             return
         mx, my = pos
         for x0, y0, x1, y1, cx, cy, vow, fg in boxes:
@@ -20199,6 +20303,37 @@ class Mascot:
                           width=1.4, tail=(cx, u(6)))
             cv.create_text(bx + bw8 / 2, cy, text=vow, font=f8,
                            fill=self._shade(fg, 0.15))
+            return
+        # 토마토 위에 커서 — 아래에 '집중 N%' 와 가로 게이지 (요청)
+        for x0, y0, x1, y1, cx, by, fr, fg in (
+                getattr(self, "_tm_tom_box", None) or []):
+            if not (x0 - u(3) <= mx <= x1 + u(3)
+                    and y0 - u(3) <= my <= y1 + u(3)):
+                continue
+            pct = int(round(max(0.0, min(1.0, fr)) * 100 / 5.0) * 5)
+            # 카드 아래 여백(32)에 들어가게 납작하게 — 안 그러면 위로
+            # 뒤집혀 이름·상태를 가린다
+            bw9, bh9 = u(84), u(26)
+            px0 = cx - bw9 / 2
+            py0 = by + u(3)
+            try:
+                if py0 + bh9 > cv.winfo_height() - u(2):
+                    py0 = y0 - u(5) - bh9        # 아래가 모자라면 위로
+            except Exception:
+                pass
+            self._rr_soft(cv, px0, py0, px0 + bw9, py0 + bh9, u(9),
+                          fill="#fffdf7", outline=self._shade(fg, 0.1),
+                          width=1.4)
+            cv.create_text(cx, py0 + u(9), text="집중 %d%%" % pct,
+                           font=uf(8, True), fill=self._shade(fg, 0.15))
+            gx0, gx1 = px0 + u(12), px0 + bw9 - u(12)
+            gy = py0 + u(19)
+            self._rr_soft(cv, gx0, gy - u(2), gx1, gy + u(2), u(2),
+                          fill="#f0ecf2", outline="")
+            if pct > 0:
+                self._rr_soft(cv, gx0, gy - u(2),
+                              gx0 + (gx1 - gx0) * pct / 100.0, gy + u(2),
+                              u(2), fill=fg, outline="")
             return
 
     def _team_fx_draw(self, cv, u, W, H, t):
@@ -20375,7 +20510,7 @@ class Mascot:
             # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
-            tmh = (154 * rows9 + 28) if (self._tm and rows9) else 0
+            tmh = (172 * rows9 + 28) if (self._tm and rows9) else 0
             return ty1 + 28 + 40 + 30 + 44 + wk + tmh + 32
 
         W, H = u(BASE_W), u(base_h())
