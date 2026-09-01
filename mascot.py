@@ -6725,6 +6725,7 @@ class Mascot:
         self._tm_host_seen = 0.0   # 방장 자리를 마지막으로 본 시각 (참가자)
         self._tm_rest_work = 0.0   # 쉬는 중인데 일하는 게 보인 시각 (자동 복귀)
         self._tm_bye_arm = 0.0     # 방장 '오늘은 여기까지' 두 번 누르기
+        self._tm_ready = False     # 대기실 '준비됐어요' (참가자)
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
@@ -17705,6 +17706,24 @@ class Mascot:
         self._safe("pomo_flush", self._pomo_hist_flush)
         self.us["pomo_runs"] = {"day": self._my_workday(),
                                 "n": self._pomo_runs() + 1}
+        # 같이한 기록 — 누구와 몇 번 집중했는지, 날짜별로 (요청)
+        tm9 = self._tm
+        if tm9 and tm9.get("state") == "run":
+            oth9 = [s for s in (tm9.get("members") or {}) if s != self.char]
+            if oth9:
+                h9 = self.us.get("pomo_team_hist")
+                if not isinstance(h9, dict):
+                    h9 = {}
+                day9 = self._my_workday()
+                d9 = h9.get(day9)
+                if not isinstance(d9, dict):
+                    d9 = {}
+                for s in oth9:
+                    d9[s] = int(d9.get(s) or 0) + 1
+                h9[day9] = d9
+                for k9 in sorted(h9)[:-60]:      # 두 달치만
+                    h9.pop(k9, None)
+                self.us["pomo_team_hist"] = h9
         self._safe("pomo_runs_save", self._save_settings)
 
     def _pomo_mins(self, phase):
@@ -17984,6 +18003,35 @@ class Mascot:
             out.append((wd_s[lt.tm_wday], n, key == today))
         return out
 
+    def _pomo_team_line(self, off=0):
+        """그 주에 같이한 기록 한 줄 — '같이 · 사가 3번 · 락스 2번' (요청).
+
+        없으면 빈 글. 주 경계는 _pomo_week 와 같다 (월요일 시작).
+        """
+        h9 = self.us.get("pomo_team_hist")
+        if not isinstance(h9, dict) or not h9:
+            return ""
+        today = self._my_workday()
+        lt9 = time.strptime(today, "%Y-%m-%d")
+        mon = (time.mktime(lt9) + 12 * 3600
+               - lt9.tm_wday * 86400 - int(off) * 7 * 86400)
+        tot = {}
+        for i in range(7):
+            key = time.strftime("%Y-%m-%d", time.localtime(mon + i * 86400))
+            d9 = h9.get(key)
+            if not isinstance(d9, dict):
+                continue
+            for s, n in d9.items():
+                try:
+                    tot[s] = tot.get(s, 0) + int(n or 0)
+                except (TypeError, ValueError):
+                    pass
+        top = sorted(tot.items(), key=lambda kv: -kv[1])[:3]
+        if not top:
+            return ""
+        return "같이 · " + " · ".join("%s %d번" % (self._note_name(s), n)
+                                     for s, n in top)
+
     def _pomo_hard_badge(self):
         """홈 '빡집중' 배지를 보일 상태.
 
@@ -18093,7 +18141,8 @@ class Mascot:
             "mode": tm.get("mode") or "norm",
             "state": tm.get("state") or "run",
             "vow": str(tm.get("vow") or "")[:self.TEAM_VOW_N],
-            "len": tm.get("len") or {}, "at": round(time.time(), 1)}
+            "len": tm.get("len") or {}, "auto": bool(tm.get("auto")),
+            "at": round(time.time(), 1)}
             if tm else None)
         self._safe("team_save", self._save_settings)
 
@@ -18120,7 +18169,8 @@ class Mascot:
                     "state": str(got.get("state") or "run"), "vow": vow,
                     "members": {host: {"v": "", "at": time.time()},
                                 self.char: {"v": vow, "at": time.time()}},
-                    "invited": {}, "len": got.get("len") or {}}
+                    "invited": {}, "len": got.get("len") or {},
+                    "auto": bool(got.get("auto"))}
         self._tm_back = time.time()
 
     TEAM_BACK = 120.0            # 되살린 방을 확인할 때까지 기다리는 시간
@@ -18164,6 +18214,7 @@ class Mascot:
         self._tm = None
         self._tm_open = False
         self._tm_rest = False
+        self._tm_ready = False
         self._tm_focus = [0.0, 0.0]
         self._tm_back = 0.0
         self._safe("team_hard", self._team_hard_leave)
@@ -18192,6 +18243,17 @@ class Mascot:
             return str(hb["m"])
         return None
 
+    def _team_ready_set(self):
+        """대기실에서 '준비됐어요'를 누른 사람들 (나 포함)."""
+        tm = self._tm or {}
+        out = set()
+        if self._tm_ready:
+            out.add(self.char)
+        for sl, d in (tm.get("members") or {}).items():
+            if isinstance(d, dict) and d.get("y"):
+                out.add(sl)
+        return out
+
     def _team_blob(self):
         """방 신호에 실을 같이하기 값 (없으면 None). 작게 유지한다."""
         tm = self._tm
@@ -18202,6 +18264,17 @@ class Mascot:
              "f": round(self._team_focus_ratio(), 2)}
         if self._tm_rest:
             b["r"] = 1               # 잠깐 쉬는 중 — 딴짓으로 안 센다
+        else:
+            # 같이하는 중 창의 '집중/딴짓'은 **내 작업 프로그램 목록**으로
+            # 가른다 — 연동 시계의 상태(s)는 에이전트 목록을 따라
+            # 어긋났다 (제보: 캐릭터는 딴짓이 아닌데 창에는 딴짓)
+            try:
+                w9 = bool(self._fg_is_work(time.time())) or self._fg_is_self()
+            except Exception:
+                w9 = True
+            b["w"] = 1 if w9 else 0
+        if self._tm_ready and tm.get("state") != "run":
+            b["y"] = 1               # 대기실 — 준비됐어요
         if tm.get("host") == self.char:
             st = self._pomo()
             b.update({"s": tm.get("state") or "wait", "p": st["phase"],
@@ -18284,6 +18357,10 @@ class Mascot:
         if not tm or not self._team_host():
             return
         tm["state"] = "run"
+        self._tm_ready = False
+        for d9 in tm["members"].values():
+            if isinstance(d9, dict):
+                d9.pop("y", None)
         self._safe("team_save", self._team_save)
         st = self._pomo()
         st.update({"on": True, "phase": "focus", "left": 0.0, "round": 0,
@@ -18379,6 +18456,7 @@ class Mascot:
                     "invited": {}, "len": {}}
         self._tm_focus = [0.0, 0.0]
         self._tm_rest = False          # 옛 방의 '쉬는 중'을 안 데려온다
+        self._tm_ready = False
         self._tm_back = time.time()    # 끝난 방이면 잠시 뒤 접힌다
         self._tm_host_seen = time.time()
         self._team_send(inv["from"], "tmy",
@@ -18490,6 +18568,19 @@ class Mascot:
             if tm.get("state") == "run":     # 이미 돌고 있으면 바로 맞춘다
                 self._team_send(f, "tms", self._team_step_blob())
             self._pomo_redraw()
+        elif k == "tmr":                     # 대기실 '준비됐어요' (방장이 받는다)
+            if not self._team_host():
+                return
+            y9 = 1 if x.get("y") else 0
+            tm["members"].setdefault(
+                f, {"v": "", "at": time.time()})["y"] = y9
+            self._tm_say = ("%s 님 %s" % (self._note_name(f),
+                                          "준비 완료!" if y9 else "준비 취소"),
+                            time.time())
+            if y9:
+                self._safe("ready_say", self._say,
+                           "%s 님이 준비됐대요!" % self._note_name(f), 4.0)
+            self._pomo_redraw()
         elif k == "tmn":                     # 거절
             tm["invited"].pop(f, None)
             self._tm_say = ("%s 님은 다음에" % self._note_name(f),
@@ -18547,11 +18638,25 @@ class Mascot:
                 tm["members"][sl9] = {"v": str(b9.get("v") or "")[
                     :self.TEAM_VOW_N], "at": now}
                 tm["invited"].pop(sl9, None)
+            if "y" in b9 and isinstance(tm["members"][sl9], dict):
+                tm["members"][sl9]["y"] = 1 if b9.get("y") else 0
         back9 = getattr(self, "_tm_back", 0.0)
         if back9 and now - back9 > self.TEAM_BACK:
             self._tm_back = 0.0
             if not seen9:            # 그 방은 이미 끝났다 — 조용히 접는다
                 self._team_fold(note="그 방은 이미 끝났어요")
+                return
+        if (self._team_host() and tm.get("state") != "run"
+                and tm.get("auto")):
+            # '모두 준비되면 자동 시작' (요청) — 방장이 자리를 비워도
+            # 참가자가 다 준비되면 방이 시작된다
+            oth9 = [s for s in tm["members"] if s != self.char]
+            if oth9 and all(int((tm["members"][s] or {}).get("y") or 0)
+                            for s in oth9):
+                self._tm_say = ("모두 준비됐어요 — 시작!", now)
+                self._safe("team_auto", self._say,
+                           "다들 준비돼서 같이 시작해!", 5.0, True)
+                self._team_start()
                 return
         if not self._team_host():
             # 방장 자리가 오래 안 보이면 방이 죽은 것이다 (검토: 방장 앱이
@@ -18653,9 +18758,16 @@ class Mascot:
             if sl == self.char:
                 vow = str(tm.get("vow") or "")
                 mine = st["phase"] != "focus" or not st["on"]
+                # 집중/딴짓은 하드모드 감시와 같은 잣대(내 작업 프로그램
+                # 목록)로 — 연동 시계 상태로 가르면 에이전트 목록을 따라
+                # 어긋났다 (제보: 캐릭터는 멀쩡한데 창에만 딴짓)
+                try:
+                    work9 = (bool(self._fg_is_work(time.time()))
+                             or self._fg_is_self())
+                except Exception:
+                    work9 = True
                 stt = ("쉬는 중" if self._tm_rest else
-                       ("휴식" if mine else
-                        ("집중" if self._last_state == "work" else "딴짓")))
+                       ("휴식" if mine else ("집중" if work9 else "딴짓")))
                 out.append((sl, vow, stt, self._team_focus_ratio()))
                 continue
             q = rest.get(sl) or {}
@@ -18667,7 +18779,11 @@ class Mascot:
             elif st["phase"] != "focus" or not st["on"]:
                 stt = "휴식"
             else:
-                stt = "집중" if str(q.get("s") or "") == "work" else "딴짓"
+                # 새 판은 자기 작업 프로그램 목록으로 가른 값(w)을 싣는다.
+                # 옛 판은 연동 시계 상태(s)뿐이라 그대로 본다.
+                stt = ("집중" if (bool(b.get("w")) if "w" in b
+                                 else str(q.get("s") or "") == "work")
+                       else "딴짓")
             try:
                 fr = max(0.0, min(1.0, float(b.get("f") or 0.0)))
             except (TypeError, ValueError):
@@ -19545,6 +19661,7 @@ class Mascot:
                     "invited": {}, "len": {}}
         self._tm_focus = [0.0, 0.0]
         self._tm_rest = False
+        self._tm_ready = False
         self._tm_back = time.time()
         self._tm_host_seen = time.time()
         self._team_hard_enter(mode9)
@@ -19929,9 +20046,32 @@ class Mascot:
         cv.create_text(pad - ox8 + u(9), y0, anchor="w",
                        text="같이 기다리는 중" if wait else "같이 하는 중",
                        font=uf(9, True), fill=cd["sub"])
+        n_txt = "%d명" % len(who)
         cv.create_text(WW8 - pad - ox8 - u(9), y0, anchor="e",
-                       text="%d명" % len(who), font=uf(8, True),
-                       fill=cd["sub"])
+                       text=n_txt, font=uf(8, True), fill=cd["sub"])
+        if wait and self._team_host():
+            # '모두 준비되면 자동 시작' 알약 (요청) — 점과 글자를 세로
+            # 정중앙에, 인원 수 왼쪽에 붙인다
+            auto9 = bool(tm.get("auto"))
+            f9 = uf(7, True)
+            lab9 = "모두 준비되면 자동 시작"
+            tw9 = self._mw(lab9, f9)
+            ph9 = u(16)
+            px1 = (WW8 - pad - ox8 - u(9) - self._mw(n_txt, uf(8, True))
+                   - u(8))
+            px0 = px1 - (tw9 + u(26))
+            col9 = "#2a9d5c" if auto9 else cd["sub"]
+            self._rr_soft(cv, px0, y0 - ph9 / 2, px1, y0 + ph9 / 2, ph9 / 2,
+                          fill="#e6f6ec" if auto9 else "#f5f2f7",
+                          outline="" if auto9 else line, width=1)
+            r9 = u(3.2)
+            self._oval(cv, px0 + u(9) - r9, y0 - r9, px0 + u(9) + r9,
+                       y0 + r9, fill=col9, outline="")
+            cv.create_text(px0 + u(16) + tw9 / 2, y0, text=lab9, font=f9,
+                           fill=col9)
+            self._pomo_hits.append((px0, y0 - ph9 / 2, px1, y0 + ph9 / 2,
+                                    ("tmauto",)))
+        ready9 = self._team_ready_set() if wait else set()
         cy0 = y0 + u(12)
         ch = u(146)
         # 창을 옆으로 넓히면 남는 폭까지 쓴다 (요청). 화면 전체는 나중에
@@ -19989,6 +20129,14 @@ class Mascot:
                 cv.create_image(cx, cy0 + u(92) + dy, image=ph, anchor="s")
                 self._pomo_keep = getattr(self, "_pomo_keep", [])
                 self._pomo_keep.append(ph)
+            if wait and slot in ready9:
+                # 준비됐어요 — 초록 동그라미에 ✓ (요청). 머리 오른쪽 위.
+                rx, ry = cx + u(17), cy0 + u(52) + dy
+                rr = u(7)
+                self._oval(cv, rx - rr, ry - rr, rx + rr, ry + rr,
+                           fill="#2a9d5c", outline="#ffffff")
+                cv.create_text(rx, ry, text="✓", font=uf(7, True),
+                               fill="#ffffff")
             if jump:                       # 완주 — 곁에 반짝임·하트
                 for k9, (ox9, oy9, s9) in enumerate(((-u(19), u(6), 7),
                                                      (u(18), u(0), 6))):
@@ -20217,7 +20365,13 @@ class Mascot:
             ty1 = 186 + (100 if self.us.get("pomo_edit") else 20)
             wk = 0
             if self.cfg.get("pomo_stats", True):   # '이번 주' (기본 켜짐)
-                wk = 34 + (72 if self.us.get("pomo_week", True) else 0)
+                wk = 34
+                if self.us.get("pomo_week", True):
+                    wk += 72
+                    # 같이한 기록이 있는 주면 한 줄 더 (요청)
+                    if self._safe_str(self._pomo_team_line,
+                                      getattr(self, "_pomo_wk_off", 0)):
+                        wk += 16
             # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
@@ -20396,7 +20550,8 @@ class Mascot:
                 rows_b = [("다 같이 시작", "tmgo"), ("더 부르기", "tminv"),
                           ("그만두기", "tmout")]
             elif tm9 and tm9.get("state") != "run":
-                rows_b = [("기다리는 중", "none"), ("오늘은 여기까지", "tmout")]
+                rows_b = [(("준비 취소" if self._tm_ready else "준비됐어요"),
+                           "tmready"), ("오늘은 여기까지", "tmout")]
             elif tm9 and self._team_host():
                 rows_b = [(rest9, "tmrest"), ("건너뛰기", "skip"),
                           ("오늘은 여기까지", "tmout")]
@@ -20555,6 +20710,12 @@ class Mascot:
                                            fill=cd["fill"] if is_t
                                            else cd["sub"])
                     wy1 = gy1
+                    tl9 = self._safe_str(self._pomo_team_line, off9)
+                    if tl9:
+                        # 같이한 기록 — 그래프 바로 아래 한 줄, 가로 정중앙
+                        cv.create_text(W / 2, gy1 + u(10), text=tl9,
+                                       font=uf(8, True), fill=cd["sub"])
+                        wy1 = gy1 + u(16)
             # ── 같이 하는 사람들 (요청) ─────────────────────────────
             if self._tm:
                 wy1 = self._safe_num(
@@ -20768,6 +20929,17 @@ class Mascot:
                         fit_win()
                         draw()
                         return
+                    if isinstance(act, tuple) and act[0] == "tmauto":
+                        # 모두 준비되면 자동 시작 (방장 · 요청)
+                        if self._tm and self._team_host():
+                            self._tm["auto"] = not bool(self._tm.get("auto"))
+                            self._safe("team_save", self._team_save)
+                            self._tm_say = ("모두 준비되면 저절로 시작해요"
+                                            if self._tm["auto"]
+                                            else "시작은 직접 눌러요",
+                                            time.time())
+                        draw()
+                        return
                     if isinstance(act, tuple) and act[0] == "len":
                         # 시간 바꾸기 (− / +)
                         _, ph9, d9 = act
@@ -20785,6 +20957,17 @@ class Mascot:
                         self._safe("team_win", self._team_win_open)
                     elif act == "tmvow":      # 내 칸 — 각오 고치기 (요청)
                         self._safe("vow_win", self._team_vow_win)
+                    elif act == "tmready":    # 대기실 — 준비됐어요 (요청)
+                        self._tm_ready = not self._tm_ready
+                        tm9 = self._tm or {}
+                        self._team_send(tm9.get("host"), "tmr",
+                                        {"i": tm9.get("sid"),
+                                         "y": 1 if self._tm_ready else 0})
+                        self._tm_say = ("준비 완료! 시작을 기다려요"
+                                        if self._tm_ready else "준비 취소",
+                                        time.time())
+                        self._safe("room_push", self._room_push_now)
+                        draw()
                     elif act == "tmrest":     # 나만 잠깐 쉬기 (요청)
                         self._tm_rest = not self._tm_rest
                         self._tm_say = (
