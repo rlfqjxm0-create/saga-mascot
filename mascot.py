@@ -898,6 +898,7 @@ DEFAULT_SETTINGS = {
     "note_sent": None,    # 오늘 보낸 쪽지 수 {"day","n"} (하루 상한)
     "note_desk_ack": 0,   # 책상 봉투를 어디까지 봤나 (쪽지 번호)
     "news_seen": None,    # 업데이트 안내 중 '본 장'의 판 번호 목록
+    "pomo_vow": "",       # 같이하기 각오 한마디 (머리 위 말풍선)
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
@@ -6692,6 +6693,20 @@ class Mascot:
         self._guard_dim = None            # 감시 때 화면을 어둡게 하는 레이어
         self._pomo_bar_last = None        # 카드 위 뽀모 줄의 직전 상태
         self._pomo_wk_off = 0             # '이번 주' 그래프의 몇 주 전인가
+        # ── 뽀모도로 같이하기 (요청 — 지금은 내 도로롱만) ──────────
+        self._tm = None            # 지금 세션 (없으면 None)
+        self._tm_inv = None        # 받은 초대 — 책상에 토마토가 놓인다
+        self._tm_open = False      # 토마토를 눌러 수락·거절이 열렸나
+        self._tm_box = None        # 토마토 클릭 자리
+        self._tm_btn = []          # 수락·거절 자리
+        self._tm_focus = [0.0, 0.0]   # 이번 구간 (집중한 초, 흐른 초)
+        self._tm_rest = False      # 나만 잠깐 쉬는 중 (방 시계는 그대로)
+        self._tm_at = 0.0          # 같이하기 셈을 마지막에 돈 시각
+        self._tm_fx = 0.0          # 완주 축하가 시작된 시각
+        self._tm_win = None        # 초대 창
+        self._tm_pick = []         # 초대 창에서 고른 사람들
+        self._tm_hits = []         # 초대 창 클릭 자리
+        self._tm_say = ("", 0.0)   # 뽀모 창에 잠깐 띄우는 한 줄
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
         self._notes_mem = None            # 받은 쪽지 캐시 (파일은 한 번만)
@@ -8848,6 +8863,25 @@ class Mascot:
                 self._char_lay.place_above(self._main_hwnd)
             except Exception:
                 pass
+        # 같이하기 초대 — 책상 위 토마토. 수락·거절이 열려 있으면 그
+        # 단추가 먼저다 (아래 편지 블록보다 앞에 둔다).
+        if self._tm_inv and self._team_gate():
+            for bx0, by0, bx1, by1, act9 in (self._tm_btn or []):
+                if bx0 <= e.x <= bx1 and by0 <= e.y <= by1:
+                    self._safe("ui_click", self._ui_click)
+                    if act9 == "yes":
+                        self._safe("team_yes", self._team_accept,
+                                   str(self.us.get("pomo_vow") or ""))
+                    else:
+                        self._safe("team_no", self._team_decline)
+                    self._press = None
+                    return
+            tb9 = self._tm_box
+            if tb9 and tb9[0] <= e.x <= tb9[2] and tb9[1] <= e.y <= tb9[3]:
+                self._tm_open = not self._tm_open
+                self._safe("ui_click", self._ui_click)
+                self._press = None
+                return
         # 편지 — 봉투·도착 말풍선이 떠 있는 동안에는 캐릭터 어디를
         # 눌러도 **쪽지함이 열리면서** 함께 들어간다. 처음엔 '누르면
         # 끄기만'이었는데, 봉투만 사라지고 아무것도 안 열려 고장으로
@@ -17777,6 +17811,18 @@ class Mascot:
             st["end"] = time.time() + self._pomo_len(nxt)
             st["on"] = True
         self._pomo_save(st)
+        # 같이하기 — 주인이 넘어가면 그 자리에서 모두에게 알린다.
+        # 자리 신호(5초)에도 실리지만 그때까지 기다리면 축하가 어긋난다.
+        if self._team_host() and (self._tm or {}).get("state") == "run":
+            self._tm_focus = [0.0, 0.0]
+            if done:
+                self._safe("team_end", self._team_bcast, "tms",
+                           self._team_step_blob())
+            else:
+                self._safe("team_step", self._team_bcast, "tms",
+                           self._team_step_blob())
+        if ph == "focus" and self._tm and say:
+            self._tm_fx = time.time()      # 다 같이 완주 — 색종이·폭죽
         if done:
             self._safe("card", self._relayout_card)
         if say:
@@ -17974,6 +18020,326 @@ class Mascot:
                                  "n": self._pomo_hruns() + 1}
         self._safe("pomo_hruns_save", self._save_settings)
 
+    # ── 뽀모도로 같이하기 ────────────────────────────────────────────
+    # 대기실을 두고 **초대한 사람이** 시작을 누른다. 시작하면 전원이 같은
+    # '끝나는 시각'을 나눠 가지므로 시계가 조금씩 달라도 같은 순간에 끝난다.
+    # 진행 조작(멈춤·건너뛰기)은 초대한 사람만 한다 — 참가자가 각자 만지면
+    # 시계가 어긋난다. 초대장은 스스로 사라지지 않는다 (자리를 비운 사이에
+    # 왔을 수 있다 — 거절해야 없어진다).
+    TEAM_VOW_N = 20              # 각오 한마디 글자 수
+    TEAM_MAX = 8                 # 한 세션 인원 (자리 여덟이면 넉넉하다)
+
+    def _team_gate(self):
+        """이 캐릭터에 '같이하기'가 열려 있는가.
+
+        서로 있어야 되는 기능이라 **켜져 있다고 알린 사람만** 초대 목록에
+        나온다 (쪽지의 nt 와 같은 방식). 지금은 내 도로롱만 열어 두었다.
+        """
+        return bool(self.cfg.get("pomo_team"))
+
+    def _team_on(self):
+        """지금 초대를 주고받을 수 있는 상태인가."""
+        return bool(self._team_gate() and self._room_on()
+                    and self.room_net is not None)
+
+    def _team_host(self):
+        """내가 이 세션의 주인인가."""
+        tm = self._tm
+        return bool(tm and tm.get("host") == self.char)
+
+    def _team_focus_ratio(self):
+        """이번 구간에서 실제로 작업한 비율 (참가자 줄의 얇은 막대)."""
+        got, all9 = self._tm_focus
+        return max(0.0, min(1.0, got / all9)) if all9 > 1.0 else 0.0
+
+    def _team_blob(self):
+        """방 신호에 실을 같이하기 값 (없으면 None). 작게 유지한다."""
+        tm = self._tm
+        if not tm:
+            return None
+        b = {"i": tm["sid"], "h": tm["host"],
+             "v": str(tm.get("vow") or "")[:self.TEAM_VOW_N],
+             "f": round(self._team_focus_ratio(), 2)}
+        if self._tm_rest:
+            b["r"] = 1               # 잠깐 쉬는 중 — 딴짓으로 안 센다
+        if tm.get("host") == self.char:
+            st = self._pomo()
+            b.update({"s": tm.get("state") or "wait", "p": st["phase"],
+                      "e": round(float(st["end"]), 1),
+                      "m": tm.get("mode") or "norm",
+                      "l": tm.get("len") or {}})
+        return b
+
+    def _team_send(self, to_slot, kind, extra=None):
+        """같이하기 신호 하나 — 통신층이 없으면 조용히 지나간다."""
+        net = self.room_net
+        if net is None or not to_slot:
+            return False
+        try:
+            net.send(to_slot, kind, extra)
+            return True
+        except Exception:
+            return False
+
+    def _team_bcast(self, kind, extra=None, skip=None):
+        """세션에 있는 모두에게 (나와 skip 은 빼고)."""
+        tm = self._tm
+        if not tm:
+            return
+        for sl in list(tm.get("members") or {}):
+            if sl in (self.char, skip):
+                continue
+            self._team_send(sl, kind, extra)
+
+    def _team_new(self, mode, vow):
+        """대기실을 연다 — 아직 시계는 안 간다 (요청)."""
+        self._tm = {"sid": "%d" % int(time.time() * 10 % 1e9),
+                    "host": self.char, "mode": mode,
+                    "state": "wait", "vow": str(vow or "")[:self.TEAM_VOW_N],
+                    "members": {self.char: {"v": str(vow or "")[
+                        :self.TEAM_VOW_N], "at": time.time()}},
+                    "invited": {},
+                    "len": {"f": self._pomo_mins("focus"),
+                            "s": self._pomo_mins("short"),
+                            "l": self._pomo_mins("long")}}
+        self._tm_focus = [0.0, 0.0]
+        return self._tm
+
+    def _team_invite(self, slot):
+        """초대장 하나 — 상대 책상에 토마토가 놓인다."""
+        tm = self._tm
+        if not tm or not slot or slot == self.char:
+            return False
+        if len(tm["members"]) + len(tm["invited"]) >= self.TEAM_MAX:
+            return False
+        ok = self._team_send(slot, "tmi", {"i": tm["sid"],
+                                           "m": tm.get("mode") or "norm"})
+        if ok:
+            tm["invited"][slot] = time.time()
+        return ok
+
+    def _team_start(self):
+        """대기실에서 '다 같이 시작' — 전원이 같은 시각에 끝난다."""
+        tm = self._tm
+        if not tm or not self._team_host():
+            return
+        tm["state"] = "run"
+        st = self._pomo()
+        st.update({"on": True, "phase": "focus", "left": 0.0, "round": 0,
+                   "hard": (tm.get("mode") == "hard"),
+                   "end": time.time() + self._pomo_len("focus")})
+        self._pomo_save(st)
+        self._tm_focus = [0.0, 0.0]
+        self._team_bcast("tms", self._team_step_blob())
+        self._safe("card", self._relayout_card)
+        self._pomo_redraw()
+
+    def _team_step_blob(self):
+        """지금 구간을 알리는 값 — 참가자는 이걸 그대로 따른다."""
+        tm = self._tm or {}
+        st = self._pomo()
+        return {"i": tm.get("sid"), "p": st["phase"],
+                "e": round(float(st["end"]), 1), "r": int(st["round"]),
+                "m": tm.get("mode") or "norm",
+                "l": tm.get("len") or {}}
+
+    def _team_apply(self, x):
+        """받은 구간을 내 뽀모도로에 그대로 앉힌다 (참가자 쪽)."""
+        tm = self._tm
+        if not tm or self._team_host():
+            return
+        if str(x.get("i") or "") != tm["sid"]:
+            return
+        tm["state"] = "run"
+        if isinstance(x.get("l"), dict):
+            tm["len"] = x["l"]
+        st = self._pomo()
+        st.update({"on": True, "phase": str(x.get("p") or "focus"),
+                   "left": 0.0, "round": int(x.get("r") or 0),
+                   "hard": (str(x.get("m") or "") == "hard"
+                            or tm.get("mode") == "hard"),
+                   "end": float(x.get("e") or 0.0)})
+        self._pomo_save(st)
+        self._tm_focus = [0.0, 0.0]
+        self._safe("card", self._relayout_card)
+        self._pomo_redraw()
+
+    def _team_accept(self, vow=""):
+        """초대 수락 — 대기실에 들어간다 (시작은 부른 사람이 누른다)."""
+        inv = self._tm_inv
+        if not inv:
+            return
+        self._tm = {"sid": inv["sid"], "host": inv["from"],
+                    "mode": inv.get("mode") or "norm", "state": "wait",
+                    "vow": str(vow or "")[:self.TEAM_VOW_N],
+                    "members": {inv["from"]: {"v": "", "at": time.time()},
+                                self.char: {"v": str(vow or "")[
+                                    :self.TEAM_VOW_N], "at": time.time()}},
+                    "invited": {}, "len": {}}
+        self._tm_focus = [0.0, 0.0]
+        self._team_send(inv["from"], "tmy",
+                        {"i": inv["sid"], "v": self._tm["vow"]})
+        self._tm_inv = None
+        self._tm_open = False
+        self._say("%s 님과 같이 하기로 했어요!"
+                  % self._note_name(inv["from"]), 4.0, True)
+
+    def _team_decline(self):
+        """거절 — 토마토가 사라진다 (스스로는 안 사라진다 · 요청)."""
+        inv = self._tm_inv
+        if not inv:
+            return
+        self._team_send(inv["from"], "tmn", {"i": inv["sid"]})
+        self._tm_inv = None
+        self._tm_open = False
+
+    def _team_leave(self, quiet=False):
+        """'오늘은 여기까지' — 같이하기에서만 빠진다 (홈에는 그대로)."""
+        tm = self._tm
+        if not tm:
+            return
+        self._team_bcast("tmo", {"i": tm["sid"]})
+        self._tm = None
+        self._tm_open = False
+        self._tm_focus = [0.0, 0.0]
+        self._tm_rest = False
+        if not quiet:
+            self._tm_say = ("같이하기에서 나왔어요", time.time())
+        self._safe("card", self._relayout_card)
+        self._pomo_redraw()
+
+    def _team_event(self, ev):
+        """같이하기 신호를 받았다 (초대·수락·거절·나감·구간)."""
+        k = str(ev.get("k") or "")
+        f = str(ev.get("f") or "")
+        x = ev.get("x")
+        x = x if isinstance(x, dict) else {}
+        if not self._team_gate() or f == self.char:
+            return
+        tm = self._tm
+        if k == "tmi":                       # 초대장이 왔다
+            if tm is not None:
+                self._team_send(f, "tmn", {"i": x.get("i")})
+                return
+            self._tm_inv = {"from": f, "sid": str(x.get("i") or ""),
+                            "mode": str(x.get("m") or "norm"),
+                            "at": time.time()}
+            self._tm_open = False
+            self._say("%s 님이 같이 뽀모도로 하재요!" % self._note_name(f),
+                      12.0, True)
+            self._safe("team_snd", self._sparkle_sound)
+            return
+        if not tm or str(x.get("i") or "") != tm["sid"]:
+            return
+        if k == "tmy":                       # 수락 (부른 쪽이 받는다)
+            if not self._team_host():
+                return
+            tm["invited"].pop(f, None)
+            tm["members"][f] = {"v": str(x.get("v") or "")[
+                :self.TEAM_VOW_N], "at": time.time()}
+            self._tm_say = ("%s 님이 들어왔어요" % self._note_name(f),
+                            time.time())
+            if tm.get("state") == "run":     # 이미 돌고 있으면 바로 맞춘다
+                self._team_send(f, "tms", self._team_step_blob())
+            self._pomo_redraw()
+        elif k == "tmn":                     # 거절
+            tm["invited"].pop(f, None)
+            self._tm_say = ("%s 님은 다음에" % self._note_name(f),
+                            time.time())
+            self._pomo_redraw()
+        elif k == "tmo":                     # 나감
+            tm["members"].pop(f, None)
+            self._tm_say = ("%s 님이 오늘 작업을 마쳤어요"
+                            % self._note_name(f), time.time())
+            if len(tm["members"]) <= 1 and not self._team_host():
+                self._tm = None              # 주인이 나가면 세션이 끝난다
+                self._tm_rest = False
+            self._pomo_redraw()
+        elif k == "tms":                     # 구간이 넘어갔다
+            self._team_apply(x)
+
+    def _team_tick(self, now):
+        """1초에 한 번 — 집중 비율을 쌓고, 끝난 세션을 정리한다."""
+        if now - self._tm_at < 1.0:
+            return
+        dt = min(3.0, now - self._tm_at) if self._tm_at else 1.0
+        self._tm_at = now
+        if not self._tm:
+            return
+        st = self._pomo()
+        if self._tm_rest:
+            return                  # 쉬는 동안은 비율도 안 깎인다
+        if st["on"] and st["phase"] == "focus":
+            self._tm_focus[1] += dt
+            work = True
+            try:
+                work = bool(self._fg_is_work(now)) or self._fg_is_self()
+            except Exception:
+                work = True
+            if work:
+                self._tm_focus[0] += dt
+
+    def _team_people(self):
+        """지금 세션에 있는 사람들 — [(slot, 각오, 상태, 비율)].
+
+        내 자리가 맨 앞. 남의 값은 방 신호(tm)에서 그대로 읽는다.
+        """
+        tm = self._tm
+        if not tm:
+            return []
+        st = self._pomo()
+        rest = dict((str(q.get("slot") or ""), q)
+                    for q in (self.room_people or []))
+        out = []
+        for sl in [self.char] + [s for s in tm.get("members") or {}
+                                 if s != self.char]:
+            vow = str((tm["members"].get(sl) or {}).get("v") or "")
+            if sl == self.char:
+                vow = str(tm.get("vow") or "")
+                mine = st["phase"] != "focus" or not st["on"]
+                stt = ("쉬는 중" if self._tm_rest else
+                       ("휴식" if mine else
+                        ("집중" if self._last_state == "work" else "딴짓")))
+                out.append((sl, vow, stt, self._team_focus_ratio()))
+                continue
+            q = rest.get(sl) or {}
+            b = q.get("tm") if isinstance(q.get("tm"), dict) else {}
+            if b.get("v"):
+                vow = str(b["v"])
+            if b.get("r"):                 # 그 사람이 잠깐 쉬는 중
+                stt = "쉬는 중"
+            elif st["phase"] != "focus" or not st["on"]:
+                stt = "휴식"
+            else:
+                stt = "집중" if str(q.get("s") or "") == "work" else "딴짓"
+            try:
+                fr = max(0.0, min(1.0, float(b.get("f") or 0.0)))
+            except (TypeError, ValueError):
+                fr = 0.0
+            out.append((sl, vow, stt, fr))
+        return out[:self.TEAM_MAX]
+
+    def _team_peers(self):
+        """초대할 수 있는 사람 — '같이하기가 열렸다'고 알린 사람만.
+
+        쪽지의 nt 와 같은 방식이다 (요청). 지금 켜져 있는 사람은 방
+        신호에서, 예전에 본 사람은 캐시에서 찾는다.
+        """
+        live = {}
+        for q in (self.room_people or []):
+            if q.get("tk"):
+                live[str(q.get("slot") or "")] = 1
+        who = self._room_who_get() or {}
+        out = []
+        for sl in self.ROOM_SEATS:
+            if sl == self.char:
+                continue
+            row = who.get(sl)
+            seen = isinstance(row, dict) and int(row.get("tk") or 0) == 1
+            if live.get(sl) or seen:
+                out.append(sl)
+        return out
+
     def _pomo_hard_tick(self, now):
         """하드모드 감시 — 초 단위면 충분해서 1초에 한 번만 돈다."""
         if now - self._hd_at < 1.0:
@@ -17986,6 +18352,16 @@ class Mascot:
             self._hd_off0 = None
             self._hd_guard_shown = False
             self._pomo_guard_close()
+            return
+        # 같이하기에서 '잠깐 쉬기'를 누른 동안은 딴짓으로 안 센다 (요청 —
+        # 화장실·물 마시기. 방 시계는 그대로 흐른다).
+        if self._tm and self._tm_rest:
+            if self._hd_off0 is not None:
+                self._hd_off0 = None
+                self._hd_nag = 0
+                self._hd_guard_shown = False
+                self._pomo_guard_close()
+            self._hd_round = st["end"]
             return
         # 새 집중 구간이 시작됐으면 판을 리셋 (end 가 구간마다 다르다)
         if st["end"] != self._hd_round:
@@ -18677,11 +19053,450 @@ class Mascot:
                 self._hd_flash_tick(now)
             except Exception:
                 self._log_error("pomo_hard")
+        if self._team_gate():
+            self._safe("team_tick", self._team_tick, now)
         st = self._pomo()
         if not st["on"] or st["end"] <= 0:
             return
         if now >= st["end"]:
             self._pomo_next()
+
+    def _team_win_open(self):
+        """초대 창 — 같이 할 사람을 고르고 각오를 적는다 (요청).
+
+        목록에는 **'같이하기가 열렸다'고 알린 사람만** 나온다 (쪽지의
+        받는 사람 목록과 같은 규칙). 초대장은 스스로 안 사라진다.
+        """
+        got = getattr(self, "_tm_win", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.lift()
+                    return
+            except Exception:
+                pass
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(300)), int(u(500))
+        win = tk.Toplevel(self.root)
+        self._tm_win = win
+        win.title("같이 하기")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        tw = {"pick": [], "page": 0, "mode": "hard", "keep": [],
+              "after": None}
+        # 각오 한마디 — 글 상자는 부모를 캔버스로 (지뢰 22)
+        box = tk.Entry(cv, bd=0, relief="flat", bg="#fffdf7",
+                       fg=cd["text"], justify="center",
+                       font=self._uf(10), highlightthickness=0)
+        box.insert(0, str(self.us.get("pomo_vow") or ""))
+
+        def keep(im):
+            tw["keep"].append(im)
+            return im
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            tw["keep"] = []
+            self._tm_hits = []
+            cv.delete("all")
+            peers = self._team_peers()
+            self._safe("dot", self._soft_dot, cv, u(24), u(26), u(13),
+                       "#ffffff", outline=line, width=1, shadow=True)
+            cv.create_text(u(24), u(26), text="‹", font=self._uf(14, True),
+                           fill=cd["text"])
+            self._tm_hits.append((u(6), u(8), u(44), u(46), ("close",)))
+            cv.create_text(W / 2, u(26), text="같이 할 사람 고르기",
+                           font=self._uf(12, True), fill=cd["text"])
+            cv.create_text(W / 2, u(52),
+                           text="고른 사람에게 초대장이 날아가요",
+                           font=self._uf(8, True), fill=cd["sub"])
+            if not peers:
+                cv.create_text(W / 2, u(150),
+                               text="아직 같이 할 수 있는 친구가 없어요",
+                               font=self._uf(9, True), fill=cd["sub"])
+                cv.create_text(W / 2, u(172),
+                               text="친구가 업데이트를 받으면 여기에 나타나요",
+                               font=self._uf(8, True), fill=cd["sub"])
+            per = 8
+            pages = max(1, (len(peers) + per - 1) // per)
+            tw["page"] = max(0, min(tw["page"], pages - 1))
+            page = peers[tw["page"] * per:(tw["page"] + 1) * per]
+            gx = (W - u(34)) / 4.0
+            for i, slot in enumerate(page):
+                cx = u(17) + gx * (i % 4 + 0.5)
+                cy = u(96) + (i // 4) * u(92)
+                on = slot in tw["pick"]
+                pt = self._note_portrait(slot, u(24),
+                                         ring=cd["fill"] if on else None)
+                if pt:
+                    cv.create_image(cx, cy, image=keep(pt))
+                if on:
+                    self._safe("dot", self._soft_dot, cv, cx + u(19),
+                               cy + u(17), u(9), cd["fill"],
+                               outline="#ffffff", width=2)
+                    cv.create_text(cx + u(19), cy + u(17), text="✔",
+                                   font=self._uf(7, True), fill="#ffffff")
+                cv.create_text(cx, cy + u(36), text=self._note_name(slot),
+                               font=self._uf(9, True),
+                               fill=cd["text"] if on else cd["sub"])
+                self._tm_hits.append((cx - u(26), cy - u(28), cx + u(26),
+                                      cy + u(42), ("pick", slot)))
+            if pages > 1:
+                cv.create_text(W / 2, u(272), text="%d / %d"
+                               % (tw["page"] + 1, pages),
+                               font=self._uf(8, True), fill=cd["sub"])
+                for tx, ch, on9, d9 in ((u(25), "‹", tw["page"] > 0, -1),
+                                        (W - u(25), "›",
+                                         tw["page"] < pages - 1, 1)):
+                    cv.create_text(tx, u(150), text=ch,
+                                   font=self._uf(14, True),
+                                   fill=cd["text"] if on9 else "#d8d2dc")
+                    if on9:
+                        self._tm_hits.append((tx - u(14), u(130),
+                                              tx + u(14), u(170),
+                                              ("page", d9)))
+            # 각오 한마디
+            cv.create_text(u(26), u(292), anchor="w", text="각오 한마디",
+                           font=self._uf(9, True), fill=cd["sub"])
+            self._rr_soft(cv, u(17), u(304), W - u(17), u(336), u(16),
+                          fill="#fffdf7", outline=line, width=1)
+            cv.create_window(u(28), u(320), anchor="w", window=box,
+                             width=int(W - u(56)), height=int(u(22)))
+            # 어떻게 같이 할까요
+            self._rr_soft(cv, u(17), u(348), W - u(17), u(404), u(15),
+                          fill="#ffffff", outline=line, width=1)
+            cv.create_text(W / 2, u(364), text="어떻게 같이 할까요?",
+                           font=self._uf(9, True), fill=cd["sub"])
+            for i, (lab, key9) in enumerate((("보통", "norm"),
+                                             ("하드모드", "hard"))):
+                on = (tw["mode"] == key9)
+                # 둘을 합친 폭이 카드 안에서 **좌우 여백이 같아야** 한다.
+                # 예전에는 사이 간격을 빼지 않아 오른쪽 알약이 카드 끝에
+                # 붙었다 (제보 — '오른쪽으로 쏠려 보인다').
+                bw = (W - u(58) - u(12)) / 2
+                x0 = u(29) + i * (bw + u(12))
+                self._rr_soft(cv, x0, u(376), x0 + bw, u(396), u(10),
+                              fill="#ffe3c4" if on else "#ffffff",
+                              outline="#e8a34c" if on else line, width=1)
+                # 불꽃 + 글자를 **한 덩어리로 보고 가운데** (제보 — 오른쪽
+                # 으로 쏠려 보였다)
+                f9 = self._uf(9, True)
+                tw9 = self._mw(lab, f9)
+                fw9 = u(13) if key9 == "hard" else 0.0
+                gap9 = u(4) if key9 == "hard" else 0.0
+                x9 = x0 + bw / 2 - (fw9 + gap9 + tw9) / 2
+                if key9 == "hard":     # 불꽃은 그림으로 (BMP 밖 금지)
+                    self._flame_icon(cv, x9 + fw9 / 2, u(386), u(15),
+                                     lit=on)
+                cv.create_text(x9 + fw9 + gap9 + tw9 / 2, u(386), text=lab,
+                               font=f9,
+                               fill=self._shade("#e8a34c", 0.2) if on
+                               else cd["sub"])
+                self._tm_hits.append((x0, u(372), x0 + bw, u(400),
+                                      ("mode", key9)))
+            # 보내기
+            n = len(tw["pick"])
+            by = u(420)
+            self._rr_soft(cv, u(40), by, W - u(40), by + u(38), u(19),
+                          fill=cd["fill"] if n else "#efeaf1", outline="")
+            cv.create_text(W / 2, by + u(19),
+                           text="초대장 보내기 (%d명)" % n if n
+                           else "같이 할 사람을 골라 주세요",
+                           font=self._uf(11, True),
+                           fill="#ffffff" if n else cd["sub"])
+            if n:
+                env = self._note_env(u(20), u(14), "#ffffff", seal_k=0.30)
+                if env:
+                    cv.create_image(u(74), by + u(19), image=keep(env))
+                self._tm_hits.append((u(40), by, W - u(40), by + u(38),
+                                      ("send",)))
+            cv.create_text(W / 2, u(474),
+                           text="받으면 대기실에 모여요 · 시작은 내가 눌러요",
+                           font=self._uf(8, True), fill=cd["sub"])
+
+        def on_click(e):
+            for x0, y0, x1, y1, act in list(self._tm_hits):
+                if not (x0 <= e.x <= x1 and y0 <= e.y <= y1):
+                    continue
+                self._safe("ui_click", self._ui_click)
+                k9 = act[0]
+                if k9 == "close":
+                    win.destroy()
+                    return
+                if k9 == "pick":
+                    if act[1] in tw["pick"]:
+                        tw["pick"].remove(act[1])
+                    elif len(tw["pick"]) < self.TEAM_MAX - 1:
+                        tw["pick"].append(act[1])
+                elif k9 == "page":
+                    tw["page"] += act[1]
+                elif k9 == "mode":
+                    tw["mode"] = act[1]
+                elif k9 == "send":
+                    vow = ""
+                    try:
+                        vow = box.get().strip()[:self.TEAM_VOW_N]
+                    except Exception:
+                        vow = ""
+                    self.us["pomo_vow"] = vow
+                    self._safe("vow_save", self._save_settings)
+                    if self._tm is None:
+                        self._team_new(tw["mode"], vow)
+                    else:
+                        self._tm["vow"] = vow
+                    for sl in list(tw["pick"]):
+                        self._safe("team_inv", self._team_invite, sl)
+                    self._tm_say = ("초대장을 보냈어요 — 기다리는 중",
+                                    time.time())
+                    self._safe("card", self._relayout_card)
+                    self._pomo_redraw()
+                    win.destroy()
+                    return
+                draw()
+                return
+
+        def beat():
+            if not win.winfo_exists():
+                return
+            draw()
+            tw["after"] = win.after(1500, beat)
+
+        def gone(_e=None):
+            if tw.get("after") is not None:      # 지뢰 20
+                try:
+                    win.after_cancel(tw["after"])
+                except Exception:
+                    pass
+                tw["after"] = None
+            if self._tm_win is win:
+                self._tm_win = None
+
+        win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
+        cv.bind("<Button-1>", lambda e: self._safe("team_click",
+                                                   on_click, e))
+        draw()
+        tw["after"] = win.after(1500, beat)
+
+    def _invite_icon(self, cv, cx, cy, r, on=False, tags="dyn"):
+        """사람 둘 + 더하기 — 초대 아이콘.
+
+        작은 동그라미 안에 들어가므로 **밖으로 안 삐져나가게** 조각을
+        반지름 안쪽으로 잡는다 (요청). 그림이 되면 4배로 구운 것을 쓰고,
+        안 되면 도형으로 물러난다.
+        """
+        got = self._invite_img(r * 2.0, on)
+        if got is not None:
+            cv.create_image(cx, cy, image=got, tags=tags)
+            return
+        col = "#ffffff" if on else self._shade(self.card["fill"], 0.05)
+        cv.create_oval(cx - r * 0.80, cy - r * 0.62, cx - r * 0.30,
+                       cy - r * 0.12, fill=col, outline="", tags=tags)
+        cv.create_arc(cx - r * 0.92, cy - r * 0.10, cx - r * 0.18,
+                      cy + r * 0.84, start=0, extent=180, fill=col,
+                      outline="", tags=tags)
+        cv.create_oval(cx - r * 0.34, cy - r * 0.74, cx + r * 0.18,
+                       cy - r * 0.22, fill=col, outline="", tags=tags)
+        cv.create_arc(cx - r * 0.48, cy - r * 0.20, cx + r * 0.32,
+                      cy + r * 0.80, start=0, extent=180, fill=col,
+                      outline="", tags=tags)
+
+    def _invite_img(self, h, on=False):
+        """초대 아이콘 그림 (캐시) — 4배로 그려 줄인다."""
+        h = max(8, int(round(h)))
+        ck = ("invite", h, bool(on), self.card["fill"])
+        got = self._soft_cache.get(ck)
+        if got is not None:
+            return got
+        try:
+            S = 4
+            D = h * S
+            im = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            col = ((255, 255, 255, 255) if on
+                   else self._rgb_of(self._shade(self.card["fill"], 0.05)))
+            r = D / 2.0
+            cx, cy = r, r
+            # 뒤 사람 — 옅게
+            back = col if on else self._rgb_of(
+                self._tint(self.card["fill"], 0.35))
+            d.ellipse([cx - r * 0.78, cy - r * 0.60, cx - r * 0.28,
+                       cy - r * 0.10], fill=back)
+            d.pieslice([cx - r * 0.90, cy - r * 0.08, cx - r * 0.14,
+                        cy + r * 0.80], 180, 360, fill=back)
+            # 앞 사람
+            d.ellipse([cx - r * 0.36, cy - r * 0.74, cx + r * 0.16,
+                       cy - r * 0.22], fill=col)
+            d.pieslice([cx - r * 0.50, cy - r * 0.20, cx + r * 0.30,
+                        cy + r * 0.72], 180, 360, fill=col)
+            # 더하기 — 오른쪽 위, 원 안에 들어오게
+            px, py = cx + r * 0.50, cy - r * 0.42
+            lw = max(2, int(round(r * 0.16)))
+            d.line([px - r * 0.22, py, px + r * 0.22, py], fill=col,
+                   width=lw)
+            d.line([px, py - r * 0.22, px, py + r * 0.22], fill=col,
+                   width=lw)
+            # **그린 것을 실제로 재서 한가운데로 옮긴다** (제보 — 왼쪽 위로
+            # 쏠려 보였다). 좌표를 손으로 맞추면 조각을 고칠 때마다 또
+            # 어긋난다 (지뢰 88과 같은 이야기).
+            bb = im.getbbox()
+            if bb:
+                cut = im.crop(bb)
+                im = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+                im.paste(cut, ((D - cut.width) // 2, (D - cut.height) // 2))
+            got = ImageTk.PhotoImage(im.resize((h, h), Image.LANCZOS))
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:
+            for old in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old, None)
+        self._soft_cache[ck] = got
+        return got
+
+    @staticmethod
+    def _rgb_of(c):
+        return tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) + (255,)
+
+    def _safe_num(self, fn, *a):
+        """숫자를 돌려주는 것이 터지면 None (0 도 뜻이 있어 _safe_str 은
+        못 쓴다 — 지뢰 110)."""
+        try:
+            return fn(*a)
+        except Exception:
+            self._log_error("safe_num %s" % getattr(fn, "__name__", "?"))
+            return None
+
+    TEAM_ST_COL = {"집중": ("#ffd9e6", "#e8688c"),
+                   "휴식": ("#dcefe0", "#57a86b"),
+                   "쉬는 중": ("#e2ecf7", "#5b7fa8"),
+                   "딴짓": ("#ffe0d2", "#e08a3c")}
+
+    def _team_row_draw(self, cv, u, uf, W, pad, line, y0):
+        """뽀모도로 창 아래 — 같이 하는 사람들 (각오 말풍선 · 상태 · 비율).
+
+        말풍선은 몸통과 꼬리를 **한 실루엣**으로 그린다 (지뢰 123 —
+        따로 그리면 이음매에 직선이 남는다).
+        """
+        cd = self.card
+        who = self._team_people()
+        if not who:
+            return y0
+        tm = self._tm or {}
+        wait = (tm.get("state") != "run")
+        ox8 = getattr(self, "_pomo_ox", 0.0)
+        WW8 = max(W, cv.winfo_width())
+        cv.create_text(pad - ox8 + u(9), y0, anchor="w",
+                       text="같이 기다리는 중" if wait else "같이 하는 중",
+                       font=uf(9, True), fill=cd["sub"])
+        cv.create_text(WW8 - pad - ox8 - u(9), y0, anchor="e",
+                       text="%d명" % len(who), font=uf(8, True),
+                       fill=cd["sub"])
+        cy0 = y0 + u(12)
+        ch = u(146)
+        # 창을 옆으로 넓히면 남는 폭까지 쓴다 (요청). 화면 전체는 나중에
+        # 정중앙으로 통째로 옮겨지므로(_pomo_ox) 그만큼 미리 빼 둔다 —
+        # 그러면 옮긴 뒤 이 줄만 창 양끝까지 닿는다.
+        ox9 = getattr(self, "_pomo_ox", 0.0)
+        WW = max(W, cv.winfo_width())
+        x_l = pad - ox9
+        x_r = WW - pad - ox9
+        per = max(1, int(getattr(self, "_tm_per", 4) or 4))
+        rows = int(math.ceil(len(who) / float(per)))
+        for r9 in range(rows):
+            ry9 = cy0 + r9 * (ch + u(8))
+            self._rr_soft(cv, x_l, ry9, x_r, ry9 + ch, u(15),
+                          fill="#ffffff", outline=line, width=1)
+        gw = (x_r - x_l) / float(per)
+        jump = (time.time() - self._tm_fx) if (
+            self._tm_fx and time.time() - self._tm_fx < 3.2) else None
+        for i, (slot, vow, stt, fr) in enumerate(who):
+            r9, c9 = divmod(i, per)
+            cy0 = y0 + u(12) + r9 * (ch + u(8))
+            # 마지막 줄이 덜 찼으면 그 줄만 가운데로 모은다
+            n_row = min(per, len(who) - r9 * per)
+            cx = x_l + (x_r - x_l - gw * n_row) / 2.0 + gw * (c9 + 0.5)
+            dy = -abs(math.sin(jump * 6.0 + i * 0.8)) * u(9) if jump else 0.0
+            bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
+            f8 = uf(7, True)
+            if vow:
+                tw8 = self._mw(vow, f8)
+                bw8 = min(gw - u(6), tw8 + u(14))
+                by0, by1 = cy0 + u(8) + dy, cy0 + u(30) + dy
+                self._rr_soft(cv, cx - bw8 / 2, by0, cx + bw8 / 2, by1,
+                              u(9), fill="#fffdf7",
+                              outline=self._tint(fg, 0.45), width=1,
+                              tail=(cx, u(6)))
+                cv.create_text(cx, (by0 + by1) / 2, text=vow, font=f8,
+                               fill=self._shade(fg, 0.15))
+            ph = self._seat_photo(
+                slot, u(46) * self.ROOM_SIZE.get(slot, 1.0))
+            if ph is not None:
+                cv.create_image(cx, cy0 + u(92) + dy, image=ph, anchor="s")
+                self._pomo_keep = getattr(self, "_pomo_keep", [])
+                self._pomo_keep.append(ph)
+            if jump:                       # 완주 — 곁에 반짝임·하트
+                for k9, (ox9, oy9, s9) in enumerate(((-u(19), u(6), 7),
+                                                     (u(18), u(0), 6))):
+                    cv.create_text(cx + ox9, cy0 + u(48) + oy9 + dy,
+                                   text="♥" if k9 else "✧",
+                                   font=uf(s9, True),
+                                   fill="#e8688c" if k9 else "#ffd75e")
+            pw = self._mw(stt, f8) / 2 + u(8)
+            self._rr_soft(cv, cx - pw, cy0 + u(98), cx + pw, cy0 + u(114),
+                          u(8), fill=bg, outline="")
+            cv.create_text(cx, cy0 + u(106), text=stt, font=f8, fill=fg)
+            nm9 = self._note_name(slot)
+            cv.create_text(cx, cy0 + u(125), text=nm9, font=uf(8, True),
+                           fill=cd["text"])
+            gx0, gx1 = cx - gw * 0.30, cx + gw * 0.30
+            self._rr_soft(cv, gx0, cy0 + u(135), gx1, cy0 + u(139), u(2),
+                          fill="#f0ecf2", outline="")
+            if fr > 0.01:
+                self._rr_soft(cv, gx0, cy0 + u(135),
+                              gx0 + (gx1 - gx0) * fr, cy0 + u(139), u(2),
+                              fill=fg, outline="")
+        return y0 + u(12) + rows * ch + (rows - 1) * u(8)
+
+    def _team_fx_draw(self, cv, u, W, H, t):
+        """완주 축하 — 색종이와 폭죽 (창 안에서만, 3초)."""
+        cd = self.card
+        rnd = random.Random(int(self._tm_fx) % 99991)
+        cols = [self._tint(cd["fill"], 0.15), "#ffd75e", "#8fd18f",
+                "#7fb0ff", "#ff9ec4", "#ffffff"]
+        for _ in range(70):
+            x = rnd.uniform(u(8), W - u(8))
+            y0 = rnd.uniform(-u(60), H * 0.5)
+            vy = rnd.uniform(u(60), u(150))
+            y = y0 + vy * t + u(40) * t * t
+            if y < 0 or y > H:
+                continue
+            w9 = rnd.uniform(u(4), u(8))
+            h9 = w9 * rnd.uniform(0.5, 1.5)
+            a = rnd.uniform(0, math.pi) + t * 3.0
+            ca, sa = math.cos(a), math.sin(a)
+            pts = []
+            for dx, dy in ((-w9 / 2, -h9 / 2), (w9 / 2, -h9 / 2),
+                           (w9 / 2, h9 / 2), (-w9 / 2, h9 / 2)):
+                pts += [x + dx * ca - dy * sa, y + dx * sa + dy * ca]
+            cv.create_polygon(pts, fill=rnd.choice(cols), outline="")
+        for fx, fy, col, t0 in ((u(58), u(66), "#ffd75e", 0.0),
+                                (W - u(60), u(92), "#ff9ec4", 0.35)):
+            p = t - t0
+            if not (0.0 < p < 1.2):
+                continue
+            r1 = u(8) + u(16) * min(1.0, p / 0.5)
+            for i in range(12):
+                a = i * math.pi / 6
+                cv.create_line(fx + math.cos(a) * r1 * 0.55,
+                               fy + math.sin(a) * r1 * 0.55,
+                               fx + math.cos(a) * r1,
+                               fy + math.sin(a) * r1,
+                               fill=col, width=2, capstyle="round")
 
     def _pomo_redraw(self):
         got = getattr(self, "_pomo_draw", None)
@@ -18812,7 +19627,11 @@ class Mascot:
             wk = 0
             if self.cfg.get("pomo_stats", True):   # '이번 주' (기본 켜짐)
                 wk = 34 + (72 if self.us.get("pomo_week", True) else 0)
-            return ty1 + 28 + 40 + 30 + 44 + wk + 32
+            # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
+            # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
+            rows9 = int(getattr(self, "_tm_rows", 0) or 0)
+            tmh = (154 * rows9 + 28) if (self._tm and rows9) else 0
+            return ty1 + 28 + 40 + 30 + 44 + wk + tmh + 32
 
         W, H = u(BASE_W), u(base_h())
         win = tk.Toplevel(self.root)
@@ -18851,6 +19670,37 @@ class Mascot:
                     self._safe("pomo_zoom_save", self._save_settings)
             W = u(BASE_W)
             pad = u(16)
+            # 같이 하는 사람들 — 한 줄에 몇이고 몇 줄인가. 기본 폭에서는
+            # 넷이 안정적이고, 창을 **옆으로** 넓히면 남는 폭만큼 한 줄에
+            # 더 들어간다 (요청). 창 폭은 배율과 따로 놀아서(배율은 가로·
+            # 세로 중 작은 쪽) 여유 폭이 실제로 생긴다 — 실측으로 확인.
+            n_tm9 = len(self._team_people()) if self._tm else 0
+            if n_tm9:
+                # **배율(z)로 재면 안 된다** — 줄이 늘면 배율이 작아지고,
+                # 그러면 한 줄에 더 들어가고, 다시 줄이 줄어드는 되먹임이
+                # 생긴다 (실측: 기본 폭인데 여섯이 들어갔다). 창 폭을
+                # '배율 1 눈금'으로 환산해서 잰다.
+                one9 = max(0.1, self._ui(1))
+                cw8 = max(BASE_W, cv.winfo_width() / one9)
+                per8 = int(max(1, (cw8 - 32) // 66))
+                per8 = max(1, min(per8, n_tm9))
+                self._tm_per = per8
+                self._tm_rows = int(math.ceil(n_tm9 / float(per8)))
+            else:
+                self._tm_per, self._tm_rows = 4, 0
+            # 줄 수가 바뀌면 창 높이를 다시 맞춘다 — 안 그러면 늘어난
+            # 줄이 창 밖으로 나가거나(잘림) 배율이 쪼그라든다.
+            # 그리는 도중에 창을 건드리지 않는다 (지뢰 15).
+            if getattr(self, "_tm_rows_last", None) != self._tm_rows:
+                self._tm_rows_last = self._tm_rows
+                try:
+                    win.after_idle(fit_win)
+                except Exception:
+                    pass
+            # 창을 옆으로 넓히면 **창 정중앙 기준**으로 벌어진다 (요청).
+            # 그리는 좌표는 0..W 그대로 두고, 다 그린 뒤 통째로 옮긴다 —
+            # 누르는 자리는 옮기지 않고 클릭에서 그만큼 빼서 본다.
+            self._pomo_ox = max(0.0, (max(W, cv.winfo_width()) - W) / 2.0)
             cv.delete("all")
             st = self._pomo()
             left = self._pomo_left(st)
@@ -18944,13 +19794,31 @@ class Mascot:
             # 단추 셋
             by0 = ty1 + u(28)
             by1 = by0 + u(40)
-            bw = (W - pad * 2 - u(16)) / 3.0
-            for i, (lab, act) in enumerate(
-                    ((("멈춤" if st["on"] else "시작"), "toggle"),
-                     ("건너뛰기", "skip"), ("처음으로", "reset"))):
+            # 같이하기 — 진행 조작은 **부른 사람만** 한다 (요청).
+            # 참가자가 각자 만지면 시계가 어긋난다.
+            tm9 = self._tm
+            # 돌고 있는 동안에는 **방 시계를 멈추지 않는다** (요청).
+            # 대신 '잠깐 쉬기'로 나만 빠진다 — 화장실·물 마시기.
+            rest9 = ("돌아왔어요" if self._tm_rest else "잠깐 쉬기")
+            if tm9 and tm9.get("state") != "run" and self._team_host():
+                rows_b = [("다 같이 시작", "tmgo"), ("더 부르기", "tminv"),
+                          ("그만두기", "tmout")]
+            elif tm9 and tm9.get("state") != "run":
+                rows_b = [("기다리는 중", "none"), ("오늘은 여기까지", "tmout")]
+            elif tm9 and self._team_host():
+                rows_b = [(rest9, "tmrest"), ("건너뛰기", "skip"),
+                          ("오늘은 여기까지", "tmout")]
+            elif tm9:
+                rows_b = [(rest9, "tmrest"), ("오늘은 여기까지", "tmout")]
+            else:
+                rows_b = [(("멈춤" if st["on"] else "시작"), "toggle"),
+                          ("건너뛰기", "skip"), ("처음으로", "reset")]
+            bw = (W - pad * 2 - u(8) * (len(rows_b) - 1)) / float(len(rows_b))
+            for i, (lab, act) in enumerate(rows_b):
                 x0 = pad + i * (bw + u(8))
                 x1 = x0 + bw
-                main = (act == "toggle")
+                main = act in ("toggle", "tmgo") or (
+                    act == "tmrest" and self._tm_rest)
                 self._rr_soft(cv, x0, by0, x1, by1, u(13),
                               fill=cd["fill"] if main else "#f2edf4",
                               outline="" if main else line,
@@ -18958,7 +19826,8 @@ class Mascot:
                 cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
                                font=self._uf(9, True if main else False),
                                fill="#ffffff" if main else cd["text"])
-                self._pomo_hits.append((x0, by0, x1, by1, act))
+                if act != "none":
+                    self._pomo_hits.append((x0, by0, x1, by1, act))
             # 오늘 끝낸 세트 — 하루는 새벽 6시로 나뉜다
             sets = self._pomo_sets()
             sy0 = by1 + u(30)          # 위에 '오늘' 라벨이 들어간다
@@ -19086,9 +19955,21 @@ class Mascot:
                                            fill=cd["fill"] if is_t
                                            else cd["sub"])
                     wy1 = gy1
+            # ── 같이 하는 사람들 (요청) ─────────────────────────────
+            if self._tm:
+                wy1 = self._safe_num(
+                    self._team_row_draw, cv, u, uf, W, pad, line,
+                    wy1 + u(24)) or (wy1 + u(24))
             cv.create_text(W / 2, wy1 + u(16),
-                           text="창을 닫아도 계속 돌아가요",
+                           text=(self._tm_say[0]
+                                 if (self._tm_say[1]
+                                     and time.time() - self._tm_say[1] < 4.0)
+                                 else "창을 닫아도 계속 돌아가요"),
                            font=self._uf(8), fill=cd["sub"])
+            # 다 같이 완주 — 색종이·폭죽 (요청)
+            if self._tm and time.time() - self._tm_fx < 3.2:
+                self._safe("team_fx", self._team_fx_draw, cv, u, W, H,
+                           time.time() - self._tm_fx)
             # 꾸미기(스티커)는 **왼쪽 위**, 시간 조절은 **오른쪽 위**
             # (요청 — 제목 양옆)
             br = u(13)
@@ -19110,6 +19991,44 @@ class Mascot:
                            fill="#ffffff" if edit9 else cd["sub"])
             self._pomo_time_btn = (tx8 - br - u(3), u(26) - br - u(3),
                                    tx8 + br + u(3), u(26) + br + u(3))
+            # \uac19\uc774\ud558\uae30\uac00 \uc5f4\ub9b0 \uce90\ub9ad\ud130\ub294 \uc624\ub978\ucabd\uc744 **\ucd08\ub300**\ub85c \ubc14\uafbc\ub2e4 (\uc694\uccad).
+            # \uc2dc\uac04 \uc870\uc808\uc740 \uc67c\ucabd \u273f \uc548\uc73c\ub85c \ub4e4\uc5b4\uac04\ub2e4 (_pomo_menu).
+            self._pomo_inv_btn = None
+            if self._team_gate():
+                cv.create_rectangle(tx8 - br - u(4), u(26) - br - u(4),
+                                    tx8 + br + u(4), u(26) + br + u(4),
+                                    fill=cd["panel"], outline="")
+                on_inv = bool(self._tm)
+                self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
+                           cd["fill"] if on_inv else "#ffffff",
+                           outline=line, width=1, shadow=True)
+                self._safe("inv_icon", self._invite_icon, cv, tx8, u(26),
+                           br * 0.78, on_inv)
+                n_tm = len(self._team_people())
+                if n_tm > 1:
+                    self._safe("soft_btn", self._soft_dot, cv,
+                               tx8 + u(11), u(15), u(7), "#e8688c",
+                               outline="", width=0)
+                    cv.create_text(tx8 + u(11), u(15), text="%d" % n_tm,
+                                   font=uf(7, True), fill="#ffffff")
+                self._pomo_inv_btn = (tx8 - br - u(3), u(26) - br - u(3),
+                                      tx8 + br + u(3), u(26) + br + u(3))
+                self._pomo_time_btn = None
+            # ✿ 안의 작은 메뉴 — 꾸미기 / 시간 조절 (요청)
+            self._pomo_menu_hits = []
+            if self._team_gate() and getattr(self, "_pomo_menu", False):
+                mw9, mh9 = u(104), u(30)
+                mx9, my9 = sx8 - u(8), u(46)
+                for i9, (lab9, act9) in enumerate((("스티커 꾸미기", "stk"),
+                                                   ("시간 조절", "len"))):
+                    y9 = my9 + i9 * (mh9 + u(4))
+                    self._rr_soft(cv, mx9, y9, mx9 + mw9, y9 + mh9, u(12),
+                                  fill="#ffffff", outline=line, width=1)
+                    cv.create_text(mx9 + u(12), y9 + mh9 / 2, anchor="w",
+                                   text=lab9, font=uf(9, True),
+                                   fill=cd["text"])
+                    self._pomo_menu_hits.append(
+                        (mx9, y9, mx9 + mw9, y9 + mh9, act9))
             # 하드모드 켜고 끄기 — 시간 조절 아이콘 **바로 왼쪽**에 같은
             # 크기로 (요청 — 1~2px 여유만 두고 붙인다)
             self._pomo_hard_btn = None
@@ -19123,14 +20042,43 @@ class Mascot:
                 self._flame_icon(cv, hx8, u(26), u(18), lit=hard_on)
                 self._pomo_hard_btn = (hx8 - br - u(3), u(26) - br - u(3),
                                        hx8 + br + u(3), u(26) + br + u(3))
+            # 다 그렸다 — 창 정중앙으로 통째로 옮긴다 (요청)
+            if self._pomo_ox > 0.5:
+                cv.move("all", self._pomo_ox, 0)
 
         def on_click(e):
+            # 그림만 창 정중앙으로 옮겨 두었다 — 누르는 자리는 옮기지
+            # 않았으므로 여기서 그만큼 되돌려 본다 (요청)
+            e.x = e.x - getattr(self, "_pomo_ox", 0.0)
             if self._safe("stk_press", self._stk_press, "pomo", e.x, e.y):
                 return                 # 스티커를 정리하는 중
             sb = getattr(self, "_pomo_stk_btn", None)
             if sb and sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]:
                 self._safe("ui_click", self._ui_click)
-                self._safe("stk_win", self._stk_win, "pomo")
+                if self._team_gate():
+                    # 시간 조절이 이 안으로 들어왔다 (요청) — 작은 메뉴
+                    self._pomo_menu = not getattr(self, "_pomo_menu", False)
+                    draw()
+                else:
+                    self._safe("stk_win", self._stk_win, "pomo")
+                return
+            for x0, y0, x1, y1, act in getattr(self, "_pomo_menu_hits", []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    self._pomo_menu = False
+                    if act == "stk":
+                        self._safe("stk_win", self._stk_win, "pomo")
+                    else:
+                        self.us["pomo_edit"] = not bool(
+                            self.us.get("pomo_edit"))
+                        self._safe("pomo_edit_save", self._save_settings)
+                        fit_win()
+                    draw()
+                    return
+            ib = getattr(self, "_pomo_inv_btn", None)
+            if ib and ib[0] <= e.x <= ib[2] and ib[1] <= e.y <= ib[3]:
+                self._safe("ui_click", self._ui_click)
+                self._safe("team_win", self._team_win_open)
                 return
             tb = getattr(self, "_pomo_time_btn", None)
             if tb and tb[0] <= e.x <= tb[2] and tb[1] <= e.y <= tb[3]:
@@ -19184,6 +20132,23 @@ class Mascot:
                         self._pomo_toggle()
                     elif act == "skip":
                         self._pomo_skip()
+                    elif act == "tmgo":       # 대기실에서 다 같이 시작
+                        self._safe("team_go", self._team_start)
+                        fit_win()
+                        draw()
+                    elif act == "tminv":      # 더 부르기
+                        self._safe("team_win", self._team_win_open)
+                    elif act == "tmrest":     # 나만 잠깐 쉬기 (요청)
+                        self._tm_rest = not self._tm_rest
+                        self._tm_say = (
+                            "다녀올게요 — 시계는 그대로 가요"
+                            if self._tm_rest else "다시 집중!", time.time())
+                        self._safe("room_push", self._room_push_now)
+                        draw()
+                    elif act == "tmout":      # 오늘은 여기까지
+                        self._safe("team_out", self._team_leave)
+                        fit_win()
+                        draw()
                     else:
                         self._pomo_reset()
                     return
@@ -20559,6 +21524,7 @@ class Mascot:
         self._safe("snack_on", self._draw_snack_on, now)
         self._safe("fortune_open", self._draw_fortune_open, now)
         self._safe("mail_desk", self._draw_mail_desk, now)
+        self._safe("tomato", self._draw_tomato, now)
         self._safe("char_fx", self._draw_char_fx, now)
         # 여기까지가 시트다 — 캐릭터와 **그 위에 얹는 것들**(zzZ·모자·간식·
         # 말풍선·반응)을 한 장에 모아 레이어 창에 올린다. 레이어는 본체 창
@@ -23393,6 +24359,11 @@ class Mascot:
                 pass
         if self.cfg.get("notes", True):
             out["nt"] = 1               # 쪽지를 받을 수 있는 판이다
+        if self._team_gate():
+            out["tk"] = 1               # 뽀모도로를 같이 할 수 있는 판이다
+        tmb = self._safe_str(self._team_blob)
+        if tmb:
+            out["tm"] = tmb
         if self._pomo_hard_badge():
             out["hm"] = 1               # 하드모드 세션 중 (홈의 '빡집중' —
             #                             멈춤·휴식에도 유지, 요청)
@@ -24096,6 +25067,157 @@ class Mascot:
                 self._soft_cache.pop(old9, None)
         self._soft_cache[key] = got
         return got
+
+    def _tomato_pil(self, h):
+        """토마토 — 4배로 그려 줄인다. 그늘·윤기는 흐린 층으로 얹어야
+        각진 선이 안 남는다 (요청: 테두리가 깨지지 않고 부드럽게)."""
+        S = 4
+        H = int(round(max(8, h) * S))
+        W = int(round(H * 1.08))
+        pad = int(6 * S)
+        im = Image.new("RGBA", (W + pad * 2, H + pad * 2), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        ox, oy = pad, pad
+        RED, RED_D, RED_L = ((233, 84, 74, 255), (150, 44, 42, 255),
+                             (247, 133, 120, 255))
+        GRN, GRN_D = (108, 178, 88, 255), (58, 112, 52, 255)
+        lw = max(1, int(round(2.6 * S)))
+        bx0, by0 = ox + W * 0.03, oy + H * 0.24
+        bx1, by1 = ox + W * 0.97, oy + H * 1.00
+        d.ellipse([bx0, by0, bx1, by1], fill=RED)
+        body = Image.new("L", im.size, 0)
+        ImageDraw.Draw(body).ellipse([bx0, by0, bx1, by1], fill=255)
+        blank = Image.new("L", im.size, 0)
+        shade = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        ImageDraw.Draw(shade).ellipse(
+            [bx0 - W * 0.10, by0 + H * 0.56, bx1 + W * 0.10, by1 + H * 0.26],
+            fill=(208, 66, 62, 150))
+        shade = shade.filter(ImageFilter.GaussianBlur(H * 0.06))
+        shade.putalpha(Image.composite(shade.getchannel("A"), blank, body))
+        im.alpha_composite(shade)
+        glow = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        ImageDraw.Draw(glow).ellipse(
+            [ox + W * 0.18, oy + H * 0.38, ox + W * 0.46, oy + H * 0.60],
+            fill=RED_L[:3] + (210,))
+        glow = glow.filter(ImageFilter.GaussianBlur(H * 0.032))
+        glow.putalpha(Image.composite(glow.getchannel("A"), blank, body))
+        im.alpha_composite(glow)
+        spark = Image.new("RGBA", im.size, (0, 0, 0, 0))
+        ImageDraw.Draw(spark).ellipse(
+            [ox + W * 0.24, oy + H * 0.42, ox + W * 0.36, oy + H * 0.52],
+            fill=(255, 236, 232, 235))
+        im.alpha_composite(spark.filter(
+            ImageFilter.GaussianBlur(max(1.0, H * 0.008))))
+        d = ImageDraw.Draw(im)
+        d.ellipse([bx0, by0, bx1, by1], outline=RED_D, width=lw)
+        cx, cy = ox + W * 0.50, oy + H * 0.30
+
+        def leaf(ang, ln, wd):
+            pts = []
+            ca, sa = math.cos(ang), math.sin(ang)
+            for side in (1, -1):
+                rng = range(0, 21) if side > 0 else range(20, -1, -1)
+                for i in rng:
+                    t = i / 20.0
+                    w = math.sin(math.pi * t) * wd * side
+                    x = t * ln
+                    pts.append((cx + x * ca - w * sa, cy + x * sa + w * ca))
+            return pts
+
+        for k in range(5):
+            d.polygon(leaf(-math.pi / 2 + (k - 2) * 0.62, H * 0.34,
+                           H * 0.075), fill=GRN, outline=GRN_D)
+        d.rounded_rectangle([cx - H * 0.045, cy - H * 0.30,
+                             cx + H * 0.045, cy + H * 0.02],
+                            radius=H * 0.045, fill=GRN_D)
+        d.ellipse([cx - H * 0.06, cy - H * 0.07,
+                   cx + H * 0.06, cy + H * 0.05],
+                  fill=GRN, outline=GRN_D, width=max(1, int(1.6 * S)))
+        return im.resize(((W + pad * 2) // S, (H + pad * 2) // S),
+                         Image.LANCZOS)
+
+    def _tomato_photo(self, h):
+        """지금 경로(매끈/색상키)에 맞는 토마토 한 벌만 (지뢰 119)."""
+        key = ("tomato", int(h), bool(self._smooth))
+        got = self._soft_cache.get(key)
+        if got is not None:
+            return got
+        try:
+            got = self._pic(self._tomato_pil(h))
+        except Exception:
+            return None
+        if len(self._soft_cache) > self.SOFT_MAX:
+            for old9 in list(self._soft_cache)[:self.SOFT_MAX // 2]:
+                self._soft_cache.pop(old9, None)
+        self._soft_cache[key] = got
+        return got
+
+    def _draw_tomato(self, now):
+        """초대장이 오면 책상에 토마토가 놓인다 (요청).
+
+        누르면 수락·거절이 열린다. 스스로는 안 사라진다 — 자리를 비운
+        사이에 왔을 수 있으니 거절해야 없어진다 (요청).
+        """
+        self._tm_box = None
+        self._tm_btn = []
+        if not (self._tm_inv and self._team_gate()):
+            return
+        k = max(1.0, self.cw_px / 260.0)
+        top = self.oy + self.ch_px * 0.13
+        mid = self.oy + self.ch_px * 0.44
+        cx, land, r = self._desk_spot(k, top, mid)
+        if cx is None:
+            cx = self.ox + self.cw_px / 2
+            land, r = self.oy + self.ch_px * 0.7, 20 * k
+        # **책상 정중앙**에 놓는다 (요청). _desk_spot 의 x 는 상판 폭의
+        # 28% 만큼 오른쪽으로 밀려 있으므로 그만큼 되돌린다.
+        bb9 = self._desk_bb
+        if bb9:
+            dx9 = self._pos("desk")[0]
+            cx = dx9 + (bb9[0] + bb9[2]) / 2
+        hh = int(46 * k)
+        img = self._tomato_photo(hh)
+        if img is None:
+            return
+        bob = math.sin(now * 2.1) * 1.6 * k
+        y9 = land + r * 1.16 + bob
+        self.canvas.create_image(cx, y9, image=img, anchor="s")
+        self._tm_box = (cx - hh * 0.6, y9 - hh, cx + hh * 0.6, y9)
+        if not self._tm_open:
+            return
+        cd = self.card
+        pw, ph = 168 * k, 74 * k
+        x0, y0 = cx - pw / 2, y9 - hh - 10 * k - ph
+        sh = self._soft_shape(int(pw), int(ph), 14 * k, "#ffffff",
+                              cd["border"],
+                              tail=(pw / 2 - 8 * k, pw / 2 + 8 * k,
+                                    pw / 2, 11 * k))
+        if sh is not None:
+            self.canvas.create_image(x0 - 1, y0 - 1, image=sh, anchor="nw")
+            self._tm_keep = sh
+        self.canvas.create_text(
+            cx, y0 + 18 * k,
+            text="%s 님의 초대" % self._note_name(self._tm_inv["from"]),
+            font=self._cf_n(max(7, int(9 * k))), fill=cd["sub"])
+        bw, bh = pw * 0.42, 26 * k
+        keep9 = []
+        for i, (lab, on, act) in enumerate((("수락", True, "yes"),
+                                            ("거절", False, "no"))):
+            bx0 = cx - pw * 0.45 + i * (bw + pw * 0.06)
+            by0 = y0 + ph - bh - 10 * k
+            s2 = self._soft_shape(int(bw), int(bh), bh / 2,
+                                  cd["fill"] if on else "#ffffff",
+                                  "" if on else cd["border"])
+            if s2 is not None:
+                self.canvas.create_image(bx0 - 1, by0 - 1, image=s2,
+                                         anchor="nw")
+                keep9.append(s2)
+            self.canvas.create_text(bx0 + bw / 2, by0 + bh / 2, text=lab,
+                                    font=self._cf_n(max(8, int(10 * k)),
+                                                    True),
+                                    fill="#ffffff" if on else cd["sub"])
+            self._tm_btn.append((bx0, by0, bx0 + bw, by0 + bh, act))
+        self._tm_keep2 = keep9
 
     def _draw_mail_desk(self, now):
         """새 편지가 오면 책상 위에 봉투가 놓인다 (요청).
@@ -25127,6 +26249,7 @@ class Mascot:
             # 쪽지 가능 표식 — 새 판만 싣는다. 한 번 1이 되면 지킨다
             # (판을 되돌리는 일은 없다)
             nt9 = 1 if (q.get("nt") or cur.get("nt")) else 0
+            tk9 = 1 if (q.get("tk") or cur.get("tk")) else 0
             # 꼬들 오늘 결과 — 날짜가 안에 있어 묵으면 저절로 안 쓰인다.
             # **온 것이 dict 이면 그것이 최신이다** (빈 것 = 아직 안 풀었다
             # ·지웠다). 열쇠가 아예 없을 때만 기존 것을 지킨다 — 옛 판이나
@@ -25181,6 +26304,7 @@ class Mascot:
                     or str(cur.get("rm") or "") != rm
                     or str(cur.get("dl") or "") != dl
                     or int(cur.get("nt") or 0) != nt9
+                    or int(cur.get("tk") or 0) != tk9
                     or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
                     or float(cur.get("lvd") or 0) != lvd
@@ -25201,6 +26325,8 @@ class Mascot:
                     row2["dl"] = dl
                 if nt9:
                     row2["nt"] = 1
+                if tk9:
+                    row2["tk"] = 1
                 if kd9:
                     row2["kd"] = kd9
                 if ms9:
@@ -25956,6 +27082,11 @@ class Mascot:
                 self._cdq_at = now9
                 self._cd_push = True
                 self._safe("room_push", self._room_push_now)
+            return
+        if str(ev.get("k") or "").startswith("tm"):
+            # 같이하기 — 반응이 아니라 약속이라 방패·mute 보다 먼저 본다
+            # (초대장은 스스로 사라지지 않는다 · 요청)
+            self._safe("team_ev", self._team_event, ev)
             return
         # 반응 받지 않기 — 남이 보낸 것은 조용히 버린다 (내가 나에게
         # 보낸 것은 그대로). 신호 번호는 이미 소비돼, 토글을 다시 켜도
