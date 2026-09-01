@@ -1,7 +1,7 @@
 {
- "version": 1788264978,
+ "version": 1788266253,
  "files": {
-  "mascot.py": "88e6ddc5af4e8feea68b0d1015f934a8684e72140b8ed7a8ffda79285fad58b8",
+  "mascot.py": "130f99e904e6e69433684d7f748a3a6f302eaa18a3b8b914b9dadf42c4b96c47",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -582,6 +582,11 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "뽀모도로 '이번 주' 그래프가 월요일부터 시작해요 — 요일이 늘 같은 자리!",
+  "타이머를 끈 채 아침 6시를 넘겨도 어제 뽀모도로 기록이 안 사라져요",
+  "긴 편지도 끝까지 읽혀요 — 편지지 오른쪽 화살표나 마우스 휠로 넘겨요",
+  "우표에 진한 테두리가 생겨 봉투 위에서도 또렷하게 보여요",
+  "맥에서도 하드모드 효과가 나와요 — 빨간 깜빡임과 감시 등장까지!"
+ ]
 }

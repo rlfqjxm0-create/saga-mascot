@@ -1331,6 +1331,84 @@ class FxLayer:
         self.ok = False
 
 
+class MacDim:
+    """감시 때 화면 전체를 살짝 어둡게 — 맥판 (FxLayer 짝의 show/hide).
+
+    UpdateLayeredWindow 가 없으니 검은 Tk 창에 **창 알파**를 준다 (0.42 ≈
+    윈도우의 110/255). 클릭은 AppKit `setIgnoresMouseEvents:` 로
+    통과시키는데, **확인이 안 되면 절대 보이지 않는다** — 화면 전체를
+    덮는 창이 클릭을 먹으면 컴퓨터를 못 쓰게 된다. 켜고 끄는 것은 창을
+    만들었다 지우는 대신 알파 0↔0.42 로 한다 (합성 필터·창 순서가 얽히는
+    일을 줄인다).
+    """
+
+    def __init__(self, root):
+        self.ok = False
+        self.top = None
+        try:
+            top = tk.Toplevel(root)
+            top.overrideredirect(True)
+            top.attributes("-topmost", True)
+            top.configure(bg="#000000", bd=0, highlightthickness=0)
+            top.attributes("-alpha", 0.0)          # 확인 전에는 안 보인다
+            sw = top.winfo_screenwidth()
+            sh = top.winfo_screenheight()
+            top.geometry("%dx%d+0+0" % (sw, sh))
+            top.update_idletasks()
+            self.top = top
+            if not self._click_through(sw, sh):
+                top.destroy()                       # 어중간 금지 (지뢰 119)
+                self.top = None
+                return
+            self.ok = True
+        except Exception:
+            try:
+                if self.top is not None:
+                    self.top.destroy()
+            except Exception:
+                pass
+            self.top = None
+
+    @staticmethod
+    def _click_through(sw, sh):
+        """화면 크기의 우리 창을 찾아 클릭 통과를 걸고 **확인까지** 한다.
+
+        창 대조는 pyobjc 의 frame() 으로 한다 — ctypes msgSend 로 구조체를
+        받으면 죽을 수 있다 (지뢰 130). 메뉴 막대 때문에 세로가 조금 깎일
+        수 있어 높이는 느슨하게 본다.
+        """
+        try:
+            from AppKit import NSApp
+            for w in NSApp.windows():
+                try:
+                    sz = w.frame().size
+                    if (abs(sz.width - sw) <= 4
+                            and abs(sz.height - sh) <= 48):
+                        w.setIgnoresMouseEvents_(True)
+                        if bool(w.ignoresMouseEvents()):
+                            return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return False
+
+    def show(self):
+        try:
+            if self.top is not None and self.top.winfo_exists():
+                self.top.attributes("-alpha", 0.42)
+                self.top.lift()
+        except Exception:
+            pass
+
+    def hide(self):
+        try:
+            if self.top is not None and self.top.winfo_exists():
+                self.top.attributes("-alpha", 0.0)
+        except Exception:
+            pass
+
+
 class CharLayer:
     """캐릭터 몸을 진짜 반투명으로 그리는 레이어 창 (본체 창 **뒤**).
 
@@ -18176,7 +18254,11 @@ class Mascot:
             if not IS_MAC:
                 top.attributes("-transparentcolor", TRANSPARENT)
             else:
-                bg = cd["panel"]
+                # 맥도 투명하게 — 말풍선 패널과 같은 길 (색상키 + 합성
+                # 필터). 필터가 돌기 전 잠깐 키 색 상자가 보일 수 있어
+                # 자리를 잡은 뒤 아래에서 필터를 바로 한 번 건다.
+                top.attributes("-transparent", True)
+                bg = MAC_KEY
         except Exception:
             bg = cd["panel"]
         try:
@@ -18283,16 +18365,40 @@ class Mascot:
                     top.after_idle(top.lift)
             except Exception:
                 pass
+        else:
+            # 맥판 (제보 — 하드모드 효과가 맥에서 안 보였다).
+            # 감시 창의 키 색을 이 자리에서 바로 지운다 — 주기 필터(2초)를
+            # 기다리면 그동안 짙은 상자가 보인다.
+            try:
+                self._safe("mac_key_now", self._mac_keep_transparent)
+            except Exception:
+                pass
+            try:
+                dim9 = self._guard_dim
+                if dim9 is None:
+                    dim9 = MacDim(self.root)
+                    self._guard_dim = dim9
+                if getattr(dim9, "ok", False):
+                    dim9.show()
+                    top.after_idle(top.lift)
+            except Exception:
+                pass
         self._pomo_hard_snd(warn=True)
 
     def _hd_flash_tick(self, now):
-        """딴짓 중 타이머 카드에 빨간 반투명 깜빡임 (요청 — 윈도우 전용).
+        """딴짓 중 타이머 카드에 빨간 반투명 깜빡임.
 
-        색상키 창은 반투명을 못 내므로 (지뢰 65) 파티클과 같은
+        윈도우: 색상키 창은 반투명을 못 내므로 (지뢰 65) 파티클과 같은
         UpdateLayeredWindow 레이어(FxLayer)를 카드 자리에 하나 더 얹는다.
         깜빡임은 켜짐/꺼짐 토글이라 푸시가 1초에 한 번뿐이다. 레이어를
-        못 만들면 다시 해 보지 않는다 (지뢰 119).
+        못 만들면 다시 해 보지 않는다 (지뢰 119). 맥은 창 알파가 진짜로
+        되므로 딴 길로 간다 (_hd_mac_flash — 제보로 뒤늦게 만들었다).
         """
+        if IS_MAC:
+            self._hd_mac_flash(self._hd_off0 is not None
+                               and self._pomo_hard_active()
+                               and (now % 1.0) < 0.55)
+            return
         want = (IS_WIN and self._hd_off0 is not None
                 and self._pomo_hard_active()
                 and (now % 1.0) < 0.55)
@@ -18359,6 +18465,106 @@ class Mascot:
             lay.show(im9, x9, y9)
             self._hd_flash_on = True
             self._hd_flash_xy = (x9, y9)
+
+    def _hd_mac_flash(self, want):
+        """딴짓 깜빡임 — 맥판 (제보: 맥에서 하드모드 효과가 안 보였다).
+
+        빨간 창 하나를 카드 자리에 만들어 두고 **창 알파만** 0↔0.33 으로
+        토글한다 (0.33 ≈ 윈도우의 84/255). 창은 색상키 캔버스라 모서리가
+        둥글고, 잔소리 말풍선 자리는 키 색으로 도려내 글이 그대로 읽힌다
+        (윈도우 판과 같은 규칙). 클릭 통과는 걸어 보되 확인을 강제하지
+        않는다 — 딴짓 중에는 앞 창이 우리가 아니고, 이 창을 누르는 순간
+        앞 창이 우리가 되어 다음 틱(≤1초)에 깜빡임이 꺼진다.
+        만들기가 실패하면 다시 해 보지 않는다 (지뢰 119).
+        """
+        lay = self._hd_layer
+        if not want:
+            if self._hd_flash_on and lay is not None and lay is not False:
+                try:
+                    lay["top"].attributes("-alpha", 0.0)
+                except Exception:
+                    pass
+                self._hd_flash_on = False
+            return
+        if lay is False:
+            return
+        g9 = self._card_geom()
+        w9 = int(round(g9["x1"] - g9["x0"]))
+        h9 = int(round(g9["y1"] - g9["y0"]))
+        if w9 <= 0 or h9 <= 0:
+            return
+        if lay is None:
+            try:
+                top = tk.Toplevel(self.root)
+                top.overrideredirect(True)
+                top.attributes("-topmost", True)
+                top.attributes("-alpha", 0.0)      # 준비 전에는 안 보인다
+                cv9 = None
+                try:
+                    top.attributes("-transparent", True)
+                    top.configure(bg=MAC_KEY, bd=0, highlightthickness=0)
+                    cv9 = tk.Canvas(top, width=w9, height=h9, bg=MAC_KEY,
+                                    highlightthickness=0, bd=0)
+                    cv9.pack()
+                except Exception:
+                    # 색상키가 안 되면 통짜 빨강 (직각 모서리·도려냄 없음)
+                    cv9 = None
+                    top.configure(bg="#ff4040", bd=0, highlightthickness=0)
+                top.geometry("%dx%d+0+0" % (w9, h9))
+                top.update_idletasks()
+                if cv9 is not None:
+                    # 키 색이 지워지도록 필터를 바로 한 번 (주기는 2초라
+                    # 첫 깜빡임이 짙은 상자로 보인다)
+                    self._safe("mac_key_now", self._mac_keep_transparent)
+                try:                   # 클릭 통과 — 못 걸어도 계속 간다
+                    from AppKit import NSApp
+                    for w in NSApp.windows():
+                        try:
+                            sz = w.frame().size
+                            if (abs(sz.width - w9) <= 2
+                                    and abs(sz.height - h9) <= 2):
+                                w.setIgnoresMouseEvents_(True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                lay = {"top": top, "cv": cv9}
+            except Exception:
+                lay = False
+            self._hd_layer = lay
+        if lay is False:
+            return
+        try:
+            top, cv9 = lay["top"], lay["cv"]
+            if not top.winfo_exists():
+                self._hd_layer = False
+                return
+            # 카드 조각 + 말풍선 도려냄 — 크기나 말풍선이 바뀔 때만 다시
+            bb9 = getattr(self, "_bubble_box", None)
+            key9 = (w9, h9, None if not bb9 else
+                    tuple(int(v) for v in bb9))
+            if cv9 is not None and self._hd_flash_key != key9:
+                self._hd_flash_key = key9
+                cv9.configure(width=w9, height=h9)
+                cv9.delete("all")
+                self._rr(cv9, 0, 0, w9, h9, 16, fill="#ff4040", outline="")
+                if bb9:
+                    # 말풍선은 빨갛게 하지 않는다 (요청 — 잔소리가
+                    # 읽혀야 한다). 키 색이 곧 구멍이다. +18 은 꼬리 몫.
+                    cv9.create_rectangle(
+                        bb9[0] - g9["x0"] - 4, bb9[1] - g9["y0"] - 4,
+                        bb9[2] - g9["x0"] + 4, bb9[3] - g9["y0"] + 18,
+                        fill=MAC_KEY, outline="")
+            x9 = self.root.winfo_rootx() + int(round(g9["x0"]))
+            y9 = self.root.winfo_rooty() + int(round(g9["y0"]))
+            if self._hd_flash_xy != (x9, y9, w9, h9):
+                top.geometry("%dx%d+%d+%d" % (w9, h9, x9, y9))
+                self._hd_flash_xy = (x9, y9, w9, h9)
+            if not self._hd_flash_on:
+                top.attributes("-alpha", 0.33)
+                self._hd_flash_on = True
+        except Exception:
+            pass
 
     def _pomo_tick(self, now):
         """구간이 끝났는지 본다 (프레임마다 — 값 비교뿐이라 싸다)."""
@@ -23599,8 +23805,24 @@ class Mascot:
                         width=S)
             im.putalpha(Image.composite(
                 im.getchannel("A"), Image.new("L", (T, T), 0), hole))
+            # 절취선 흰 테두리가 흰 봉투·편지지에 묻힌다 (피드백) —
+            # 바깥 윤곽을 캐릭터 색을 어둡게 낮춘 진한 선으로 한 줄
+            # 두른다. 실루엣(알파)을 안쪽으로 깎아 낸 차이가 곧 테두리라
+            # 절취공의 물결 모양을 그대로 따라간다. 캔버스에 여백을 먼저
+            # 붙여야 곧은 변도 깎인다 (PIL 필터는 가장자리를 복제한다).
+            pad9 = S * 2
+            big9 = Image.new("RGBA", (T + pad9 * 2, T + pad9 * 2),
+                             (0, 0, 0, 0))
+            big9.alpha_composite(im, (pad9, pad9))
+            a9 = big9.getchannel("A")
+            dark9 = Image.new("RGBA", big9.size,
+                              self._note_rgb(self._shade(col, 0.35)))
+            dark9.putalpha(a9)                 # 실루엣 전체가 진한 색
+            big9.putalpha(a9.filter(ImageFilter.MinFilter(11)))
+            dark9.alpha_composite(big9)        # 속을 좁혀 얹으면 테가 남는다
+            T9 = T + pad9 * 2
             return ImageTk.PhotoImage(
-                im.resize((T // S, T // S), Image.LANCZOS))
+                dark9.resize((T9 // S, T9 // S), Image.LANCZOS))
         return self._note_cache(("nstamp", int(sz), col, slot), mk)
 
     def _note_paper(self, w, h):
