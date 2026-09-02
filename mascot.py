@@ -1627,6 +1627,10 @@ class TeamStrip:
             w9.bind("<B1-Motion>", self._on_move)
             w9.bind("<ButtonRelease-1>", self._on_release)
             w9.bind("<Button-3>", self._on_menu)
+            # 맥 Tk 는 우클릭이 <Button-2> 이고 Ctrl+클릭도 우클릭이다 —
+            # <Button-3> 만 걸면 맥에서 판이 안 뜬다 (제보)
+            w9.bind("<Button-2>", self._on_menu)
+            w9.bind("<Control-Button-1>", self._on_menu)
 
     @property
     def visible(self):
