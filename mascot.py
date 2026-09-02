@@ -17857,12 +17857,11 @@ class Mascot:
         # 자리 신호(5초)에도 실리지만 그때까지 기다리면 축하가 어긋난다.
         if self._team_host() and (self._tm or {}).get("state") == "run":
             self._team_focus_reset()
-            if done:
-                self._safe("team_end", self._team_bcast, "tms",
-                           self._team_step_blob())
-            else:
-                self._safe("team_step", self._team_bcast, "tms",
-                           self._team_step_blob())
+            b9 = self._team_step_blob()
+            if not say:
+                b9["sk"] = 1               # 건너뛰기 — 참가자도 안 센다
+            self._safe("team_end" if done else "team_step",
+                       self._team_bcast, "tms", b9)
         if ph == "focus" and self._tm and say:
             self._tm_fx = time.time()      # 다 같이 완주 — 색종이·폭죽
         if done:
@@ -18518,6 +18517,17 @@ class Mascot:
         same9 = (st["phase"] == ph9 and abs(st["end"] - end9) < 1.0)
         prev9, on9 = st["phase"], bool(st["on"])
         rnd9 = int(x.get("r") or 0)
+        if prev9 == "focus" and on9 and ph9 != "focus" and not x.get("sk"):
+            # 집중이 신호로 끝났다 — 내 _pomo_next 가 안 돌았으니 집중·하드
+            # 횟수를 여기서 센다 (제보: 참가자만 카운트가 안 올랐다).
+            # 방장이 건너뛴 것(sk)은 방장처럼 안 센다.
+            hard9 = self._pomo_hard_active(st)
+            if hard9 and not self._hd_fail:
+                self._safe("pomo_hruns", self._pomo_hrun_done)
+                self._safe("hard_ok_say", self._say,
+                           "하드모드 성공! 정말 대단해!", 5.0, True)
+            if not (hard9 and self._hd_fail):
+                self._safe("pomo_runs", self._pomo_run_done)
         st.update({"on": True, "phase": ph9, "left": 0.0,
                    "round": rnd9, "hard": hard9, "end": end9})
         self._pomo_save(st)
@@ -20534,7 +20544,7 @@ class Mascot:
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
             tmh = (172 * rows9 + 28) if (self._tm and rows9) else 0
-            return ty1 + 28 + 40 + 30 + 44 + wk + tmh + 32
+            return ty1 + 16 + 40 + 30 + 44 + wk + tmh + 32
 
         W, H = u(BASE_W), u(base_h())
         win = tk.Toplevel(self.root)
@@ -20689,14 +20699,12 @@ class Mascot:
                              ("len", ph9, sign * stp)))
                 cv.create_text(W - pad - u(47), ry, text="%d분" % cur,
                                font=uf(10, True), fill=cd["text"])
-            cv.create_text(W / 2, ty1 + u(12),
-                           text="시간이 되면 알려 주고 같이 몸을 펴요",
-                           font=uf(8), fill=cd["sub"])
+            # ('시간이 되면 알려 주고 같이 몸을 펴요' 안내 줄은 뺐다 — 요청)
             # 스티커는 여기까지의 그림 위, **단추 아래** (단추를 가리면
             # 누를 수가 없다 — 홈과 같은 규칙)
             self._safe("stk_pomo", self._stk_draw, cv, "pomo", W, H)
             # 단추 셋
-            by0 = ty1 + u(28)
+            by0 = ty1 + u(16)
             by1 = by0 + u(40)
             # 같이하기 — 진행 조작은 **부른 사람만** 한다 (요청).
             # 참가자가 각자 만지면 시계가 어긋난다.
