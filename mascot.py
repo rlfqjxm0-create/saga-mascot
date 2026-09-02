@@ -18933,7 +18933,14 @@ class Mascot:
             self._strip_key = key9
             self._strip_im = self._strip_sheet(who, now, fx)
         x, y = self._strip_pos(self._strip_im)
+        first9 = not self._strip.visible and not self.us.get("pomo_strip_tip")
         self._strip.show(self._strip_im, x, y)
+        if first9:
+            # 처음 켜졌을 때 한 번만 — 우클릭으로 크기·여백을 바꿀 수 있다고
+            # 알려 준다 (요청)
+            self.us["pomo_strip_tip"] = True
+            self._safe("strip_tip_save", self._save_settings)
+            self._safe("strip_tip", self._strip_tip)
         pop = getattr(self, "_strip_pop_ref", None)
         try:
             pop_on = bool(pop is not None and pop.winfo_exists())
@@ -19405,6 +19412,45 @@ class Mascot:
             self._strip_menu()
             return
         self._strip_popup(self._strip_react_menu(slot), xr, yr)
+
+    STRIP_TIP = ("바탕화면에 친구들이 떴어요!",
+                 "친구를 우클릭하면 채찍질·콕·쓰담·응원을 보낼 수 있고,",
+                 "빈 자리를 우클릭하면 캐릭터 크기와 가로 여백을 바꿀 수 있어요.",
+                 "띠를 끌어서 원하는 자리에 둘 수도 있어요.")
+
+    def _strip_tip(self):
+        """'친구들을 바탕화면에'가 처음 켜졌을 때 한 번 뜨는 안내 창 (요청)."""
+        u, cd = self._ui, self.card
+        W, H = int(u(330)), int(u(150))
+        win = tk.Toplevel(self.root)
+        win.title("친구들을 바탕화면에")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        cv.create_text(W / 2, u(24), text=self.STRIP_TIP[0],
+                       font=self._uf(11, True), fill=cd["text"])
+        for i, ln in enumerate(self.STRIP_TIP[1:]):
+            cv.create_text(W / 2, u(50) + i * u(18), text=ln,
+                           font=self._uf(8, True), fill=cd["sub"])
+        bw, bh = u(96), u(28)
+        bx0, by0 = W / 2 - bw / 2, H - u(40)
+        self._rr_soft(cv, bx0, by0, bx0 + bw, by0 + bh, bh / 2,
+                      fill=cd["fill"], outline="")
+        cv.create_text(W / 2, by0 + bh / 2, text="알겠어요",
+                       font=self._uf(9, True), fill="#ffffff")
+
+        def click(e):
+            if bx0 <= e.x <= bx0 + bw and by0 <= e.y <= by0 + bh:
+                self._safe("ui_click", self._ui_click)
+                win.destroy()
+
+        cv.bind("<Button-1>", click)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        self._place_near(win, u(60), u(40))
+        return win
 
     def _strip_menu(self):
         """띠 우클릭 — 캐릭터 크기·가로 여백을 게이지바로 (요청).
