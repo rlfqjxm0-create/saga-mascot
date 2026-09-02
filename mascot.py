@@ -1569,11 +1569,13 @@ class TeamStrip:
     우클릭이면 on_menu(), 끌기를 마치면 on_drop().
     """
 
-    def __init__(self, root, key, on_click, on_drag, on_menu, on_drop=None):
+    def __init__(self, root, key, on_click, on_drag, on_menu, on_drop=None,
+                 on_hover=None):
         self.top = tk.Toplevel(root)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
         self.key = key
+        self.on_hover = on_hover
         self.hwnd = 0
         self.mode = "key"
         self._shown = False
@@ -1631,6 +1633,19 @@ class TeamStrip:
             # <Button-3> 만 걸면 맥에서 판이 안 뜬다 (제보)
             w9.bind("<Button-2>", self._on_menu)
             w9.bind("<Control-Button-1>", self._on_menu)
+            w9.bind("<Motion>", self._on_hover)
+            w9.bind("<Leave>", lambda _e: self._on_hover(None))
+
+    def _on_hover(self, e):
+        if self.on_hover is None:
+            return
+        try:
+            if e is None:
+                self.on_hover(None, None)
+            else:
+                self.on_hover(e.x, e.y)
+        except Exception:
+            pass
 
     @property
     def visible(self):
@@ -18697,13 +18712,15 @@ class Mascot:
         if self._strip is None:
             self._strip = TeamStrip(self.root, self.canvas_bg,
                                     self._strip_click, self._strip_drag,
-                                    self._strip_menu_at, self._strip_drop)
+                                    self._strip_menu_at, self._strip_drop,
+                                    on_hover=self._strip_hover)
         size9 = self._strip_size()
         gap9 = self._strip_gap()
         key9 = (tuple((p[0], p[1], p[2], round(float(p[3] or 0), 2))
                       for p in who), size9, gap9,
                 int(now * 25) if fx else
-                (self._strip_step(now) if anim else 0))
+                (self._strip_step(now) if anim else 0),
+                getattr(self, "_strip_hov", None))
         if key9 != self._strip_key or self._strip_im is None:
             self._strip_key = key9
             self._strip_im = self._strip_sheet(who, now, fx)
@@ -18765,15 +18782,33 @@ class Mascot:
     def _strip_drop(self):
         self._safe("strip_save", self._save_settings)
 
+    def _strip_hover(self, x, y):
+        """커서가 잘린 각오 위에 있으면 그 사람 이름을 들고, 바뀌면 곧
+        다시 그린다 (요청 — 뽀모도로 창의 호버와 같은 결)."""
+        hov = None
+        if x is not None:
+            for x0, y0, x1, y1, sl in (getattr(self, "_strip_bubs", None)
+                                       or []):
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    hov = sl
+                    break
+        if hov != getattr(self, "_strip_hov", None):
+            self._strip_hov = hov
+            self._strip_at = 0.0          # 다음 프레임에 바로 다시 그린다
+
     def _strip_click(self):
         self._safe("pomo_win", self._pomo_win)
 
-    def _strip_seat(self, slot, h):
-        key = (slot, int(h))
+    def _strip_seat(self, slot, h, name="seat"):
+        """앉은 그림 (PIL·캐시). name 은 seat / seat_pen / seat_pen2 —
+        펜 자세가 없는 옛 배포본이면 기본 자세로 물러난다."""
+        key = (slot, int(h), name)
         got = self._strip_seat_cache.get(key)
         if got is not None:
             return got
-        p = self._room_art_file(slot, "seat.png")
+        p = self._room_art_file(slot, name + ".png")
+        if not p and name != "seat":
+            return self._strip_seat(slot, h, "seat")
         if not p:
             return None
         try:
@@ -18788,38 +18823,18 @@ class Mascot:
         self._strip_seat_cache[key] = im
         return im
 
-    STRIP_ANIM_N = 8             # 집중 중 움직임 — 한 바퀴를 몇 장으로
-    STRIP_ANIM_DT = 0.125        # 그 장 간격 (초당 8장)
-    STRIP_ANIM_DEG = 2.4         # 상체가 기우는 최대 각도
+    STRIP_ANIM_DT = 0.7          # 집중 중 펜 자세가 바뀌는 간격 (홈과 같다)
 
     def _strip_step(self, now):
-        return int(now / self.STRIP_ANIM_DT) % self.STRIP_ANIM_N
+        return int(now / self.STRIP_ANIM_DT)
 
-    def _strip_seat_anim(self, slot, h, step):
-        """집중 중인 캐릭터 — 발을 축으로 살짝 기운 장 (캐시).
-
-        친구 캐릭터는 파츠가 없고 앉은 그림 한 장뿐이라 팔만 움직일 수는
-        없다. 대신 그리는 것처럼 상체가 앞뒤로 살짝 흔들린다 (요청).
-        """
-        key = ("anim", slot, int(h), int(step))
-        got = self._strip_seat_cache.get(key)
-        if got is not None:
-            return got
-        base = self._strip_seat(slot, h)
-        if base is None:
-            return None
-        a = self.STRIP_ANIM_DEG * math.sin(2 * math.pi * step
-                                           / float(self.STRIP_ANIM_N))
-        try:
-            got = base.rotate(a, resample=Image.BICUBIC, expand=False,
-                              center=(base.width / 2.0, base.height * 0.92))
-        except Exception:
-            return base
-        if len(self._strip_seat_cache) > 120:
-            for k in list(self._strip_seat_cache)[:60]:
-                self._strip_seat_cache.pop(k, None)
-        self._strip_seat_cache[key] = got
-        return got
+    def _strip_pose(self, slot, stt, now, i):
+        """그 사람의 지금 자세 이름 — 집중 중이면 홈처럼 펜 자세 두 장을
+        번갈아 (사람마다 박자를 어긋나게), 아니면 기본 자세로 멈춘다 (요청)."""
+        if stt != "집중":
+            return "seat"
+        n = self._strip_step(now) + (hash(slot) % 3) + i
+        return "seat_pen" if n % 2 else "seat_pen2"
 
     def _strip_tomato(self, size, ratio):
         step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
@@ -18857,10 +18872,14 @@ class Mascot:
             except Exception:
                 return len(s) * int(8 * k)
 
-        for slot, vow, stt, fr in who:
-            seat = self._strip_seat(slot, H)
-            sw = seat.width if seat is not None else int(H * 0.8)
+        for i0, (slot, vow, stt, fr) in enumerate(who):
+            # 집중 중이면 펜 자세 두 장을 번갈아 (홈과 같은 그림·박자)
+            seat = self._strip_seat(slot, H, self._strip_pose(slot, stt, now, i0)
+                                    if not fx else "seat")
+            base9 = self._strip_seat(slot, H)
+            sw = base9.width if base9 is not None else int(H * 0.8)
             vow = str(vow or "")
+            full = vow
             # 말풍선은 **칸 폭(캐릭터 + 여백) 안**으로 자른다 — 칸 폭을
             # 말풍선에 맞추면 첫 칸만 넓어져 여백이 사람마다 달라졌다 (제보)
             lim = sw + gap - int(4 * k)
@@ -18869,7 +18888,7 @@ class Mascot:
                     vow = vow[:-1]
                 vow = (vow + "…") if vow else ""
             bw = (tw_of(vow) + int(18 * k)) if vow else 0
-            cols.append((slot, vow, stt, fr, seat, sw, bw))
+            cols.append((slot, vow, stt, fr, seat, sw, bw, full))
         head = (bh + th + int(10 * k)) + int(u(28))    # 말풍선 + 뛰는 여유
         base_y = head + H
         Wt = sum(c[5] for c in cols) + gap * max(0, len(cols) - 1) \
@@ -18880,23 +18899,21 @@ class Mascot:
         t = (now - self._tm_fx) if fx else 0.0
         x = margin
         self._strip_cols = []          # 우클릭이 누구를 짚었는지 (시트 좌표)
-        for i, (slot, vow, stt, fr, seat, sw, bw) in enumerate(cols):
+        self._strip_bubs = []          # 잘린 각오 말풍선 자리 (호버용)
+        hov9 = getattr(self, "_strip_hov", None)
+        later = []                     # 호버로 펼친 말풍선은 맨 뒤에 그린다
+        for i, (slot, vow, stt, fr, seat, sw, bw, full) in enumerate(cols):
             cw = sw                    # 여백은 캐릭터마다 똑같이 (제보)
             cx = x + cw / 2.0
             self._strip_cols.append((x - gap / 2.0, x + cw + gap / 2.0, slot))
             dy = (-abs(math.sin(t * 6.0 + i * 0.8)) * u(9)) if fx else 0.0
-            if (not fx) and stt == "집중" and seat is not None:
-                # 집중 중 — 그리는 듯 상체가 살짝 흔들린다 (사람마다 박자 다르게)
-                seat = self._strip_seat_anim(
-                    slot, H, (self._strip_step(now) + i * 3)
-                    % self.STRIP_ANIM_N) or seat
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
             # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
             d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
                        base_y + 6 * k), fill=(0, 0, 0, 60))
             if seat is not None:
-                im.alpha_composite(seat, (int(cx - sw / 2),
-                                          int(base_y - H + dy)))
+                im.alpha_composite(seat, (int(cx - seat.width / 2),
+                                          int(base_y - seat.height + dy)))
                 d = ImageDraw.Draw(im)
             if vow and bw:
                 bub = bubble_img(bw, bh, bh / 2.0,
@@ -18909,6 +18926,12 @@ class Mascot:
                 if f_v is not None:
                     d.text((cx, by0 + bh / 2.0), vow, font=f_v,
                            fill=self._shade(fg, 0.15), anchor="mm")
+                if vow != full:
+                    # 잘렸다 — 커서를 올리면 통째로 (요청)
+                    self._strip_bubs.append((cx - bw / 2, by0, cx + bw / 2,
+                                             by0 + bh + th, slot))
+                    if hov9 == slot:
+                        later.append((cx, by0, full, fg))
             # 상태 알약
             if f_s is not None:
                 try:
@@ -18930,6 +18953,18 @@ class Mascot:
                                      py0 + ph9 + int(6 * k)))
             d = ImageDraw.Draw(im)
             x += cw + gap
+        for cx, by0, full, fg in later:
+            # 펼친 말풍선 — 시트 안에 들어가게 좌우로 밀고 맨 위에 그린다
+            fw = tw_of(full) + int(18 * k)
+            bx = max(2, min(cx - fw / 2.0, Wt - fw - 2))
+            bub = bubble_img(fw, bh, bh / 2.0,
+                             (cx - bx - 6 * k, cx - bx + 6 * k, cx - bx, th),
+                             "#fffdf7", self._tint(fg, 0.45), 1.3)
+            im.alpha_composite(bub, (int(bx), by0))
+            d = ImageDraw.Draw(im)
+            if f_v is not None:
+                d.text((bx + fw / 2.0, by0 + bh / 2.0), full, font=f_v,
+                       fill=self._shade(fg, 0.15), anchor="mm")
         if fx:
             self._strip_fx(im, t, k)
         return im
@@ -18975,29 +19010,125 @@ class Mascot:
                    ("응원", "cheer"))
 
     def _strip_react_menu(self, slot):
-        """캐릭터 위 우클릭 — 홈처럼 반응을 보내는 메뉴 (요청).
+        """캐릭터 위 우클릭 메뉴의 항목들 — [(글자, 할 일 또는 None)].
 
         반응은 홈의 단추와 **같은 길**(_room_send)로 나가므로 연타 제한·
-        소리·홈 카드 연출이 그대로다. 메뉴는 누를 때만 만들어 가볍다.
+        소리·홈 카드 연출이 그대로다. Tk 메뉴는 '항상 위' 띠 뒤로 숨어서
+        (제보) 직접 그리는 팝업(_strip_popup)에 이 목록을 넘긴다.
         """
-        mn = tk.Menu(self.root, tearoff=0)
-        nm = self._note_name(slot)
-        mn.add_command(label="  %s 님에게  " % nm, state="disabled")
+        items = [("%s 님에게" % self._note_name(slot), None)]
         for lab, kind in self.STRIP_REACT:
-            mn.add_command(label=lab, command=lambda k9=kind, s9=slot:
-                           self._safe("strip_react", self._strip_react, s9, k9))
-        mn.add_separator()
-        mn.add_command(label="크기·여백 조절",
-                       command=lambda: self._safe("strip_menu",
-                                                  self._strip_menu))
-        mn.add_command(label="뽀모도로 창 열기",
-                       command=lambda: self._safe("pomo_win", self._pomo_win))
-        mn.add_command(label="바탕화면에서 숨기기",
-                       command=lambda: self._safe("strip_off",
-                                                  self._strip_off))
-        self._safe("menu_snd", self._btn_snd, mn) if hasattr(
-            self, "_btn_snd") else None
-        return mn
+            items.append((lab, lambda k9=kind, s9=slot: self._safe(
+                "strip_react", self._strip_react, s9, k9)))
+        items.append(("-", None))
+        items.append(("크기·여백 조절",
+                      lambda: self._safe("strip_menu", self._strip_menu)))
+        items.append(("뽀모도로 창 열기",
+                      lambda: self._safe("pomo_win", self._pomo_win)))
+        items.append(("바탕화면에서 숨기기",
+                      lambda: self._safe("strip_off", self._strip_off)))
+        return items
+
+    def _strip_popup(self, items, xr, yr):
+        """띠 위에 뜨는 작은 메뉴 창 — '항상 위'라 띠에 안 가린다 (제보).
+
+        헤더(할 일 None)·구분선("-")·항목. 항목을 누르거나 창 밖을 누르면
+        (포커스가 나가면) 닫힌다. Esc 도 닫는다.
+        """
+        old = getattr(self, "_strip_pop_ref", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception:
+            pass
+        u, cd = self._ui, self.card
+        rowh = int(u(24))
+        f = self._uf(9, True)
+        W = int(max(u(150), max(self._mw(lab, f) for lab, _c in items)
+                    + u(36)))
+        H = 0
+        rows = []
+        for lab, cb in items:
+            h9 = int(u(8)) if lab == "-" else rowh
+            rows.append((lab, cb, H, H + h9))
+            H += h9
+        H += int(u(8))
+        win = tk.Toplevel(self.root)
+        self._strip_pop_ref = win
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=cd["panel"])
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=1, highlightbackground=cd["border"],
+                       bd=0)
+        cv.pack()
+        st = {"hover": None}
+
+        def draw():
+            cv.delete("all")
+            for lab, cb, y0, y1 in rows:
+                if lab == "-":
+                    cv.create_line(u(10), (y0 + y1) / 2 + u(4), W - u(10),
+                                   (y0 + y1) / 2 + u(4),
+                                   fill=self._tint(cd["fill"], 0.55))
+                    continue
+                yy = y0 + u(4) + rowh / 2
+                if cb is not None and st["hover"] == lab:
+                    self._rr_soft(cv, u(6), yy - rowh / 2 + u(2), W - u(6),
+                                  yy + rowh / 2 - u(2), u(8),
+                                  fill=self._tint(cd["fill"], 0.82),
+                                  outline="")
+                cv.create_text(u(16), yy, anchor="w", text=lab, font=f,
+                               fill=cd["text"] if cb is not None
+                               else cd["sub"])
+
+        def at(y):
+            for lab, cb, y0, y1 in rows:
+                if y0 + u(4) <= y <= y1 + u(4) and cb is not None:
+                    return lab, cb
+            return None, None
+
+        def move(e):
+            lab, _cb = at(e.y)
+            if lab != st["hover"]:
+                st["hover"] = lab
+                draw()
+
+        def click(e):
+            lab, cb = at(e.y)
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            if cb is not None:
+                self._safe("ui_click", self._ui_click)
+                cb()
+
+        def close(_e=None):
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        cv.bind("<Motion>", move)
+        cv.bind("<Button-1>", click)
+        cv.bind("<Leave>", lambda _e: (st.__setitem__("hover", None),
+                                       draw()))
+        win.bind("<Escape>", close)
+        win.bind("<FocusOut>", close)
+        # 화면 밖으로 안 나가게
+        try:
+            l9, t9, r9, b9 = self._screen_box()
+            xr = min(max(int(xr), l9), r9 - W - 4)
+            yr = min(max(int(yr), t9), b9 - H - 4)
+        except Exception:
+            pass
+        win.geometry("%dx%d+%d+%d" % (W, H, int(xr), int(yr)))
+        draw()
+        win.after(30, lambda: (self._win_top(win),
+                               win.focus_force() if win.winfo_exists()
+                               else None))
+        return win
 
     def _strip_off(self):
         self.us["pomo_strip"] = False
@@ -19026,14 +19157,7 @@ class Mascot:
         if not slot:
             self._strip_menu()
             return
-        mn = self._strip_react_menu(slot)
-        try:
-            mn.tk_popup(int(xr), int(yr))
-        finally:
-            try:
-                mn.grab_release()
-            except Exception:
-                pass
+        self._strip_popup(self._strip_react_menu(slot), xr, yr)
 
     def _strip_menu(self):
         """띠 우클릭 — 캐릭터 크기·가로 여백을 게이지바로 (요청).
