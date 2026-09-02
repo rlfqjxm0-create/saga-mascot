@@ -22044,9 +22044,16 @@ class Mascot:
             elif tm9 and tm9.get("state") != "run":
                 rows_b = [(("준비 취소" if self._tm_ready else "준비됐어요"),
                            "tmready"), ("오늘은 여기까지", "tmout")]
+            elif tm9 and self._team_host() and not st["on"]:
+                # 사이클을 다 돌아 멈췄다 — 방장이 이어서 돌린다 (제보:
+                # 말풍선의 '다시 시작'이 사라지면 이어갈 길이 없었다)
+                rows_b = [("다시 시작", "tmagain"), ("더 부르기", "tminv"),
+                          ("오늘은 여기까지", "tmout")]
             elif tm9 and self._team_host():
                 rows_b = [(rest9, "tmrest"), ("건너뛰기", "skip"),
                           ("오늘은 여기까지", "tmout")]
+            elif tm9 and not st["on"]:
+                rows_b = [("잠시 멈춤", "none"), ("오늘은 여기까지", "tmout")]
             elif tm9:
                 rows_b = [(rest9, "tmrest"), ("오늘은 여기까지", "tmout")]
             else:
@@ -22244,6 +22251,9 @@ class Mascot:
                     and self._tm.get("state") != "run"):
                 foot9 = "%s 님이 시작하면 같이 돌아가요" % self._note_name(
                     self._tm.get("host") or "")
+            elif self._tm and not self._team_host() and not st["on"]:
+                foot9 = "한 사이클 끝! %s 님이 다시 시작하면 같이 돌아가요" % (
+                    self._note_name(self._tm.get("host") or ""))
             elif (self._tm and self._team_host()
                     and self._tm_bye_arm
                     and time.time() - self._tm_bye_arm < self.TEAM_BYE_ARM):
@@ -22480,6 +22490,14 @@ class Mascot:
                         draw()
                     elif act == "tminv":      # 더 부르기
                         self._safe("team_win", self._team_win_open)
+                    elif act == "tmagain":    # 사이클 다 돌고 이어서 (제보)
+                        self._safe("team_again", self._pomo_restart)
+                        self._tm_say = ("다시 시작! 참가자에게도 갔어요",
+                                        time.time())
+                        fit_win()
+                        draw()
+                    elif act == "none":
+                        pass
                     elif act == "tmvow":      # 내 칸 — 각오 고치기 (요청)
                         self._safe("vow_win", self._team_vow_win)
                     elif act == "tmready":    # 대기실 — 준비됐어요 (요청)
