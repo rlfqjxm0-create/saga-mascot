@@ -6915,6 +6915,8 @@ class Mascot:
         self._guard_dim = None            # 감시 때 화면을 어둡게 하는 레이어
         self._pomo_bar_last = None        # 카드 위 뽀모 줄의 직전 상태
         self._pomo_wk_off = 0             # '이번 주' 그래프의 몇 주 전인가
+        self._pomo_tf_page = 0            # 같이한 친구 줄의 쪽
+        self._tf_boxes = []               # 친구 얼굴 자리 (호버용)
         # ── 뽀모도로 같이하기 (요청 — 지금은 내 도로롱만) ──────────
         self._tm = None            # 지금 세션 (없으면 None)
         self._tm_inv = None        # 받은 초대 — 책상에 토마토가 놓인다
@@ -13033,7 +13035,19 @@ class Mascot:
         return "".join(ch for ch in s if ch.isalnum())
 
     def _fg_is_self(self):
-        """앞 창이 이 프로그램 자신의 창인가 (캐릭터·설정·말풍선 모두 포함)."""
+        """앞 창이 이 프로그램 자신의 창인가 (캐릭터·설정·말풍선 모두 포함).
+
+        맥은 늘 False 를 돌려주고 있어서 타이머를 만지는 것이 딴짓으로
+        세어졌다 (요청: 전체 사용자에게 타이머 조작은 딴짓이 아니게).
+        맨 앞 앱의 PID 를 내 것과 견준다 — AppKit 은 맥 번들에 있다.
+        """
+        if IS_MAC:
+            try:
+                from AppKit import NSWorkspace
+                app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                return int(app.processIdentifier()) == os.getpid()
+            except Exception:
+                return False
         if not IS_WIN:
             return False
         try:
@@ -18334,6 +18348,148 @@ class Mascot:
             out.append((wd_s[lt.tm_wday], n, key == today))
         return out
 
+    def _pomo_team_week(self, off=0):
+        """그 주에 같이한 친구 — [(slot, 횟수)] 많이 한 순."""
+        h9 = self.us.get("pomo_team_hist")
+        if not isinstance(h9, dict) or not h9:
+            return []
+        today = self._my_workday()
+        lt9 = time.strptime(today, "%Y-%m-%d")
+        mon = (time.mktime(lt9) + 12 * 3600
+               - lt9.tm_wday * 86400 - int(off) * 7 * 86400)
+        tot = {}
+        for i in range(7):
+            key = time.strftime("%Y-%m-%d", time.localtime(mon + i * 86400))
+            d9 = h9.get(key)
+            if not isinstance(d9, dict):
+                continue
+            for s, n in d9.items():
+                try:
+                    tot[s] = tot.get(s, 0) + int(n or 0)
+                except (TypeError, ValueError):
+                    pass
+        return sorted(((s, n) for s, n in tot.items() if n > 0),
+                      key=lambda kv: (-kv[1], kv[0]))
+
+    def _pomo_team_days(self, off=0):
+        """그 주에 같이한 날 — 요일 번호(월=0)의 집합 (막대 위 토마토 도장)."""
+        h9 = self.us.get("pomo_team_hist")
+        if not isinstance(h9, dict) or not h9:
+            return set()
+        today = self._my_workday()
+        lt9 = time.strptime(today, "%Y-%m-%d")
+        mon = (time.mktime(lt9) + 12 * 3600
+               - lt9.tm_wday * 86400 - int(off) * 7 * 86400)
+        out = set()
+        for i in range(7):
+            key = time.strftime("%Y-%m-%d", time.localtime(mon + i * 86400))
+            d9 = h9.get(key)
+            if isinstance(d9, dict) and any(
+                    (int(n or 0) if str(n).isdigit() else 0) > 0
+                    for n in d9.values()):
+                out.add(i)
+        return out
+
+    TF_ROW = 96                  # '이번 주 같이한 친구' 줄 높이 (배율 1)
+    TF_COL = 100                 # 친구 한 칸 폭
+
+    def _team_week_row(self, cv, u, uf, W, pad, line, gy1, off):
+        """그래프 아래 — 같이한 친구들 (얼굴 / 토마토 ×N / 이름) (요청).
+
+        글자 한 줄이던 것을 그림으로. 창 폭에 들어가는 만큼만 보이고,
+        더 있으면 양옆 ‹ › 로 넘긴다. 커서를 올리면 말풍선.
+        """
+        cd = self.card
+        who = self._pomo_team_week(off)
+        self._tf_boxes = []
+        if not who:
+            return gy1
+        ox8 = getattr(self, "_pomo_ox", 0.0)
+        WW8 = max(W, cv.winfo_width())
+        x_l, x_r = pad - ox8, WW8 - pad - ox8
+        cw = u(self.TF_COL)
+        arrow_w = u(22)
+        avail = (x_r - x_l) - (arrow_w * 2 if len(who) > 1 else 0)
+        per = max(1, int(avail // cw))
+        pages = max(1, int(math.ceil(len(who) / float(per))))
+        page = max(0, min(pages - 1, int(getattr(self, "_pomo_tf_page", 0))))
+        self._pomo_tf_page = page
+        shown = who[page * per:(page + 1) * per]
+        y0 = gy1 + u(10)
+        cv.create_text((x_l + x_r) / 2, y0, text="이번 주 같이한 친구"
+                       if off == 0 else "그 주에 같이한 친구",
+                       font=uf(8, True), fill=cd["sub"])
+        total = cw * len(shown)
+        sx = (x_l + x_r) / 2 - total / 2
+        py = gy1 + u(18)
+        ph9 = u(44)
+        for i, (slot, n) in enumerate(shown):
+            cx = sx + cw * (i + 0.5)
+            ph = self._seat_photo(slot, ph9)
+            if ph is not None:
+                cv.create_image(cx, py, image=ph, anchor="n")
+                self._pomo_keep.append(ph)
+            # 토마토 ×N 알약 — 얼굴 바로 아래 정중앙 (토마토는 살짝 작게)
+            lab = "×%d" % n
+            f9 = uf(9, True)
+            tw = self._mw(lab, f9)
+            pw = u(17) + tw + u(14)
+            px0 = cx - pw / 2
+            py0 = py + ph9 + u(4)
+            self._rr_soft(cv, px0, py0, px0 + pw, py0 + u(18), u(9),
+                          fill="#fff0f3", outline=self._tint(cd["fill"], 0.45),
+                          width=1)
+            tim = self._safe_str(self._tomgauge_pic, u(14), 1.0)
+            if tim:
+                cv.create_image(px0 + u(4) + u(7), py0 + u(9), image=tim)
+                self._pomo_keep.append(tim)
+            cv.create_text(px0 + u(4) + u(14) + u(3) + tw / 2, py0 + u(9),
+                           text=lab, font=f9, fill=self._shade(cd["fill"], 0.15))
+            cv.create_text(cx, py0 + u(18) + u(9), text=self._note_name(slot),
+                           font=uf(8, True), fill=cd["text"])
+            self._tf_boxes.append((cx - cw * 0.45, py, cx + cw * 0.45,
+                                   py0 + u(18), cx, py, slot, n))
+        if pages > 1:
+            ay = py + ph9 / 2
+            for tx, ch, on, d9 in ((x_l + u(10), "‹", page > 0, -1),
+                                   (x_r - u(10), "›", page < pages - 1, 1)):
+                cv.create_text(tx, ay, text=ch, font=uf(14, True),
+                               fill=cd["text"] if on else "#d8d2dc")
+                if on:
+                    self._pomo_hits.append((tx - u(11), ay - u(14), tx + u(11),
+                                            ay + u(14), ("tfpg", d9)))
+            cv.create_text((x_l + x_r) / 2, gy1 + u(self.TF_ROW) - u(6),
+                           text="%d / %d" % (page + 1, pages), font=uf(7),
+                           fill=cd["sub"])
+        return gy1 + u(self.TF_ROW)
+
+    def _team_week_hover(self, cv, u, uf, W, pad):
+        """친구 얼굴에 커서 — '히헌과 4번 집중했어요' 말풍선 (맨 위에)."""
+        pos = getattr(self, "_pomo_mouse", None)
+        boxes = getattr(self, "_tf_boxes", None) or []
+        if not pos or not boxes:
+            return
+        mx, my = pos
+        for x0, y0, x1, y1, cx, py, slot, n in boxes:
+            if not (x0 <= mx <= x1 and y0 <= my <= y1):
+                continue
+            cd = self.card
+            txt = "%s과 %d번 집중했어요" % (self._note_name(slot), n)
+            f8 = uf(8, True)
+            tw = self._mw(txt, f8)
+            bw, bh = tw + u(20), u(20)
+            ox8 = getattr(self, "_pomo_ox", 0.0)
+            WW8 = max(W, cv.winfo_width())
+            bx = max(pad - ox8 + u(2), min(cx - bw / 2, WW8 - pad - ox8 - bw - u(2)))
+            by1 = py - u(6)
+            by0 = by1 - bh
+            self._rr_soft(cv, bx, by0, bx + bw, by1, u(10), fill="#fffdf7",
+                          outline=self._tint(cd["fill"], 0.45), width=1.2,
+                          tail=(cx - bx, u(6)))
+            cv.create_text(bx + bw / 2, (by0 + by1) / 2, text=txt, font=f8,
+                           fill=self._shade(cd["fill"], 0.15))
+            return
+
     def _pomo_team_line(self, off=0):
         """그 주에 같이한 기록 한 줄 — '같이 · 사가 3번 · 락스 2번' (요청).
 
@@ -21633,6 +21789,7 @@ class Mascot:
             got.lift()
             return
         self._pomo_wk_off = 0             # 새로 열면 '이번 주'부터
+        self._pomo_tf_page = 0            # 같이한 친구 줄도 첫 쪽부터
         cd = self.card
         # 기준 크기 — 실제로는 창 크기에 맞춰 배율(zoom)로 늘리고 줄인다
         BASE_W = 300
@@ -21657,10 +21814,10 @@ class Mascot:
                 wk = 34
                 if self.us.get("pomo_week", True):
                     wk += 72
-                    # 같이한 기록이 있는 주면 한 줄 더 (요청)
+                    # 같이한 기록이 있는 주면 친구 줄 (요청)
                     if self._safe_str(self._pomo_team_line,
                                       getattr(self, "_pomo_wk_off", 0)):
-                        wk += 16
+                        wk += self.TF_ROW
             # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
@@ -21960,11 +22117,14 @@ class Mascot:
                     self._rr_soft(cv, pad, gy0, W - pad, gy1, u(13),
                                   fill="#ffffff", outline=line, width=1)
                     wk9 = self._safe_str(self._pomo_week, off9) or []
+                    tdays = self._safe_str(self._pomo_team_days, off9) or set()
                     if wk9:
                         gw = (W - pad * 2 - u(20)) / float(len(wk9))
                         mx9 = max([n for _w, n, _t in wk9] + [1])
                         base_y = gy1 - u(16)
-                        top_y = gy0 + u(22)
+                        # 같이한 날은 막대 위에 토마토가 앉으므로 그만큼 더
+                        # 여유를 둔다 — 별이 칸을 뚫지 않게 (피드백)
+                        top_y = gy0 + (u(36) if tdays else u(22))
                         for i7, (wd7, n7, is_t) in enumerate(wk9):
                             cx7 = pad + u(10) + gw * (i7 + 0.5)
                             if n7 > 0:
@@ -21977,14 +22137,24 @@ class Mascot:
                                     fill=cd["fill"] if is_t
                                     else self._tint(cd["fill"], 0.55),
                                     outline="", width=0)
+                                ty7 = base_y - bh7
+                                if i7 in tdays:
+                                    # 같이한 날 — 막대 꼭대기 한가운데 토마토
+                                    tim7 = self._safe_str(self._tomgauge_pic,
+                                                          u(16), 1.0)
+                                    if tim7:
+                                        cv.create_image(cx7, ty7 - u(3),
+                                                        image=tim7)
+                                        self._pomo_keep.append(tim7)
+                                    ty7 -= u(13)
                                 cv.create_text(
-                                    cx7, base_y - bh7 - u(7),
+                                    cx7, ty7 - u(7),
                                     text="%d" % n7,
                                     font=uf(8, True),
                                     fill=self._shade(cd["fill"], 0.2))
                                 if n7 == mx9:     # 이 주의 최고엔 별
                                     cv.create_text(
-                                        cx7, base_y - bh7 - u(16),
+                                        cx7, max(gy0 + u(7), ty7 - u(16)),
                                         text="★", font=uf(6),
                                         fill="#e8b64c")
                             else:                 # 안 한 날은 작은 씨앗
@@ -21998,12 +22168,12 @@ class Mascot:
                                            fill=cd["fill"] if is_t
                                            else cd["sub"])
                     wy1 = gy1
-                    tl9 = self._safe_str(self._pomo_team_line, off9)
-                    if tl9:
-                        # 같이한 기록 — 그래프 바로 아래 한 줄, 가로 정중앙
-                        cv.create_text(W / 2, gy1 + u(10), text=tl9,
-                                       font=uf(8, True), fill=cd["sub"])
-                        wy1 = gy1 + u(16)
+                    self._tf_boxes = []
+                    if self._safe_str(self._pomo_team_line, off9):
+                        # 같이한 친구들 — 얼굴 / 토마토 ×N / 이름 (요청)
+                        wy1 = self._safe_num(
+                            self._team_week_row, cv, u, uf, W, pad, line,
+                            gy1, off9) or gy1
             # ── 같이 하는 사람들 (요청) ─────────────────────────────
             if self._tm:
                 wy1 = self._safe_num(
@@ -22040,6 +22210,7 @@ class Mascot:
             if self._tm:
                 self._safe("team_vow_hover", self._team_vow_hover, cv, u,
                            uf, W, pad)
+            self._safe("tf_hover", self._team_week_hover, cv, u, uf, W, pad)
             # 다 같이 완주 — 색종이·폭죽 (요청)
             if self._tm and time.time() - self._tm_fx < 3.2:
                 self._safe("team_fx", self._team_fx_draw, cv, u, W, H,
@@ -22207,6 +22378,14 @@ class Mascot:
                         off0 = max(0, int(getattr(self, "_pomo_wk_off", 0)
                                           or 0))
                         self._pomo_wk_off = max(0, min(8, off0 + act[1]))
+                        self._pomo_tf_page = 0
+                        fit_win()
+                        draw()
+                        return
+                    if isinstance(act, tuple) and act[0] == "tfpg":
+                        # 같이한 친구 줄 넘기기 (요청)
+                        self._pomo_tf_page = max(
+                            0, int(getattr(self, "_pomo_tf_page", 0)) + act[1])
                         draw()
                         return
                     if isinstance(act, tuple) and act[0] == "week":
