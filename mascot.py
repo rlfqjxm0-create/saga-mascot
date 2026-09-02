@@ -1673,6 +1673,13 @@ class TeamStrip:
             if not self._shown:
                 self.top.deiconify()
                 self._shown = True
+                # 맥 Tk 는 withdraw → deiconify 를 거치면 '항상 위'가
+                # 풀린다 — 다시 못 박는다 (사가 제보: 클립스튜디오 뒤로 숨음)
+                try:
+                    self.top.attributes("-topmost", True)
+                    self.top.lift()
+                except Exception:
+                    pass
             return True
         except Exception:
             return False
@@ -1700,6 +1707,9 @@ class TeamStrip:
                 ctypes.windll.user32.SetWindowPos(
                     self.hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
             else:
+                # 맥 — 다른 앱(클립스튜디오) 창이 앞으로 오면 lift 만으로는
+                # 못 이긴다. '항상 위'를 매번 다시 건다 (1초에 한 번).
+                self.top.attributes("-topmost", True)
                 self.top.lift()
         except Exception:
             pass
