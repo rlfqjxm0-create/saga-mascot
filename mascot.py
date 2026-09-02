@@ -6956,6 +6956,7 @@ class Mascot:
         self._tom_top_cache = {}    # 카드 위 내 토마토 그림
         self._pomo_tom_box = None
         self._vow_keep = None       # 카드 위 내 각오 말풍선 그림
+        self._vow_box = None        # 그 말풍선 자리 (호버용) + 원문
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
@@ -11189,7 +11190,7 @@ class Mascot:
             return 0
         return YT_BAR if self._yt_on() else 0
 
-    VOW_BAR = 30                 # 카드 위 내 각오 말풍선 몫 (같이하기 중)
+    VOW_BAR = 36                 # 카드 위 내 각오 말풍선 몫 (같이하기 중)
 
     def _vow_bar(self):
         """같이하기 중이면 카드 위에 내 각오 말풍선이 선다 (요청) — 그 몫."""
@@ -11713,6 +11714,9 @@ class Mascot:
             # 노래 단추 왼쪽으로 비켜 준다. 플레이리스트는 단추가 셋이라
             # 더 멀리 (이전곡 단추와 겹치지 않게).
             cx -= 62.0 if getattr(self, "_pl_on", False) else 34.0
+        else:
+            # 뽀모 시계·토마토와 한 줄이면 무리 전체가 가운데 (요청)
+            cx = self._top_row_x().get("amb", cx)
         by = g["y0"] - 24
         # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
         self._soft_circle(c, cx, by, r, cd["bg"], cd["border"])
@@ -16438,6 +16442,34 @@ class Mascot:
 
     LV_PAD = 4                   # 칭호 알약과 카드 윗변 사이 여백
 
+    TOP_GAP = 8                  # 카드 위 아이콘들 사이 간격
+
+    def _top_row_x(self):
+        """카드 위 아이콘 줄의 가로 자리 — **무리 전체를 카드 정중앙에**
+        (요청: 아이콘이 늘어도 옆으로 밀려나지 않게).
+
+        재생 단추 줄이 있으면 환경음 알약은 그 줄에 남고(노래 단추 왼쪽),
+        뽀모 시계·내 토마토만 위 줄에서 가운데를 잡는다. 없으면 셋이 한 줄.
+        """
+        g = self._card_geom()
+        mid = (g["x0"] + g["x1"]) / 2.0
+        music = self._yt_music_row()
+        items = []
+        if self._amb_on_any() and not music:
+            items.append(("amb", 28.0))
+        pomo = bool(getattr(self, "timer_on", False) and self._pomo_running())
+        if pomo:
+            items.append(("pomo", 28.0))
+            if self._tm and not self._pomo_win_open():
+                items.append(("tom", 26.0))
+        total = sum(w for _n, w in items) + self.TOP_GAP * max(0, len(items) - 1)
+        x = mid - total / 2.0
+        out = {}
+        for name, w in items:
+            out[name] = x + w / 2.0
+            x += w + self.TOP_GAP
+        return out
+
     def _draw_pomo_top(self, now):
         """카드 **위** 뽀모도로 아이콘 (요청 — 창 안이 아니라 음악 줄처럼).
 
@@ -16453,16 +16485,12 @@ class Mascot:
         g = self._card_geom()
         mid = (g["x0"] + g["x1"]) / 2
         r = 14.0
+        # 가로 자리는 줄 전체를 가운데에 맞춘 값에서 (요청)
+        xs = self._top_row_x()
         if self._yt_music_row():
-            bx, by = mid, g["y0"] - YT_BAR - 16    # 재생 줄 위 정중앙
-        elif self._amb_on_any():
-            ab = getattr(self, "_amb_btn", None)   # 환경음 알약 옆 (요청)
-            if ab:
-                bx, by = ab[2] + r + 6, (ab[1] + ab[3]) / 2
-            else:
-                bx, by = mid + 34, g["y0"] - 24
+            bx, by = xs.get("pomo", mid), g["y0"] - YT_BAR - 16   # 재생 줄 위
         else:
-            bx, by = mid, g["y0"] - 24             # 혼자면 정중앙
+            bx, by = xs.get("pomo", mid), g["y0"] - 24
         hard9 = self._pomo_hard_active()
         if hard9:
             # 불타는 시계 — 불꽃을 시계 뒤에 먼저 (위로 솟아 보인다)
@@ -16478,7 +16506,8 @@ class Mascot:
         # (요청 — 친구들은 바탕화면에 있는데 내 것만 안 보였다)
         self._pomo_tom_box = None
         if self._tm and not self._pomo_win_open():
-            self._safe("pomo_tom_top", self._draw_my_tomato, bx + r + 20, by)
+            self._safe("pomo_tom_top", self._draw_my_tomato,
+                       xs.get("tom", bx + r + 20), by)
 
     def _pomo_win_open(self):
         pw = getattr(self, "_pomo_winref", None)
@@ -19335,28 +19364,51 @@ class Mascot:
         vb = self._vow_bar()
         if not vb:
             self._vow_keep = None
+            self._vow_box = None
             return
-        vow = str(self._tm.get("vow") or "").strip()
-        if len(vow) > 16:
-            vow = vow[:16] + "…"
+        full = str(self._tm.get("vow") or "").strip()
         cd = self.card
         g = self._card_geom()
         cx = (g["x0"] + g["x1"]) / 2.0
         top = float(self.cfg.get("card_top", 22))
-        f = self._cf_n(9, True)
-        tw = self._mw(vow, f)
-        bw, bh, th = tw + 20, 20, 6
+        # 다른 사람 말풍선과 같은 결로 — 글자 10pt·높이 24 (피드백)
+        f = self._cf_n(10, True)
+        bh, th = 24, 6
+        # 카드 폭 안으로 자른다 — 넘치면 커서를 올렸을 때 통째로 (피드백)
+        lim = (g["x1"] - g["x0"]) - 8
+        vow = full
+        if self._mw(vow, f) + 22 > lim:
+            while vow and self._mw(vow + "…", f) + 22 > lim:
+                vow = vow[:-1]
+            vow = (vow + "…") if vow else "…"
+        y0 = top - 2                      # 살짝 위로 (피드백)
+        bw = self._mw(vow, f) + 22
+        self._vow_box = (cx - bw / 2, y0, cx + bw / 2, y0 + bh + th, full)
+        if vow != full:
+            try:
+                px, py = self._vow_pointer()
+            except Exception:
+                px = py = None
+            if (px is not None and cx - bw / 2 - 4 <= px <= cx + bw / 2 + 4
+                    and y0 - 4 <= py <= y0 + bh + th + 4):
+                vow = full                # 호버 — 통째로
         fg = cd["fill"]
+        tw = self._mw(vow, f)
+        bw = min(tw + 22, self.W - 4)
+        bx = max(2.0, min(cx - bw / 2.0, self.W - bw - 2))
         sh = self._soft_shape(bw, bh, bh / 2.0, "#fffdf7",
                               self._tint(fg, 0.45), lw=1.2,
-                              tail=(bw / 2 - 6, bw / 2 + 6, bw / 2, th))
-        y0 = top + 1
+                              tail=(cx - bx - 6, cx - bx + 6, cx - bx, th))
         if sh is not None:
-            self.canvas.create_image(cx - bw / 2 - 1, y0 - 1, image=sh,
-                                     anchor="nw")
+            self.canvas.create_image(bx - 1, y0 - 1, image=sh, anchor="nw")
             self._vow_keep = sh
-        self.canvas.create_text(cx, y0 + bh / 2.0, text=vow, font=f,
-                                fill=self._shade(fg, 0.15))
+        self.canvas.create_text(bx + bw / 2.0, y0 + bh / 2.0, text=vow,
+                                font=f, fill=self._shade(fg, 0.15))
+
+    def _vow_pointer(self):
+        """커서의 캔버스 좌표 (검사가 갈아 끼우는 자리)."""
+        return (self.root.winfo_pointerx() - self.root.winfo_rootx(),
+                self.root.winfo_pointery() - self.root.winfo_rooty())
 
     def _team_blob(self):
         """방 신호에 실을 같이하기 값 (없으면 None). 작게 유지한다."""
