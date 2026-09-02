@@ -18403,11 +18403,18 @@ class Mascot:
                                      fill=255)
         im.paste(Image.alpha_composite(im, lo), (0, 0), mask)
         d = ImageDraw.Draw(im)
-        # 하이라이트 — 안쪽(아래)으로 (피드백)
-        d.ellipse((cx - rx * 0.58, cy - ry * 0.62, cx - rx * 0.20,
-                   cy - ry * 0.24), fill=(255, 255, 255, 150))
-        d.ellipse((cx - rx * 0.06, cy - ry * 0.64, cx + rx * 0.06,
-                   cy - ry * 0.50), fill=(255, 255, 255, 110))
+        # 하이라이트 — 안쪽(아래)으로 (피드백). **따로 그려 합성한다** —
+        # ImageDraw 는 반투명 색을 섞지 않고 덮어써서 그 자리가 알파 150
+        # 짜리 구멍이 된다. 색상키 창에선 안 보였지만 레이어 창(바탕화면
+        # 띠)에선 뚫려 보였다 (제보).
+        hi = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+        dh = ImageDraw.Draw(hi)
+        dh.ellipse((cx - rx * 0.58, cy - ry * 0.62, cx - rx * 0.20,
+                    cy - ry * 0.24), fill=(255, 255, 255, 150))
+        dh.ellipse((cx - rx * 0.06, cy - ry * 0.64, cx + rx * 0.06,
+                    cy - ry * 0.50), fill=(255, 255, 255, 110))
+        im.alpha_composite(hi)
+        d = ImageDraw.Draw(im)
         # 꼭지 잎(다섯 갈래) + 줄기
         leaf, leaf_line = hexc("#82d69c"), hexc("#4fb574")
         pts = []
@@ -19420,6 +19427,16 @@ class Mascot:
                 tm["members"][sl9] = {"v": str(b9.get("v") or "")[
                     :self.TEAM_VOW_N], "at": now}
                 tm["invited"].pop(sl9, None)
+            elif isinstance(tm["members"][sl9], dict) and "v" in b9:
+                # 누가 각오를 바꿨다 — 작게 '틱' (요청). 처음 들어올 때는
+                # 위에서 그대로 적으므로 여기엔 안 온다.
+                v9 = str(b9.get("v") or "")[:self.TEAM_VOW_N]
+                if v9 != str(tm["members"][sl9].get("v") or ""):
+                    tm["members"][sl9]["v"] = v9
+                    self._safe("vow_tick", self._ui_click)
+                    self._tm_say = ("%s 님이 각오를 바꿨어요"
+                                    % self._note_name(sl9), now)
+                    self._pomo_redraw()
             if "y" in b9 and isinstance(tm["members"][sl9], dict):
                 tm["members"][sl9]["y"] = 1 if b9.get("y") else 0
         back9 = getattr(self, "_tm_back", 0.0)
