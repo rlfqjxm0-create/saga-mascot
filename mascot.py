@@ -6930,6 +6930,9 @@ class Mascot:
         self._tm_rest = False      # 나만 잠깐 쉬는 중 (방 시계는 그대로)
         self._tm_at = 0.0          # 같이하기 셈을 마지막에 돈 시각
         self._tm_fx = 0.0          # 완주 축하가 시작된 시각
+        self._tm_bye = {}          # 퇴장 연출 중인 사람 — slot: (시각, 각오, 상태, 비율)
+        self._tm_gone = {}         # 방금 나간 사람 — 묵은 자리 신호로 되살아나지 않게
+        self._bye_cache = {}       # 퇴장 말풍선·손 그림
         self._pomo_alarm_key = ""  # 마지막으로 알린 구간 (phase, round) — 두 번 안 울리게
         self._tm_win = None        # 초대 창
         self._tm_pick = []         # 초대 창에서 고른 사람들
@@ -18806,6 +18809,7 @@ class Mascot:
         self._tm_ready = False
         self._tm_focus = [0.0, 0.0]
         self._tm_back = 0.0
+        self._tm_bye = {}
         self._safe("team_hard", self._team_hard_leave)
         self._safe("team_save", self._team_save)
         self._safe("strip_hide", self._strip_hide)
@@ -18868,6 +18872,13 @@ class Mascot:
     # 25fps, 평소엔 1초에 한 장 (상태가 느리게 바뀐다).
     STRIP_SEAT = 120             # 캐릭터 키 (100% · 화면 배율 전)
     STRIP_FX = 3.2               # 축하 길이 (창과 같다)
+    # 퇴장 연출 (요청) — 말풍선·손 흔들기 뒤 옅어져 사라진다. 나간 사람은
+    # 방 명단(room_list)이 묵어 몇 분 더 그 방 번호를 싣고 있으므로, 그동안
+    # 되살아나지 않게 따로 기억한다.
+    TEAM_BYE_HOLD = 2.2          # 말풍선·손 흔들기 (초)
+    TEAM_BYE_FADE = 0.8          # 그 뒤 옅어지는 시간 (초)
+    TEAM_GONE_KEEP = 150.0       # 나간 사람을 묵은 자리 신호로 되살리지 않는 시간
+    TEAM_BYE_MSG = ("오늘은 여기까지 할게요,", "모두 화이팅!")
 
     def _strip_want(self):
         """지금 띠를 보여야 하는가."""
@@ -18907,14 +18918,16 @@ class Mascot:
         # 누가 집중 중이면 그 사람이 살짝 움직인다 (요청) — 8장 캐시라
         # 초당 8장이면 충분하고 값도 싸다. 아무도 안 움직이면 1초에 한 장.
         who = self._strip_people()
+        byes = self._team_byes(now)       # 퇴장 연출 중 (요청) — 그 3초도 빠르게
+        bye9 = bool(byes)
         anim = (not fx) and any(p[2] == "집중" for p in who)
-        gap9 = 0.04 if fx else (self.STRIP_ANIM_DT if anim else 1.0)
+        gap9 = 0.04 if (fx or bye9) else (self.STRIP_ANIM_DT if anim else 1.0)
         if (self._strip_key is not None and self._strip_im is not None
                 and now - self._strip_at < gap9):
             self._strip_follow()        # 캐릭터가 움직였으면 따라간다
             return
         self._strip_at = now
-        if not who:
+        if not who and not byes:
             self._strip_hide()
             return
         if self._strip is None:
@@ -18926,12 +18939,13 @@ class Mascot:
         gap9 = self._strip_gap()
         key9 = (tuple((p[0], p[1], p[2], round(float(p[3] or 0), 2))
                       for p in who), size9, gap9,
-                int(now * 25) if fx else
+                int(now * 25) if (fx or bye9) else
                 (self._strip_step(now) if anim else 0),
-                getattr(self, "_strip_hov", None))
+                getattr(self, "_strip_hov", None),
+                tuple(b9[0] for b9 in byes))
         if key9 != self._strip_key or self._strip_im is None:
             self._strip_key = key9
-            self._strip_im = self._strip_sheet(who, now, fx)
+            self._strip_im = self._strip_sheet(who, now, fx, byes)
         x, y = self._strip_pos(self._strip_im)
         first9 = not self._strip.visible and not self.us.get("pomo_strip_tip")
         self._strip.show(self._strip_im, x, y)
@@ -19097,9 +19111,16 @@ class Mascot:
             self._strip_tom_cache[key] = got
         return got
 
-    def _strip_sheet(self, who, now, fx):
-        """띠 한 장 (RGBA) — 각오 말풍선 · 앉은 그림 · 상태 · 토마토 (+축하)."""
+    def _strip_sheet(self, who, now, fx, byes=None):
+        """띠 한 장 (RGBA) — 각오 말풍선 · 앉은 그림 · 상태 · 토마토 (+축하).
+        byes 는 퇴장 연출 중인 사람들(_team_byes) — 옅어진 채 제 칸에 서고
+        말풍선·손은 맨 위에 얹힌다."""
         u = self._ui
+        byes = list(byes or [])
+        bye_a = dict((b9[0], b9[4]) for b9 in byes)
+        bye_t = dict((b9[0], b9[5]) for b9 in byes)
+        have9 = set(p[0] for p in who)
+        who = list(who) + [b9[:4] for b9 in byes if b9[0] not in have9]
         k = u(1) * self._strip_size() / 100.0
         H = int(self.STRIP_SEAT * k)
         gap = int(u(self._strip_gap()))
@@ -19153,31 +19174,41 @@ class Mascot:
         self._strip_bubs = []          # 잘린 각오 말풍선 자리 (호버용)
         hov9 = getattr(self, "_strip_hov", None)
         later = []                     # 호버로 펼친 말풍선은 맨 뒤에 그린다
+        bye_at = {}                    # 퇴장 중인 사람 → (cx, 그림 폭, 머리 위 y)
         for i, (slot, vow, stt, fr, seat, sw, bw, full) in enumerate(cols):
             cw = sw                    # 여백은 캐릭터마다 똑같이 (제보)
             cx = x + cw / 2.0
-            self._strip_cols.append((x - gap / 2.0, x + cw + gap / 2.0, slot))
+            a9 = bye_a.get(slot, 1.0)
+            leaving = slot in bye_a
+            # 퇴장 연출 중인 사람은 따로 한 장에 그려 옅게 얹는다 (요청).
+            # 우클릭·호버 자리에서는 뺀다 — 사라지는 사람에게 반응을 보낼
+            # 수는 없다.
+            tgt = Image.new("RGBA", im.size, (0, 0, 0, 0)) if leaving else im
+            d = ImageDraw.Draw(tgt)
+            if not leaving:
+                self._strip_cols.append((x - gap / 2.0, x + cw + gap / 2.0,
+                                         slot))
             dy = (-abs(math.sin(t * 6.0 + i * 0.8)) * u(9)) if fx else 0.0
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
             # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
             d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
                        base_y + 6 * k), fill=(0, 0, 0, 60))
             if seat is not None:
-                im.alpha_composite(seat, (int(cx - seat.width / 2),
-                                          int(base_y - seat.height + dy)))
-                d = ImageDraw.Draw(im)
+                tgt.alpha_composite(seat, (int(cx - seat.width / 2),
+                                           int(base_y - seat.height + dy)))
+                d = ImageDraw.Draw(tgt)
             if vow and bw:
                 bub = bubble_img(bw, bh, bh / 2.0,
                                  (bw / 2.0 - 6 * k, bw / 2.0 + 6 * k,
                                   bw / 2.0, th),
                                  "#fffdf7", self._tint(fg, 0.45), 1.3)
                 by0 = int(base_y - H - (tsz - tdip) - bh - th - 6 * k + dy)
-                im.alpha_composite(bub, (int(cx - bw / 2), by0))
-                d = ImageDraw.Draw(im)
+                tgt.alpha_composite(bub, (int(cx - bw / 2), by0))
+                d = ImageDraw.Draw(tgt)
                 if f_v is not None:
                     d.text((cx, by0 + bh / 2.0), vow, font=f_v,
                            fill=self._shade(fg, 0.15), anchor="mm")
-                if vow != full:
+                if vow != full and not leaving:
                     # 잘렸다 — 커서를 올리면 통째로 (요청)
                     self._strip_bubs.append((cx - bw / 2, by0, cx + bw / 2,
                                              by0 + bh + th, slot))
@@ -19194,8 +19225,8 @@ class Mascot:
             pw9 = sw9 + int(18 * k)
             py0 = base_y + int(8 * k)
             pill = bubble_img(pw9, ph9, ph9 / 2.0, None, bg, fg, 1.0)
-            im.alpha_composite(pill, (int(cx - pw9 / 2), py0))
-            d = ImageDraw.Draw(im)
+            tgt.alpha_composite(pill, (int(cx - pw9 / 2), py0))
+            d = ImageDraw.Draw(tgt)
             if f_s is not None:
                 d.text((cx, py0 + ph9 / 2.0), stt, font=f_s, fill=fg,
                        anchor="mm")
@@ -19203,8 +19234,11 @@ class Mascot:
             # 여백만큼 내려간다. 캐릭터보다 나중에 그려 위로.
             tom = self._strip_tomato(tsz, fr)
             ht9 = self._seat_head_top(slot, H)
-            im.alpha_composite(tom, (int(cx - tsz / 2),
-                                     int(base_y - H + ht9 - tdip + dy)))
+            tgt.alpha_composite(tom, (int(cx - tsz / 2),
+                                      int(base_y - H + ht9 - tdip + dy)))
+            if leaving:
+                bye_at[slot] = (cx, sw, base_y - H + ht9)
+                im.alpha_composite(self._bye_alpha_im(tgt, a9))
             d = ImageDraw.Draw(im)
             x += cw + gap
         for cx, by0, full, fg in later:
@@ -19219,6 +19253,10 @@ class Mascot:
             if f_v is not None:
                 d.text((bx + fw / 2.0, by0 + bh / 2.0), full, font=f_v,
                        fill=self._shade(fg, 0.15), anchor="mm")
+        for slot9, (bcx, bsw, btop) in bye_at.items():
+            # 퇴장 말풍선·손 — 이웃 위에 오도록 맨 나중에 (요청)
+            self._strip_bye(im, k, bcx, bsw, btop, bye_a.get(slot9, 1.0),
+                            bye_t.get(slot9, 0.0))
         if fx:
             self._strip_fx(im, t, k)
         return im
@@ -19881,6 +19919,7 @@ class Mascot:
         self._tm_rest = False
         self._tm_focus = [0.0, 0.0]
         self._tm_back = 0.0
+        self._tm_bye = {}
         self._safe("team_hard", self._team_hard_leave)
         self._safe("team_save", self._team_save)
         self._tm_fx = time.time()          # 창에 색종이·폭죽
@@ -19957,6 +19996,7 @@ class Mascot:
             if not self._team_host():
                 return
             tm["invited"].pop(f, None)
+            self._tm_gone.pop(f, None)
             tm["members"][f] = {"v": str(x.get("v") or "")[
                 :self.TEAM_VOW_N], "at": time.time()}
             self._tm_say = ("%s 님이 들어왔어요" % self._note_name(f),
@@ -19983,6 +20023,8 @@ class Mascot:
                             time.time())
             self._pomo_redraw()
         elif k == "tmo":                     # 나감
+            if f != tm.get("host"):
+                self._safe("team_bye_start", self._team_bye_start, f)
             tm["members"].pop(f, None)
             self._tm_say = ("%s 님이 오늘 작업을 마쳤어요"
                             % self._note_name(f), time.time())
@@ -20031,6 +20073,8 @@ class Mascot:
         # 같이 세워 두면 tmo 로 접을지 판단할 때 쓸 수 있다.
         for sl9, b9 in seen9.items():
             if sl9 not in tm["members"]:
+                if self._team_gone(sl9):
+                    continue             # 방금 나갔다 — 묵은 자리 신호
                 tm["members"][sl9] = {"v": str(b9.get("v") or "")[
                     :self.TEAM_VOW_N], "at": now}
                 tm["invited"].pop(sl9, None)
@@ -20173,11 +20217,13 @@ class Mascot:
         # **누가 같이 하는지는 방 신호로 안다.** 초대한 사람만 명단을
         # 들고 있어서, 참가자끼리는 서로 안 보였다 (사가 제보 —
         # '방에 나밖에 안 보여'). 같은 세션 번호를 싣고 있으면 한 팀이다.
-        mem = [s for s in (tm.get("members") or {}) if s != self.char]
+        mem = [s for s in (tm.get("members") or {})
+               if s != self.char and not self._team_gone(s)]
         for sl9, q9 in rest.items():
             b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
             if (b9 and str(b9.get("i") or "") == str(tm["sid"])
-                    and sl9 != self.char and sl9 not in mem):
+                    and sl9 != self.char and sl9 not in mem
+                    and not self._team_gone(sl9)):
                 mem.append(sl9)
         out = []
         for sl in [self.char] + mem:
@@ -21470,6 +21516,7 @@ class Mascot:
         who = self._team_people()
         if not who:
             return y0
+        byes = self._team_byes()
         tm = self._tm or {}
         wait = (tm.get("state") != "run")
         ox8 = getattr(self, "_pomo_ox", 0.0)
@@ -21536,6 +21583,19 @@ class Mascot:
         x_r = WW - pad - ox9
         per = max(1, int(getattr(self, "_tm_per", 4) or 4))
         rows = int(math.ceil(len(who) / float(per)))
+        # 퇴장 연출 중인 사람은 **줄을 늘리지 않고** 세운다 — 줄이 늘면 창
+        # 높이가 안 맞는다 (base_h 는 _tm_rows 를 본다). 한 줄 칸 수는 사람
+        # 수에 딱 맞춰져 있어 빈 칸이 없는 게 보통이라, 그 3초만 한 칸 더
+        # 좁혀 세운다 (사라지고 나면 남은 사람끼리 다시 가운데로).
+        room9 = rows * per - len(who)
+        if byes and room9 <= 0:
+            per = per + 1
+            room9 = rows * per - len(who)
+        room9 = max(0, room9)
+        bye_a = dict((b9[0], b9[4]) for b9 in byes[:room9])
+        bye_t = dict((b9[0], b9[5]) for b9 in byes[:room9])
+        allp = list(who) + [b9[:4] for b9 in byes[:room9]]
+        bye_at = {}                    # slot → (cx, 그림 폭, 그림 위 y)
         # 줄마다 칸을 나누면 '혼자 작업하는 것처럼' 보인다 (제보) —
         # 여러 줄이어도 **칸은 하나**로 두른다.
         self._rr_soft(cv, x_l, cy0, x_r, cy0 + ch * rows + u(8) * (rows - 1),
@@ -21543,14 +21603,22 @@ class Mascot:
         gw = (x_r - x_l) / float(per)
         jump = (time.time() - self._tm_fx) if (
             self._tm_fx and time.time() - self._tm_fx < 3.2) else None
-        for i, (slot, vow, stt, fr) in enumerate(who):
+        for i, (slot, vow, stt, fr) in enumerate(allp):
             r9, c9 = divmod(i, per)
             cy0 = y0 + u(12) + r9 * (ch + u(8))
             # 마지막 줄이 덜 찼으면 그 줄만 가운데로 모은다
-            n_row = min(per, len(who) - r9 * per)
+            n_row = min(per, len(allp) - r9 * per)
             cx = x_l + (x_r - x_l - gw * n_row) / 2.0 + gw * (c9 + 0.5)
             dy = -abs(math.sin(jump * 6.0 + i * 0.8)) * u(9) if jump else 0.0
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
+            # 퇴장 중이면 옅어진다 — 색은 흰 바탕과 섞고 그림은 알파로
+            a9 = bye_a.get(slot, 1.0)
+            if a9 < 1.0:
+                def fd(c, _a=a9):
+                    return self._mix(c, "#ffffff", 1.0 - _a)
+            else:
+                def fd(c):
+                    return c
             f8 = uf(7, True)
             if vow:
                 # 긴 각오는 말풍선 밖으로 새어 나왔다 (제보) — 칸에 맞게
@@ -21566,23 +21634,27 @@ class Mascot:
                 bw8 = min(lim8, tw8 + u(14))
                 by0, by1 = cy0 + u(8) + dy, cy0 + u(30) + dy
                 self._rr_soft(cv, cx - bw8 / 2, by0, cx + bw8 / 2, by1,
-                              u(9), fill="#fffdf7",
-                              outline=self._tint(fg, 0.45), width=1,
+                              u(9), fill=fd("#fffdf7"),
+                              outline=fd(self._tint(fg, 0.45)), width=1,
                               tail=(cx, u(6)))
                 cv.create_text(cx, (by0 + by1) / 2, text=show8, font=f8,
-                               fill=self._shade(fg, 0.15))
-                if show8 != vow:
+                               fill=fd(self._shade(fg, 0.15)))
+                if show8 != vow and a9 >= 1.0:
                     # 커서가 올라오면 통째로 보여 줄 자리 (그리기는 맨 뒤)
                     self._tm_vow_box.append(
                         (cx - bw8 / 2, by0, cx + bw8 / 2, by1, cx,
                          (by0 + by1) / 2, vow, fg))
-            ph = self._seat_photo(
-                slot, u(46) * self.ROOM_SIZE.get(slot, 1.0))
+            h9 = u(46) * self.ROOM_SIZE.get(slot, 1.0)
+            ph = (self._seat_photo(slot, h9) if a9 >= 1.0
+                  else self._seat_photo_a(slot, h9, a9))
             if ph is not None:
                 cv.create_image(cx, cy0 + u(92) + dy, image=ph, anchor="s")
                 self._pomo_keep = getattr(self, "_pomo_keep", [])
                 self._pomo_keep.append(ph)
-            if wait and slot in ready9:
+                if slot in bye_a:
+                    bye_at[slot] = (cx, ph.width(),
+                                    cy0 + u(92) + dy - ph.height())
+            if wait and slot in ready9 and a9 >= 1.0:
                 # 준비됐어요 — 초록 동그라미에 ✓ (요청). 머리 오른쪽 위.
                 rx, ry = cx + u(20), cy0 + u(52) + dy
                 rr = u(7)
@@ -21590,7 +21662,7 @@ class Mascot:
                            fill="#2a9d5c", outline="#ffffff")
                 cv.create_text(rx, ry, text="✓", font=uf(7, True),
                                fill="#ffffff")
-            if jump:                       # 완주 — 곁에 반짝임·하트
+            if jump and a9 >= 1.0:         # 완주 — 곁에 반짝임·하트
                 for k9, (ox9, oy9, s9) in enumerate(((-u(19), u(6), 7),
                                                      (u(18), u(0), 6))):
                     cv.create_text(cx + ox9, cy0 + u(48) + oy9 + dy,
@@ -21599,8 +21671,8 @@ class Mascot:
                                    fill="#e8688c" if k9 else "#ffd75e")
             pw = self._mw(stt, f8) / 2 + u(8)
             self._rr_soft(cv, cx - pw, cy0 + u(98), cx + pw, cy0 + u(114),
-                          u(8), fill=bg, outline="")
-            cv.create_text(cx, cy0 + u(106), text=stt, font=f8, fill=fg)
+                          u(8), fill=fd(bg), outline="")
+            cv.create_text(cx, cy0 + u(106), text=stt, font=f8, fill=fd(fg))
             nm9 = self._note_name(slot)
             if slot == self.char:
                 # 내 칸을 누르면 각오를 고친다 (요청). 누를 수 있다는 걸
@@ -21615,7 +21687,7 @@ class Mascot:
                      cy0 + u(132), "tmvow"))
             else:
                 cv.create_text(cx, cy0 + u(125), text=nm9,
-                               font=uf(8, True), fill=cd["text"])
+                               font=uf(8, True), fill=fd(cd["text"]))
             if not wait:
                 # 집중 비율은 **토마토 한 알**로 (요청 — 얇은 막대는 뭘 재는지
                 # 안 읽혔다). 익을수록 민트 → 코랄. 커서를 올리면 아래에
@@ -21628,14 +21700,221 @@ class Mascot:
                 ht9 = self._seat_head_top(slot, h9)
                 tcx = cx
                 tcy = cy0 + u(92) - h9 + ht9 - tsz * 0.55 + tsz / 2 + dy
-                tim = self._safe_str(self._tomgauge_pic, tsz, fr)
+                tim = (self._safe_str(self._tomgauge_pic, tsz, fr)
+                       if a9 >= 1.0 else
+                       self._safe_str(self._tomgauge_pic_a, tsz, fr, a9))
                 if tim:
                     cv.create_image(tcx, tcy, image=tim)
                     self._pomo_keep.append(tim)
+                if tim and a9 >= 1.0:
                     self._tm_tom_box.append(
                         (tcx - tsz / 2, tcy - tsz / 2, tcx + tsz / 2,
                          tcy + tsz / 2, tcx, tcy + tsz / 2, fr, fg))
+        # 퇴장 말풍선·손 — 이웃 칸 위에 오도록 맨 나중에 (요청)
+        for slot9, (bcx, bsw, btop) in bye_at.items():
+            self._safe("team_bye_draw", self._team_bye_draw, cv, u, bcx, bsw,
+                       btop, bye_a.get(slot9, 1.0), bye_t.get(slot9, 0.0),
+                       x_l, x_r)
         return y0 + u(12) + rows * ch + (rows - 1) * u(8)
+
+    # ── 퇴장 연출 (요청) ────────────────────────────────────────────
+    # 참가자가 '오늘은 여기까지'를 누르면 본인은 바로 나가고, 남은 사람들
+    # 화면에서는 그 캐릭터 왼쪽에 큰 말풍선이 뜨고 손을 흔들다가 캐릭터와
+    # 함께 옅어져 사라진다. 뽀모도로 창과 바탕화면 띠 양쪽 다.
+    def _team_gone(self, slot):
+        """방금 나간 사람인가 — 묵은 방 명단(room_list)이 아직 그 방 번호를
+        싣고 있어도 되살리지 않는다. 다시 들어오면(tmy·참여) 지운다."""
+        t = self._tm_gone.get(slot)
+        if not t:
+            return False
+        if time.time() - t > self.TEAM_GONE_KEEP:
+            self._tm_gone.pop(slot, None)
+            return False
+        return True
+
+    def _team_bye_start(self, slot):
+        """나감 신호가 왔다 — 그 사람의 지금 모습(각오·상태·비율)을 얼려 두고
+        연출을 시작한다."""
+        now = time.time()
+        got = None
+        for p in self._team_people():   # '나간 사람' 표시를 하기 **전에** 읽는다
+            if p[0] == slot:
+                got = p
+                break
+        self._tm_gone[slot] = now
+        if got is None:
+            vow = str(((self._tm or {}).get("members") or {}).get(slot, {})
+                      .get("v") or "")
+            got = (slot, vow, "휴식", 0.0)
+        self._tm_bye[slot] = (now, str(got[1] or ""), str(got[2] or "휴식"),
+                              float(got[3] or 0.0))
+        self._strip_at = 0.0             # 띠는 다음 프레임에 바로
+
+    def _team_byes(self, now=None):
+        """퇴장 연출 중인 사람들 — [(slot, 각오, 상태, 비율, 불투명도, 흐른 초)].
+        끝난 것은 여기서 치운다."""
+        if not self._tm:
+            self._tm_bye = {}
+            return []
+        now = now or time.time()
+        out = []
+        for sl, (t0, vow, stt, fr) in list(self._tm_bye.items()):
+            t = now - t0
+            if t < 0 or t > self.TEAM_BYE_HOLD + self.TEAM_BYE_FADE:
+                self._tm_bye.pop(sl, None)
+                continue
+            a = (1.0 if t < self.TEAM_BYE_HOLD else
+                 max(0.0, 1.0 - (t - self.TEAM_BYE_HOLD) / self.TEAM_BYE_FADE))
+            out.append((sl, vow, stt, fr, a, t))
+        return out
+
+    def _team_bye_on(self):
+        return bool(self._team_byes())
+
+    @staticmethod
+    def _bye_alpha_im(im, a):
+        """그림의 알파를 a(0~1)배로 — 옅어져 사라지는 데 쓴다."""
+        if im is None or a >= 1.0:
+            return im
+        k = max(0, min(255, int(round(a * 255))))
+        out = im.copy()
+        out.putalpha(out.getchannel("A").point(lambda v: v * k // 255))
+        return out
+
+    def _seat_photo_a(self, slot, h, a):
+        """옅어진 앉은 그림 (뽀모도로 창용 ImageTk)."""
+        im = self._strip_seat(slot, int(h))
+        if im is None:
+            return None
+        return self._tkimg(self._bye_alpha_im(im, a))
+
+    def _tomgauge_pic_a(self, size, fr, a):
+        return self._tkimg(self._bye_alpha_im(self._strip_tomato(size, fr), a))
+
+    def _bye_cache_put(self, key, im):
+        if len(self._bye_cache) > 60:
+            for k9 in list(self._bye_cache)[:30]:
+                self._bye_cache.pop(k9, None)
+        self._bye_cache[key] = im
+        return im
+
+    def _bye_bubble_pil(self, w, h, k, fpx):
+        """퇴장 말풍선 — 몸통과 오른쪽 꼬리를 한 실루엣으로 (지뢰 123),
+        글은 PIL 로 (창·띠 어디서든 같은 모양)."""
+        key = ("bub", int(w), int(h), int(fpx))
+        got = self._bye_cache.get(key)
+        if got is not None:
+            return got
+        S = 3
+        w, h = int(w), int(h)
+        T = int(10 * k)
+        im = Image.new("RGBA", ((w + T) * S, h * S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        FILL, EDGE = (255, 253, 247, 255), (243, 183, 194, 255)
+        lw = max(2, int(round(1.6 * k * S)))
+        r = int(14 * k * S)
+        d.rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=r, fill=EDGE)
+        ty = h * S * 0.42
+        hh = 7 * k * S
+        d.polygon([(w * S - 2, ty - hh), (w * S - 2, ty + hh),
+                   ((w + T) * S - 1, ty)], fill=EDGE)
+        d.rounded_rectangle((lw, lw, w * S - 1 - lw, h * S - 1 - lw),
+                            radius=max(0, r - lw), fill=FILL)
+        d.polygon([(w * S - 2 - lw, ty - hh + lw * 1.5),
+                   (w * S - 2 - lw, ty + hh - lw * 1.5),
+                   ((w + T) * S - 1 - lw * 1.8, ty)], fill=FILL)
+        im = im.resize((w + T, h), Image.LANCZOS)
+        f = self._pil_font(int(fpx), True)
+        if f is not None:
+            d = ImageDraw.Draw(im)
+            lines = self.TEAM_BYE_MSG
+            lh = int(fpx * 1.7)
+            y0 = h / 2.0 - lh * (len(lines) - 1) / 2.0
+            for j, ln in enumerate(lines):
+                d.text((w / 2.0, y0 + j * lh), ln, font=f,
+                       fill=(217, 96, 122, 255), anchor="mm")
+        return self._bye_cache_put(key, im)
+
+    def _bye_hand_pil(self, size, ang):
+        """흔드는 손바닥 — 흰 실루엣 하나(손바닥·손가락 넷·짧은 엄지)에
+        바깥선, 손가락 사이 홈만. 손목을 축으로 ang 도 기운다. 판을 가로로
+        1.4배 넓혀 어느 각도에서도 잘리지 않는다 (피드백)."""
+        ang = int(round(ang / 5.0)) * 5
+        key = ("hand", int(size), ang)
+        got = self._bye_cache.get(key)
+        if got is not None:
+            return got
+        W = max(16, int(size) * 4)
+        CW = int(W * 1.4)
+        mask = Image.new("L", (CW, W), 0)
+        m = ImageDraw.Draw(mask)
+        cx, base = CW * 0.5, W * 0.88
+        m.rounded_rectangle((cx - W * 0.25, W * 0.44, cx + W * 0.25, W * 0.86),
+                            radius=W * 0.15, fill=255)
+        fw = W * 0.062
+        xs = (cx - W * 0.19, cx - W * 0.063, cx + W * 0.063, cx + W * 0.19)
+        tops = (0.28, 0.18, 0.20, 0.30)
+        for x, t in zip(xs, tops):
+            m.rounded_rectangle((x - fw, W * t, x + fw, W * 0.60), radius=fw,
+                                fill=255)
+        th = Image.new("L", (CW, W), 0)
+        ImageDraw.Draw(th).rounded_rectangle(
+            (cx - W * 0.31, W * 0.40, cx - W * 0.21, W * 0.64),
+            radius=W * 0.05, fill=255)
+        th = th.rotate(22, resample=Image.BICUBIC,
+                       center=(cx - W * 0.24, W * 0.62))
+        mask.paste(255, (0, 0), th)
+        lw = max(3, int(W * 0.026))
+        outer = mask.filter(ImageFilter.MaxFilter(lw * 2 + 1))
+        im = Image.new("RGBA", (CW, W), (0, 0, 0, 0))
+        LINE9, SKIN = (205, 182, 193, 255), (255, 255, 255, 255)
+        im.paste(LINE9, (0, 0), outer)
+        im.paste(SKIN, (0, 0), mask)
+        d = ImageDraw.Draw(im)
+        for j in range(3):
+            gx = (xs[j] + xs[j + 1]) / 2
+            gy0 = W * max(tops[j], tops[j + 1]) + fw * 0.9
+            d.line((gx, gy0, gx, W * 0.55), fill=LINE9, width=lw)
+            d.ellipse((gx - lw * 0.5, gy0 - lw * 0.5, gx + lw * 0.5,
+                       gy0 + lw * 0.5), fill=LINE9)
+        im = im.rotate(ang, resample=Image.BICUBIC, center=(cx, base),
+                       expand=False)
+        im = im.resize((max(1, int(size * 1.4)), max(1, int(size))),
+                       Image.LANCZOS)
+        return self._bye_cache_put(key, im)
+
+    @staticmethod
+    def _bye_hand_ang(t):
+        return 25.0 * math.sin(t * 2.0 * math.pi * 1.6)
+
+    def _team_bye_draw(self, cv, u, cx, sw, top, a, t, x_l, x_r):
+        """뽀모도로 창 — 나가는 캐릭터 왼쪽에 큰 말풍선, 오른쪽 위에 손."""
+        k = u(1)
+        bub = self._bye_bubble_pil(int(u(126)), int(u(46)), k, int(u(10)))
+        bx1 = cx - sw / 2.0 - u(4)
+        bx0 = max(x_l + u(4), bx1 - bub.width)
+        ph = self._tkimg(self._bye_alpha_im(bub, a))
+        cv.create_image(bx0, top + u(4), image=ph, anchor="nw")
+        self._pomo_keep = getattr(self, "_pomo_keep", [])
+        self._pomo_keep.append(ph)
+        hd = self._bye_hand_pil(int(u(40)), self._bye_hand_ang(t))
+        hx = min(x_r - hd.width - u(2), cx + sw / 2.0 - u(8))
+        ph2 = self._tkimg(self._bye_alpha_im(hd, a))
+        cv.create_image(hx, top - u(12), image=ph2, anchor="nw")
+        self._pomo_keep.append(ph2)
+
+    def _strip_bye(self, im, k, cx, sw, top, a, t):
+        """바탕화면 띠 — 같은 연출을 시트 위에 (이웃보다 위, 맨 나중에)."""
+        W9 = im.width
+        bub = self._bye_bubble_pil(int(150 * k), int(54 * k), k,
+                                   int(round(11 * k)))
+        bx1 = cx - sw / 2.0 + 6 * k
+        bx0 = int(max(2, bx1 - bub.width))
+        im.alpha_composite(self._bye_alpha_im(bub, a),
+                           (bx0, int(top + 20 * k)))
+        hd = self._bye_hand_pil(int(52 * k), self._bye_hand_ang(t))
+        hx = int(min(W9 - hd.width - 2, cx + sw / 2.0 - 16 * k))
+        im.alpha_composite(self._bye_alpha_im(hd, a), (max(0, hx), int(top + 2 * k)))
 
     def _team_vow_hover(self, cv, u, uf, W, pad):
         """커서가 올라간 각오 말풍선을 통째로 보여 준다 (요청).
@@ -22546,7 +22825,8 @@ class Mascot:
             draw()
             # 폭죽·색종이가 터지는 3초만 빠르게 (제보: 0.5초에 한 장이라
             # 여섯 장짜리 폭죽이 '렉'으로 보였다). 평소엔 0.5초.
-            fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4)
+            fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4
+                                       or self._team_bye_on())
             self._pomo_after = win.after(40 if fx9 else 500, beat)
 
         def fit_win():
