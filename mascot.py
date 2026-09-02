@@ -6716,6 +6716,7 @@ class Mascot:
         self._tm_rest = False      # 나만 잠깐 쉬는 중 (방 시계는 그대로)
         self._tm_at = 0.0          # 같이하기 셈을 마지막에 돈 시각
         self._tm_fx = 0.0          # 완주 축하가 시작된 시각
+        self._pomo_alarm_key = ""  # 마지막으로 알린 구간 (phase, round) — 두 번 안 울리게
         self._tm_win = None        # 초대 창
         self._tm_pick = []         # 초대 창에서 고른 사람들
         self._tm_hits = []         # 초대 창 클릭 자리
@@ -17867,6 +17868,7 @@ class Mascot:
         if done:
             self._safe("card", self._relayout_card)
         if say:
+            self._pomo_alarm_key = "%s:%d" % (nxt, int(st["round"]))
             self._safe("pomo_say", self._pomo_alarm, line, nxt, done)
         self._pomo_redraw()
 
@@ -18466,6 +18468,10 @@ class Mascot:
         self._pomo_save(st)
         self._tm_focus = [0.0, 0.0]
         self._team_bcast("tms", self._team_step_blob())
+        # 혼자 시작할 때처럼 시작음·말풍선 (제보: 같이하기에선 소리가 없다)
+        self._pomo_alarm_key = "focus:0"
+        self._safe("pomo_say", self._pomo_alarm, self.POMO_LINES["focus"],
+                   "focus", False)
         self._safe("card", self._relayout_card)
         self._pomo_redraw()
 
@@ -18510,12 +18516,29 @@ class Mascot:
                        self.POMO_LINES["done"], "focus", True)
             return
         same9 = (st["phase"] == ph9 and abs(st["end"] - end9) < 1.0)
+        prev9, on9 = st["phase"], bool(st["on"])
+        rnd9 = int(x.get("r") or 0)
         st.update({"on": True, "phase": ph9, "left": 0.0,
-                   "round": int(x.get("r") or 0),
-                   "hard": hard9, "end": end9})
+                   "round": rnd9, "hard": hard9, "end": end9})
         self._pomo_save(st)
         if not same9:                      # 구간이 그대로면 비율은 지킨다
             self._team_focus_reset()
+        # 방장 신호가 내 시계보다 먼저 오면 내 _pomo_next 가 안 돌아
+        # 소리·말풍선·폭죽이 없었다 (제보). 구간이 실제로 바뀐 것만,
+        # 그리고 한 번만 알린다 (_pomo_alarm_key).
+        key9 = "%s:%d" % (ph9, rnd9)
+        if (ph9 != prev9 or not on9) and self._pomo_alarm_key != key9:
+            self._pomo_alarm_key = key9
+            if ph9 == "focus":
+                line9 = (self.POMO_LINES["focus"] if not on9
+                         else self.POMO_LINES["back"])
+            elif ph9 == "long":
+                line9 = self.POMO_LINES["long"]
+            else:
+                line9 = self.POMO_LINES["short"] % self._pomo_mins("focus")
+            if prev9 == "focus" and on9:
+                self._tm_fx = time.time()  # 집중 한 번 끝 — 색종이·폭죽
+            self._safe("pomo_say", self._pomo_alarm, line9, ph9, False)
         self._safe("team_save", self._team_save)
         self._safe("card", self._relayout_card)
         self._pomo_redraw()
@@ -21136,7 +21159,10 @@ class Mascot:
             if not win.winfo_exists():
                 return
             draw()
-            self._pomo_after = win.after(500, beat)
+            # 폭죽·색종이가 터지는 3초만 빠르게 (제보: 0.5초에 한 장이라
+            # 여섯 장짜리 폭죽이 '렉'으로 보였다). 평소엔 0.5초.
+            fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4)
+            self._pomo_after = win.after(40 if fx9 else 500, beat)
 
         def fit_win():
             """지금 구성에 딱 맞게 창 높이를 맞춘다 (열 때·여닫을 때)."""
