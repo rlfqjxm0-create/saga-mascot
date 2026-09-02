@@ -1715,6 +1715,12 @@ class TeamStrip:
             pass
 
     def _on_press(self, e):
+        # 맥의 Ctrl+클릭은 우클릭이다 — 그 누름·뗌을 왼쪽 클릭으로 세면
+        # 메뉴가 뜨자마자 '창 열기'가 같이 돌았다 (사가 제보)
+        if int(getattr(e, "state", 0) or 0) & 0x4:
+            self._press = None
+            self._moved = False
+            return
         self._press = (e.x_root, e.y_root)
         self._moved = False
 
@@ -1731,7 +1737,13 @@ class TeamStrip:
         except Exception:
             pass
 
-    def _on_release(self, _e):
+    def _on_release(self, e):
+        if self._press is None:
+            return                     # Ctrl+클릭(메뉴)의 뗌 — 클릭이 아니다
+        if int(getattr(e, "state", 0) or 0) & 0x4:
+            self._press = None
+            self._moved = False
+            return
         moved = self._moved
         self._press = None
         self._moved = False
