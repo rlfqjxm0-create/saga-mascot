@@ -12209,7 +12209,8 @@ class Mascot:
                     except Exception:
                         pass
                 for holder in (self.shadow, self.todo_panel,
-                               self.due_panel, self._fx):
+                               self.due_panel, self._fx,
+                               getattr(self, "_strip", None)):
                     h = getattr(holder, "hwnd", None)
                     if h:
                         kin.add(h)
@@ -18748,7 +18749,16 @@ class Mascot:
             self._strip_im = self._strip_sheet(who, now, fx)
         x, y = self._strip_pos(self._strip_im)
         self._strip.show(self._strip_im, x, y)
-        if not fx or now - self._strip_z > 1.0:
+        pop = getattr(self, "_strip_pop_ref", None)
+        try:
+            pop_on = bool(pop is not None and pop.winfo_exists())
+        except Exception:
+            pop_on = False
+        if pop_on:
+            # 반응 메뉴가 떠 있는 동안은 띠를 올리지 않는다 — 올리면 방금
+            # 뜬 메뉴를 도로 덮는다 (제보). 대신 메뉴를 위로.
+            self._win_top(pop)
+        elif not fx or now - self._strip_z > 1.0:
             self._strip_z = now
             self._strip.raise_top()
 
@@ -18858,6 +18868,31 @@ class Mascot:
         n = self._strip_step(now) + (hash(slot) % 3) + i
         return "seat_pen" if n % 2 else "seat_pen2"
 
+    def _seat_head_top(self, slot, h):
+        """앉은 그림에서 **머리 꼭대기**가 위에서 몇 px 인가 (캐시).
+
+        그림 위쪽에 투명 여백이 있어 그림 꼭대기에 얹으면 토마토가 뜬다
+        (피드백). 가운데 40% 열에서 처음 불투명해지는 줄을 찾는다.
+        """
+        key = ("head", slot, int(h))
+        got = self._strip_seat_cache.get(key)
+        if got is not None:
+            return got
+        im = self._strip_seat(slot, h)
+        top = 0
+        if im is not None:
+            try:
+                a = im.getchannel("A")
+                w9, h9 = a.size
+                x0, x1 = int(w9 * 0.3), max(int(w9 * 0.3) + 1, int(w9 * 0.7))
+                band = a.crop((x0, 0, x1, h9))
+                bb = band.point(lambda v: 255 if v > 60 else 0).getbbox()
+                top = bb[1] if bb else 0
+            except Exception:
+                top = 0
+        self._strip_seat_cache[key] = top
+        return top
+
     def _strip_tomato(self, size, ratio):
         step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
         key = (int(size), step)
@@ -18882,7 +18917,8 @@ class Mascot:
         bh = int(24 * k)            # 말풍선 높이
         th = int(7 * k)             # 꼬리
         ph9 = int(18 * k)           # 상태 알약 높이
-        tsz = int(24 * k)           # 토마토
+        tsz = int(34 * k)           # 토마토 — 머리 위에 얹는다 (요청)
+        tdip = int(tsz * 0.55)      # 머리에 얹혀 겹치는 만큼
         cols = []
         dm = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
@@ -18911,11 +18947,12 @@ class Mascot:
                 vow = (vow + "…") if vow else ""
             bw = (tw_of(vow) + int(18 * k)) if vow else 0
             cols.append((slot, vow, stt, fr, seat, sw, bw, full))
-        head = (bh + th + int(10 * k)) + int(u(28))    # 말풍선 + 뛰는 여유
+        # 위에서부터: 말풍선 · 토마토(머리 위) · 캐릭터 · 상태 알약
+        head = (bh + th + int(6 * k)) + (tsz - tdip) + int(u(28))
         base_y = head + H
         Wt = sum(c[5] for c in cols) + gap * max(0, len(cols) - 1) \
             + margin * 2
-        Ht = base_y + int(8 * k) + ph9 + int(6 * k) + tsz + int(6 * k)
+        Ht = base_y + int(8 * k) + ph9 + int(8 * k)
         im = Image.new("RGBA", (max(2, Wt), max(2, Ht)), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
         t = (now - self._tm_fx) if fx else 0.0
@@ -18942,7 +18979,7 @@ class Mascot:
                                  (bw / 2.0 - 6 * k, bw / 2.0 + 6 * k,
                                   bw / 2.0, th),
                                  "#fffdf7", self._tint(fg, 0.45), 1.3)
-                by0 = int(base_y - H - bh - th - 8 * k + dy)
+                by0 = int(base_y - H - (tsz - tdip) - bh - th - 6 * k + dy)
                 im.alpha_composite(bub, (int(cx - bw / 2), by0))
                 d = ImageDraw.Draw(im)
                 if f_v is not None:
@@ -18970,9 +19007,12 @@ class Mascot:
             if f_s is not None:
                 d.text((cx, py0 + ph9 / 2.0), stt, font=f_s, fill=fg,
                        anchor="mm")
+            # 토마토 — **머리 꼭대기에 딱 붙여** 얹는다 (요청). 그림 위 투명
+            # 여백만큼 내려간다. 캐릭터보다 나중에 그려 위로.
             tom = self._strip_tomato(tsz, fr)
+            ht9 = self._seat_head_top(slot, H)
             im.alpha_composite(tom, (int(cx - tsz / 2),
-                                     py0 + ph9 + int(6 * k)))
+                                     int(base_y - H + ht9 - tdip + dy)))
             d = ImageDraw.Draw(im)
             x += cw + gap
         for cx, by0, full, fg in later:
@@ -21289,7 +21329,7 @@ class Mascot:
                 self._pomo_keep.append(ph)
             if wait and slot in ready9:
                 # 준비됐어요 — 초록 동그라미에 ✓ (요청). 머리 오른쪽 위.
-                rx, ry = cx + u(17), cy0 + u(52) + dy
+                rx, ry = cx + u(20), cy0 + u(52) + dy
                 rr = u(7)
                 self._oval(cv, rx - rr, ry - rr, rx + rr, ry + rr,
                            fill="#2a9d5c", outline="#ffffff")
@@ -21323,10 +21363,19 @@ class Mascot:
                                font=uf(8, True), fill=cd["text"])
             if not wait:
                 # 집중 비율은 **토마토 한 알**로 (요청 — 얇은 막대는 뭘 재는지
-                # 안 읽혔다). 이름 정중앙 아래, 익을수록 민트 → 코랄.
-                # 커서를 올리면 아래에 숫자 게이지가 뜬다 (_team_vow_hover).
-                tsz = u(24)                # 카드 아래에 붙지 않게 작게·위로
-                tcx, tcy = cx, cy0 + u(145) + dy
+                # 안 읽혔다). 익을수록 민트 → 코랄. 커서를 올리면 아래에
+                # 숫자 게이지가 뜬다 (_team_vow_hover).
+                # 내 것은 이름 아래, **남의 것은 머리 위에 얹는다** (요청)
+                if slot == self.char:
+                    tsz = u(24)            # 카드 아래에 붙지 않게 작게·위로
+                    tcx, tcy = cx, cy0 + u(145) + dy
+                else:
+                    # 머리 꼭대기에 딱 붙여 (그림 위 투명 여백만큼 내려간다)
+                    tsz = u(26)
+                    h9 = int(u(46) * self.ROOM_SIZE.get(slot, 1.0))
+                    ht9 = self._seat_head_top(slot, h9)
+                    tcx = cx
+                    tcy = cy0 + u(92) - h9 + ht9 - tsz * 0.55 + tsz / 2 + dy
                 tim = self._safe_str(self._tomgauge_pic, tsz, fr)
                 if tim:
                     cv.create_image(tcx, tcy, image=tim)
