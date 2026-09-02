@@ -6730,6 +6730,7 @@ class Mascot:
         self._tm_rest_work = 0.0   # 쉬는 중인데 일하는 게 보인 시각 (자동 복귀)
         self._tm_bye_arm = 0.0     # 방장 '오늘은 여기까지' 두 번 누르기
         self._tm_ready = False     # 대기실 '준비됐어요' (참가자)
+        self._tm_off_at = 0.0      # 방장 — 사이클을 마치고 멈춰 있기 시작한 시각
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
@@ -18276,6 +18277,7 @@ class Mascot:
     TEAM_REINVITE = 45.0         # 답 없는 초대장을 다시 보내는 간격
     TEAM_REST_BACK = 120.0       # '잠깐 쉬기' 중 이만큼 계속 일하면 자동 복귀
     TEAM_BYE_ARM = 8.0           # 방장 마무리 — 두 번째 누름을 기다리는 시간
+    TEAM_IDLE_FOLD = 1800.0      # 빈 대기실·다 마치고 멈춘 방을 닫는 시간
 
     def _team_hard_enter(self, mode):
         """방 모드로 하드 깃발을 덮기 전에 **혼자 하던 설정을 적어 둔다.**
@@ -18340,6 +18342,22 @@ class Mascot:
         if isinstance(hb, dict) and hb.get("m"):
             return str(hb["m"])
         return None
+
+    def _team_seat_alive(self, b, slot=""):
+        """그 자리가 싣고 있는 방이 살아 있는가 — 방장 자리가 같은 세션
+        번호를 싣고 보이면 산 방이다 (본인이 방장이면 그 자체로).
+        홈 '같작업' 배지와 중간 참여가 이걸로 유령 방을 거른다 (요청)."""
+        if not isinstance(b, dict) or not b.get("i"):
+            return False
+        host = str(b.get("h") or "")
+        if not host or host == slot:
+            return True
+        for q in (self.room_people or []):
+            if str(q.get("slot") or "") != host:
+                continue
+            hb = q.get("tm") if isinstance(q.get("tm"), dict) else None
+            return bool(hb and str(hb.get("i") or "") == str(b["i"]))
+        return False
 
     def _team_ready_set(self):
         """대기실에서 '준비됐어요'를 누른 사람들 (나 포함)."""
@@ -18427,17 +18445,16 @@ class Mascot:
         tm = self._tm
         if not tm or not slot or slot == self.char:
             return False
-        if not self._team_host():
-            # 참가자가 보낸 초대는 방장이 수락을 못 받아 새 사람이 어느
-            # 명단에도 안 붙는다 (검토) — 보내는 쪽에서 막는다.
-            self._say("초대는 부른 사람만 보낼 수 있어요", 4.0)
-            return False
         if slot in tm["members"]:
             return False
         if len(tm["members"]) + len(tm["invited"]) >= self.TEAM_MAX:
             return False
+        # 참가자도 부를 수 있다 (요청). 초대장에 **방장(h)** 을 실어, 받는
+        # 쪽이 수락 신호를 방장에게 보내게 한다 — 예전엔 초대한 참가자에게
+        # 가서 조용히 버려졌다.
         ok = self._team_send(slot, "tmi", {"i": tm["sid"],
-                                           "m": tm.get("mode") or "norm"})
+                                           "m": tm.get("mode") or "norm",
+                                           "h": tm.get("host") or self.char})
         if ok:
             tm["invited"][slot] = time.time()
             # 지금 꺼져 있으면 초대장이 닿지 않는다 — 켤 때까지 다시
@@ -18564,8 +18581,9 @@ class Mascot:
         # 있어 60초 지난 초대장만 이렇게 가른다. 그 전이면 일단 들어가고
         # _team_tick 의 TEAM_BACK·'방장 안 보임' 검사가 정리한다.
         old9 = time.time() - float(inv.get("at") or 0) > 60.0
+        host9 = str(inv.get("host") or inv["from"])
         for q9 in (self.room_people or [] if old9 else []):
-            if str(q9.get("slot") or "") != inv["from"]:
+            if str(q9.get("slot") or "") != host9:
                 continue
             b9 = q9.get("tm") if isinstance(q9.get("tm"), dict) else None
             if not b9 or str(b9.get("i") or "") != str(inv["sid"]):
@@ -18577,10 +18595,10 @@ class Mascot:
         if self._tm:
             # 이미 다른 방에 있었다 — 조용히 빠지고 옮긴다 (요청)
             self._team_bcast("tmo", {"i": self._tm["sid"]})
-        self._tm = {"sid": inv["sid"], "host": inv["from"],
+        self._tm = {"sid": inv["sid"], "host": host9,
                     "mode": inv.get("mode") or "norm", "state": "wait",
                     "vow": str(vow or "")[:self.TEAM_VOW_N],
-                    "members": {inv["from"]: {"v": "", "at": time.time()},
+                    "members": {host9: {"v": "", "at": time.time()},
                                 self.char: {"v": str(vow or "")[
                                     :self.TEAM_VOW_N], "at": time.time()}},
                     "invited": {}, "len": {}}
@@ -18589,8 +18607,8 @@ class Mascot:
         self._tm_ready = False
         self._tm_back = time.time()    # 끝난 방이면 잠시 뒤 접힌다
         self._tm_host_seen = time.time()
-        self._team_send(inv["from"], "tmy",
-                        {"i": inv["sid"], "v": self._tm["vow"]})
+        # 수락은 **방장에게** (참가자가 부른 초대여도) — 방장만 명단을 든다
+        self._team_send(host9, "tmy", {"i": inv["sid"], "v": self._tm["vow"]})
         self._tm_inv = None
         self._tm_open = False
         # 대기실에서도 불꽃이 켜져 있게 (방장이 시작하면 그때 시계가 돈다)
@@ -18598,6 +18616,8 @@ class Mascot:
         self._safe("team_save", self._team_save)
         self._say("%s 님과 같이 하기로 했어요!"
                   % self._note_name(inv["from"]), 4.0, True)
+        # 수락하면 뽀모도로 창이 뜬다 (요청 — 뭐하는 초대인지 보이게)
+        self._safe("pomo_win", self._pomo_win)
 
     def _team_decline(self):
         """거절 — 토마토가 사라진다 (스스로는 안 사라진다 · 요청)."""
@@ -18672,6 +18692,7 @@ class Mascot:
             # 조용히 거절했다. 옮길지는 사람이 고른다.
             self._tm_inv = {"from": f, "sid": str(x.get("i") or ""),
                             "mode": str(x.get("m") or "norm"),
+                            "host": str(x.get("h") or f),
                             "at": time.time(),
                             "busy": (self._note_name(tm["host"])
                                      if tm else "")}
@@ -18684,6 +18705,8 @@ class Mascot:
                 self._say("%s 님이 같이 뽀모도로 하재요!"
                           % self._note_name(f), 12.0, True)
             self._safe("team_snd", self._sparkle_sound)
+            # 초대가 오면 뽀모도로 창을 열어 무슨 초대인지 보이게 (요청)
+            self._safe("pomo_win", self._pomo_win)
             return
         if not tm or str(x.get("i") or "") != tm["sid"]:
             return
@@ -18820,15 +18843,36 @@ class Mascot:
                            if hard9 else "다 같이 보통 모드로 바뀌었어.",
                            5.0, True)
                 self._pomo_redraw()
-        elif tm.get("state") != "run" and tm.get("invited"):
+        else:
+            # 방장 — 아무도 안 온 대기실은 30분 뒤, 사이클을 다 마치고
+            # 30분 넘게 멈춰 있으면 방을 닫는다 (요청: 홈에 '같작업'만
+            # 남은 유령 방이 생기지 않게). 참가자에게는 조용히(q=1) 간다.
+            oth9 = [s for s in tm["members"] if s != self.char]
+            born9 = float((tm["members"].get(self.char) or {}).get("at")
+                          or now)
+            if (tm.get("state") != "run" and not oth9
+                    and now - born9 > self.TEAM_IDLE_FOLD):
+                self._team_fold(note="아무도 안 와서 방을 닫았어요")
+                return
+            if tm.get("state") == "run" and not st["on"]:
+                if not self._tm_off_at:
+                    self._tm_off_at = now
+                elif now - self._tm_off_at > self.TEAM_IDLE_FOLD:
+                    self._team_bcast("tmbye", {"i": sid9, "q": 1})
+                    self._team_fold(note="한참 쉬어서 방을 닫았어요")
+                    return
+            else:
+                self._tm_off_at = 0.0
+        if tm.get("state") != "run" and tm.get("invited"):
             # 답 없는 초대장은 되보낸다 — 상대가 꺼져 있었으면 처음 것은
             # 서버에서 지워져 영영 안 닿았다 (검토). 받는 쪽은 같은 것이면
-            # 조용히 넘긴다 (tmi 처리).
+            # 조용히 넘긴다 (tmi 처리). 참가자가 부른 것도 같이 (요청).
             for sl9, t9 in list(tm["invited"].items()):
                 if now - float(t9 or 0) > self.TEAM_REINVITE:
                     tm["invited"][sl9] = now
                     self._team_send(sl9, "tmi", {"i": sid9,
-                                                 "m": tm.get("mode") or "norm"})
+                                                 "m": tm.get("mode") or "norm",
+                                                 "h": host9 or self.char})
         if self._tm_rest:
             # '잠깐 쉬기'를 눌러 두고 그냥 그림을 그리면 영영 '쉬는 중'
             # 이었다 (검토). 작업 프로그램이 앞에 있는 채로 오래 가면 스스로
@@ -19774,6 +19818,9 @@ class Mascot:
         if not isinstance(b, dict) or not b.get("i"):
             self._say("그 친구는 지금 같이 하는 중이 아니에요", 4.0)
             return
+        if not self._team_seat_alive(b, slot):
+            self._say("그 방은 지금 비어 있어요 — 부른 사람이 안 보여요", 4.0)
+            return
         sid, host = str(b["i"]), str(b.get("h") or slot)
         if self._tm and self._tm["sid"] == sid:
             self._say("이미 같이 하고 있어요", 3.0)
@@ -19801,6 +19848,7 @@ class Mascot:
         self._say("%s 님네 방에 꼈어요!" % self._note_name(host), 4.0, True)
         self._safe("card", self._relayout_card)
         self._pomo_redraw()
+        self._safe("pomo_win", self._pomo_win)     # 끼면 창이 뜬다 (요청)
 
     def _room_team_ask_draw(self, cv, k):
         """'같작업' 배지를 눌렀을 때 뜨는 참여/아니오 (요청)."""
@@ -21179,11 +21227,11 @@ class Mascot:
                     # 옆으로 넓혀 둔 폭은 지킨다 — 높이만 맞춘다 (검토:
                     # 줄 수가 바뀌는 순간 기본 폭으로 되돌아가 '넓히면 한
                     # 줄에 더'가 스스로 풀렸다)
-                    w9 = int(u(BASE_W))
-                    try:
-                        w9 = max(w9, int(win.winfo_width()))
-                    except Exception:
-                        pass
+                    # winfo_width 는 방금 바꾼 geometry 를 아직 안 반영할
+                    # 때가 있어(after_idle) 옛 폭으로 되돌아갔다 — 사람이
+                    # 끌어 정한 폭(on_resize 가 적어 둔 것)을 쓴다.
+                    w9 = max(int(u(BASE_W)), int(zst.get("user_w") or 0))
+                    zst["w_set"] = w9
                     win.geometry("%dx%d" % (w9, int(u(base_h()))))
             except Exception:
                 pass
@@ -21192,6 +21240,12 @@ class Mascot:
             """크기가 바뀌면 곧바로 다시 그린다 (저장은 draw 가 맡는다)."""
             if e is not None and e.widget is not win:
                 return
+            # fit_win 이 정한 폭과 다르면 사람이 끌어 바꾼 것 — 기억해 둔다
+            try:
+                if e is not None and int(e.width) != int(zst.get("w_set") or 0):
+                    zst["user_w"] = int(e.width)
+            except Exception:
+                pass
             draw()
 
         fit_win()
@@ -32117,21 +32171,31 @@ class Mascot:
         fw = 11 * k                         # 불꽃 폭
         x1 = px0 - 6 * k
         room = x1 - (kx0 + 4 * k)
+        # **글자가 뜻을 나른다** — 좁으면 불꽃을 먼저 버리고 글자를 살린다
+        # (제보: 이름이 긴 사람은 불꽃만 남아 무슨 배지인지 안 읽혔다).
+        # 글자조차 안 들어가면 그때 불꽃만.
+        icon9 = True
         if tw0 + fw + 14 * k > room:
-            txt = ""                        # 좁으면 불꽃만
-            tw0 = 0
-        w9 = tw0 + fw + (12 * k if txt else 8 * k)
+            if tw0 + 12 * k <= room:
+                icon9 = False
+            else:
+                txt = ""
+                tw0 = 0
+        iw9 = fw if icon9 else 0
+        w9 = tw0 + iw9 + (12 * k if txt else 8 * k) - (0 if icon9 else 2 * k)
         x0 = x1 - w9
         if x0 < kx0 + 2 * k:
             return
         cy = py0 + h9 / 2 + 4 * k
         self._rr(cv, x0, cy - h9 / 2, x1, cy + h9 / 2, h9 / 2,
                  fill="#fff0e2", outline="#e8a34c", width=max(1, int(k)))
-        fx = x0 + 5 * k + fw / 2
-        self._flame_icon(cv, fx, cy, h9 * 0.82, tags="dyn")
+        if icon9:
+            fx = x0 + 5 * k + fw / 2
+            self._flame_icon(cv, fx, cy, h9 * 0.82, tags="dyn")
         if txt:
-            cv.create_text(x0 + 8 * k + fw, cy, anchor="w", text=txt,
-                           font=f9, fill="#a35c1f", tags="dyn")
+            cv.create_text(x0 + (8 * k + fw if icon9 else 6 * k), cy,
+                           anchor="w", text=txt, font=f9, fill="#a35c1f",
+                           tags="dyn")
 
     def _room_team_tag(self, cv, px0, py0, k, kx0, slot=""):
         """홈 카드의 '같작업' 배지 — 같이 뽀모도로 하는 중 (요청).
@@ -32146,21 +32210,29 @@ class Mascot:
         fw = 12 * k                         # 사람 아이콘 폭
         x1 = px0 - 6 * k
         room = x1 - (kx0 + 4 * k)
+        # 글자가 뜻을 나른다 — 좁으면 아이콘을 먼저 버린다 (빡집중과 같은 규칙)
+        icon9 = True
         if tw0 + fw + 14 * k > room:
-            txt = ""                        # 좁으면 아이콘만
-            tw0 = 0
-        w9 = tw0 + fw + (12 * k if txt else 8 * k)
+            if tw0 + 12 * k <= room:
+                icon9 = False
+            else:
+                txt = ""
+                tw0 = 0
+        iw9 = fw if icon9 else 0
+        w9 = tw0 + iw9 + (12 * k if txt else 8 * k) - (0 if icon9 else 2 * k)
         x0 = x1 - w9
         if x0 < kx0 + 2 * k:
             return
         cy = py0 + h9 / 2 + 4 * k
         self._rr(cv, x0, cy - h9 / 2, x1, cy + h9 / 2, h9 / 2,
                  fill="#e9f0ff", outline="#6f8fd6", width=max(1, int(k)))
-        self._safe("team_tag_icon", self._invite_icon, cv,
-                   x0 + 5 * k + fw / 2, cy, h9 * 0.40, False, "dyn")
+        if icon9:
+            self._safe("team_tag_icon", self._invite_icon, cv,
+                       x0 + 5 * k + fw / 2, cy, h9 * 0.40, False, "dyn")
         if txt:
-            cv.create_text(x0 + 8 * k + fw, cy, anchor="w", text=txt,
-                           font=f9, fill="#41599b", tags="dyn")
+            cv.create_text(x0 + (8 * k + fw if icon9 else 6 * k), cy,
+                           anchor="w", text=txt, font=f9, fill="#41599b",
+                           tags="dyn")
         if slot and slot != self.char:
             self._room_team_hit.append(
                 (x0 - 4 * k, cy - h9 / 2 - 4 * k, x1 + 4 * k,
@@ -32176,7 +32248,9 @@ class Mascot:
         # 같이 뽀모도로 중이면 그것이 가장 앞이다 (요청 — '같작업').
         # 누르면 중간에 낄 수 있다 (_room_team_hit).
         tmb9 = (p or {}).get("tm")
-        if isinstance(tmb9, dict) and tmb9.get("i"):
+        if (isinstance(tmb9, dict) and tmb9.get("i")
+                and self._team_seat_alive(tmb9, slot)):
+            # 방장 자리가 안 보이는 방(유령)은 배지를 안 단다 (요청)
             self._room_team_tag(cv, px0, py0, k, kx0, slot)
             return
         # 하드모드 집중 중이면 상태 칩보다 '빡집중'이 먼저다 (요청)

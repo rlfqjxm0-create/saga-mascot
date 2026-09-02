@@ -1,7 +1,7 @@
 {
- "version": 1788309127,
+ "version": 1788370303,
  "files": {
-  "mascot.py": "2065e3262721a6209c88da80354e96849ee63a995b19e8caec0d4593c139fa04",
+  "mascot.py": "0d8bbcfbe7f3d084ed043c67823c6ee84b61395ecf2270739103b248812639be",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -582,6 +582,12 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "같이 뽀모도로 — 부른 사람이 아니어도 친구를 초대할 수 있어요 (수락은 방장 방으로 들어가요)",
+  "초대가 오거나 수락하면 뽀모도로 창이 저절로 떠서 무슨 초대인지 바로 보여요",
+  "홈의 '같작업' 배지는 부른 사람이 실제로 보일 때만 떠요 · 아무도 안 온 대기실과 다 마치고 30분 넘게 멈춘 방은 스스로 닫혀요 (유령 방 방지)",
+  "이름이 길어도 홈의 '빡집중'·'같작업' 배지 글자가 잘리지 않아요 (좁으면 아이콘을 먼저 뺍니다)",
+  "같이하기 참가자도 집중 한 번이 끝나면 집중·하드 횟수가 올라가요 (방장이 건너뛴 구간은 안 세요)",
+  "뽀모도로 창의 '시간이 되면 알려 주고 같이 몸을 펴요' 줄을 뺐어요"
+ ]
 }
