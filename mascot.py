@@ -1719,9 +1719,9 @@ class TeamStrip:
         except Exception:
             pass
 
-    def _on_menu(self, _e):
+    def _on_menu(self, e):
         try:
-            self.on_menu()
+            self.on_menu(e.x, e.y, e.x_root, e.y_root)
         except Exception:
             pass
 
@@ -6915,6 +6915,9 @@ class Mascot:
         self._strip_seat_cache = {}
         self._strip_tom_cache = {}
         self._strip_menu_ref = None
+        self._strip_cols = []       # 띠에서 누가 어느 x 구간인지
+        self._tom_top_cache = {}    # 카드 위 내 토마토 그림
+        self._pomo_tom_box = None
         self._vow_keep = None       # 카드 위 내 각오 말풍선 그림
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
@@ -12050,6 +12053,9 @@ class Mascot:
                     x, y = int(pos[0]), int(pos[1])
                     if self._pos_on_screen(x, y):
                         win.geometry("+%d+%d" % (x, y))
+                        # 뒤이어 _place_near 가 '캐릭터 옆'으로 되돌리던
+                        # 것을 막는다 (각오 창이 자리를 못 외운 이유)
+                        win._ena_saved_pos = True
                 last = {}
 
                 def moved(e, w=win):
@@ -12248,8 +12254,15 @@ class Mascot:
                       if win.winfo_exists() else None)
 
     def _place_near(self, win, dx=40, dy=20):
-        """캐릭터 옆에, 캐릭터가 있는 화면 안으로 창을 놓는다."""
+        """캐릭터 옆에, 캐릭터가 있는 화면 안으로 창을 놓는다.
+
+        _keep_front 뒤에 불리면 update_idletasks 가 그 안의 '지난 자리
+        되살리기'를 먼저 돌린다 — 되살린 자리가 있으면 그대로 둔다 (요청:
+        각오 창이 닫은 자리를 기억하게).
+        """
         win.update_idletasks()
+        if getattr(win, "_ena_saved_pos", False):
+            return
         l, t, r, b = self._screen_box()
         w = max(win.winfo_width(), win.winfo_reqwidth())
         h = max(win.winfo_height(), win.winfo_reqheight())
@@ -16423,6 +16436,38 @@ class Mascot:
         self._safe("pomo_badge", self._draw_pomo_badge, bx, by, r, now,
                    hard9)
         self._pomo_badge = (bx, by, r)
+        # 같이하기 중이고 뽀모도로 창이 닫혀 있으면 **내 토마토**도 이 줄에
+        # (요청 — 친구들은 바탕화면에 있는데 내 것만 안 보였다)
+        self._pomo_tom_box = None
+        if self._tm and not self._pomo_win_open():
+            self._safe("pomo_tom_top", self._draw_my_tomato, bx + r + 20, by)
+
+    def _pomo_win_open(self):
+        pw = getattr(self, "_pomo_winref", None)
+        try:
+            return bool(pw is not None and pw.winfo_exists())
+        except Exception:
+            return False
+
+    def _draw_my_tomato(self, cx, cy):
+        """카드 위 아이콘 줄의 내 토마토 (집중 비율만큼 익는다)."""
+        tsz = 26
+        fr = self._team_focus_ratio()
+        step = int(round(max(0.0, min(1.0, fr)) * 20))
+        key = (tsz, step, self.canvas_bg)
+        got = self._tom_top_cache.get(key)
+        if got is None:
+            pil = self._tomgauge_pil(tsz, step / 20.0)
+            key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16)
+                         for i in (1, 3, 5))
+            got = self._tkimg(flat_on_key(pil, key2), soft=pil)
+            if len(self._tom_top_cache) > 40:
+                for k9 in list(self._tom_top_cache)[:20]:
+                    self._tom_top_cache.pop(k9, None)
+            self._tom_top_cache[key] = got
+        self.canvas.create_image(cx, cy, image=got)
+        self._pomo_tom_box = (cx - tsz / 2, cy - tsz / 2, cx + tsz / 2,
+                              cy + tsz / 2)
 
     def _draw_pomo_badge(self, bx, by, br, now, hard=False):
         """뽀모도로가 도는 동안만 뜨는 작은 시계.
@@ -18636,24 +18681,29 @@ class Mascot:
                 self._strip_hide()
             return
         fx = bool(self._tm_fx) and (now - self._tm_fx < self.STRIP_FX)
+        # 누가 집중 중이면 그 사람이 살짝 움직인다 (요청) — 8장 캐시라
+        # 초당 8장이면 충분하고 값도 싸다. 아무도 안 움직이면 1초에 한 장.
+        who = self._strip_people()
+        anim = (not fx) and any(p[2] == "집중" for p in who)
+        gap9 = 0.04 if fx else (self.STRIP_ANIM_DT if anim else 1.0)
         if (self._strip_key is not None and self._strip_im is not None
-                and now - self._strip_at < (0.04 if fx else 1.0)):
+                and now - self._strip_at < gap9):
             self._strip_follow()        # 캐릭터가 움직였으면 따라간다
             return
         self._strip_at = now
-        who = self._strip_people()
         if not who:
             self._strip_hide()
             return
         if self._strip is None:
             self._strip = TeamStrip(self.root, self.canvas_bg,
                                     self._strip_click, self._strip_drag,
-                                    self._strip_menu, self._strip_drop)
+                                    self._strip_menu_at, self._strip_drop)
         size9 = self._strip_size()
         gap9 = self._strip_gap()
         key9 = (tuple((p[0], p[1], p[2], round(float(p[3] or 0), 2))
                       for p in who), size9, gap9,
-                int(now * 25) if fx else 0)
+                int(now * 25) if fx else
+                (self._strip_step(now) if anim else 0))
         if key9 != self._strip_key or self._strip_im is None:
             self._strip_key = key9
             self._strip_im = self._strip_sheet(who, now, fx)
@@ -18738,6 +18788,39 @@ class Mascot:
         self._strip_seat_cache[key] = im
         return im
 
+    STRIP_ANIM_N = 8             # 집중 중 움직임 — 한 바퀴를 몇 장으로
+    STRIP_ANIM_DT = 0.125        # 그 장 간격 (초당 8장)
+    STRIP_ANIM_DEG = 2.4         # 상체가 기우는 최대 각도
+
+    def _strip_step(self, now):
+        return int(now / self.STRIP_ANIM_DT) % self.STRIP_ANIM_N
+
+    def _strip_seat_anim(self, slot, h, step):
+        """집중 중인 캐릭터 — 발을 축으로 살짝 기운 장 (캐시).
+
+        친구 캐릭터는 파츠가 없고 앉은 그림 한 장뿐이라 팔만 움직일 수는
+        없다. 대신 그리는 것처럼 상체가 앞뒤로 살짝 흔들린다 (요청).
+        """
+        key = ("anim", slot, int(h), int(step))
+        got = self._strip_seat_cache.get(key)
+        if got is not None:
+            return got
+        base = self._strip_seat(slot, h)
+        if base is None:
+            return None
+        a = self.STRIP_ANIM_DEG * math.sin(2 * math.pi * step
+                                           / float(self.STRIP_ANIM_N))
+        try:
+            got = base.rotate(a, resample=Image.BICUBIC, expand=False,
+                              center=(base.width / 2.0, base.height * 0.92))
+        except Exception:
+            return base
+        if len(self._strip_seat_cache) > 120:
+            for k in list(self._strip_seat_cache)[:60]:
+                self._strip_seat_cache.pop(k, None)
+        self._strip_seat_cache[key] = got
+        return got
+
     def _strip_tomato(self, size, ratio):
         step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
         key = (int(size), step)
@@ -18764,34 +18847,49 @@ class Mascot:
         ph9 = int(18 * k)           # 상태 알약 높이
         tsz = int(24 * k)           # 토마토
         cols = []
+        dm = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+
+        def tw_of(s):
+            if f_v is None:
+                return len(s) * int(8 * k)
+            try:
+                return int(dm.textlength(s, font=f_v))
+            except Exception:
+                return len(s) * int(8 * k)
+
         for slot, vow, stt, fr in who:
             seat = self._strip_seat(slot, H)
             sw = seat.width if seat is not None else int(H * 0.8)
             vow = str(vow or "")
-            if len(vow) > 14:
-                vow = vow[:14] + "…"
-            tw = 0
-            if vow and f_v is not None:
-                try:
-                    tw = int(ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-                             .textlength(vow, font=f_v))
-                except Exception:
-                    tw = len(vow) * int(8 * k)
-            bw = (tw + int(18 * k)) if vow else 0
+            # 말풍선은 **칸 폭(캐릭터 + 여백) 안**으로 자른다 — 칸 폭을
+            # 말풍선에 맞추면 첫 칸만 넓어져 여백이 사람마다 달라졌다 (제보)
+            lim = sw + gap - int(4 * k)
+            if vow and tw_of(vow) + int(18 * k) > lim:
+                while vow and tw_of(vow + "…") + int(18 * k) > lim:
+                    vow = vow[:-1]
+                vow = (vow + "…") if vow else ""
+            bw = (tw_of(vow) + int(18 * k)) if vow else 0
             cols.append((slot, vow, stt, fr, seat, sw, bw))
         head = (bh + th + int(10 * k)) + int(u(28))    # 말풍선 + 뛰는 여유
         base_y = head + H
-        Wt = sum(max(c[5], c[6]) for c in cols) + gap * max(0, len(cols) - 1) \
+        Wt = sum(c[5] for c in cols) + gap * max(0, len(cols) - 1) \
             + margin * 2
         Ht = base_y + int(8 * k) + ph9 + int(6 * k) + tsz + int(6 * k)
         im = Image.new("RGBA", (max(2, Wt), max(2, Ht)), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
         t = (now - self._tm_fx) if fx else 0.0
         x = margin
+        self._strip_cols = []          # 우클릭이 누구를 짚었는지 (시트 좌표)
         for i, (slot, vow, stt, fr, seat, sw, bw) in enumerate(cols):
-            cw = max(sw, bw)
+            cw = sw                    # 여백은 캐릭터마다 똑같이 (제보)
             cx = x + cw / 2.0
+            self._strip_cols.append((x - gap / 2.0, x + cw + gap / 2.0, slot))
             dy = (-abs(math.sin(t * 6.0 + i * 0.8)) * u(9)) if fx else 0.0
+            if (not fx) and stt == "집중" and seat is not None:
+                # 집중 중 — 그리는 듯 상체가 살짝 흔들린다 (사람마다 박자 다르게)
+                seat = self._strip_seat_anim(
+                    slot, H, (self._strip_step(now) + i * 3)
+                    % self.STRIP_ANIM_N) or seat
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
             # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
             d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
@@ -18872,6 +18970,70 @@ class Mascot:
                         fy9 + math.sin(a) * r1 * 0.55,
                         fx9 + math.cos(a) * r1, fy9 + math.sin(a) * r1),
                        fill=col, width=max(1, int(2 * k)))
+
+    STRIP_REACT = (("채찍질", "gwhip"), ("콕", "poke"), ("쓰담", "blanket"),
+                   ("응원", "cheer"))
+
+    def _strip_react_menu(self, slot):
+        """캐릭터 위 우클릭 — 홈처럼 반응을 보내는 메뉴 (요청).
+
+        반응은 홈의 단추와 **같은 길**(_room_send)로 나가므로 연타 제한·
+        소리·홈 카드 연출이 그대로다. 메뉴는 누를 때만 만들어 가볍다.
+        """
+        mn = tk.Menu(self.root, tearoff=0)
+        nm = self._note_name(slot)
+        mn.add_command(label="  %s 님에게  " % nm, state="disabled")
+        for lab, kind in self.STRIP_REACT:
+            mn.add_command(label=lab, command=lambda k9=kind, s9=slot:
+                           self._safe("strip_react", self._strip_react, s9, k9))
+        mn.add_separator()
+        mn.add_command(label="크기·여백 조절",
+                       command=lambda: self._safe("strip_menu",
+                                                  self._strip_menu))
+        mn.add_command(label="뽀모도로 창 열기",
+                       command=lambda: self._safe("pomo_win", self._pomo_win))
+        mn.add_command(label="바탕화면에서 숨기기",
+                       command=lambda: self._safe("strip_off",
+                                                  self._strip_off))
+        self._safe("menu_snd", self._btn_snd, mn) if hasattr(
+            self, "_btn_snd") else None
+        return mn
+
+    def _strip_off(self):
+        self.us["pomo_strip"] = False
+        self._safe("strip_save", self._save_settings)
+        self._strip_hide()
+
+    def _strip_react(self, slot, kind):
+        """띠에서 고른 반응을 그 사람에게 — 홈의 '고른 상대'를 잠깐 빌린다."""
+        old = getattr(self, "_room_pick", None)
+        self._room_pick = slot
+        try:
+            self._room_send(kind)
+        finally:
+            self._room_pick = old
+        toast = getattr(self, "_room_toast", None)
+        if toast and isinstance(toast, tuple):
+            self._tm_say = (toast[0], time.time())
+
+    def _strip_menu_at(self, x, y, xr, yr):
+        """띠 우클릭 — 캐릭터 위면 반응 메뉴, 빈 자리면 크기·여백 판."""
+        slot = None
+        for x0, x1, sl in (getattr(self, "_strip_cols", None) or []):
+            if x0 <= x <= x1:
+                slot = sl
+                break
+        if not slot:
+            self._strip_menu()
+            return
+        mn = self._strip_react_menu(slot)
+        try:
+            mn.tk_popup(int(xr), int(yr))
+        finally:
+            try:
+                mn.grab_release()
+            except Exception:
+                pass
 
     def _strip_menu(self):
         """띠 우클릭 — 캐릭터 크기·가로 여백을 게이지바로 (요청).
