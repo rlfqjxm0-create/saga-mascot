@@ -1559,6 +1559,177 @@ class CharLayer:
         self.ok = False
 
 
+class TeamStrip:
+    """같이하는 친구들을 바탕화면에 두는 창 (요청 — 뽀모도로 창을 닫아도).
+
+    윈도우는 레이어 창(진짜 알파 — 앉은 그림·말풍선·토마토·색종이의
+    가장자리가 그대로 매끈)이고, 레이어를 못 쓰는 곳(맥)은 색상키 창으로
+    물러난다. 그림은 마스코트가 PIL 한 장으로 합성해 넘긴다 — 이 클래스는
+    창·입력·자리만 안다. 끌면 on_drag(dx, dy), 그냥 누르면 on_click(),
+    우클릭이면 on_menu(), 끌기를 마치면 on_drop().
+    """
+
+    def __init__(self, root, key, on_click, on_drag, on_menu, on_drop=None):
+        self.top = tk.Toplevel(root)
+        self.top.overrideredirect(True)
+        self.top.attributes("-topmost", True)
+        self.key = key
+        self.hwnd = 0
+        self.mode = "key"
+        self._shown = False
+        self._img = None
+        self.canvas = None
+        self.x = self.y = 0
+        self.w = self.h = 1
+        self.on_click, self.on_drag = on_click, on_drag
+        self.on_menu, self.on_drop = on_menu, on_drop
+        self._press = None
+        self._moved = False
+        self._premul = CharLayer._premul
+        u = layer_api()[0] if IS_WIN else None
+        if u is not None:
+            try:
+                self.top.update_idletasks()
+                self.hwnd = int(self.top.wm_frame(), 16)
+                ex = u.GetWindowLongW(self.hwnd, -20)
+                # LAYERED | TOOLWINDOW | NOACTIVATE — TRANSPARENT 는 안 건다
+                # (끌고 눌러야 한다 · 지뢰 118)
+                u.SetWindowLongW(self.hwnd, -20,
+                                 ex | 0x80000 | 0x80 | 0x8000000)
+                self.mode = "layer"
+                self._shown = True
+                CharLayer.push(self, Image.new("RGBA", (1, 1), (0, 0, 0, 0)),
+                               0, 0)
+                self._shown = False
+                u.ShowWindow(self.hwnd, 0)
+            except Exception:
+                self.mode = "key"
+        if self.mode == "key":
+            try:
+                if IS_MAC:
+                    self.top.attributes("-transparent", True)
+                else:
+                    self.top.attributes("-transparentcolor", key)
+            except Exception:
+                pass
+            self.top.config(bg=key)
+            self.canvas = tk.Canvas(self.top, width=1, height=1, bg=key,
+                                    highlightthickness=0, bd=0)
+            self.canvas.pack()
+            self.top.withdraw()
+            try:
+                self.hwnd = int(self.top.wm_frame(), 16) if IS_WIN else 0
+            except Exception:
+                self.hwnd = 0
+        for w9 in ((self.top, self.canvas) if self.canvas is not None
+                   else (self.top,)):
+            w9.bind("<Button-1>", self._on_press)
+            w9.bind("<B1-Motion>", self._on_move)
+            w9.bind("<ButtonRelease-1>", self._on_release)
+            w9.bind("<Button-3>", self._on_menu)
+
+    @property
+    def visible(self):
+        return bool(self._shown)
+
+    def show(self, im, x, y):
+        """그림을 화면 (x, y) 에 올린다 (레이어면 자리·그림 한 번에)."""
+        self.x, self.y = int(x), int(y)
+        self.w, self.h = im.size
+        if self.mode == "layer":
+            if not self._shown:
+                u = layer_api()[0]
+                if u is not None:
+                    u.ShowWindow(self.hwnd, 4)       # SW_SHOWNOACTIVATE
+                self._shown = True
+            return CharLayer.push(self, im, self.x, self.y)
+        try:
+            key2 = tuple(int(str(self.key)[i:i + 2], 16) for i in (1, 3, 5))
+            ph = ImageTk.PhotoImage(flat_on_key(im, key2))
+            self.canvas.config(width=im.width, height=im.height)
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, image=ph, anchor="nw")
+            self._img = ph
+            self.top.geometry("+%d+%d" % (self.x, self.y))
+            if not self._shown:
+                self.top.deiconify()
+                self._shown = True
+            return True
+        except Exception:
+            return False
+
+    def hide(self):
+        if not self._shown:
+            return
+        self._shown = False
+        try:
+            if self.mode == "layer":
+                u = layer_api()[0]
+                if u is not None:
+                    u.ShowWindow(self.hwnd, 0)
+            else:
+                self.top.withdraw()
+        except Exception:
+            pass
+
+    def raise_top(self):
+        """'항상 위' 창 사이에서 맨 앞으로 (HWND_TOP · 지뢰 23)."""
+        if not self._shown:
+            return
+        try:
+            if IS_WIN and self.hwnd:
+                ctypes.windll.user32.SetWindowPos(
+                    self.hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+            else:
+                self.top.lift()
+        except Exception:
+            pass
+
+    def _on_press(self, e):
+        self._press = (e.x_root, e.y_root)
+        self._moved = False
+
+    def _on_move(self, e):
+        if self._press is None:
+            return
+        dx, dy = e.x_root - self._press[0], e.y_root - self._press[1]
+        if abs(dx) + abs(dy) < 2 and not self._moved:
+            return
+        self._moved = True
+        self._press = (e.x_root, e.y_root)
+        try:
+            self.on_drag(dx, dy)
+        except Exception:
+            pass
+
+    def _on_release(self, _e):
+        moved = self._moved
+        self._press = None
+        self._moved = False
+        try:
+            if moved:
+                if self.on_drop is not None:
+                    self.on_drop()
+            else:
+                self.on_click()
+        except Exception:
+            pass
+
+    def _on_menu(self, _e):
+        try:
+            self.on_menu()
+        except Exception:
+            pass
+
+    def destroy(self):
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+        self.hwnd = 0
+        self._shown = False
+
+
 class MacCharLayer:
     """맥에서 캐릭터 몸을 진짜 반투명으로 올리는 층 (CALayer 덧레이어).
 
@@ -6731,6 +6902,16 @@ class Mascot:
         self._tm_bye_arm = 0.0     # 방장 '오늘은 여기까지' 두 번 누르기
         self._tm_ready = False     # 대기실 '준비됐어요' (참가자)
         self._tm_off_at = 0.0      # 방장 — 사이클을 마치고 멈춰 있기 시작한 시각
+        # 친구들을 바탕화면에 (요청) — 창·마지막 그림·자리·캐시
+        self._strip = None
+        self._strip_at = 0.0
+        self._strip_key = None
+        self._strip_im = None
+        self._strip_z = 0.0
+        self._strip_seat_cache = {}
+        self._strip_tom_cache = {}
+        self._strip_menu_ref = None
+        self._vow_keep = None       # 카드 위 내 각오 말풍선 그림
         self._safe("team_back", self._team_restore)
         self._note_at = 0.0               # 쪽지 폴링을 마지막에 돈 시각
         self._note_q = []                 # 쪽지 스레드 → 본체 큐 (지뢰 26)
@@ -10964,7 +11145,26 @@ class Mascot:
             return 0
         return YT_BAR if self._yt_on() else 0
 
+    VOW_BAR = 30                 # 카드 위 내 각오 말풍선 몫 (같이하기 중)
+
+    def _vow_bar(self):
+        """같이하기 중이면 카드 위에 내 각오 말풍선이 선다 (요청) — 그 몫."""
+        tm = getattr(self, "_tm", None)
+        if not tm or not getattr(self, "timer_on", False):
+            return 0
+        if not str(tm.get("vow") or "").strip():
+            return 0
+        return self.VOW_BAR
+
     def _yt_bar(self):
+        """카드 위에 필요한 여백 전부 — 음악·환경음·뽀모 줄 + 내 각오 말풍선.
+
+        말풍선은 그 줄들보다 **더 위**에 선다 (요청). 아이콘은 카드 y0 기준
+        으로 그리므로 합만 늘리면 카드·아이콘이 같이 내려가고 맨 위가 빈다.
+        """
+        return self._yt_bar_rows() + self._vow_bar()
+
+    def _yt_bar_rows(self):
         """카드 위 줄(음악·환경음·뽀모도로)이 요구하는 여백. 없으면 0.
 
         같은 줄에 나란히 놓으므로 여백은 한 번만 잡는다. 단 **재생 단추
@@ -11994,7 +12194,17 @@ class Mascot:
             try:
                 if not win.winfo_exists():
                     return
-                if not IS_WIN or covered():
+                # 마우스 왼쪽 단추가 눌린 동안(=창을 끄는 중)에는 건드리지
+                # 않는다 — 끄는 도중 z순서를 바꾸면 윈도우의 창 이동이
+                # 끊긴다 (제보: 창을 옮길 때 프레임이 떨어진다)
+                busy9 = False
+                if IS_WIN:
+                    try:
+                        busy9 = bool(ctypes.windll.user32.GetAsyncKeyState(0x01)
+                                     & 0x8000)
+                    except Exception:
+                        busy9 = False
+                if not busy9 and (not IS_WIN or covered()):
                     to_front()
                 win.after(150 if IS_WIN else 700, raise_loop)
             except Exception:
@@ -18319,6 +18529,7 @@ class Mascot:
         self._tm_back = 0.0
         self._safe("team_hard", self._team_hard_leave)
         self._safe("team_save", self._team_save)
+        self._safe("strip_hide", self._strip_hide)
         if note:
             self._tm_say = (note, time.time())
         if say:
@@ -18369,6 +18580,424 @@ class Mascot:
             if isinstance(d, dict) and d.get("y"):
                 out.add(sl)
         return out
+
+    # ── 친구들을 바탕화면에 (요청) ──────────────────────────────────────
+    # 뽀모도로 창을 닫아 두면 같이하는 친구들이 내 캐릭터 옆에 뜬다 —
+    # 각오 말풍선·앉은 그림·상태·토마토. 그림은 PIL 한 장(시트)으로 합성해
+    # 레이어 창에 올린다 (가장자리 매끈 · 지뢰 117). 집중 한 번이 끝나면
+    # 창과 똑같이 색종이·폭죽이 터지고 캐릭터가 콩콩 뛴다 — 그 3초만
+    # 25fps, 평소엔 1초에 한 장 (상태가 느리게 바뀐다).
+    STRIP_SEAT = 120             # 캐릭터 키 (100% · 화면 배율 전)
+    STRIP_FX = 3.2               # 축하 길이 (창과 같다)
+
+    def _strip_want(self):
+        """지금 띠를 보여야 하는가."""
+        if not (self._tm and self._team_gate()
+                and self.us.get("pomo_strip", True)):
+            return False
+        if getattr(self, "_fs_hidden", False) or getattr(self, "_chip_hide",
+                                                          False):
+            return False
+        pw = getattr(self, "_pomo_winref", None)
+        try:
+            if pw is not None and pw.winfo_exists():
+                return False            # 창이 떠 있으면 거기서 본다
+        except Exception:
+            pass
+        return True
+
+    def _strip_hide(self):
+        st = self._strip
+        if st is not None:
+            try:
+                st.hide()
+            except Exception:
+                pass
+        self._strip_key = None
+
+    def _strip_people(self):
+        """띠에 서는 사람들 — 내 캐릭터는 뺀다 (요청: 타이머가 곧 나다)."""
+        return [p for p in self._team_people() if p[0] != self.char]
+
+    def _strip_tick(self, now):
+        if not self._strip_want():
+            if self._strip is not None and self._strip.visible:
+                self._strip_hide()
+            return
+        fx = bool(self._tm_fx) and (now - self._tm_fx < self.STRIP_FX)
+        if (self._strip_key is not None and self._strip_im is not None
+                and now - self._strip_at < (0.04 if fx else 1.0)):
+            self._strip_follow()        # 캐릭터가 움직였으면 따라간다
+            return
+        self._strip_at = now
+        who = self._strip_people()
+        if not who:
+            self._strip_hide()
+            return
+        if self._strip is None:
+            self._strip = TeamStrip(self.root, self.canvas_bg,
+                                    self._strip_click, self._strip_drag,
+                                    self._strip_menu, self._strip_drop)
+        size9 = self._strip_size()
+        gap9 = self._strip_gap()
+        key9 = (tuple((p[0], p[1], p[2], round(float(p[3] or 0), 2))
+                      for p in who), size9, gap9,
+                int(now * 25) if fx else 0)
+        if key9 != self._strip_key or self._strip_im is None:
+            self._strip_key = key9
+            self._strip_im = self._strip_sheet(who, now, fx)
+        x, y = self._strip_pos(self._strip_im)
+        self._strip.show(self._strip_im, x, y)
+        if not fx or now - self._strip_z > 1.0:
+            self._strip_z = now
+            self._strip.raise_top()
+
+    def _strip_follow(self):
+        st = self._strip
+        if st is None or self._strip_im is None or not st.visible:
+            return
+        x, y = self._strip_pos(self._strip_im)
+        if (x, y) != (st.x, st.y):
+            st.show(self._strip_im, x, y)
+
+    def _strip_size(self):
+        try:
+            return max(50, min(150, int(self.us.get("pomo_strip_size") or 100)))
+        except (TypeError, ValueError):
+            return 100
+
+    def _strip_gap(self):
+        v = self.us.get("pomo_strip_gap")
+        try:
+            return max(0, min(80, int(30 if v is None else v)))
+        except (TypeError, ValueError):
+            return 30
+
+    def _strip_pos(self, im):
+        """띠의 화면 자리 — 내 캐릭터 창 기준 (끌어 옮긴 값이 있으면 그것)."""
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw, rh = self.root.winfo_width(), self.root.winfo_height()
+        except Exception:
+            rx = ry = 0
+            rw, rh = int(self.W), int(self.H)
+        pos = self.us.get("pomo_strip_pos")
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            try:
+                return rx + int(pos[0]), ry + int(pos[1])
+            except (TypeError, ValueError):
+                pass
+        return rx + rw + int(self._ui(12)), ry + rh - im.height
+
+    def _strip_drag(self, dx, dy):
+        """끌어서 옮긴다 — 내 캐릭터 창 기준 상대 자리로 기억."""
+        st = self._strip
+        if st is None or self._strip_im is None:
+            return
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        except Exception:
+            rx = ry = 0
+        self.us["pomo_strip_pos"] = [st.x + dx - rx, st.y + dy - ry]
+        self._strip_follow()
+
+    def _strip_drop(self):
+        self._safe("strip_save", self._save_settings)
+
+    def _strip_click(self):
+        self._safe("pomo_win", self._pomo_win)
+
+    def _strip_seat(self, slot, h):
+        key = (slot, int(h))
+        got = self._strip_seat_cache.get(key)
+        if got is not None:
+            return got
+        p = self._room_art_file(slot, "seat.png")
+        if not p:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            w9 = max(1, round(im.width * (h / float(im.height))))
+            im = im.resize((w9, int(h)), Image.LANCZOS)
+        except Exception:
+            return None
+        if len(self._strip_seat_cache) > 40:
+            for k in list(self._strip_seat_cache)[:20]:
+                self._strip_seat_cache.pop(k, None)
+        self._strip_seat_cache[key] = im
+        return im
+
+    def _strip_tomato(self, size, ratio):
+        step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
+        key = (int(size), step)
+        got = self._strip_tom_cache.get(key)
+        if got is None:
+            got = self._tomgauge_pil(int(size), step / 20.0)
+            if len(self._strip_tom_cache) > 80:
+                for k in list(self._strip_tom_cache)[:40]:
+                    self._strip_tom_cache.pop(k, None)
+            self._strip_tom_cache[key] = got
+        return got
+
+    def _strip_sheet(self, who, now, fx):
+        """띠 한 장 (RGBA) — 각오 말풍선 · 앉은 그림 · 상태 · 토마토 (+축하)."""
+        u = self._ui
+        k = u(1) * self._strip_size() / 100.0
+        H = int(self.STRIP_SEAT * k)
+        gap = int(u(self._strip_gap()))
+        margin = int(u(16))
+        f_v = self._pil_font(int(round(9 * k / u(1) * u(1))), True)
+        f_s = self._pil_font(int(round(8 * k / u(1) * u(1))), True)
+        bh = int(24 * k)            # 말풍선 높이
+        th = int(7 * k)             # 꼬리
+        ph9 = int(18 * k)           # 상태 알약 높이
+        tsz = int(24 * k)           # 토마토
+        cols = []
+        for slot, vow, stt, fr in who:
+            seat = self._strip_seat(slot, H)
+            sw = seat.width if seat is not None else int(H * 0.8)
+            vow = str(vow or "")
+            if len(vow) > 14:
+                vow = vow[:14] + "…"
+            tw = 0
+            if vow and f_v is not None:
+                try:
+                    tw = int(ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+                             .textlength(vow, font=f_v))
+                except Exception:
+                    tw = len(vow) * int(8 * k)
+            bw = (tw + int(18 * k)) if vow else 0
+            cols.append((slot, vow, stt, fr, seat, sw, bw))
+        head = (bh + th + int(10 * k)) + int(u(28))    # 말풍선 + 뛰는 여유
+        base_y = head + H
+        Wt = sum(max(c[5], c[6]) for c in cols) + gap * max(0, len(cols) - 1) \
+            + margin * 2
+        Ht = base_y + int(8 * k) + ph9 + int(6 * k) + tsz + int(6 * k)
+        im = Image.new("RGBA", (max(2, Wt), max(2, Ht)), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        t = (now - self._tm_fx) if fx else 0.0
+        x = margin
+        for i, (slot, vow, stt, fr, seat, sw, bw) in enumerate(cols):
+            cw = max(sw, bw)
+            cx = x + cw / 2.0
+            dy = (-abs(math.sin(t * 6.0 + i * 0.8)) * u(9)) if fx else 0.0
+            bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
+            # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
+            d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
+                       base_y + 6 * k), fill=(0, 0, 0, 60))
+            if seat is not None:
+                im.alpha_composite(seat, (int(cx - sw / 2),
+                                          int(base_y - H + dy)))
+                d = ImageDraw.Draw(im)
+            if vow and bw:
+                bub = bubble_img(bw, bh, bh / 2.0,
+                                 (bw / 2.0 - 6 * k, bw / 2.0 + 6 * k,
+                                  bw / 2.0, th),
+                                 "#fffdf7", self._tint(fg, 0.45), 1.3)
+                by0 = int(base_y - H - bh - th - 8 * k + dy)
+                im.alpha_composite(bub, (int(cx - bw / 2), by0))
+                d = ImageDraw.Draw(im)
+                if f_v is not None:
+                    d.text((cx, by0 + bh / 2.0), vow, font=f_v,
+                           fill=self._shade(fg, 0.15), anchor="mm")
+            # 상태 알약
+            if f_s is not None:
+                try:
+                    sw9 = int(d.textlength(stt, font=f_s))
+                except Exception:
+                    sw9 = len(stt) * int(8 * k)
+            else:
+                sw9 = len(stt) * int(8 * k)
+            pw9 = sw9 + int(18 * k)
+            py0 = base_y + int(8 * k)
+            pill = bubble_img(pw9, ph9, ph9 / 2.0, None, bg, fg, 1.0)
+            im.alpha_composite(pill, (int(cx - pw9 / 2), py0))
+            d = ImageDraw.Draw(im)
+            if f_s is not None:
+                d.text((cx, py0 + ph9 / 2.0), stt, font=f_s, fill=fg,
+                       anchor="mm")
+            tom = self._strip_tomato(tsz, fr)
+            im.alpha_composite(tom, (int(cx - tsz / 2),
+                                     py0 + ph9 + int(6 * k)))
+            d = ImageDraw.Draw(im)
+            x += cw + gap
+        if fx:
+            self._strip_fx(im, t, k)
+        return im
+
+    def _strip_fx(self, im, t, k):
+        """색종이·폭죽 — 창(_team_fx_draw)과 같은 씨앗·색으로."""
+        d = ImageDraw.Draw(im)
+        W, H = im.size
+        rnd = random.Random(int(self._tm_fx) % 99991)
+        cd = self.card
+        cols = [self._tint(cd["fill"], 0.15), "#ffd75e", "#8fd18f",
+                "#7fb0ff", "#ff9ec4", "#ffffff"]
+        for _ in range(60):
+            x = rnd.uniform(8 * k, W - 8 * k)
+            y0 = rnd.uniform(-60 * k, H * 0.4)
+            vy = rnd.uniform(60 * k, 150 * k)
+            y = y0 + vy * t + 40 * k * t * t
+            if y < 0 or y > H:
+                continue
+            w9 = rnd.uniform(4 * k, 8 * k)
+            h9 = w9 * rnd.uniform(0.5, 1.5)
+            a = rnd.uniform(0, math.pi) + t * 3.0
+            ca, sa = math.cos(a), math.sin(a)
+            pts = []
+            for dx, dy in ((-w9 / 2, -h9 / 2), (w9 / 2, -h9 / 2),
+                           (w9 / 2, h9 / 2), (-w9 / 2, h9 / 2)):
+                pts.append((x + dx * ca - dy * sa, y + dx * sa + dy * ca))
+            d.polygon(pts, fill=rnd.choice(cols))
+        for fx9, fy9, col, t0 in ((W * 0.2, 40 * k, "#ffd75e", 0.0),
+                                  (W * 0.8, 60 * k, "#ff9ec4", 0.35)):
+            p = t - t0
+            if not (0.0 < p < 1.2):
+                continue
+            r1 = 8 * k + 16 * k * min(1.0, p / 0.5)
+            for i in range(12):
+                a = i * math.pi / 6
+                d.line((fx9 + math.cos(a) * r1 * 0.55,
+                        fy9 + math.sin(a) * r1 * 0.55,
+                        fx9 + math.cos(a) * r1, fy9 + math.sin(a) * r1),
+                       fill=col, width=max(1, int(2 * k)))
+
+    def _strip_menu(self):
+        """띠 우클릭 — 캐릭터 크기·가로 여백을 게이지바로 (요청).
+
+        Tk 의 Scale 은 맥에서 죽으므로(적대 검증 4) 캔버스에 직접 그린다.
+        """
+        got = self._strip_menu_ref
+        try:
+            if got is not None and got.winfo_exists():
+                got.lift()
+                return
+        except Exception:
+            pass
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(230)), int(u(158))
+        win = tk.Toplevel(self.root)
+        self._strip_menu_ref = win
+        win.title("친구들 띠")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        st = {"drag": None, "hits": []}
+        rows = (("캐릭터 크기", "pomo_strip_size", 50, 150, "%d%%"),
+                ("가로 여백", "pomo_strip_gap", 0, 80, "%dpx"))
+
+        def cur(key):
+            return self._strip_size() if key == "pomo_strip_size" \
+                else self._strip_gap()
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            cv.delete("all")
+            st["hits"] = []
+            for i, (lab, key, lo, hi, fmt) in enumerate(rows):
+                y = u(14) + i * u(44)
+                v = cur(key)
+                cv.create_text(u(14), y + u(6), anchor="w", text=lab,
+                               font=self._uf(9, True), fill=cd["text"])
+                cv.create_text(W - u(14), y + u(6), anchor="e", text=fmt % v,
+                               font=self._uf(9, True), fill=cd["fill"])
+                gx0, gx1, gy = u(14), W - u(14), y + u(27)
+                self._rr_soft(cv, gx0, gy - u(3), gx1, gy + u(3), u(3),
+                              fill="#f3edf2", outline="")
+                kx = gx0 + (gx1 - gx0) * (v - lo) / float(hi - lo)
+                self._rr_soft(cv, gx0, gy - u(3), max(gx0 + u(6), kx),
+                              gy + u(3), u(3),
+                              fill=self._tint(cd["fill"], 0.45), outline="")
+                self._oval(cv, kx - u(7), gy - u(7), kx + u(7), gy + u(7),
+                           fill="#ffffff", outline=cd["fill"])
+                st["hits"].append((gx0, gy - u(13), gx1, gy + u(13),
+                                   key, lo, hi))
+            y2 = u(102)
+            cv.create_line(u(12), y2, W - u(12), y2, fill=line)
+            for j, (lab, act) in enumerate((("뽀모도로 창 열기", "open"),
+                                            ("바탕화면에서 숨기기", "hide"))):
+                yy = y2 + u(14) + j * u(20)
+                cv.create_text(u(14), yy, anchor="w", text=lab,
+                               font=self._uf(9, True), fill=cd["text"])
+                st["hits"].append((u(10), yy - u(9), W - u(10), yy + u(9),
+                                   act, 0, 0))
+
+        def set_from(x, hit):
+            key, lo, hi = hit[4], hit[5], hit[6]
+            frac = max(0.0, min(1.0, (x - hit[0]) / float(hit[2] - hit[0])))
+            self.us[key] = int(round(lo + (hi - lo) * frac))
+            self._strip_key = None          # 바로 다시 그린다
+            self._strip_at = 0.0
+            draw()
+
+        def press(e):
+            for hit in st["hits"]:
+                if hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3]:
+                    self._safe("ui_click", self._ui_click)
+                    if hit[4] == "open":
+                        win.destroy()
+                        self._safe("pomo_win", self._pomo_win)
+                    elif hit[4] == "hide":
+                        self.us["pomo_strip"] = False
+                        self._safe("strip_save", self._save_settings)
+                        self._strip_hide()
+                        win.destroy()
+                    else:
+                        st["drag"] = hit
+                        set_from(e.x, hit)
+                    return
+
+        def motion(e):
+            if st["drag"] is not None:
+                set_from(e.x, st["drag"])
+
+        def release(_e):
+            if st["drag"] is not None:
+                st["drag"] = None
+                self._safe("strip_save", self._save_settings)
+
+        cv.bind("<Button-1>", press)
+        cv.bind("<B1-Motion>", motion)
+        cv.bind("<ButtonRelease-1>", release)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        draw()
+
+    def _draw_my_vow(self):
+        """카드 위 — 같이하기 중인 내 각오 말풍선 (요청).
+
+        음악·환경음·뽀모 아이콘 줄이 있으면 그보다 **조금 더 위**에 선다.
+        자리는 _vow_bar 가 _yt_bar 에 더해 둔 맨 윗칸이다.
+        """
+        vb = self._vow_bar()
+        if not vb:
+            self._vow_keep = None
+            return
+        vow = str(self._tm.get("vow") or "").strip()
+        if len(vow) > 16:
+            vow = vow[:16] + "…"
+        cd = self.card
+        g = self._card_geom()
+        cx = (g["x0"] + g["x1"]) / 2.0
+        top = float(self.cfg.get("card_top", 22))
+        f = self._cf_n(9, True)
+        tw = self._mw(vow, f)
+        bw, bh, th = tw + 20, 20, 6
+        fg = cd["fill"]
+        sh = self._soft_shape(bw, bh, bh / 2.0, "#fffdf7",
+                              self._tint(fg, 0.45), lw=1.2,
+                              tail=(bw / 2 - 6, bw / 2 + 6, bw / 2, th))
+        y0 = top + 1
+        if sh is not None:
+            self.canvas.create_image(cx - bw / 2 - 1, y0 - 1, image=sh,
+                                     anchor="nw")
+            self._vow_keep = sh
+        self.canvas.create_text(cx, y0 + bh / 2.0, text=vow, font=f,
+                                fill=self._shade(fg, 0.15))
 
     def _team_blob(self):
         """방 신호에 실을 같이하기 값 (없으면 None). 작게 유지한다."""
@@ -19695,7 +20324,7 @@ class Mascot:
         # (환경음 토글과 같은 이유 — 지뢰 145: 카드만 움직이고 oy 가
         # 안 따라가면 캐릭터가 밀린다)
         bar9 = (bool(self.timer_on and self._pomo_running()),
-                self._yt_music_row())
+                self._yt_music_row(), self._vow_bar())
         if bar9 != self._pomo_bar_last:
             self._pomo_bar_last = bar9
             self._safe("card", self._relayout_card)
@@ -19707,6 +20336,7 @@ class Mascot:
                 self._log_error("pomo_hard")
         if self._team_gate():
             self._safe("team_tick", self._team_tick, now)
+            self._safe("strip", self._strip_tick, now)
         st = self._pomo()
         if not st["on"] or st["end"] <= 0:
             return
@@ -20222,7 +20852,27 @@ class Mascot:
         WW8 = max(W, cv.winfo_width())
         self._tm_vow_box = []          # 잘린 각오 (커서를 올리면 다 보인다)
         self._tm_tom_box = []          # 토마토 (커서를 올리면 게이지)
-        cv.create_text(pad - ox8 + u(9), y0, anchor="w",
+        # '친구들을 바탕화면에' 토글 — 방 섹션 왼쪽 위 (요청). 점과 글자를
+        # 세로 정중앙에, 제목은 그 오른쪽으로.
+        on7 = bool(self.us.get("pomo_strip", True))
+        f7 = uf(7, True)
+        lab7 = "친구들을 바탕화면에"
+        tw7 = self._mw(lab7, f7)
+        ph7 = u(16)
+        px0 = pad - ox8 + u(6)
+        px1 = px0 + tw7 + u(26)
+        col7 = "#2a9d5c" if on7 else cd["sub"]
+        self._rr_soft(cv, px0, y0 - ph7 / 2, px1, y0 + ph7 / 2, ph7 / 2,
+                      fill="#e6f6ec" if on7 else "#f5f2f7",
+                      outline="" if on7 else line, width=1)
+        r7 = u(3.2)
+        self._oval(cv, px0 + u(9) - r7, y0 - r7, px0 + u(9) + r7, y0 + r7,
+                   fill=col7, outline="")
+        cv.create_text(px0 + u(16) + tw7 / 2, y0, text=lab7, font=f7,
+                       fill=col7)
+        self._pomo_hits.append((px0, y0 - ph7 / 2, px1, y0 + ph7 / 2,
+                                ("tmstrip",)))
+        cv.create_text(px1 + u(8), y0, anchor="w",
                        text="같이 기다리는 중" if wait else "같이 하는 중",
                        font=uf(9, True), fill=cd["sub"])
         n_txt = "%d명" % len(who)
@@ -20598,6 +21248,7 @@ class Mascot:
         win = tk.Toplevel(self.root)
         self._pomo_winref = win
         win.title("뽀모도로")
+        self._safe("strip_hide", self._strip_hide)   # 창이 뜨면 띠는 숨는다
         win.configure(bg=cd["panel"])
         win.resizable(True, True)       # 모서리를 끌어 크기 조절 (요청)
         win.minsize(int(self._ui(BASE_W) * 0.7), int(self._ui(base_h()) * 0.7))
@@ -21143,6 +21794,17 @@ class Mascot:
                         fit_win()
                         draw()
                         return
+                    if isinstance(act, tuple) and act[0] == "tmstrip":
+                        # 친구들을 바탕화면에 (요청)
+                        on7 = not bool(self.us.get("pomo_strip", True))
+                        self.us["pomo_strip"] = on7
+                        self._safe("strip_save", self._save_settings)
+                        self._strip_key = None
+                        self._tm_say = ("창을 닫으면 친구들이 바탕화면에 보여요"
+                                        if on7 else "바탕화면에는 안 보여요",
+                                        time.time())
+                        draw()
+                        return
                     if isinstance(act, tuple) and act[0] == "tmauto":
                         # 모두 준비되면 자동 시작 (방장 · 요청)
                         if self._tm and self._team_host():
@@ -21240,6 +21902,16 @@ class Mascot:
             """크기가 바뀌면 곧바로 다시 그린다 (저장은 draw 가 맡는다)."""
             if e is not None and e.widget is not win:
                 return
+            # **크기가 그대로면 안 그린다.** 창을 옮기는 동안에도 <Configure>
+            # 가 초당 수십 번 오는데, 그때마다 통째로 다시 그려 끌 때 끊겼다
+            # (제보 — 홈 창은 _room_relayout 이 이미 이렇게 막고 있다).
+            try:
+                wh9 = (int(e.width), int(e.height)) if e is not None else None
+            except Exception:
+                wh9 = None
+            if wh9 is not None and wh9 == zst.get("wh"):
+                return
+            zst["wh"] = wh9
             # fit_win 이 정한 폭과 다르면 사람이 끌어 바꾼 것 — 기억해 둔다
             try:
                 if e is not None and int(e.width) != int(zst.get("w_set") or 0):
@@ -22432,6 +23104,8 @@ class Mascot:
             # 뽀모 시계도 이 줄에 — 자리는 구역 밖에서 지운다 (같은 이유)
             self._pomo_badge = None
             self._safe("pomo_top", self._draw_pomo_top, now)
+            # 같이하기 중 — 내 각오 말풍선은 그 줄들보다 위에 (요청)
+            self._safe("my_vow", self._draw_my_vow)
             # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
             # 남으면 점이 안 보이는데도 그 자리를 누르면 창이 뜬다
             self._dot_btn = None
