@@ -21271,7 +21271,7 @@ class Mascot:
                                     ("tmauto",)))
         ready9 = self._team_ready_set() if wait else set()
         cy0 = y0 + u(12)
-        ch = u(164)                    # 이름 아래 토마토 한 알 몫까지
+        ch = u(150)                    # 토마토가 머리 위로 가서 아래는 이름까지
         # 창을 옆으로 넓히면 남는 폭까지 쓴다 (요청). 화면 전체는 나중에
         # 정중앙으로 통째로 옮겨지므로(_pomo_ox) 그만큼 미리 빼 둔다 —
         # 그러면 옮긴 뒤 이 줄만 창 양끝까지 닿는다.
@@ -21365,17 +21365,14 @@ class Mascot:
                 # 집중 비율은 **토마토 한 알**로 (요청 — 얇은 막대는 뭘 재는지
                 # 안 읽혔다). 익을수록 민트 → 코랄. 커서를 올리면 아래에
                 # 숫자 게이지가 뜬다 (_team_vow_hover).
-                # 내 것은 이름 아래, **남의 것은 머리 위에 얹는다** (요청)
-                if slot == self.char:
-                    tsz = u(24)            # 카드 아래에 붙지 않게 작게·위로
-                    tcx, tcy = cx, cy0 + u(145) + dy
-                else:
-                    # 머리 꼭대기에 딱 붙여 (그림 위 투명 여백만큼 내려간다)
-                    tsz = u(26)
-                    h9 = int(u(46) * self.ROOM_SIZE.get(slot, 1.0))
-                    ht9 = self._seat_head_top(slot, h9)
-                    tcx = cx
-                    tcy = cy0 + u(92) - h9 + ht9 - tsz * 0.55 + tsz / 2 + dy
+                # 창 안에서는 **나까지 모두 머리 위에** 얹는다 (요청 — 캐릭터
+                # 타이머 위 아이콘 줄의 내 토마토는 그대로). 머리 꼭대기에
+                # 딱 붙여 (그림 위 투명 여백만큼 내려간다)
+                tsz = u(26)
+                h9 = int(u(46) * self.ROOM_SIZE.get(slot, 1.0))
+                ht9 = self._seat_head_top(slot, h9)
+                tcx = cx
+                tcy = cy0 + u(92) - h9 + ht9 - tsz * 0.55 + tsz / 2 + dy
                 tim = self._safe_str(self._tomgauge_pic, tsz, fr)
                 if tim:
                     cv.create_image(tcx, tcy, image=tim)
@@ -21420,16 +21417,12 @@ class Mascot:
                     and y0 - u(3) <= my <= y1 + u(3)):
                 continue
             pct = int(round(max(0.0, min(1.0, fr)) * 100 / 5.0) * 5)
-            # 카드 아래 여백(32)에 들어가게 납작하게 — 안 그러면 위로
-            # 뒤집혀 이름·상태를 가린다
+            # 토마토가 머리 위에 있으니 게이지는 그 **위**에 (얼굴을 안 가린다)
             bw9, bh9 = u(84), u(26)
             px0 = cx - bw9 / 2
-            py0 = by + u(3)
-            try:
-                if py0 + bh9 > cv.winfo_height() - u(2):
-                    py0 = y0 - u(5) - bh9        # 아래가 모자라면 위로
-            except Exception:
-                pass
+            py0 = y0 - u(4) - bh9
+            if py0 < u(2):
+                py0 = by + u(3)                  # 위가 모자라면 아래로
             self._rr_soft(cv, px0, py0, px0 + bw9, py0 + bh9, u(9),
                           fill="#fffdf7", outline=self._shade(fg, 0.1),
                           width=1.4)
@@ -21619,7 +21612,7 @@ class Mascot:
             # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
-            tmh = (172 * rows9 + 28) if (self._tm and rows9) else 0
+            tmh = (158 * rows9 + 28) if (self._tm and rows9) else 0
             return ty1 + 16 + 40 + 30 + 44 + wk + tmh + 32
 
         W, H = u(BASE_W), u(base_h())
