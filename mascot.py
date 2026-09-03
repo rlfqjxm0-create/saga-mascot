@@ -9318,6 +9318,7 @@ class Mascot:
                 self._press = None
                 return
             pb = getattr(self, "_pomo_badge", None)
+            tb9 = getattr(self, "_pomo_tom_box", None)
             bb = getattr(self, "_bubble_btn", None)
             act = getattr(self, "_bubble_act", None)
             if (bb and act and bb[0] <= px <= bb[2] and bb[1] <= py <= bb[3]):
@@ -9348,6 +9349,11 @@ class Mascot:
             elif mb and (px - mb[0]) ** 2 + (py - mb[1]) ** 2 <= (mb[2] + 3) ** 2:
                 self._safe("ui_click", self._ui_click)
                 self._safe("music", self._yt_toggle)
+            elif (tb9 and tb9[0] - 3 <= px <= tb9[2] + 3
+                    and tb9[1] - 3 <= py <= tb9[3] + 3):
+                # 카드 위 토마토 = '잠깐 쉬기' (요청). 창의 단추와 같다.
+                self._safe("ui_click", self._ui_click)
+                self._safe("tom_rest", self._pomo_rest_toggle)
             elif pb and (px - pb[0]) ** 2 + (py - pb[1]) ** 2 <= (pb[2] + 3) ** 2:
                 # 뽀모도로가 도는 동안만 뜨는 시계 배지 — 창을 연다
                 self._safe("ui_click", self._ui_click)
@@ -16497,7 +16503,7 @@ class Mascot:
         pomo = bool(getattr(self, "timer_on", False) and self._pomo_running())
         if pomo:
             items.append(("pomo", 28.0))
-            if self._tm and not self._pomo_win_open():
+            if self._tom_top_want():
                 items.append(("tom", 26.0))
         total = sum(w for _n, w in items) + self.TOP_GAP * max(0, len(items) - 1)
         x = mid - total / 2.0
@@ -16542,9 +16548,21 @@ class Mascot:
         # 같이하기 중이고 뽀모도로 창이 닫혀 있으면 **내 토마토**도 이 줄에
         # (요청 — 친구들은 바탕화면에 있는데 내 것만 안 보였다)
         self._pomo_tom_box = None
-        if self._tm and not self._pomo_win_open():
+        if self._tom_top_want():
             self._safe("pomo_tom_top", self._draw_my_tomato,
                        xs.get("tom", bx + r + 20), by)
+
+    def _tom_top_want(self):
+        """카드 위 아이콘 줄에 내 토마토를 둘까 — 같이하기 중이거나
+        하드모드 감시가 도는 중, 그리고 뽀모도로 창이 닫혀 있을 때.
+
+        토마토는 곧 **'잠깐 쉬기' 단추**다 (요청) — 하드모드에서 화장실·물
+        마시기처럼 잠깐 자리를 비울 때 누르면 그동안 딴짓으로 안 센다.
+        혼자 하는 하드모드에는 그 단추가 창에도 없어서 토마토가 유일한 길이다.
+        """
+        if self._pomo_win_open():
+            return False
+        return bool(self._tm or self._pomo_hard_active())
 
     def _pomo_win_open(self):
         pw = getattr(self, "_pomo_winref", None)
@@ -16558,10 +16576,11 @@ class Mascot:
         tsz = 26
         fr = self._team_focus_ratio()
         step = int(round(max(0.0, min(1.0, fr)) * 20))
-        key = (tsz, step, self.canvas_bg)
+        rest = bool(self._tm_rest)          # 잠깐 쉬는 중 — 파란 토마토
+        key = (tsz, step, self.canvas_bg, rest)
         got = self._tom_top_cache.get(key)
         if got is None:
-            pil = self._tomgauge_pil(tsz, step / 20.0)
+            pil = self._tomgauge_pil(tsz, step / 20.0, rest=rest)
             key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16)
                          for i in (1, 3, 5))
             got = self._tkimg(flat_on_key(pil, key2), soft=pil)
@@ -18658,9 +18677,12 @@ class Mascot:
     TOMATO_RAMP = (("#a9e39c", "#5fbf62"), ("#ffcf7f", "#f0a23a"),
                    ("#ff8a86", "#e8544e"))   # (몸, 테두리) 0% · 50% · 100%
 
-    def _tomgauge_pil(self, size, ripe):
+    TOMATO_REST = ("#8fb8ff", "#4f86d8")   # 잠깐 쉬는 중 (몸, 테두리)
+
+    def _tomgauge_pil(self, size, ripe, rest=False):
         """토마토 한 알 (RGBA, size px) — 집중 비율만큼 민트 → 살구 → 코랄로
-        익는다. 4배로 그려 줄여 가장자리가 매끈하다. 얼굴은 없다 (요청)."""
+        익는다. 4배로 그려 줄여 가장자리가 매끈하다. 얼굴은 없다 (요청).
+        rest 면 '잠깐 쉬는 중' — 익기와 무관하게 파랗다 (요청)."""
         S = 4
         W = int(size * S)
 
@@ -18680,6 +18702,8 @@ class Mascot:
             t = (ripe - 0.5) / 0.5
             base = lerp(hexc(r1[0]), hexc(r2[0]), t)
             line = lerp(hexc(r1[1]), hexc(r2[1]), t)
+        if rest:
+            base, line = hexc(self.TOMATO_REST[0]), hexc(self.TOMATO_REST[1])
         dark = lerp(base, (120, 80, 100), 0.16)
         im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
         d = ImageDraw.Draw(im)
@@ -20328,6 +20352,46 @@ class Mascot:
                 out.append(sl)
         return out
 
+    def _pomo_rest_toggle(self, redraw=True):
+        """'잠깐 쉬기' 켜고 끄기 — 뽀모도로 창의 단추와 카드 위 토마토가
+        같은 길을 쓴다 (요청). 같이하기면 방에도 알린다(r). 혼자 하는
+        하드모드에서는 그동안 딴짓으로 안 센다."""
+        self._tm_rest = not self._tm_rest
+        self._tm_rest_work = 0.0
+        self._tm_say = ("다녀올게요 — 시계는 그대로 가요"
+                        if self._tm_rest else "다시 집중!", time.time())
+        self._safe("rest_say", self._say,
+                   "다녀와 — 그동안은 딴짓으로 안 셀게" if self._tm_rest
+                   else "다시 집중!", 4.0)
+        if self._tm:
+            self._safe("room_push", self._room_push_now)
+        if redraw:
+            self._pomo_redraw()
+
+    def _rest_autoback(self, now):
+        """'잠깐 쉬기'를 켜 두고 그냥 그리면 스스로 돌아온다 — 작업
+        프로그램이 앞에 있는 채로 TEAM_REST_BACK 을 넘기면. 같이하기는
+        _team_tick 이, 혼자 하는 하드모드는 _pomo_hard_tick 이 부른다."""
+        if not self._tm_rest:
+            self._tm_rest_work = 0.0
+            return
+        work9 = False
+        try:
+            work9 = bool(self._fg_is_work(now))
+        except Exception:
+            work9 = False
+        if not work9:
+            self._tm_rest_work = 0.0
+        elif not self._tm_rest_work:
+            self._tm_rest_work = now
+        elif now - self._tm_rest_work > self.TEAM_REST_BACK:
+            self._tm_rest = False
+            self._tm_rest_work = 0.0
+            self._tm_say = ("다시 집중!", now)
+            self._safe("rest_say", self._say,
+                       "다시 그리기 시작했네 — '쉬는 중'을 껐어!", 5.0)
+            self._pomo_redraw()
+
     def _pomo_hard_tick(self, now):
         """하드모드 감시 — 초 단위면 충분해서 1초에 한 번만 돈다."""
         if now - self._hd_at < 1.0:
@@ -20340,10 +20404,17 @@ class Mascot:
             self._hd_off0 = None
             self._hd_guard_shown = False
             self._pomo_guard_close()
+            if not self._tm and self._tm_rest:
+                # 혼자 하는 하드모드의 '잠깐 쉬기'는 감시 구간과 함께 끝난다
+                self._tm_rest = False
+                self._tm_rest_work = 0.0
             return
-        # 같이하기에서 '잠깐 쉬기'를 누른 동안은 딴짓으로 안 센다 (요청 —
-        # 화장실·물 마시기. 방 시계는 그대로 흐른다).
-        if self._tm and self._tm_rest:
+        if not self._tm:
+            self._rest_autoback(now)     # 같이하기는 _team_tick 이 맡는다
+        # '잠깐 쉬기'를 누른 동안은 딴짓으로 안 센다 (요청 — 화장실·물
+        # 마시기. 방 시계는 그대로 흐른다). 같이하기든 혼자든 같다 — 카드 위
+        # 토마토가 이 단추다.
+        if self._tm_rest:
             if self._hd_off0 is not None:
                 self._hd_off0 = None
                 self._hd_nag = 0
@@ -22834,11 +22905,7 @@ class Mascot:
                         self._safe("room_push", self._room_push_now)
                         draw()
                     elif act == "tmrest":     # 나만 잠깐 쉬기 (요청)
-                        self._tm_rest = not self._tm_rest
-                        self._tm_say = (
-                            "다녀올게요 — 시계는 그대로 가요"
-                            if self._tm_rest else "다시 집중!", time.time())
-                        self._safe("room_push", self._room_push_now)
+                        self._pomo_rest_toggle(redraw=False)
                         draw()
                     elif act == "tmout":      # 오늘은 여기까지
                         # 방장이 돌고 있는 방에서 누르면 **전원 마무리**라

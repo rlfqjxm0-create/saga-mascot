@@ -1,7 +1,7 @@
 {
- "version": 1788401917,
+ "version": 1788402920,
  "files": {
-  "mascot.py": "0c19914f8e585b354a2059f0b5be1d7ce11cba3b67c49cd1005018e9b515ac73",
+  "mascot.py": "d9a02ded9bae27f62484cf0b2e73897a43c145c367a4589cd41c355a83db7a78",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -594,6 +594,9 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "환경음이 여섯 가지 늘었어요 — 바다 동굴·바다 파도·숲·숲 새소리·숲 새소리2·일상 빗소리2. 모두 3분짜리라 오래 틀어도 덜 지루하고, 반복해도 이음매가 안 들려요. 종류가 많아져서 고르는 창에는 스크롤이 생겼어요 (일곱 줄까지 보이고 휠이나 오른쪽 막대로)",
+  "캐릭터 폼을 바꾸면 홈·뽀모도로 창·바탕화면에서도 그 모습으로 보여요 (사가의 변신 전/후) — 모두에게 바로 반영돼요. 그리고 같이하기에서 나간 사람이 창에 계속 남아 있던 것도 고쳤어요 (나감 신호를 놓쳐도 4분 뒤 저절로 빠지고, 대기실이면 자동 시작도 다시 돌아가요)",
+  "하드모드에서 타이머 카드 위의 토마토를 누르면 '잠깐 쉬기'가 켜져요 (혼자·같이 모두) — 쉬는 동안은 딴짓으로 안 세고 토마토가 파래져요. 다시 누르면 꺼지고 원래 색으로 돌아와요"
+ ]
 }
