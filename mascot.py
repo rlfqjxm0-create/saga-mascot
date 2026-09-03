@@ -15834,10 +15834,19 @@ class Mascot:
             self._say("새 소식이 있어요! 껐다 켜면 반영돼요", 6.0, hold=True)
 
     def _update_latest(self, pages=None):
-        """기록에 있는 가장 최신 안내 번호. 없으면 0."""
+        """빨간 점을 켤지 가르는 '가장 최신 안내 번호'. 없으면 0.
+
+        **조용한 배포의 안내(q)는 세지 않는다.** 팝업만 안 뜰 뿐 목록에
+        새 줄이 생기면 빨간 점이 켜져서, 사람에게는 그냥 알림이 온 것과
+        같았다 (제보: "조용히 배포하랬는데 왜 빨간 점이 뜨지"). 그런
+        안내는 목록에는 그대로 쌓이되 먼저 부르지는 않는다 — 나중에
+        '업데이트 소식'을 열면 다 보인다.
+        """
         try:
             vs = [int(g.get("ver") or 0)
-                  for g in (pages if pages is not None else self._update_pages())]
+                  for g in (pages if pages is not None
+                            else self._update_pages())
+                  if not g.get("q")]
             return max([v for v in vs if v > 0] or [0])
         except Exception:
             return 0
