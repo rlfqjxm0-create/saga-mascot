@@ -1581,6 +1581,7 @@ class TeamStrip:
         self._shown = False
         self._img = None
         self._last_im = None        # 마지막으로 올린 그림 객체 (색상키 경로)
+        self._ph_cache = []         # [(그림 객체, PhotoImage)] — 번갈아 오는 자세용
         self.canvas = None
         self.x = self.y = 0
         self.w = self.h = 1
@@ -1670,9 +1671,21 @@ class TeamStrip:
             # 맥에서 끌 때마다 심하게 끊겼다 (퀸시 제보). 그림 객체가 그대로면
             # 창만 옮긴다.
             if im is not self._last_im or self._img is None:
-                key2 = tuple(int(str(self.key)[i:i + 2], 16)
-                             for i in (1, 3, 5))
-                ph = ImageTk.PhotoImage(flat_on_key(im, key2))
+                # 최근에 올린 그림이면 만들어 둔 PhotoImage 를 다시 쓴다 —
+                # 펜 자세 두 장이 번갈아 오가는 동안 키 색 섞기를 되풀이하지
+                # 않는다 (맥 CPU · 퀸시 제보). 몇 장만 든다.
+                ph = None
+                for im9, ph9 in self._ph_cache:
+                    if im9 is im:
+                        ph = ph9
+                        break
+                if ph is None:
+                    key2 = tuple(int(str(self.key)[i:i + 2], 16)
+                                 for i in (1, 3, 5))
+                    ph = ImageTk.PhotoImage(flat_on_key(im, key2))
+                    self._ph_cache.append((im, ph))
+                    if len(self._ph_cache) > 4:
+                        self._ph_cache.pop(0)
                 self.canvas.config(width=im.width, height=im.height)
                 self.canvas.delete("all")
                 self.canvas.create_image(0, 0, image=ph, anchor="nw")
@@ -6942,6 +6955,13 @@ class Mascot:
         self._tm_at = 0.0          # 같이하기 셈을 마지막에 돈 시각
         self._tm_fx = 0.0          # 완주 축하가 시작된 시각
         self._tm_bye = {}          # 퇴장 연출 중인 사람 — slot: (시각, 각오, 상태, 비율)
+        self._strip_who = None     # 띠가 마지막으로 그린 사람 목록 (다시 그릴 때만 갱신)
+        self._strip_root = None    # 띠를 마지막으로 놓았을 때의 본체 창 자리
+        self._strip_sheets = {}    # 띠 시트 캐시 — 열쇠 → (시트, 클릭 자리, 말풍선 자리)
+        self._fgself_at = 0.0      # 앞 창이 내 창인지 마지막으로 물은 시각
+        self._fgself_val = False
+        self._upd_unread_at = 0.0  # 빨간 점 판정을 마지막으로 계산한 시각
+        self._upd_unread_val = False
         self._tm_gone = {}         # 방금 나간 사람 — 묵은 자리 신호로 되살아나지 않게
         self._bye_cache = {}       # 퇴장 말풍선·손 그림
         self._pomo_alarm_key = ""  # 마지막으로 알린 구간 (phase, round) — 두 번 안 울리게
@@ -11182,8 +11202,6 @@ class Mascot:
         self._chip_imgs[key] = got
         return got or None
 
-    POMO_TOP_EXTRA = 30          # 재생 단추 줄 **위**에 뽀모 아이콘이 설 때
-
     def _yt_music_row(self):
         """재생 단추 줄이 서 있는가 (개인 노래·모두의 플리)."""
         if not getattr(self, "timer_on", False):
@@ -11242,10 +11260,9 @@ class Mascot:
                  and self._pomo_running())
         if not pomo9:
             return base9
-        if self._yt_music_row():
-            return base9 + self.POMO_TOP_EXTRA
-        # 하드모드 불꽃이 시계 위로 솟는다 — 여기 여유가 없으면 불꽃
-        # 윗부분이 창에 잘린다 (제보)
+        # 재생 단추도 **같은 줄**에 선다 (요청 — 위에 한 줄 더 세우니
+        # 시계·토마토가 재생 단추와 겹쳐 보였다). 하드모드 불꽃이 시계
+        # 위로 솟으므로 그만큼만 더 (없으면 불꽃 윗부분이 창에 잘린다).
         return (base9 or YT_BAR) + 12
 
     def _amb_on_any(self):
@@ -11668,7 +11685,8 @@ class Mascot:
             return
         c, cd = self.canvas, self.card
         g = self._card_geom()
-        mid = (g["x0"] + g["x1"]) / 2
+        # 가로 자리는 줄 전체(환경음·음악·시계·토마토)를 가운데 맞춘 값에서
+        mid = self._top_row_x().get("music", (g["x0"] + g["x1"]) / 2)
         by = g["y0"] - 24            # 카드 윗변에서 10px 띄운다 (붙으면 답답하다)
         ink = cd["fill"]
         trio = bool(getattr(self, "_pl_on", False))
@@ -11730,15 +11748,8 @@ class Mascot:
         c, cd = self.canvas, self.card
         g = self._card_geom()
         r = 14.0                          # 노래 버튼과 같은 동그라미
-        cx = (g["x0"] + g["x1"]) / 2
-        if (self.us.get("yt_url") or getattr(self, "_pl_on", False)) \
-                and self._yt_on():
-            # 노래 단추 왼쪽으로 비켜 준다. 플레이리스트는 단추가 셋이라
-            # 더 멀리 (이전곡 단추와 겹치지 않게).
-            cx -= 62.0 if getattr(self, "_pl_on", False) else 34.0
-        else:
-            # 뽀모 시계·토마토와 한 줄이면 무리 전체가 가운데 (요청)
-            cx = self._top_row_x().get("amb", cx)
+        # 무리 전체(환경음·음악·시계·토마토)가 가운데 — 제 자리는 여기서
+        cx = self._top_row_x().get("amb", (g["x0"] + g["x1"]) / 2)
         by = g["y0"] - 24
         # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
         self._soft_circle(c, cx, by, r, cd["bg"], cd["border"])
@@ -12562,6 +12573,22 @@ class Mascot:
             return
         self._z_pin_at = now
         u = ctypes.windll.user32
+        # **'항상 위' 표식이 풀렸는가.** 다른 창 뒤에 놓이는 SetWindowPos 나
+        # 전체화면 프로그램의 복귀에서 창이 항상 위 무리에서 빠질 수 있다.
+        # 그러면 HWND_TOP 으로 올려도 보통 창 무리의 맨 앞일 뿐이라, 다음
+        # 클릭에 곧바로 다시 묻힌다 — '가끔 창 아래로 가려진다'의 후보.
+        # 표식을 다시 걸고, 그랬다는 사실을 기록에 남긴다 (지뢰 51).
+        try:
+            ex9 = u.GetWindowLongW(self._main_hwnd, -20)
+            if not (ex9 & 0x8):
+                u.SetWindowPos(self._main_hwnd, -1, 0, 0, 0, 0,
+                               0x1 | 0x2 | 0x10)           # HWND_TOPMOST
+                lay9 = self._char_lay
+                if lay9 is not None and getattr(lay9, "hwnd", 0):
+                    lay9.set_topmost(True)
+                self._z_note("topmost_lost")
+        except Exception:
+            pass
         x, y = self.root.winfo_rootx(), self.root.winfo_rooty()
         bx0, by0, bx1, by1 = x, y, x + self.W, y + self.H
         # 내 창들은 앞에 있어도 괜찮다 (말풍선은 일부러 캐릭터보다 위에 둔다).
@@ -12608,6 +12635,16 @@ class Mascot:
             cur = u.GetWindow(cur, 2)          # GW_HWNDNEXT
         if not buried:
             return
+        # 무엇에 묻혔는지 남긴다 — 창 종류(클래스)와 자리만 (제목은 안 남긴다)
+        try:
+            cls9 = ctypes.create_unicode_buffer(48)
+            u.GetClassNameW(cur, cls9, 48)
+            ex9 = u.GetWindowLongW(cur, -20)
+            self._z_note("buried_by %s topmost=%d rect=%d,%d,%d,%d"
+                         % (cls9.value[:24], 1 if ex9 & 0x8 else 0,
+                            r[0], r[1], r[2], r[3]))
+        except Exception:
+            pass
         # HWND_TOP(0) — HWND_TOPMOST(-1)는 이미 항상 위인 창에는 무효라
         # 순서를 못 되돌린다 (지뢰 23).
         u.SetWindowPos(self._main_hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
@@ -12617,6 +12654,33 @@ class Mascot:
         self._last_pos = None
         self._panel_z = 0.0
         self._z_check = 0.0
+
+    Z_NOTE_GAP = 600.0       # 같은 z순서 사건은 10분에 한 번만 기록한다
+
+    def _z_note(self, what):
+        """z순서 사건을 .error.log 에 남긴다 (10분에 한 번씩만).
+
+        '가끔 창 뒤로 가려진다'는 화면만 보고는 못 가른다 — 어떤 창이
+        덮었는지, 항상 위가 풀렸는지를 숫자로 남겨야 제보 하나로 갈린다.
+        """
+        now = time.time()
+        d = getattr(self, "_z_notes", None)
+        if d is None:
+            d = self._z_notes = {}
+        key = what.split(" ", 1)[0]
+        if now - d.get(key, 0.0) < self.Z_NOTE_GAP:
+            return
+        d[key] = now
+        try:
+            path = os.path.join(self.state_dir, ".error.log")
+            with open(path, "a", encoding="utf-8") as fp:
+                fp.write("\n===== %s zorder %s\n"
+                         % (time.strftime("%Y-%m-%d %H:%M:%S"), what))
+                fp.write("char=%s fs_hidden=%s smooth=%s topmost_set=%s\n"
+                         % (self.char, self._fs_hidden, self._smooth_on,
+                            self.us.get("topmost", True)))
+        except Exception:
+            pass
 
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
@@ -13060,7 +13124,19 @@ class Mascot:
         맥은 늘 False 를 돌려주고 있어서 타이머를 만지는 것이 딴짓으로
         세어졌다 (요청: 전체 사용자에게 타이머 조작은 딴짓이 아니게).
         맨 앞 앱의 PID 를 내 것과 견준다 — AppKit 은 맥 번들에 있다.
+
+        **0.5초 기억한다.** 같이하기 중에는 사람 목록을 만들 때마다 불려
+        맥에서 프레임마다 AppKit 질의가 나갔다 (퀸시 CPU 제보). 상태 판정은
+        1초 단위라 0.5초 묵어도 결과가 같다.
         """
+        now = time.time()
+        if now - self._fgself_at < 0.5:
+            return self._fgself_val
+        self._fgself_at = now
+        self._fgself_val = self._fg_is_self_now()
+        return self._fgself_val
+
+    def _fg_is_self_now(self):
         if IS_MAC:
             try:
                 from AppKit import NSWorkspace
@@ -15889,17 +15965,30 @@ class Mascot:
         """
         v = max(self._update_latest(), self._update_read_ver())
         self._read_ver = v
+        self._upd_unread_at = 0.0          # 점 판정 캐시를 그 자리에서 지운다
         try:
             _save_json(os.path.join(self.state_dir, UPDATE_READ), {"ver": v})
         except Exception:
             pass
 
     def _update_unread(self):
-        """안 본 안내가 있는가 — 그릴 때마다 계산한다."""
+        """안 본 안내가 있는가 — 5초에 한 번만 계산한다.
+
+        계산이 업데이트 기록·소식 목록 **파일 둘을 읽어** JSON 으로 푸는데,
+        그릴 때마다 불려 프레임마다 디스크를 건드렸다 (맥 러너 실측 프레임당
+        0.4~0.5ms · 퀸시 CPU 제보). 새 소식은 5초 안에 점이 켜지면 충분하고,
+        읽음 표시는 그 자리에서 캐시를 지운다.
+        """
         if not self.cfg.get("update_dot"):
             return False
+        now = time.time()
+        if now - self._upd_unread_at < 5.0:
+            return self._upd_unread_val
+        self._upd_unread_at = now
         latest = self._update_latest()
-        return latest > 0 and latest > self._update_read_ver()
+        self._upd_unread_val = bool(latest > 0
+                                    and latest > self._update_read_ver())
+        return self._upd_unread_val
 
     def _update_pages(self):
         """보여 줄 안내 묶음들 — 오래된 것부터.
@@ -16496,10 +16585,14 @@ class Mascot:
         """
         g = self._card_geom()
         mid = (g["x0"] + g["x1"]) / 2.0
-        music = self._yt_music_row()
         items = []
-        if self._amb_on_any() and not music:
+        if self._amb_on_any():
             items.append(("amb", 28.0))
+        if self._yt_bar_music():
+            # 재생 단추 — 플레이리스트면 이전·재생·다음 셋이 나란히
+            # (중심 간격 27 · 반지름 11.5), 아니면 하나 (반지름 14)
+            items.append(("music", 77.0 if getattr(self, "_pl_on", False)
+                          else 28.0))
         pomo = bool(getattr(self, "timer_on", False) and self._pomo_running())
         if pomo:
             items.append(("pomo", 28.0))
@@ -16516,9 +16609,8 @@ class Mascot:
     def _draw_pomo_top(self, now):
         """카드 **위** 뽀모도로 아이콘 (요청 — 창 안이 아니라 음악 줄처럼).
 
-        · 아무것도 없으면 카드 위 정중앙
-        · 환경음 알약이 있으면 그 옆
-        · 재생 단추 줄이 있으면 그 줄 **위**, 가로 정중앙
+        환경음 알약·재생 단추·토마토와 **한 줄**에 서고, 무리 전체가
+        카드 가로 정중앙이다 (요청 — 줄을 나누니 겹쳐 보였다).
         하드모드 집중 중에는 시계가 불탄다 — 시계 뒤로 불꽃이 솟고
         테두리·바늘이 주황이 된다 (요청).
         """
@@ -16530,10 +16622,7 @@ class Mascot:
         r = 14.0
         # 가로 자리는 줄 전체를 가운데에 맞춘 값에서 (요청)
         xs = self._top_row_x()
-        if self._yt_music_row():
-            bx, by = xs.get("pomo", mid), g["y0"] - YT_BAR - 16   # 재생 줄 위
-        else:
-            bx, by = xs.get("pomo", mid), g["y0"] - 24
+        bx, by = xs.get("pomo", mid), g["y0"] - 24   # 재생 단추와 같은 줄
         hard9 = self._pomo_hard_active()
         if hard9:
             # 불타는 시계 — 불꽃을 시계 뒤에 먼저 (위로 솟아 보인다)
@@ -18949,6 +19038,8 @@ class Mascot:
             except Exception:
                 pass
         self._strip_key = None
+        self._strip_who = None
+        self._strip_sheets = {}
 
     def _strip_people(self):
         """띠에 서는 사람들 — 내 캐릭터는 뺀다 (요청: 타이머가 곧 나다)."""
@@ -18962,16 +19053,29 @@ class Mascot:
         fx = bool(self._tm_fx) and (now - self._tm_fx < self.STRIP_FX)
         # 누가 집중 중이면 그 사람이 살짝 움직인다 (요청) — 8장 캐시라
         # 초당 8장이면 충분하고 값도 싸다. 아무도 안 움직이면 1초에 한 장.
-        who = self._strip_people()
+        # **사람 목록은 다시 그릴 때만 만든다.** 예전에는 '다시 그릴 때가
+        # 됐나'를 보기 전에 매 프레임 만들었는데, 그 안에서 내 상태를 가르는
+        # 앞 창 질의가 맥에서는 밀리초 단위라 CPU 를 먹었다 (퀸시 제보 —
+        # 맥 러너 실측: 띠가 떠 있을 때만 프레임당 +4ms). 간격 판정은 마지막
+        # 목록으로 한다.
         byes = self._team_byes(now)       # 퇴장 연출 중 (요청) — 그 3초도 빠르게
         bye9 = bool(byes)
-        anim = (not fx) and any(p[2] == "집중" for p in who)
+        who = self._strip_who
+        anim = (not fx) and bool(who) and any(p[2] == "집중" for p in who)
         gap9 = 0.04 if (fx or bye9) else (self.STRIP_ANIM_DT if anim else 1.0)
         if (self._strip_key is not None and self._strip_im is not None
-                and now - self._strip_at < gap9):
-            self._strip_follow()        # 캐릭터가 움직였으면 따라간다
+                and who is not None and now - self._strip_at < gap9):
+            # 캐릭터가 움직였을 때만 따라간다. **본체가 이미 재 둔 자리**
+            # (_last_pos, 한 프레임 전)와 견준다 — 여기서 Tk 에 창 좌표를
+            # 다시 물으면 안 그리는 프레임에도 네 번씩 나가 맥에서 프레임당
+            # 2ms 를 먹었다 (맥 러너 실측).
+            lp = self._last_pos
+            if lp is not None and lp != self._strip_root:
+                self._strip_follow()
             return
         self._strip_at = now
+        who = self._strip_people()
+        self._strip_who = who
         if not who and not byes:
             self._strip_hide()
             return
@@ -18990,8 +19094,25 @@ class Mascot:
                 tuple(b9[0] for b9 in byes))
         if key9 != self._strip_key or self._strip_im is None:
             self._strip_key = key9
-            self._strip_im = self._strip_sheet(who, now, fx, byes)
+            # **같은 열쇠면 만들어 둔 시트를 다시 쓴다.** 집중 중엔 펜 자세
+            # 두 장이 0.7초마다 번갈아 오가는데, 매번 새로 합성하니(맥 러너
+            # 실측 장당 14ms · 실제 맥은 더) CPU 를 계속 먹었다 (퀸시 제보).
+            # 축하·퇴장 연출은 열쇠에 시각이 들어 있어 어차피 안 맞는다 —
+            # 그런 것까지 담지 않게 fx/bye 는 캐시를 안 쓴다.
+            hit = None if (fx or bye9) else self._strip_sheets.get(key9)
+            if hit is not None:
+                self._strip_im, self._strip_cols, self._strip_bubs = hit
+            else:
+                self._strip_im = self._strip_sheet(who, now, fx, byes)
+                if not (fx or bye9):
+                    if len(self._strip_sheets) > 8:          # 상한 (지뢰 18)
+                        for k9 in list(self._strip_sheets)[:4]:
+                            self._strip_sheets.pop(k9, None)
+                    self._strip_sheets[key9] = (
+                        self._strip_im, list(self._strip_cols),
+                        list(self._strip_bubs))
         x, y = self._strip_pos(self._strip_im)
+        self._strip_root = self._last_pos
         first9 = not self._strip.visible and not self.us.get("pomo_strip_tip")
         self._strip.show(self._strip_im, x, y)
         if first9:
@@ -19018,6 +19139,7 @@ class Mascot:
         if st is None or self._strip_im is None or not st.visible:
             return
         x, y = self._strip_pos(self._strip_im)
+        self._strip_root = self._last_pos
         if (x, y) != (st.x, st.y):
             st.show(self._strip_im, x, y)
 
