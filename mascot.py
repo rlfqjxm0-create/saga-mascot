@@ -3358,6 +3358,8 @@ class AmbientSound:
                 "played": 0}
 
     def _close_track(self, tr):
+        # 켰다 껐다 되풀이해도 안 쌓인다 — 여섯 바퀴를 재 보면 +4.5MB 에서
+        # 평평하고 winmm 반환값도 전부 0 이다 (tests/test_ambmem.py).
         wm = ctypes.windll.winmm
         try:
             wm.waveOutReset(tr["h"])
@@ -23020,7 +23022,17 @@ class Mascot:
         RH = u(60)                       # 한 줄 높이
         TOP = u(74)                       # 제목 몫
         BOT = u(58)                       # 아래 단추 몫
-        H = TOP + RH * len(names) + BOT
+        # 환경음이 늘면 창이 화면 밖으로 나간다 (열셋이면 900px 을 넘어
+        # 아래 단추가 잘린다) — 일곱 줄까지만 보이고 나머지는 스크롤로
+        # 본다 (휠 · 오른쪽 막대 끌기). 캔버스는 자기 그림을 잘라내지
+        # 못하므로(지뢰 22) 넘친 줄은 위아래를 판 색으로 덮어 가린다.
+        VIS = min(len(names), 7)
+        SCROLL = len(names) > VIS
+        H = TOP + RH * VIS + BOT
+        LIST_H = RH * VIS
+        CONT_H = RH * len(names)
+        MAXOFF = max(0.0, CONT_H - LIST_H)
+        sc = {"off": 0.0, "bar": False}
         win = tk.Toplevel(self.root)
         self._amb_winref = win
         win.title("환경음")
@@ -23032,27 +23044,43 @@ class Mascot:
         cv.pack()
         line = self._tint(cd["fill"], 0.55)
         pad = u(14)
-        sx0, sx1 = pad + u(16), W - pad - u(16)   # 슬라이더 양 끝
+        BARW = u(5)                                # 스크롤 막대 굵기
+        RX = W - pad - (u(12) if SCROLL else 0)    # 줄의 오른쪽 끝
+        sx0, sx1 = pad + u(16), RX - u(16)         # 슬라이더 양 끝
 
         def row_y(i):
-            return TOP + RH * i
+            return TOP + RH * i - sc["off"]
+
+        def bar_track():
+            """스크롤 막대의 홈통 (위, 아래, 손잡이 높이)."""
+            ty0, ty1 = TOP + u(6), H - BOT - u(6)
+            th = max(u(28), (ty1 - ty0) * LIST_H / float(max(1, CONT_H)))
+            return ty0, ty1, th
+
+        def bar_y():
+            ty0, ty1, th = bar_track()
+            f = (sc["off"] / MAXOFF) if MAXOFF else 0.0
+            return ty0 + (ty1 - ty0 - th) * f, th
+
+        def bar_set(y):
+            ty0, ty1, th = bar_track()
+            f = (y - ty0 - th / 2.0) / max(1.0, (ty1 - ty0 - th))
+            sc["off"] = max(0.0, min(MAXOFF, f * MAXOFF))
 
         def val_of(name):
             return self._amb_mix().get(name, self.AMB_DEFAULT_VOL)
 
         def draw():
             cv.delete("all")
-            cv.create_text(W / 2, u(24), text="환경음",
-                           font=self._uf(13, True), fill=cd["text"])
-            cv.create_text(W / 2, u(46), text="여러 개를 같이 틀 수 있어요",
-                           font=self._uf(8), fill=cd["sub"])
             mix = self._amb_mix()
             for i, name in enumerate(names):
                 y0 = row_y(i)
+                if y0 >= H - BOT or y0 + RH <= TOP:
+                    continue                   # 화면 밖 — 안 그린다
                 y1 = y0 + RH - u(6)
                 on = name in mix
                 bg = self._tint(cd["fill"], 0.82) if on else "#ffffff"
-                self._rr_soft(cv, pad, y0, W - pad, y1, u(14), fill=bg,
+                self._rr_soft(cv, pad, y0, RX, y1, u(14), fill=bg,
                               outline=cd["fill"] if on else line,
                               width=1, tags="row")
                 # 동그란 체크 — 켜면 테마색으로 찬다
@@ -23068,7 +23096,7 @@ class Mascot:
                 cv.create_text(pad + u(34), cy, anchor="w", text=name,
                                font=self._uf(11, True),
                                fill=cd["text"] if on else cd["sub"])
-                cv.create_text(W - pad - u(14), cy, anchor="e",
+                cv.create_text(RX - u(14), cy, anchor="e",
                                text=str(mix.get(name, val_of(name))),
                                font=self._uf(10, True),
                                fill=cd["text"] if on else cd["sub"])
@@ -23088,6 +23116,28 @@ class Mascot:
                 self._oval(cv, fx - kr, gy - kr, fx + kr, gy + kr,
                                fill="#ffffff",
                                outline=cd["fill"] if on else line, width=2)
+            # 목록 밖으로 넘친 줄을 판 색으로 덮는다 (캔버스는 못 자른다)
+            if SCROLL:
+                cv.create_rectangle(0, 0, W, TOP, fill=cd["panel"],
+                                    outline="")
+                cv.create_rectangle(0, H - BOT, W, H, fill=cd["panel"],
+                                    outline="")
+            cv.create_text(W / 2, u(24), text="환경음",
+                           font=self._uf(13, True), fill=cd["text"])
+            cv.create_text(W / 2, u(46),
+                           text=("휠이나 오른쪽 막대로 더 볼 수 있어요"
+                                 if SCROLL else "여러 개를 같이 틀 수 있어요"),
+                           font=self._uf(8), fill=cd["sub"])
+            if SCROLL:
+                ty0, ty1, _th = bar_track()
+                bx1 = W - pad + u(2)
+                bx0 = bx1 - BARW
+                self._rr_soft(cv, bx0, ty0, bx1, ty1, BARW / 2.0,
+                              fill=self._tint(cd["fill"], 0.86), outline="",
+                              width=0)
+                ky, kh = bar_y()
+                self._rr_soft(cv, bx0, ky, bx1, ky + kh, BARW / 2.0,
+                              fill=cd["fill"], outline="", width=0)
             # 아래 단추 둘
             by0 = H - BOT + u(8)
             by1 = H - u(14)
@@ -23104,10 +23154,10 @@ class Mascot:
                            font=self._uf(9, True), fill="#ffffff")
 
         def hit_row(y):
-            for i in range(len(names)):
-                if row_y(i) <= y < row_y(i) + RH:
-                    return i
-            return None
+            if y < TOP or y >= H - BOT:
+                return None
+            i = int((y - TOP + sc["off"]) // RH)
+            return i if 0 <= i < len(names) else None
 
         def in_box(box, x, y):
             return box and box[0] <= x <= box[2] and box[1] <= y <= box[3]
@@ -23130,6 +23180,11 @@ class Mascot:
                     self._amb_toggle(nm, False)
                 draw()
                 return
+            if SCROLL and e.x >= W - pad - u(6) and TOP <= e.y < H - BOT:
+                sc["bar"] = True
+                bar_set(e.y)
+                draw()
+                return
             i = hit_row(e.y)
             if i is None:
                 return
@@ -23148,6 +23203,10 @@ class Mascot:
             draw()
 
         def on_drag(e):
+            if sc["bar"]:
+                bar_set(e.y)
+                draw()
+                return
             i = drag["i"]
             if i is None:
                 return
@@ -23159,12 +23218,46 @@ class Mascot:
 
         def on_up(_e):
             drag["i"] = None
+            sc["bar"] = False
+
+        def on_wheel(e):
+            """휠로 스크롤 — 윈도우·맥은 delta, 리눅스는 Button-4/5.
+
+            **안 쓰는 칸을 Tk 가 '??' 라는 글자로 채운다** — 그대로 int()
+            하면 예외가 나고, _safe 가 삼켜서 '휠이 그냥 안 먹는' 것으로
+            보인다 (검사가 잡았다).
+            """
+            if not SCROLL:
+                return
+
+            def num_of(v):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            d = num_of(getattr(e, "delta", 0))
+            num = int(num_of(getattr(e, "num", 0)))
+            if num == 4:
+                step = -RH * 0.8
+            elif num == 5:
+                step = RH * 0.8
+            elif d:
+                # 윈도우는 ±120, 맥은 ±1 — 부호만 쓴다
+                step = (-1.0 if d > 0 else 1.0) * RH * 0.8
+            else:
+                return
+            sc["off"] = max(0.0, min(MAXOFF, sc["off"] + step))
+            draw()
 
         draw()
         self._amb_draw = draw             # 밖에서도 다시 그릴 수 있게
         cv.bind("<Button-1>", lambda e: self._safe("amb_click", on_press, e))
         cv.bind("<B1-Motion>", lambda e: self._safe("amb_drag", on_drag, e))
         cv.bind("<ButtonRelease-1>", on_up)
+        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            cv.bind(ev, lambda e: self._safe("amb_wheel", on_wheel, e))
+            win.bind(ev, lambda e: self._safe("amb_wheel", on_wheel, e))
         win.bind("<Escape>", lambda _e: win.destroy())
 
     def _slime_close(self):

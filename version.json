@@ -1,7 +1,7 @@
 {
- "version": 1788382607,
+ "version": 1788394159,
  "files": {
-  "mascot.py": "82f7fb45dd6a4fe3331968674aa51807f02cb10b4d18fc1f3142f0233b3d5d9d",
+  "mascot.py": "ba6fcd7dbef7ed2669be4004b92f9d9c0b8f78198a3da0a83b3b09c04453489d",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -198,9 +198,15 @@
   "parts_saga/sounds/ambient/말발굽.wav": "da8a2776072deab12000285fe6334fa2523728691fe88366b83ef027e058d6eb",
   "parts_saga/sounds/ambient/모닥불.wav": "640dd1d690b31f2167448a9c86ec4bb8a30362de59afd6176af4a469c5f7a261",
   "parts_saga/sounds/ambient/무거운 빗소리.wav": "664a9e3a008196793e9c65f691fda227e0d7f6cf29d33705bf86dcd194554d13",
+  "parts_saga/sounds/ambient/바다 동굴.wav": "3792ebd0a6f1be0c7a4de1fd22fa7f5c9819f5570225ac279e6dae44b057df44",
+  "parts_saga/sounds/ambient/바다 파도.wav": "bece389b19a16645300f756f079a50b8447b639b03217d00e42e88929653209e",
+  "parts_saga/sounds/ambient/숲 새소리.wav": "1fd6f83b1c3233636c849adae91af905482f839aecbca114b98fff5309c2eeb6",
+  "parts_saga/sounds/ambient/숲 새소리2.wav": "acf322c0d8e526a252e0de77a9b616d6935f6de808b34594e7ceda3dc559ad3f",
+  "parts_saga/sounds/ambient/숲.wav": "daa5f3bfd5adda4bb3cc415408baaa7d5fcd987fc6689041366b2706bcef8832",
   "parts_saga/sounds/ambient/야외 모닥불.wav": "d15a58dae563400eb2d78d3e777ba20c7ccd71714b05a30eab7de62e97d9e818",
   "parts_saga/sounds/ambient/야외 모닥불2.wav": "83ee284ccf9981bbc944c52a5da108ed1bcde15ef0bf99037ee0f08153b0d891",
   "parts_saga/sounds/ambient/일상 빗소리.wav": "0498a465a5eabe642a91ff8e6931a04c393fb3300ec3254dd4423c49406b8a3a",
+  "parts_saga/sounds/ambient/일상 빗소리2.wav": "590eb43eb0ede90e1a019171371784195b179c53bc46055bc61f011a5649e95c",
   "parts_saga/sounds/ambient/캠프파이어.wav": "2c29f6d2b7a76f7625cd397192a9d344204acad136d0f08152ec712254c147eb",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/config.json": "7511749602b0050f49964cf0255e0affb3871d852bf7bc5e7e0d8dada1f829bd",
   "parts_saga/sounds/apex-pro-tkl-v2_Akira/enter.wav": "fe7998dabcc579dd88b8ecb3b22f942efc880bd75f9794b792a41f5c10b51ef3",
@@ -583,8 +589,8 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "같이하기에서 친구가 '오늘은 여기까지'를 누르면 그 캐릭터 왼쪽에 '오늘은 여기까지 할게요, 모두 화이팅!' 말풍선이 크게 뜨고 손을 흔들다가, 2초쯤 뒤 캐릭터와 함께 스르르 사라져요 — 뽀모도로 창과 바탕화면 띠 양쪽에서",
-  "같이하기 사이클을 끝까지 돌아 멈추면 부른 사람 창에 '다시 시작' 단추가 떠서 이어서 같이 돌릴 수 있어요"
+  "환경음이 여섯 가지 늘었어요 — 바다 동굴·바다 파도·숲·숲 새소리·숲 새소리2·일상 빗소리2. 모두 3분짜리라 오래 틀어도 덜 지루하고, 끝과 처음을 겹쳐 이어 붙여 반복해도 이음매가 안 들려요",
+  "환경음이 많아져서 고르는 창에 스크롤이 생겼어요 — 일곱 줄까지 보이고 휠이나 오른쪽 막대로 나머지를 봐요"
  ],
  "silent": true
 }
