@@ -18768,6 +18768,7 @@ class Mascot:
 
     TEAM_BACK = 120.0            # 되살린 방을 확인할 때까지 기다리는 시간
     TEAM_HOST_GONE = 240.0       # 방장 자리가 이만큼 안 보이면 방이 죽은 것
+    TEAM_MEMBER_GONE = 240.0     # 참가자 자리가 이만큼 안 보이면 명단에서 뺀다
     TEAM_REINVITE = 45.0         # 답 없는 초대장을 다시 보내는 간격
     TEAM_REST_BACK = 120.0       # '잠깐 쉬기' 중 이만큼 계속 일하면 자동 복귀
     TEAM_BYE_ARM = 8.0           # 방장 마무리 — 두 번째 누름을 기다리는 시간
@@ -19042,7 +19043,7 @@ class Mascot:
     def _strip_seat(self, slot, h, name="seat"):
         """앉은 그림 (PIL·캐시). name 은 seat / seat_pen / seat_pen2 —
         펜 자세가 없는 옛 배포본이면 기본 자세로 물러난다."""
-        key = (slot, int(h), name)
+        key = (slot, int(h), name, self._slot_form(slot))
         got = self._strip_seat_cache.get(key)
         if got is not None:
             return got
@@ -19082,7 +19083,7 @@ class Mascot:
         그림 위쪽에 투명 여백이 있어 그림 꼭대기에 얹으면 토마토가 뜬다
         (피드백). 가운데 40% 열에서 처음 불투명해지는 줄을 찾는다.
         """
-        key = ("head", slot, int(h))
+        key = ("head", slot, int(h), self._slot_form(slot))
         got = self._strip_seat_cache.get(key)
         if got is not None:
             return got
@@ -20092,6 +20093,28 @@ class Mascot:
                     self._pomo_redraw()
             if "y" in b9 and isinstance(tm["members"][sl9], dict):
                 tm["members"][sl9]["y"] = 1 if b9.get("y") else 0
+            if isinstance(tm["members"][sl9], dict):
+                tm["members"][sl9]["seen"] = now     # 자리 신호로 확인됨
+        # **명단은 저절로 줄어들기도 해야 한다.** 예전에는 빼는 길이 '나감
+        # 신호(tmo)를 받는 것' 하나뿐이라, 그 신호를 놓치면(맥이 잠들어
+        # 있었거나·통신층이 재시작했거나·나간 사람의 명단이 나를 안 담고
+        # 있었거나·앱이 그냥 죽었거나) 그 사람이 휴식 상태로 **영영** 남았다
+        # (사가 제보). 대기실이면 그 사람의 준비가 안 끝나 자동 시작도
+        # 막혔다. 이제 자리 신호로 한참 안 보이면 뺀다 — 자리 신호는 창을
+        # 닫아 둬도 150초 안에 오므로 4분이면 오판이 없고, 잘못 빼도 다음
+        # 바퀴에 위에서 도로 들어온다 (지뢰 30 — 깃발이 아니라 계산).
+        # 방장은 따로 본다(TEAM_HOST_GONE — 방을 통째로 접는다).
+        for sl9 in list(tm["members"]):
+            d9 = tm["members"][sl9]
+            if sl9 in (self.char, host9) or sl9 in seen9 \
+                    or not isinstance(d9, dict):
+                continue
+            last9 = max(float(d9.get("at") or 0), float(d9.get("seen") or 0))
+            if last9 and now - last9 > self.TEAM_MEMBER_GONE:
+                tm["members"].pop(sl9, None)
+                self._tm_say = ("%s 님이 안 보여서 명단에서 뺐어요"
+                                % self._note_name(sl9), now)
+                self._pomo_redraw()
         back9 = getattr(self, "_tm_back", 0.0)
         if back9 and now - back9 > self.TEAM_BACK:
             self._tm_back = 0.0
@@ -27171,6 +27194,14 @@ class Mascot:
                 # 값의 있고 없음으로).
                 out["cp"] = ch9
         out["v"] = self._my_build()      # 실행 중 판 번호 (버전 확인용)
+        if len(getattr(self, "skins", []) or []) > 1:
+            # 지금 입은 폼 — 홈·뽀모도로 창·바탕화면 띠의 앉은 모습이
+            # 이걸 따라간다 (사가의 변신 전/후, 요청). **빈 값도 싣는다** —
+            # 안 실으면 기본 모습으로 되돌린 것이 남에게 안 전해진다
+            # (지뢰 77 — 본인이 보낸 최신 값을 따른다). 폼이 하나뿐인
+            # 캐릭터는 아예 안 실어 신호를 아끼고, 받는 쪽은 열쇠가
+            # 없으면 기존 값을 지킨다.
+            out["sk"] = self._my_skin_id()
         # 진단 — 꺼진 구역과 마지막 실패 이유. '안 돼요' 제보가 왔을 때
         # 그 컴퓨터에 가지 않고도 무엇이 죽었는지 갈린다 (지뢰 51).
         # 사람 이름·파일·창 제목은 안 들어간다 (구역 이름과 예외 종류뿐).
@@ -29110,6 +29141,11 @@ class Mascot:
             else:
                 ms9 = cur.get("ms") if isinstance(cur.get("ms"), dict) \
                     else None
+            # 폼 — **열쇠가 있으면** 본인이 보낸 값을 그대로 따르고(빈 값
+            # 이면 기본 모습으로 되돌린 것이다), 없으면(폼이 하나뿐인
+            # 캐릭터·옛 판) 기존 것을 지킨다 (지뢰 92).
+            sk9 = (self._form_ok(q.get("sk")) if "sk" in q
+                   else self._form_ok(cur.get("sk")))
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             rmg = q.get("rmg")
             rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
@@ -29127,6 +29163,7 @@ class Mascot:
                     or int(cur.get("tk") or 0) != tk9
                     or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
+                    or self._form_ok(cur.get("sk")) != sk9
                     or float(cur.get("lvd") or 0) != lvd
                     or (cur.get("ms") or None) != ms9
                     or (cur.get("rmg") or {}) != rmg):
@@ -29153,6 +29190,8 @@ class Mascot:
                     row2["ms"] = ms9
                 if cdh9:
                     row2["cdh"] = cdh9
+                if sk9:
+                    row2["sk"] = sk9
                 if lvd:
                     row2["lvd"] = lvd
                 row2["seen"] = _now9              # 직접 본 것은 지금
@@ -30107,17 +30146,25 @@ class Mascot:
             slot = p.get("slot") or ""
             if slot not in self.ROOM_ART or slot in self._room_art_bad:
                 continue
+            # 그 사람이 폼을 입고 있으면 그 폼 그림도 같이 받아 둔다
+            # (사가의 변신 전). 폼이 없으면 form9 는 빈 값이라 예전 그대로다.
+            form9 = self._slot_form(slot)
             for tag in ("seat.png", "seat_idle.png", "seat_type.png",
                         "seat_pen.png", "seat_pen2.png", "seat_meta.json",
                         "wg_head.png"):
-                if os.path.isfile(os.path.join(HERE, slot, tag)):
+                sub9 = ("skins/%s/" % form9) if (
+                    form9 and tag in self.SEAT_TAGS) else ""
+                if os.path.isfile(os.path.join(HERE, slot,
+                                               *(sub9 + tag).split("/"))):
                     continue                      # 원본이 여기 있다
                 fld2 = self.ROOM_ART[slot][1]
                 if fld2 != slot and os.path.isfile(
-                        os.path.join(HERE, fld2, tag)):
+                        os.path.join(HERE, fld2, *(sub9 + tag).split("/"))):
                     continue                      # 별칭 폴더(내 그림)에 있다
-                got = os.path.join(self._room_art_dir(),
-                                   "%s_%s" % (slot, tag))
+                got = os.path.join(
+                    self._room_art_dir(),
+                    "%s~%s_%s" % (slot, form9, tag) if sub9
+                    else "%s_%s" % (slot, tag))
                 try:
                     # 켤 때마다 한 번은 새로 받는다 — 앉은 모습을 고쳐
                     # 배포하면 다음 실행에서 바로 보인다. 깃허브 정적
@@ -30128,15 +30175,15 @@ class Mascot:
                 except Exception:
                     fresh = os.path.isfile(got)
                 if not fresh:
-                    need.append((slot, tag))
+                    need.append((slot, tag, sub9))
         if not need or self._room_art_th is not None:
             return
 
         def work():
-            for slot, tag in need:
+            for slot, tag, sub9 in need:
                 repo, folder = self.ROOM_ART[slot]
                 url = ("https://raw.githubusercontent.com/rlfqjxm0-create/"
-                       "%s/main/%s/%s" % (repo, folder, tag))
+                       "%s/main/%s/%s%s" % (repo, folder, sub9, tag))
                 try:
                     req = urllib.request.Request(
                         url, headers={"User-Agent": "mascot-room"})
@@ -30145,27 +30192,113 @@ class Mascot:
                         raw = r.read()
                     if len(raw) < 200:
                         raise ValueError("너무 작음")
-                    tmp = os.path.join(self._room_art_dir(),
-                                       "%s_%s.tmp" % (slot, tag))
+                    nm9 = ("%s~%s_%s" % (slot, sub9.split("/")[1], tag)
+                           if sub9 else "%s_%s" % (slot, tag))
+                    tmp = os.path.join(self._room_art_dir(), nm9 + ".tmp")
                     with open(tmp, "wb") as fp:
                         fp.write(raw)
                     os.replace(tmp, tmp[:-4])
                     # 새로 받았으면 그리기 캐시도 비워 이번 실행에서 바로
                     # 새 그림이 보이게 한다 (안 비우면 재시작 전까지 옛 그림)
-                    base = tag.rsplit(".", 1)[0]
-                    self._room_img_cache.pop((slot, base), None)
+                    self._room_art_forget(slot)
                 except Exception:
                     # 게임 머리는 아직 배포 안 된 레포에서 404 가 날 수
-                    # 있다 — 그것 때문에 자리(seat)까지 막으면 안 된다
-                    if tag != "wg_head.png":
+                    # 있다 — 그것 때문에 자리(seat)까지 막으면 안 된다.
+                    # **폼 그림도 마찬가지다** — 아직 안 구운 폼이면
+                    # 기본 모습으로 물러나면 되지 그 사람을 막으면 안 된다.
+                    if tag != "wg_head.png" and not sub9:
                         self._room_art_bad.add(slot)
             self._room_art_th = None
 
         self._room_art_th = threading.Thread(target=work, daemon=True)
         self._room_art_th.start()
 
+    # 앉은 모습 한 벌 — 이것들만 **입고 있는 폼**을 따라간다. 수박게임
+    # 머리(wg_head)는 폼과 무관하게 기본 모습을 쓴다 (게임 판 구성이
+    # 사람마다 흔들리면 안 된다).
+    SEAT_TAGS = ("seat.png", "seat_idle.png", "seat_type.png",
+                 "seat_pen.png", "seat_pen2.png", "seat_meta.json")
+
+    @staticmethod
+    def _form_ok(v):
+        """폼 이름은 폴더 한 칸으로 쓰인다 — 경로가 될 만한 글자는 버린다."""
+        # **아스키만** 받는다. isalnum() 만 보면 한글도 통과하는데, 폼
+        # 이름은 그대로 폴더 한 칸과 주소가 되므로 영문·숫자로 못 박는다.
+        v = str(v or "")[:24]
+        return v if v and all(
+            (c.isascii() and c.isalnum()) or c in "_-" for c in v) else ""
+
+    def _my_skin_id(self):
+        """지금 입은 폼의 짧은 이름 ("" 이면 기본 모습).
+
+        패션 슬롯의 폴더 이름 마지막 칸을 쓴다 (skins/shinhana → shinhana).
+        폼이 하나뿐인 캐릭터는 늘 빈 값이다.
+        """
+        try:
+            for s9 in (self.skins or []):
+                if (s9.get("name") or "") == self.skin_name:
+                    d9 = (s9.get("dir") or "").strip().strip("/")
+                    return self._form_ok(d9.rsplit("/", 1)[-1]) if d9 else ""
+        except Exception:
+            pass
+        return ""
+
+    def _slot_form(self, slot):
+        """그 사람이 지금 입고 있는 폼 ("" 이면 기본 모습).
+
+        신호(sk)에 실려 오고, 꺼져 있는 사람은 마지막으로 본 값을 쓴다.
+        내 것은 설정에서 바로 읽는다 — 옷을 갈아입으면 프로그램이 다시
+        뜨므로(지뢰 115) 그때 새 값이 실린다.
+        """
+        if slot == self.char:
+            return self._my_skin_id()
+        for q9 in (self.room_people or []):
+            if str(q9.get("slot") or "") != slot:
+                continue
+            if "sk" in q9:
+                return self._form_ok(q9.get("sk"))
+            break
+        w9 = self._room_who_get().get(slot)
+        return self._form_ok(w9.get("sk")) if isinstance(w9, dict) else ""
+
+    def _room_art_forget(self, slot):
+        """그 사람의 앉은 그림 캐시를 통째로 비운다 (새로 받았을 때).
+
+        폼이 열쇠에 들어가 있어 폼이 바뀌면 저절로 갈리지만, **같은
+        열쇠로 파일만 바뀐 경우**(그림을 고쳐 배포)는 이렇게 비워야
+        이번 실행에서 바로 보인다 (지뢰 62).
+        """
+        for cache in (self._room_img_cache, self._room_head_cache,
+                      self._room_dxc, self._strip_seat_cache):
+            for k9 in [k for k in cache
+                       if isinstance(k, tuple) and slot in k]:
+                cache.pop(k9, None)
+        self._room_meta.pop(slot, None)
+        self._room_meta_h.pop(slot, None)
+        for k9 in [k for k in self._room_meta if isinstance(k, tuple)
+                   and k and k[0] == slot]:
+            self._room_meta.pop(k9, None)
+        for k9 in [k for k in self._room_meta_h if isinstance(k, tuple)
+                   and k and k[0] == slot]:
+            self._room_meta_h.pop(k9, None)
+
     def _room_art_file(self, slot, name):
-        """받아 둔 것 먼저, 없으면 내 컴퓨터의 원본."""
+        """받아 둔 것 먼저, 없으면 내 컴퓨터의 원본.
+
+        앉은 모습은 그 사람이 **지금 입은 폼**을 따른다 (사가의 변신 전/후).
+        그 폼 그림이 아직 없으면 조용히 기본 모습으로 물러난다 — 코드가
+        먼저 가고 그림이 나중에 따라오는 동안에도 캐릭터가 보여야 한다
+        (지뢰 76).
+        """
+        form = self._slot_form(slot) if name in self.SEAT_TAGS else ""
+        if form:
+            p = os.path.join(self._room_art_dir(),
+                             "%s~%s_%s" % (slot, form, name))
+            if os.path.isfile(p):
+                return p
+            local = os.path.join(HERE, slot, "skins", form, name)
+            if os.path.isfile(local):
+                return local
         p = os.path.join(self._room_art_dir(), "%s_%s" % (slot, name))
         if os.path.isfile(p):
             return p
@@ -30174,8 +30307,9 @@ class Mascot:
 
     def _room_deskline(self, slot):
         """그림에서 책상이 시작되는 높이 (0~1). 모르면 None."""
-        if slot in self._room_meta:
-            return self._room_meta[slot]
+        k9 = (slot, self._slot_form(slot))
+        if k9 in self._room_meta:
+            return self._room_meta[k9]
         v = None
         p = self._room_art_file(slot, "seat_meta.json")
         if p:
@@ -30184,13 +30318,14 @@ class Mascot:
                     v = float(json.load(fp).get("desk"))
             except Exception:
                 v = None
-        self._room_meta[slot] = v
+        self._room_meta[k9] = v
         return v
 
     def _room_headline(self, slot):
         """그림에서 머리가 끝나는 높이 (0~1). 모르면 None (옛 배포본)."""
-        if slot in self._room_meta_h:
-            return self._room_meta_h[slot]
+        k9 = (slot, self._slot_form(slot))
+        if k9 in self._room_meta_h:
+            return self._room_meta_h[k9]
         v = None
         p = self._room_art_file(slot, "seat_meta.json")
         if p:
@@ -30199,7 +30334,7 @@ class Mascot:
                     v = float(json.load(fp).get("head"))
             except Exception:
                 v = None
-        self._room_meta_h[slot] = v
+        self._room_meta_h[k9] = v
         return v
 
     def _room_floor_img(self, w, h, r, band_h, color):
@@ -30285,7 +30420,9 @@ class Mascot:
         책상까지 떠올라 어색하다. 책상이 시작되는 높이는 그림을 만들 때
         같이 적어 둔다(seat_meta.json). 없으면 통짜로 돌려준다.
         """
-        k = (slot, tag)
+        # 폼이 열쇠에 없으면 사가가 변신해도 남의 화면이 안 바뀐다 (지뢰 89)
+        f9 = self._slot_form(slot)
+        k = (slot, tag, f9)
         got = self._room_img_cache.get(k)
         if got is not None:
             return got
@@ -30333,10 +30470,10 @@ class Mascot:
                 line0 = line if (line and 0.2 < line < 0.95) else 0.72
                 strip = im.crop((0, int(h * line0), im.width, h))
                 bb2 = strip.split()[3].getbbox()
-                self._room_dxc[(slot, tag)] = (
+                self._room_dxc[(slot, tag, f9)] = (
                     round(im.width / 2 - (bb2[0] + bb2[2]) / 2) if bb2 else 0)
             except Exception:
-                self._room_dxc[(slot, tag)] = 0
+                self._room_dxc[(slot, tag, f9)] = 0
             hline = self._room_headline(slot)
             if hline and 0.05 < hline < 0.9:
                 # 머리/몸 분리 — 전신은 고정하고 머리 조각만 숨쉬게 한다.
@@ -30381,7 +30518,7 @@ class Mascot:
         잰다 — 맨 윗줄 언저리의 불투명 픽셀 띠가 곧 머리(머리카락)다.
         """
         h = int(self.ROOM_FIG * self._room_k() * self.ROOM_SIZE.get(slot, 1.0))
-        key = (slot, tag, h)
+        key = (slot, tag, h, self._slot_form(slot))
         hit = self._room_head_cache.get(key)
         if hit is not None:
             return hit
@@ -30745,6 +30882,9 @@ class Mascot:
                 q.get("t"), q.get("p"), q.get("s"), q.get("cdh"),
                 q.get("m"), q.get("gm"), q.get("gd"), q.get("dl"),
                 q.get("cp"), q.get("hm"),
+                # 입고 있는 폼 — 안 넣으면 사가가 변신해도 남의 화면이
+                # 안 바뀐다 (지뢰 89)
+                q.get("sk"),
                 # 같이 뽀모도로 중인가 — 안 넣으면 '같작업' 배지가
                 # 남의 화면에서 안 바뀐다 (지뢰 89)
                 str((q.get("tm") or {}).get("i") or "")
@@ -31902,7 +32042,7 @@ class Mascot:
 
     def _room_mini(self, slot, hpx):
         """캡슐용 작은 캐릭터 그림 (높이 hpx로 줄임)."""
-        key = ("mini", slot, int(hpx))
+        key = ("mini", slot, int(hpx), self._slot_form(slot))
         got = self._room_img_cache.get(key)
         if got is not None:
             return got
@@ -32564,8 +32704,9 @@ class Mascot:
                 bob *= 0.6
             base = floor + 4 * k
             pose = self._room_pose(p)
+            f8 = self._slot_form(slot)
             cx = (kx0 + kx1) / 2 + self._room_dxc.get(
-                (slot, pose), self._room_dxc.get((slot, "seat"), 0))
+                (slot, pose, f8), self._room_dxc.get((slot, "seat", f8), 0))
             if mode == "head" and over is not None:
                 # body = 머리 조각(움직임), over = 전신(고정)
                 ditem = cv.create_image(cx, base, image=over, anchor="s",
@@ -43408,6 +43549,9 @@ class Mascot:
                           "dl": str(w.get("dl") or "")[:10],
                           # 칸 꾸미기 그림도 마지막으로 본 것 그대로 (요청)
                           "cdh": cdh0,
+                          # 입고 있던 폼도 마지막으로 본 것 그대로 — 꺼진
+                          # 사이에 기본 모습으로 되돌아가 보이지 않게
+                          "sk": self._form_ok(w.get("sk")),
                           "a": "", "off": True})
         # 차례: 나 → 접속한 사람(레벨 높은 순) → 안 켠 사람 (요청).
         # 예전엔 게이지(%) 순이라 1%마다 자리가 뒤바뀌어 어지러웠다 —

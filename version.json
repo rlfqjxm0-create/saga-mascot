@@ -1,7 +1,7 @@
 {
- "version": 1788394159,
+ "version": 1788396689,
  "files": {
-  "mascot.py": "ba6fcd7dbef7ed2669be4004b92f9d9c0b8f78198a3da0a83b3b09c04453489d",
+  "mascot.py": "a9a4edcee41532ec8aef46a5e44472def4abb932bfb1654651da4734d63aa158",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -156,6 +156,12 @@
   "parts_saga/skins/shinhana/prop8_back.png": "d36f20ecd8f476eb05c68449cdb1f968dc5101e6fbbecc473ab9181cbe72f178",
   "parts_saga/skins/shinhana/prop9.png": "455a5310de3134a72a012998e3c813b2332059cf716de5bd899cd5a0f90d4dbd",
   "parts_saga/skins/shinhana/pupils.png": "7a8e76901b95cb201c55d83cd6549ac7c15954794c56ede47e3bd5f77f371e93",
+  "parts_saga/skins/shinhana/seat.png": "0e6f27b4e2de9c0537ba521594ac115a5c067f1b83485559428b3cb39b92ec18",
+  "parts_saga/skins/shinhana/seat_idle.png": "0838c8ece7c7bf10f9b058708706a4b1d6fb4128585f8880ea1abfa0f94ea324",
+  "parts_saga/skins/shinhana/seat_meta.json": "a603a04de076e22abeb30d5706b25c541cd4def764a7070f44e27e4b0c61f6c2",
+  "parts_saga/skins/shinhana/seat_pen.png": "0f03cee24b8e7e7a0482e4562a296f1bfa5eb93fc7c04fffa0e386703eec434c",
+  "parts_saga/skins/shinhana/seat_pen2.png": "ca0edcc9fc881395d75409a863a4c2c093cd36992847a012de9707c8af94ec1d",
+  "parts_saga/skins/shinhana/seat_type.png": "4ca19f2750abb174ee7fb6a79b5de46f444ba175529de7b180198801903b7065",
   "parts_saga/skins/shinhana/smile.png": "94525ba1cdd2380eae1be76f46223b56f5a6ff51f877ed4affbb80cdbac9bc7c",
   "parts_saga/snacks/apple.png": "1b07368fb7e1ff3141b29e726727d47b1f369c962ea3635af5239bb7fa9ae01e",
   "parts_saga/snacks/banana.png": "16032c8970de5f4ac8ec73f44321f8c2e568fe3ff132890170cc6e629cdadab0",
@@ -589,8 +595,8 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "환경음이 여섯 가지 늘었어요 — 바다 동굴·바다 파도·숲·숲 새소리·숲 새소리2·일상 빗소리2. 모두 3분짜리라 오래 틀어도 덜 지루하고, 끝과 처음을 겹쳐 이어 붙여 반복해도 이음매가 안 들려요",
-  "환경음이 많아져서 고르는 창에 스크롤이 생겼어요 — 일곱 줄까지 보이고 휠이나 오른쪽 막대로 나머지를 봐요"
+  "캐릭터 폼을 바꾸면 홈·뽀모도로 창·바탕화면에서도 그 모습으로 보여요 (사가의 변신 전/후) — 모두에게 바로 반영돼요",
+  "같이하기에서 나간 사람이 창에 계속 남아 있던 것을 고쳤어요 — 나감 신호를 놓쳐도 4분 뒤 저절로 빠지고, 대기실이면 자동 시작도 다시 돌아가요"
  ],
  "silent": true
 }
