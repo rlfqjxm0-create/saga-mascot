@@ -1580,6 +1580,7 @@ class TeamStrip:
         self.mode = "key"
         self._shown = False
         self._img = None
+        self._last_im = None        # 마지막으로 올린 그림 객체 (색상키 경로)
         self.canvas = None
         self.x = self.y = 0
         self.w = self.h = 1
@@ -1663,12 +1664,20 @@ class TeamStrip:
                 self._shown = True
             return CharLayer.push(self, im, self.x, self.y)
         try:
-            key2 = tuple(int(str(self.key)[i:i + 2], 16) for i in (1, 3, 5))
-            ph = ImageTk.PhotoImage(flat_on_key(im, key2))
-            self.canvas.config(width=im.width, height=im.height)
-            self.canvas.delete("all")
-            self.canvas.create_image(0, 0, image=ph, anchor="nw")
-            self._img = ph
+            # **같은 그림이면 자리만 옮긴다.** 색상키 경로(맥)는 그림을 올릴
+            # 때마다 키 색 섞기 + PhotoImage 를 새로 만드는데, 캐릭터 창을
+            # 끌면 따라오느라(_strip_follow) 프레임마다 그 일을 되풀이해
+            # 맥에서 끌 때마다 심하게 끊겼다 (퀸시 제보). 그림 객체가 그대로면
+            # 창만 옮긴다.
+            if im is not self._last_im or self._img is None:
+                key2 = tuple(int(str(self.key)[i:i + 2], 16)
+                             for i in (1, 3, 5))
+                ph = ImageTk.PhotoImage(flat_on_key(im, key2))
+                self.canvas.config(width=im.width, height=im.height)
+                self.canvas.delete("all")
+                self.canvas.create_image(0, 0, image=ph, anchor="nw")
+                self._img = ph
+                self._last_im = im
             self.top.geometry("+%d+%d" % (self.x, self.y))
             if not self._shown:
                 self.top.deiconify()
@@ -42422,6 +42431,14 @@ class Mascot:
         p = self._room_art_file(slot, "seat.png")
         if not p:
             return None
+        # **캐시한다.** 뽀모도로 창이 그릴 때마다 사람 수만큼 PNG 를 열고
+        # LANCZOS 로 줄이고 있었다 (실측: 한 바퀴에 4.5번, 프레임 비용의
+        # 3할). 맥은 그리기가 더 느려 창을 만질 때마다 끊겼다 (퀸시 제보).
+        # 열쇠에 폼이 들어가 있어(경로 p) 폼이 바뀌면 저절로 갈린다.
+        key = ("photo", p, int(h), bool(hard))
+        got = self._room_img_cache.get(key)
+        if got is not None:
+            return got
         try:
             im = Image.open(p).convert("RGBA")
             w9 = max(1, round(im.width * (h / float(im.height))))
@@ -42430,9 +42447,14 @@ class Mascot:
                 a9 = im.getchannel("A").point(
                     lambda v: 255 if v >= 128 else 0)
                 im.putalpha(a9)
-            return ImageTk.PhotoImage(im)
+            got = ImageTk.PhotoImage(im)
         except Exception:
             return None
+        if len(self._room_img_cache) > 40:          # 상한 (지뢰 18)
+            for k2 in list(self._room_img_cache)[:20]:
+                self._room_img_cache.pop(k2, None)
+        self._room_img_cache[key] = got
+        return got
 
     MONTH_HELLO = ("이번 달도 수고했어!", "정말 열심히 그렸다!",
                    "수고했어! 최고야!", "고생 많았어!")
