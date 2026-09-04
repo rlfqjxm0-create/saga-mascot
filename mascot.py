@@ -5638,6 +5638,14 @@ def _ssl_ctx():
     return _SSL_CTX[0] or None
 
 
+def _win_alive(w):
+    """그 Toplevel 이 아직 살아 있는가 (없어진 창은 목록에서 뺀다)."""
+    try:
+        return bool(w is not None and w.winfo_exists())
+    except Exception:
+        return False
+
+
 def _room_keys(code):
     """방 코드에서 '방 번호'와 '자물쇠'를 따로 뽑는다.
 
@@ -6314,6 +6322,8 @@ class Mascot:
          self._update_link) = update_notice(self.dir,
                                                              self.state_dir)
         self._update_win = None      # 업데이트 안내 팝업 (한 번만)
+        self._menu_up = False        # 우클릭 메뉴가 떠 있는가 (z 복구를 쉰다)
+        self._front_wins = []        # '항상 위'보다 앞을 지켜 줄 창들 (_keep_front)
         self._dot_btn = None         # 안 본 업데이트 점 자리 (x, y, 반지름)
         self._read_ver = None        # 어디까지 읽었는지 (파일에서 한 번만 읽음)
         if not self._update_notes and not os.path.exists(
@@ -12223,6 +12233,12 @@ class Mascot:
             win.attributes("-topmost", True)   # 한 번만 — 주기로 걸면 깜빡인다
         except Exception:
             pass
+        # 할 일·마감 말풍선은 0.5초마다 스스로 맨 앞으로 올라온다. 그 줄이
+        # 이 창을 덮으면 서로 번갈아 올라와 **깜빡이면서 가려진다**(제보).
+        # 목록에 넣어 두면 그리기 루프가 겹칠 때만 패널을 내려 준다.
+        self._front_wins = [w for w in self._front_wins
+                            if w is not win and _win_alive(w)]
+        self._front_wins.append(win)
 
         def covered():
             # 같은 프로세스의 '항상 위' 창이 이 창보다 앞에서 겹치는가.
@@ -12570,6 +12586,11 @@ class Mascot:
         if (not IS_WIN or self._fs_hidden or not self._main_hwnd
                 or not self.us.get("topmost", True)
                 or now - self._z_pin_at < self.Z_PIN):
+            return
+        # **우클릭 메뉴가 떠 있는 동안은 쉰다.** 메뉴는 캐릭터에 안 가리려고
+        # '항상 위'를 일부러 내려 두는데(_menu_popup), 아래 되걸기가 그걸
+        # '풀렸다'로 보고 1초 만에 도로 걸어 메뉴를 덮었다 (제보).
+        if self._menu_up:
             return
         self._z_pin_at = now
         u = ctypes.windll.user32
@@ -13019,6 +13040,9 @@ class Mascot:
         """
         self._safe("ui_click", self._ui_click)      # 메뉴 열리는 '똑'
         was = bool(self.us.get("topmost", True))
+        # 메뉴가 떠 있는 동안 z순서 되걸기를 쉬게 한다 (_z_pin). 안 그러면
+        # 아래에서 내려 둔 '항상 위'를 1초 만에 도로 걸어 메뉴를 덮는다.
+        self._menu_up = True
         if was:
             try:
                 self.root.attributes("-topmost", False)
@@ -13034,16 +13058,21 @@ class Mascot:
         if was:
             self._menu_layers_topmost(True)
 
-            def back(tries=0):
-                try:
-                    if self._menu.winfo_ismapped() and tries < 100:
-                        self.root.after(300, lambda: back(tries + 1))
-                        return
+        def back(tries=0):
+            """메뉴가 다 닫힌 뒤에 되돌린다. **어느 길로 왔든 부른다** —
+            항상 위가 꺼진 사람에게서 깃발이 영영 안 내려가면 z순서
+            자가 복구가 통째로 멈춘다."""
+            try:
+                if self._menu.winfo_ismapped() and tries < 100:
+                    self.root.after(300, lambda: back(tries + 1))
+                    return
+                self._menu_up = False
+                if was:
                     self.root.attributes("-topmost", True)
                     self.root.lift()
-                except Exception:
-                    pass
-            self.root.after(250, back)
+            except Exception:
+                self._menu_up = False
+        self.root.after(250, back)
 
     RESET_KEEP = 5           # 초기화 백업을 몇 벌 남길지
 
@@ -14086,6 +14115,28 @@ class Mascot:
         except Exception:
             return None
         return (bb[0] + x9, bb[1] + y9, bb[2] + x9, bb[3] + y9 + 14)
+
+    def _front_boxes(self):
+        """지금 떠 있는 '앞을 지켜야 하는 창'들의 화면 상자.
+
+        업데이트 소식처럼 `_keep_front` 로 띄운 창이다. 할 일·마감 패널이
+        0.5초마다 맨 앞으로 올라오는 줄과 부딪혀 깜빡였다 (제보) — 겹치는
+        동안에는 패널을 내려 준다.
+        """
+        out = []
+        keep = []
+        for w in (self._front_wins or []):
+            if not _win_alive(w):
+                continue
+            keep.append(w)
+            try:
+                x9, y9 = w.winfo_rootx(), w.winfo_rooty()
+                out.append((x9, y9, x9 + w.winfo_width(),
+                            y9 + w.winfo_height()))
+            except Exception:
+                pass
+        self._front_wins = keep
+        return out
 
     @staticmethod
     def _panel_overlap(p, box):
@@ -17627,15 +17678,20 @@ class Mascot:
                     bub9 = self._bubble_scr()
                 except Exception:
                     bub9 = None
+                fronts9 = self._front_boxes()
                 for _p in (self.todo_panel, self.due_panel):
                     # 우클릭 메뉴가 떠 있는 동안은 건드리지 않는다 —
                     # 안 그러면 앞에 뜬 메뉴를 0.5초 안에 도로 덮는다 (제보)
-                    if _p is None or getattr(_p, "menu_open", False):
+                    if _p is None or getattr(_p, "menu_open", False) \
+                            or self._menu_up:
                         continue
                     # 캐릭터 말풍선이 이 패널을 덮는 자리면 **패널을 내려서**
                     # 말풍선이 위로 오게 한다 (요청 — 가려서 읽기 힘들다).
                     # 겹칠 때만 하므로 평소 순서는 그대로다 (지뢰 15).
-                    if bub9 and self._panel_overlap(_p, bub9):
+                    # 앞을 지켜야 하는 창(업데이트 소식 등)도 같은 규칙이다.
+                    if any(self._panel_overlap(_p, b9) for b9 in fronts9):
+                        self._safe("panel_down", self._panel_demote, _p)
+                    elif bub9 and self._panel_overlap(_p, bub9):
                         self._safe("panel_down", self._panel_demote, _p)
                     else:
                         _p.raise_above()
@@ -43474,16 +43530,16 @@ class Mascot:
                   "blanket": (5, 10.0), "snack": (3, 30.0),
                   "praise": (3, 30.0),
                   # 남의 목표를 눌러 보내는 것 — 칭찬은 10분, 채찍질은
-                  # **5분**에 한 번 (요청).
+                  # **1분**에 한 번 (요청).
                   # 표의 수는 '몇 번까지'가 아니라 **n-1 번까지**다
                   # (`len(keep) >= n - 1` 로 막는다). 그래서 한 번은 2 다.
                   # 1 로 두면 `len >= 0` 이라 아예 못 보낸다 — 함정.
-                  "gpraise": (2, 600.0), "gwhip": (2, 300.0)}
+                  "gpraise": (2, 600.0), "gwhip": (2, 60.0)}
     GOAL_KINDS = ("gpraise", "gwhip")   # 목표에 붙는 반응 (칭찬·채찍질)
     # 받는 쪽 — 보낸 사람과 무관하게 이 간격 안에는 한 번만 받는다.
     # **보내는 쪽(SEND_LIMIT)과 같은 수라야 한다.** 받는 쪽만 길면
     # 보내진 것이 조용히 사라져 '눌렀는데 아무 일도 안 일어난다'가 된다.
-    GOAL_RECV_GAP = {"gpraise": 600.0, "gwhip": 300.0}
+    GOAL_RECV_GAP = {"gpraise": 600.0, "gwhip": 60.0}
     SEND_ALL = (10, 10.0)    # 한 사람에게 종류를 바꿔 가며 쏟아붓는 것도 막는다
 
     def _send_ok(self, kind, to=None):
