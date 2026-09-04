@@ -498,6 +498,7 @@ function report(){
   var st=player.getPlayerState();
   var d={ready:ready, playing: st===1};
   try{ var vd=player.getVideoData(); if(vd){ if(vd.title) d.title=vd.title; if(vd.video_id) d.vid=vd.video_id; } }catch(e){}
+  try{ d.dur=Math.round(player.getDuration()||0); }catch(e){}
   send(d);
 }
 function onYouTubeIframeAPIReady(){
@@ -595,7 +596,7 @@ def _mac_yt_player_main():
                 if st.get("vol") is not None:
                     run_js("window.ytVol(%d)" % int(st["vol"]))
                 out = {"ready": True, "playing": bool(d.get("p")),
-                       "vid": st["vid"]}
+                       "vid": st["vid"], "dur": dur}
                 ttl = d.get("title") or st["title"]
                 if ttl:
                     out["title"] = st["title"] = ttl
@@ -1438,6 +1439,8 @@ class CharLayer:
         self.ok = False
         self.hwnd = 0
         self._shown = False
+        self.fail = 0                # push 가 잇달아 실패한 수 (진단)
+        self._show_at = 0.0          # 마지막으로 창을 되살려 본 시각
         self.top = tk.Toplevel(root)
         self.top.overrideredirect(True)
         self.top.attributes("-topmost", True)
@@ -1489,9 +1492,25 @@ class CharLayer:
         w, h = im.size
         if w <= 0 or h <= 0:
             return False
-        if not self._shown:
-            u.ShowWindow(self.hwnd, 4)           # SW_SHOWNOACTIVATE
-            self._shown = True
+        # **깃발 말고 창에 직접 묻는다** (지뢰 24). 창이 어떤 이유로든
+        # 숨겨져 있으면 UpdateLayeredWindow 가 오류 87 로 조용히 실패해
+        # 몸이 통째로 안 보인다 (제리·개 제보).
+        if not self._shown or self.fail:
+            # 창이 숨겨져 있으면 UpdateLayeredWindow 가 오류 87 로 조용히
+            # 실패해 몸이 통째로 안 보인다 (지뢰 23 · 제리·개 제보).
+            # **깃발 말고 창에 직접 묻는다** (지뢰 24). 다만 되살리기는
+            # 1초에 한 번으로 묶는다 — 매 프레임 ShowWindow 를 부르면
+            # z순서가 흔들려 되레 깜빡인다 (검사가 잡았다).
+            now9 = time.time()
+            if now9 - self._show_at > 1.0:
+                self._show_at = now9
+                try:
+                    vis = bool(u.IsWindowVisible(self.hwnd))
+                except Exception:
+                    vis = self._shown
+                if not vis:
+                    u.ShowWindow(self.hwnd, 4)   # SW_SHOWNOACTIVATE
+        self._shown = True
         data = self._premul(im)
         hdc = u.GetDC(0)
         mem = g.CreateCompatibleDC(hdc)
@@ -1514,6 +1533,12 @@ class CharLayer:
         g.DeleteObject(hbm)
         g.DeleteDC(mem)
         u.ReleaseDC(0, hdc)
+        if not got:
+            # 실패가 이어지면 몸이 계속 안 보인다 — 세어 두고(지뢰 51),
+            # 위에서 1초에 한 번씩 창을 되살려 본다.
+            self.fail += 1
+        else:
+            self.fail = 0
         return bool(got)
 
     def place_above(self, owner_hwnd):
@@ -1522,10 +1547,24 @@ class CharLayer:
         **올리는 게 아니라 본체를 내린다.** 이 창을 맨 앞(HWND_TOP)으로
         올리면 그 위에 있어야 할 파티클 창까지 덮는다 — 대신 본체를 이
         창 뒤로 보내면 파티클과의 순서는 그대로 남는다.
+
+        **표식을 먼저 맞춘다.** '항상 위'인 창을 보통 창 뒤에 놓으면
+        그 표식이 벗겨진다 (지뢰 160). 본체는 항상 위인데 이 레이어가
+        아니면, 본체가 보통 층으로 내려가 다른 창에 묻히고 그 자리
+        클릭이 통째로 남에게 간다 (제리·개 제보의 후보).
         """
         u, _g = layer_api()
         if u is None or not owner_hwnd:
             return
+        try:
+            ex9 = u.GetWindowLongW(ctypes.c_void_p(owner_hwnd), -20)
+            me9 = u.GetWindowLongW(ctypes.c_void_p(self.hwnd), -20)
+            # **켜는 쪽으로만** 맞춘다. 여기서 레이어를 보통 층으로
+            # 내리면 몸이 남의 창에 묻혀 되레 깜빡인다 (검사가 잡았다).
+            if (ex9 & 0x8) and not (me9 & 0x8):
+                self.set_topmost(True)
+        except Exception:
+            pass
         try:
             # 둘째 인자는 '이 창 뒤에 놓아라' 다 (지뢰 23)
             u.SetWindowPos(owner_hwnd, self.hwnd, 0, 0, 0, 0,
@@ -6490,8 +6529,12 @@ class Mascot:
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        # 메뉴에 BGM 을 붙일지 여기서 갈리므로 재생기를 먼저 준비한다
+        # 메뉴에 붙일지 여기서 갈리므로 재생기를 먼저 준비한다
         self._safe("amb_init", self._amb_init)
+        # 옛 `yt_url` 한 곡을 목록으로 옮긴다 — **켤 때** 해야 한다.
+        # 창을 열 때만 하면 창을 한 번도 안 연 사람은 카드 위 단추가
+        # 통째로 사라진다 (지뢰 167).
+        self._safe("pl_migrate", self._pl_migrate)
         menu = tk.Menu(self.root, tearoff=0, font=self._uf(9))
         # 메뉴 차례는 요청대로 — 홈 / 오늘 할 일 / 꾸미기·소리 /
         # 설정·진단 / 끝내기. 되돌릴 수 없는 것(작업 종료·종료)은
@@ -6515,6 +6558,25 @@ class Mascot:
         menu.add_command(label="뽀모도로 타이머",
                          command=lambda: self._safe("pomo_win",
                                                     self._pomo_win))
+        # 플레이리스트는 뽀모도로 바로 아래, 그 밑에 가름끈 (요청).
+        # 유튜브 노래와 환경음이 한 창의 두 탭이라 항목은 하나다.
+        self._bgm_menu = None
+        self._bgm_menu_idx = None
+        if self._yt_on() or self._amb is not None:
+            # 새 기능이 들어왔으면 빨간 점 — 한 번 눌러 보면 사라진다.
+            # tk 메뉴는 글자 일부만 색을 못 주므로 점 문자를 붙이고 그
+            # 항목 전체를 빨갛게 한다 (슬라임 메뉴와 같은 방법).
+            new9 = self._bgm_menu_new()
+            menu.add_command(
+                label="플레이리스트  ●" if new9 else "플레이리스트",
+                command=lambda: self._safe("bgm_menu_open", self._bgm_open))
+            self._bgm_menu_idx = menu.index("end")
+            if new9:
+                try:
+                    menu.entryconfig(self._bgm_menu_idx,
+                                     foreground="#e0525c")
+                except Exception:
+                    pass
         # 여기까지가 '오늘 할 일' 묶음 — 아래는 꾸미기·소리 묶음 (요청)
         menu.add_separator()
         # 상태 칩 — 지금 무엇을 하는 중인지 홈에 알린다 (요청).
@@ -6550,20 +6612,6 @@ class Mascot:
             menu.add_command(label="소품 새로고침",
                              command=lambda: self._safe("prop_refresh",
                                                         self._prop_refresh))
-        if self._yt_on() or self._amb is not None:
-            # BGM 하나로 모은다 — 유튜브 노래와 환경음이 같은 자리에 있어야
-            # '무엇을 틀까'를 한 곳에서 고르게 된다.
-            bgm = tk.Menu(menu, tearoff=0, font=self._uf(9))
-            if self._yt_on():
-                bgm.add_command(label="유튜브 노래", command=self.add_music)
-            if self._amb is not None:
-                # 여러 개를 겹쳐 틀고 각자 볼륨을 주는 기능이라 메뉴로는
-                # 담기지 않는다 — 창을 따로 연다.
-                bgm.add_command(label="환경음",
-                                command=lambda: self._safe("amb_win",
-                                                           self._amb_win))
-            menu.add_cascade(label="BGM", menu=bgm)
-            self._bgm_menu = bgm
         if self.cfg.get("slime"):
             # 꺼내기/치우기와 종류 고르기를 '슬라임' 하나로 모은다.
             # 켬/끔은 체크 표시로, 종류는 라디오로 지금 상태가 보이게.
@@ -7066,7 +7114,25 @@ class Mascot:
         self._mq_cache = {}          # 마퀴 글자 띠 (상한 있음)
         self._pl_open = False        # 모두의 플레이리스트 패널 펼침
         self._pl_on = False          # 플레이리스트로 재생 중인가
+        self._vid_at = None          # 영상 창을 끼워 둔 자리 (창·x·y·w·h)
+        self._vid_add = None         # 영상 칸을 열며 창에 더해 준 높이
+        # 친구들의 플레이리스트
+        self._pl_peers = None        # 받아 둔 친구 목록 {slot: {h, at, songs}}
+        self._pl_askat = {}          # 자리마다 마지막으로 청한 시각
+        self._pl_face_cache = {}     # 친구 얼굴 동그라미 (slot, 크기, 폼)
+        self._pl_friend = ""         # 지금 트는 친구 목록의 자리
+        self._pl_push = False        # 청을 받아 다음 신호에 목록을 싣는다
+        self._pl_burst = 0.0         # 목록을 계속 싣는 시간창 끝
+        self._plq_at = 0.0           # 마지막으로 청에 응한 시각
         self._pl_i = -1              # 지금 트는 곡 번호
+        self._pl_src = "room"        # 트는 목록의 출처 (room=모두 / mine=내 것)
+        self._pl_shuf = None         # 섞기 한 바퀴 순서
+        self._pl_title_q = []        # 받아 온 제목 (스레드가 넣고 루프가 뺀다)
+        self._bgm_tab = "pl"         # 플레이리스트 창의 지금 탭
+        self._bgm_winref = None
+        self._bgm_draw = None
+        self._bgm_st = None
+        self._bgm_card = None        # 창 바탕 그림 (수거 방지)
         # 꼬들 (한국어 워들)
         self._kk = None              # 오늘 판
         self._kk_winref = None       # 창
@@ -9962,6 +10028,8 @@ class Mascot:
 
     def close(self):
         try:
+            # 영상 창을 먼저 떼어 낸다 — 자식 창은 부모와 함께 죽는다
+            self._safe("vid_park", self._vid_park)
             # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
             # 그 프레임이 없어진 창을 불러 'invalid command name' 이 뜬다.
             if self._tick_after is not None:
@@ -11233,7 +11301,7 @@ class Mascot:
         if not getattr(self, "timer_on", False):
             return False
         # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
-        if not (self.us.get("yt_url") or getattr(self, "_pl_on", False)):
+        if not (self._pl_list() or getattr(self, "_pl_on", False)):
             return False
         return bool(self._yt_on())
 
@@ -11248,11 +11316,11 @@ class Mascot:
             return YT_BAR
         if not getattr(self, "timer_on", False):
             return 0
-        # 모두의 플레이리스트로 틀었을 때도 이 줄이 선다. 그 경우 주소가
-        # us["yt_url"] 에 안 들어가서, 개인 노래를 한 번도 안 넣은 사람은
-        # 재생 중인데도 카드 위가 텅 비어 있었다.
+        # 모두의 플레이리스트로 틀었을 때도 이 줄이 선다. 그 경우 곡이
+        # 내 목록에 없어서, 제 노래를 한 번도 안 넣은 사람은 재생 중인데도
+        # 카드 위가 텅 비어 있었다.
         # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
-        if not (self.us.get("yt_url") or getattr(self, "_pl_on", False)):
+        if not (self._pl_list() or getattr(self, "_pl_on", False)):
             return 0
         return YT_BAR if self._yt_on() else 0
 
@@ -11284,11 +11352,10 @@ class Mascot:
         base9 = self._yt_bar_music()
         pomo9 = (bool(getattr(self, "timer_on", False))
                  and self._pomo_running())
+        # 아이콘은 **한 줄**이다 (요청 — 두 줄로 쌓으니 너무 높았다).
+        # 하드모드 불꽃이 시계 위로 솟으므로 그만큼만 더 (없으면 잘린다).
         if not pomo9:
             return base9
-        # 재생 단추도 **같은 줄**에 선다 (요청 — 위에 한 줄 더 세우니
-        # 시계·토마토가 재생 단추와 겹쳐 보였다). 하드모드 불꽃이 시계
-        # 위로 솟으므로 그만큼만 더 (없으면 불꽃 윗부분이 창에 잘린다).
         return (base9 or YT_BAR) + 12
 
     def _amb_on_any(self):
@@ -11449,6 +11516,7 @@ class Mascot:
     def _yt_forget(self):
         """재생기가 사라졌다고 표시만 한다 (프로세스 정리는 _yt_stop)."""
         self._pl_on = False          # 재생기가 죽었으면 플레이리스트도 끝
+        self._vid_at = None          # 끼워 둔 영상 창도 같이 사라졌다
         self._safe("card", self._relayout_card)
         self._yt_proc = None
         self._yt = {}
@@ -11497,22 +11565,15 @@ class Mascot:
                 self._yt_want = True
                 self._yt_send(c="play")
             return
-        self._pl_on = False          # 개인 노래 조작이 플레이리스트를 이긴다
-        url = str(self.us.get("yt_url") or "")
-        if not url:
-            return self.add_music()
+        # 개인 노래도 이제 **목록**이다 — 처음 누르면 내 목록을 튼다 (요청).
+        # 곡이 하나도 없으면 창을 열어 넣게 한다.
+        lst9 = self._pl_list()
+        if not lst9:
+            return self._bgm_win("pl")
         if not self._yt_alive():
-            if not self._yt_spawn():
-                self._say("음악을 켤 수 없어요.", 3.0)
-                return
-            vid, lst = self._yt_ids(url)
-            if not (vid or lst):
-                self._say("주소가 이상해요.", 3.0)
-                self._yt_stop()
-                return
-            self._yt_want = True
-            self._yt_send(c="vol", v=int(self.us.get("yt_volume", 55)))
-            self._yt_send(c="load", v=vid, list=lst)
+            self._pl_src = "mine"
+            self._safe("pl_play", self._pl_play,
+                       self._pl_i if 0 <= self._pl_i < len(lst9) else 0)
             return
         if self._yt.get("playing"):
             self._yt_want = False
@@ -11613,7 +11674,7 @@ class Mascot:
                     # 플레이리스트 중 막힌 곡(임베드 금지 등)은 건너뛴다.
                     # 전부 막혀 있으면 한 바퀴 돌고 멈춘다 (무한 넘김 방지).
                     self._pl_skip += 1
-                    songs = self._room_pl_songs()
+                    songs = self._pl_songs()
                     t = (songs[self._pl_i]["t"]
                          if 0 <= self._pl_i < len(songs) else "")
                     # **어느 곡이 왜 막혔는지 남긴다.** 예전에는 번호도
@@ -11637,7 +11698,8 @@ class Mascot:
                     else:
                         self._say("이 노래는 막혀 있어요 — 다음 곡!", 3.0)
                         self._room_toast = ("건너뜀 — %s" % why, time.time())
-                        self._safe("pl_next", self._pl_play, self._pl_i + 1)
+                        self._safe("pl_next", self._pl_play,
+                                   self._pl_next_i(self._pl_i, songs))
                 else:
                     self._yt_want = False
                     self._say(self.YT_ERRS.get(err, "이 노래는 못 틀겠어요."),
@@ -11650,10 +11712,15 @@ class Mascot:
                 # 먼저 낚아채야 같은 곡이 다시 돌지 않는다.
                 if getattr(self, "_pl_on", False) and s.get("ended") \
                         and time.time() - self._pl_adv_at > 2.0:
-                    self._safe("pl_next", self._pl_play, self._pl_i + 1)
+                    self._safe("pl_next", self._pl_play,
+                               self._pl_next_i(self._pl_i, self._pl_songs()))
                 # 곡이 바뀌면 제목을 말해 준다. 말풍선이 떠 있어도 덮어쓴다 —
                 # 사람이 방금 튼 노래라 그게 지금 가장 하고 싶은 말이다.
                 if s.get("playing") and s.get("title") and s["title"] != was:
+                    # 내 목록에 제목·길이를 적어 둔다 (다음에 열면 바로 보이게)
+                    self._safe("pl_title_note", self._pl_note_title,
+                               str(s.get("vid") or ""), str(s.get("title")),
+                               int(s.get("dur") or 0))
                     if self.can_talk:
                         self._say("♪ " + s["title"][:26], 4.5)
         if getattr(self, "_yt_proc", None) is None:
@@ -11713,9 +11780,9 @@ class Mascot:
         g = self._card_geom()
         # 가로 자리는 줄 전체(환경음·음악·시계·토마토)를 가운데 맞춘 값에서
         mid = self._top_row_x().get("music", (g["x0"] + g["x1"]) / 2)
-        by = g["y0"] - 24            # 카드 윗변에서 10px 띄운다 (붙으면 답답하다)
+        by = self._top_row_y("music")   # 카드 윗변에서 조금 띄운다
         ink = cd["fill"]
-        trio = bool(getattr(self, "_pl_on", False))
+        trio = self._yt_trio()
 
         def circle(bx, r):
             # 옅은 그림자 없음 — 어두운 바탕에서 흰 테로 보인다 (제보)
@@ -11729,15 +11796,9 @@ class Mascot:
                              start=a, extent=110, style="arc",
                              outline=ink, width=3)
             elif self._yt.get("playing"):         # 멈춤 표시 (막대 둘)
-                for sx in (-3.8 * k, 3.8 * k):
-                    c.create_rectangle(bx + sx - 1.8 * k, by - 6 * k,
-                                       bx + sx + 1.8 * k, by + 6 * k,
-                                       fill=ink, outline="")
+                self._gl_pause(c, bx, by, 13 * k, ink)
             else:                                 # 재생 표시 (세모)
-                # 무게중심이 단추 중심에 오도록 왼쪽으로 살짝 당긴다
-                c.create_polygon(bx - 4.9 * k, by - 6.5 * k,
-                                 bx - 4.9 * k, by + 6.5 * k,
-                                 bx + 6.6 * k, by, fill=ink, outline="")
+                self._gl_play(c, bx, by, 13 * k, ink)
 
         if not trio:
             r = 14.0
@@ -11754,13 +11815,7 @@ class Mascot:
         for sign, kind in ((-1, "prev"), (1, "next")):
             bx = mid + sign * gap
             circle(bx, r)
-            # 겹세모 — 좌우 대칭이라 저절로 정중앙이다. 이전곡은 왼쪽,
-            # 다음곡은 오른쪽을 본다.
-            for off in (-3.4, 3.4):
-                x0 = bx + off - 3.1 * sign      # 밑변 쪽
-                x1 = bx + off + 3.1 * sign      # 꼭짓점 쪽
-                c.create_polygon(x0, by - 4.6, x0, by + 4.6, x1, by,
-                                 fill=ink, outline="")
+            self._gl_skip(c, bx, by, 9.0, ink, sign)
             self._pl_ctl.append((bx, by, r, kind))
 
     def _draw_amb_btn(self):
@@ -11776,7 +11831,7 @@ class Mascot:
         r = 14.0                          # 노래 버튼과 같은 동그라미
         # 무리 전체(환경음·음악·시계·토마토)가 가운데 — 제 자리는 여기서
         cx = self._top_row_x().get("amb", (g["x0"] + g["x1"]) / 2)
-        by = g["y0"] - 24
+        by = self._top_row_y("amb")
         # 옅은 그림자 없음 — 어두운 바탕화면에서 흰 테로 보인다 (제보)
         self._soft_circle(c, cx, by, r, cd["bg"], cd["border"])
         ink = cd["fill"]
@@ -11827,120 +11882,8 @@ class Mascot:
         self._safe("update_popup", self._show_update_popup)
 
     def add_music(self):
-        """유튜브 노래 주소를 넣는 창. 엔터로 저장 후 바로 재생."""
-        if getattr(self, "_yt_win", None) is not None \
-                and self._yt_win.winfo_exists():
-            self._yt_win.destroy()
-        cd, u = self.card, self._ui
-        W, H = u(360), u(244)
-        win = tk.Toplevel(self.root)
-        self._yt_win = win
-        win.title("유튜브 노래")
-        win.attributes("-topmost", True)
-        win.resizable(False, False)
-        win.configure(bg=cd["panel"])
-        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
-                       highlightthickness=0)
-        cv.pack()
-
-        def rr(x0, y0, x1, y1, rad, **kw):
-            pts = [x0 + rad, y0, x1 - rad, y0, x1, y0, x1, y0 + rad,
-                   x1, y1 - rad, x1, y1, x1 - rad, y1, x0 + rad, y1,
-                   x0, y1, x0, y1 - rad, x0, y0 + rad, x0, y0]
-            return cv.create_polygon(pts, smooth=True, **kw)
-
-        rr(u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
-           outline=cd["border"], width=2)
-        cv.create_text(W / 2, u(28), text="무슨 노래를 틀까요?",
-                       font=self._uf(10, True), fill=cd["text"])
-        uv = tk.StringVar(value=str(self.us.get("yt_url") or ""))
-        cv.create_text(u(22), u(71), anchor="w", text="주소",
-                       font=self._uf(9), fill=cd["sub"])
-        ent = tk.Entry(cv, textvariable=uv, font=self._uf(10), relief="flat",
-                       bg="#ffffff", fg=cd["text"], highlightthickness=1,
-                       highlightbackground=cd["border"],
-                       highlightcolor=cd["fill"])
-        cv.create_window(u(58), u(58), anchor="nw", window=ent,
-                         width=W - u(80), height=u(26))
-        vol = tk.IntVar(value=int(self.us.get("yt_volume", 55)))
-        cv.create_text(u(22), u(110), anchor="w", text="볼륨",
-                       font=self._uf(9), fill=cd["sub"])
-        sc = tk.Scale(cv, from_=0, to=100, orient="horizontal", variable=vol,
-                      showvalue=True, bg=cd["panel"], fg=cd["sub"],
-                      troughcolor=cd["track"], highlightthickness=0,
-                      relief="flat", font=self._uf(8), length=u(240),
-                      command=lambda _v: self._yt_send(c="vol", v=vol.get()))
-        cv.create_window(u(58), u(94), anchor="nw", window=sc, width=W - u(80))
-
-        def btn(x0, y0, x1, y1, label, cmd, fill, fg="#ffffff", size=9):
-            shape = rr(x0, y0, x1, y1, (y1 - y0) / 2, fill=fill, outline="")
-            tid = cv.create_text((x0 + x1) / 2, (y0 + y1) / 2, text=label,
-                                 font=self._uf(size, True), fill=fg)
-            for item in (shape, tid):
-                cv.tag_bind(item, "<Button-1>", lambda _e: cmd())
-
-        # ── 유튜브 계정 — 로그인해 두면 그 계정으로 재생된다(프리미엄 적용)
-        signed = bool(self.us.get("yt_signed"))
-        cv.create_text(u(22), u(146), anchor="w",
-                       text=("유튜브 계정 · 로그인됨"
-                             if signed else "유튜브 계정 · 로그인 안 됨"),
-                       font=self._uf(9), fill=cd["text"] if signed else cd["sub"])
-
-        def do_login():
-            win.destroy()
-            self._yt_stop()
-            self.root.after(200, self._yt_login)
-
-        btn(W - u(126), u(133), W - u(20), u(159),
-            "다시 로그인" if signed else "로그인", do_login,
-            cd["track"] if signed else cd["fill"],
-            cd["sub"] if signed else "#ffffff", 8)
-        cv.create_text(W / 2, u(228),
-                       text="영상 주소나 재생목록 주소 · 소리만 나옵니다 · Esc로 닫기",
-                       font=self._uf(8), fill=cd["sub"])
-
-        def commit(_e=None):
-            url = uv.get().strip()[:400]
-            vid, lst = self._yt_ids(url)
-            if url and not (vid or lst):
-                ent.focus_set()
-                ent.selection_range(0, "end")
-                return
-            had, was = self._yt_bar(), str(self.us.get("yt_url") or "")
-            self.us["yt_url"] = url
-            self.us["yt_volume"] = int(vol.get())
-            self._save_settings()
-            if self._yt_bar() != had:
-                self._safe("card", self._relayout_card)
-            win.destroy()
-            # 재생기를 새로 열 때는 옛것이 완전히 사라진 뒤에 연다.
-            # 겹치면 잠깐 두 배로 무거워진다.
-            wait = 1200 if self._yt_alive() else 60
-            if not url:
-                self._yt_stop()
-            elif not self.us.get("yt_signed") and not self.us.get("yt_asked"):
-                # 처음 노래를 넣은 때 — 로그인부터 권한다. 로그인 창을 닫으면
-                # 재생기가 기억해 둔 이 곡으로 바로 이어진다.
-                self._yt_stop()
-                self.root.after(wait, self._yt_login)
-            elif url != was or not self._yt_alive():
-                self._yt_stop()
-                self.root.after(wait, self._yt_toggle)
-            elif not self._yt.get("playing"):
-                self._yt_toggle()
-
-        def clear():
-            uv.set("")
-            commit()
-
-        btn(u(20), u(176), u(176), u(204), "재생", commit, cd["fill"])
-        btn(u(190), u(176), W - u(20), u(204), "지우기", clear,
-            cd["track"], cd["sub"])
-        ent.bind("<Return>", commit)
-        win.bind("<Escape>", lambda _e: win.destroy())
-        self._place_near(win)
-        self._keep_front(win)
-        ent.focus_force()
+        """유튜브 노래 — 이제 플레이리스트 창의 **탭**이다 (요청)."""
+        return self._bgm_win("pl")
 
     def _set_win_icon(self):
         """별도 창(할 일·업데이트·환경설정…)의 제목표시줄 아이콘.
@@ -16643,34 +16586,67 @@ class Mascot:
 
     TOP_GAP = 8                  # 카드 위 아이콘들 사이 간격
 
-    def _top_row_x(self):
-        """카드 위 아이콘 줄의 가로 자리 — **무리 전체를 카드 정중앙에**
-        (요청: 아이콘이 늘어도 옆으로 밀려나지 않게).
+    def _yt_trio(self):
+        """카드 위 재생바가 '이전 · 재생/멈춤 · 다음' 셋인가.
 
-        재생 단추 줄이 있으면 환경음 알약은 그 줄에 남고(노래 단추 왼쪽),
-        뽀모 시계·내 토마토만 위 줄에서 가운데를 잡는다. 없으면 셋이 한 줄.
+        홈의 모두의 플레이리스트와 같은 구성으로 늘 셋을 둔다 (요청 —
+        곡이 하나뿐이어도 자리가 안 흔들린다). **줄이 몇이고 무엇이 어느
+        줄에 서는지가 다 이 값에서 나온다** — 표가 둘이면 어긋난다
+        (지뢰 159).
+        """
+        return bool(self._yt_bar_music())
+
+    def _top_row_y(self, _name=None):
+        """카드 위 아이콘이 서는 세로 자리 — **한 줄이다** (요청).
+
+        두 줄로 쌓아 봤더니 너무 높아 보인다는 제보로 되돌렸다. 재생바가
+        가운데, 나머지가 그 양옆이다 (_top_row_x).
+        """
+        return self._card_geom()["y0"] - 24
+
+    def _top_row_x(self):
+        """카드 위 아이콘의 가로 자리 — **재생바가 카드 정중앙**, 나머지는
+        그 양옆 (요청). 환경음은 왼쪽, 뽀모 시계·토마토는 오른쪽.
+
+        재생바가 없으면 있는 것들끼리 무리째 가운데를 잡는다.
         """
         g = self._card_geom()
         mid = (g["x0"] + g["x1"]) / 2.0
-        items = []
+        others = []
         if self._amb_on_any():
-            items.append(("amb", 28.0))
-        if self._yt_bar_music():
-            # 재생 단추 — 플레이리스트면 이전·재생·다음 셋이 나란히
-            # (중심 간격 27 · 반지름 11.5), 아니면 하나 (반지름 14)
-            items.append(("music", 77.0 if getattr(self, "_pl_on", False)
-                          else 28.0))
-        pomo = bool(getattr(self, "timer_on", False) and self._pomo_running())
-        if pomo:
-            items.append(("pomo", 28.0))
+            others.append(("amb", 28.0))
+        if bool(getattr(self, "timer_on", False) and self._pomo_running()):
+            others.append(("pomo", 28.0))
             if self._tom_top_want():
-                items.append(("tom", 26.0))
-        total = sum(w for _n, w in items) + self.TOP_GAP * max(0, len(items) - 1)
-        x = mid - total / 2.0
+                others.append(("tom", 26.0))
+        # **양옆에 번갈아** 나눈다 — 한쪽에 둘을 몰면 창 밖으로 삐져나간다
+        # (제보: 시계·토마토가 둘 다 오른쪽에 붙어 잘렸다). 첫째는 왼쪽.
+        left, right = [], []
+        for it9 in others:
+            (right if len(right) < len(left) else left).append(it9)
         out = {}
-        for name, w in items:
+        if not self._yt_bar_music():
+            items = left + right
+            if items:
+                total = (sum(w for _n, w in items)
+                         + self.TOP_GAP * (len(items) - 1))
+                x = mid - total / 2.0
+                for name, w in items:
+                    out[name] = x + w / 2.0
+                    x += w + self.TOP_GAP
+            return out
+        # 재생바 — 이전·재생·다음 셋 (중심 간격 27 · 반지름 11.5)
+        mw = 77.0 if self._yt_trio() else 28.0
+        out["music"] = mid
+        x = mid - mw / 2.0
+        for name, w in reversed(left):          # 왼쪽으로 붙여 나간다
+            x -= self.TOP_GAP + w
             out[name] = x + w / 2.0
-            x += w + self.TOP_GAP
+        x = mid + mw / 2.0
+        for name, w in right:
+            x += self.TOP_GAP
+            out[name] = x + w / 2.0
+            x += w
         return out
 
     def _draw_pomo_top(self, now):
@@ -16689,7 +16665,7 @@ class Mascot:
         r = 14.0
         # 가로 자리는 줄 전체를 가운데에 맞춘 값에서 (요청)
         xs = self._top_row_x()
-        bx, by = xs.get("pomo", mid), g["y0"] - 24   # 재생 단추와 같은 줄
+        bx, by = xs.get("pomo", mid), self._top_row_y("pomo")
         hard9 = self._pomo_hard_active()
         if hard9:
             # 불타는 시계 — 불꽃을 시계 뒤에 먼저 (위로 솟아 보인다)
@@ -17729,8 +17705,19 @@ class Mascot:
             # 8초 재고정은 3초짜리 말풍선이 끝난 뒤에야 돈다 — 상태 칩을
             # 바꿀 때마다 말풍선이 카드 뒤에 숨던 제보의 뿌리다. 매 프레임
             # **재고 나서** 어긋났을 때만 올리므로 깜빡이지 않는다 (지뢰 15).
-            if self._char_lay is not None and self._layer_buried():
-                self._char_lay.place_above(self._main_hwnd)
+            lay9 = self._char_lay
+            if lay9 is not None and int(getattr(lay9, "fail", 0)) >= 30:
+                # 몸이 화면에 안 올라간다 — 무슨 일인지 남긴다 (지뢰 51).
+                # 창이 숨겨졌거나(오류 87) 손잡이가 죽은 것이다.
+                lay9.fail = 0
+                try:
+                    vis9 = bool(ctypes.windll.user32.IsWindowVisible(
+                        ctypes.c_void_p(lay9.hwnd)))
+                except Exception:
+                    vis9 = None
+                self._z_note("layer_push_fail vis=%s" % vis9)
+            if lay9 is not None and self._layer_buried():
+                lay9.place_above(self._main_hwnd)
                 if self.shadow is not None:
                     self.shadow.place(*pos, self._main_hwnd)
         # 기존 타이머(에이전트)에게 '캐릭터 타이머가 살아 있다'고 알린다.
@@ -17752,6 +17739,10 @@ class Mascot:
             except Exception:
                 pass
 
+        # 받아 온 곡 제목을 목록에 적는다 — **재생기가 꺼져 있어도** 돌아야
+        # 한다 (_yt_tick 은 재생기가 떠 있을 때만 불린다 · 지뢰 169)
+        if getattr(self, "_pl_title_q", None):
+            self._safe("pl_title_tick", self._pl_title_tick)
         # 음악 재생기가 보낸 상태 (재생기를 띄운 적 있을 때만)
         if self._yt_q or self._yt_proc is not None:
             self._safe("yt", self._yt_tick, now)
@@ -19096,7 +19087,11 @@ class Mascot:
             return False
         pw = getattr(self, "_pomo_winref", None)
         try:
-            if pw is not None and pw.winfo_exists():
+            # **'있다'가 아니라 '화면에 보인다'로 본다.** 맥에서는 창을
+            # 최소화해도 창은 살아 있어서, 최소화한 사람에게는 띠가 영영
+            # 안 떴다 (사가 제보 — '친구들을 바탕화면에 두기를 켰는데
+            # 캐릭터가 안 보여요'). 지뢰 24 와 같은 이야기다.
+            if pw is not None and pw.winfo_exists()                     and str(pw.state()) not in ("iconic", "withdrawn"):
                 return False            # 창이 떠 있으면 거기서 본다
         except Exception:
             pass
@@ -23473,229 +23468,1982 @@ class Mascot:
         self._amb_win()
 
     def _amb_win(self):
-        """환경음 고르는 창 — 여러 개를 겹쳐 틀고 각자 볼륨을 준다.
+        """환경음 — 이제 플레이리스트 창의 **탭**이다 (요청).
 
-        위젯을 얹지 않고 캔버스에 직접 그린다. tk.Frame·tk.Scale 은
-        모서리가 각져서, 둥근 카드로 된 다른 창과 나란히 두면 튄다.
+        옛 이름은 부르는 곳이 여럿이라 통로로 남긴다 (카드 위 알약·검사).
         """
-        got = getattr(self, "_amb_winref", None)
-        if got is not None and got.winfo_exists():
-            got.lift()
+        return self._bgm_win("amb")
+
+    # ── 플레이리스트 · 환경음 (한 창 두 탭) ──────────────────────────
+    PL_MAX = 200                 # 목록에 담을 수 있는 곡 수
+    PL_SHARE_MAX = 120           # 친구에게 보내는 곡 수 (신호 상한 안에서)
+    PL_ASK_GAP = 60.0            # 자리마다 목록을 다시 청하는 간격
+    PL_PUSH_GAP = 20.0           # 청에 응하고 다음 청까지 (cdq 와 같다)
+    PL_BURST = 20.0              # 목록을 신호에 계속 싣는 시간 (cd 와 같다)
+    VID_GAP = 12                 # 영상 칸과 목록 사이 여백
+    VID_R = 14                   # 영상 칸 모서리 (창에 직접 오려 붙인다)
+    BGM_W = 380                  # 창 폭 (100% 기준)
+    BGM_PLROW = 46               # 곡 한 줄 높이
+    BGM_AMBROW = 58              # 환경음 한 줄 높이
+    BGM_VIS = 5                  # 곡 목록에 한 번에 보이는 줄 수
+    BGM_AVIS = 7                 # 환경음은 아래에 조작줄이 없어 더 보인다
+    BGM_H = 636                  # 창 높이 (처음 열 때 · 다섯 줄이 보이게)
+    BGM_MINW, BGM_MAXW = 320, 680    # 끌어서 줄이고 늘릴 수 있는 폭
+    BGM_MINH, BGM_MAXH = 452, 940
+    BGM_EDGE = 8                 # 가장자리를 잡을 수 있는 두께
+
+    def _pl_migrate(self):
+        """옛 값들을 지금 꼴로 옮긴다 (한 번만).
+
+        `yt_url`(주소 한 줄) → `yt_list`(목록) → `yt_sets`(목록 세 벌).
+        예전 사용자가 넣어 둔 노래가 한 곡도 사라지면 안 된다.
+        """
+        changed = False
+        if not isinstance(self.us.get("yt_list"), list):
+            old = str(self.us.get("yt_url") or "").strip()
+            self.us["yt_list"] = [{"u": old, "t": "", "d": 0}] if old else []
+            changed = True
+        v = self.us.get("yt_sets")
+        if not (isinstance(v, list) and len(v) == self.PL_SETS):
+            # 지금까지 쓰던 목록이 첫 번째 프리셋이 된다
+            self.us["yt_sets"] = [list(self.us.get("yt_list") or []), [], []]
+            changed = True
+        if changed:
+            self._safe("pl_save", self._save_settings)
+
+    PL_SETS = 3                  # 프리셋 (목록) 수
+
+    def _pl_sets(self):
+        """목록 세 벌. 꼴이 깨져 있으면 그 자리에서 고쳐 준다."""
+        v = self.us.get("yt_sets")
+        if not (isinstance(v, list) and len(v) == self.PL_SETS):
+            v = [list(self.us.get("yt_list") or []), [], []]
+            self.us["yt_sets"] = v
+        for i9 in range(self.PL_SETS):
+            if not isinstance(v[i9], list):
+                v[i9] = []
+        return v
+
+    def _pl_set_i(self):
+        """지금 고른 프리셋 번호."""
+        try:
+            return max(0, min(self.PL_SETS - 1,
+                              int(self.us.get("yt_set_i") or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _pl_set_pick(self, i9):
+        """프리셋을 고른다. 트는 곡의 번호는 **주소로** 다시 찾는다."""
+        self.us["yt_set_i"] = max(0, min(self.PL_SETS - 1, int(i9)))
+        self._pl_shuf = None
+        self._safe("pl_save", self._save_settings)
+        self._pl_sync_i()
+        self._safe("card", self._relayout_card)
+
+    def _pl_sync_i(self):
+        """지금 트는 곡의 번호를 주소로 다시 찾는다 (지뢰 133).
+
+        목록을 갈아 끼우거나 순서를 바꾸면 번호가 딴 곡을 가리킨다.
+        """
+        if getattr(self, "_pl_src", "room") not in ("mine", "friend"):
             return
-        if self._amb is None:
+        url9 = str(getattr(self, "_pl_url", "") or "")
+        for i9, sg in enumerate(self._pl_songs()):
+            if str(sg.get("u") or "") == url9:
+                self._pl_i = i9
+                return
+        self._pl_i = -1
+
+    def _pl_count(self, i9):
+        """그 프리셋에 든 곡 수."""
+        try:
+            return len([it for it in self._pl_sets()[int(i9)]
+                        if isinstance(it, dict) and str(it.get("u") or "")])
+        except Exception:
+            return 0
+
+    def _pl_sub(self, it):
+        """곡 아래에 적을 글 — 길이 > 아티스트 > 받아 오는 중 (요청).
+
+        주소를 그대로 보여 주면 길고 읽을 것이 없다 (제보). 길이는 한 번
+        틀어 봐야 알 수 있으므로, 그 전에는 oEmbed 로 받아 둔 채널 이름을
+        쓴다.
+        """
+        d9 = self._pl_dur((it or {}).get("d"))
+        if d9:
+            a9 = str((it or {}).get("a") or "")
+            return ("%s · %s" % (a9, d9)) if a9 else d9
+        a9 = str((it or {}).get("a") or "")
+        return a9 or "불러오는 중…"
+
+    def _pl_list(self):
+        """지금 고른 프리셋 — [{"u": 주소, "t": 제목, "a": 채널, "d": 길이초}]."""
+        v = self._pl_sets()[self._pl_set_i()]
+        return [it for it in v
+                if isinstance(it, dict) and str(it.get("u") or "").strip()]
+
+    def _pl_list_save(self, lst):
+        sets9 = self._pl_sets()
+        sets9[self._pl_set_i()] = list(lst)[:self.PL_MAX]
+        self.us["yt_sets"] = sets9
+        self.us["yt_list"] = sets9[0]        # 옛 열쇠도 맞춰 둔다
+        self._safe("pl_save", self._save_settings)
+
+    @staticmethod
+    def _pl_short(url):
+        """제목을 아직 모를 때 보여 줄 짧은 주소."""
+        s = str(url or "")
+        for cut in ("https://", "http://", "www."):
+            if s.startswith(cut):
+                s = s[len(cut):]
+        return s[:34] + ("…" if len(s) > 34 else "")
+
+    @staticmethod
+    def _pl_dur(sec):
+        try:
+            n = int(sec or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            return ""
+        h, m, s = n // 3600, (n % 3600) // 60, n % 60
+        return ("%d:%02d:%02d" % (h, m, s)) if h else ("%d:%02d" % (m, s))
+
+    def _pl_mode(self):
+        v = str(self.us.get("yt_mode") or "seq")
+        return v if v in ("seq", "shuffle", "one") else "seq"
+
+    def _pl_shuffle_order(self, n):
+        """섞기 순서 — **한 바퀴를 미리 뽑아** 들고 돈다.
+
+        고를 때마다 새로 뽑으면 같은 곡이 연달아 나온다.
+        """
+        got = getattr(self, "_pl_shuf", None)
+        if not got or len(got) != n:
+            got = list(range(n))
+            random.Random(int(time.time() * 1000) % 999983).shuffle(got)
+            self._pl_shuf = got
+        return got
+
+    def _pl_next_i(self, i, songs):
+        """다음에 틀 번호 — 재생 방식(순서·섞기·한 곡)을 따른다."""
+        n = len(songs)
+        if n <= 0:
+            return 0
+        mode = self._pl_mode()
+        if mode == "one":
+            return i % n
+        if mode == "shuffle":
+            order = self._pl_shuffle_order(n)
+            try:
+                p = order.index(i % n)
+            except ValueError:
+                p = -1
+            return order[(p + 1) % n]
+        return (i + 1) % n
+
+    def _pl_songs(self):
+        """지금 트는 목록 — 홈에서 고르면 모두의 것, 내 창이면 내 것.
+
+        `_pl_play`·다음 곡·막힌 곡 건너뛰기가 전부 이것만 본다. 출처를
+        번호가 아니라 여기서 한 번에 가르므로 재생 코드는 그대로다.
+        """
+        src9 = getattr(self, "_pl_src", "room")
+        if src9 == "friend":
+            return self._pl_friend_songs()
+        if src9 != "mine":
+            return self._room_pl_songs()
+        return self._pl_songs_mine()
+
+    def _pl_add(self, url):
+        """주소 한 줄을 목록 끝에 넣는다. 넣었으면 True."""
+        url = str(url or "").strip()[:400]
+        if not url:
+            return False
+        vid, lst = self._yt_ids(url)
+        if not (vid or lst):
+            return False
+        cur = self._pl_list()
+        if any(str(it.get("u") or "") == url for it in cur):
+            return False                      # 이미 있는 곡
+        cur.append({"u": url, "t": "", "d": 0})
+        self._pl_list_save(cur)
+        self._safe("pl_title", self._pl_fetch_title, url)
+        return True
+
+    def _pl_fetch_title(self, url):
+        """oEmbed 로 제목만 한 번 받아 온다 (넣자마자 보이게).
+
+        표준 라이브러리만 쓴다 (지뢰 21) — 굳힌 exe 에는 pip 꾸러미가 없다.
+        못 받아도 그만이다; 재생기가 틀 때 제목을 보내 주면 그때 채운다.
+        """
+        vid, lst = self._yt_ids(url)
+        if not vid:
             return
-        cd, u = self.card, self._ui
-        names = list(self._amb.names)
-        W = u(330)
-        RH = u(60)                       # 한 줄 높이
-        TOP = u(74)                       # 제목 몫
-        BOT = u(58)                       # 아래 단추 몫
-        # 환경음이 늘면 창이 화면 밖으로 나간다 (열셋이면 900px 을 넘어
-        # 아래 단추가 잘린다) — 일곱 줄까지만 보이고 나머지는 스크롤로
-        # 본다 (휠 · 오른쪽 막대 끌기). 캔버스는 자기 그림을 잘라내지
-        # 못하므로(지뢰 22) 넘친 줄은 위아래를 판 색으로 덮어 가린다.
-        VIS = min(len(names), 7)
-        SCROLL = len(names) > VIS
-        H = TOP + RH * VIS + BOT
-        LIST_H = RH * VIS
-        CONT_H = RH * len(names)
-        MAXOFF = max(0.0, CONT_H - LIST_H)
-        sc = {"off": 0.0, "bar": False}
+        def work():
+            try:
+                q = urllib.parse.urlencode(
+                    {"url": "https://www.youtube.com/watch?v=" + vid,
+                     "format": "json"})
+                with urllib.request.urlopen(
+                        "https://www.youtube.com/oembed?" + q,
+                        timeout=4, context=_ssl_ctx()) as r:
+                    d = json.loads(r.read().decode("utf-8", "replace"))
+                t = str(d.get("title") or "")[:80]
+                a = str(d.get("author_name") or "")[:40]
+            except Exception:
+                return
+            if t or a:
+                self._pl_title_q.append((url, t, a))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pl_title_tick(self):
+        """받아 온 제목을 목록에 적는다 (그리기 루프에서 — 스레드가 아니라).
+
+        스레드에서 tkinter 를 건드리면 'main thread is not in main loop'
+        로 죽는다 (지뢰 150). 큐는 앞에서 꺼내 비운다 (지뢰 26).
+        """
+        q = self._pl_title_q
+        if not q:
+            return
+        cur = self._pl_list()
+        hit = False
+        while q:
+            url, t, a = q.pop(0)
+            for it in cur:
+                if str(it.get("u") or "") != url:
+                    continue
+                if t and not it.get("t"):
+                    it["t"] = t
+                    hit = True
+                if a and not it.get("a"):
+                    it["a"] = a          # 채널 이름 (길이를 알기 전까지)
+                    hit = True
+        if hit:
+            self._pl_list_save(cur)
+            self._safe("bgm_redraw", self._bgm_redraw)
+
+    def _pl_note_title(self, vid, title, dur=0):
+        """재생기가 알려 준 제목·길이를 그 곡 줄에 적어 둔다."""
+        if not vid or not title:
+            return
+        cur = self._pl_list()
+        hit = False
+        for it in cur:
+            v9, _l9 = self._yt_ids(str(it.get("u") or ""))
+            if v9 == vid:
+                if str(it.get("t") or "") != title:
+                    it["t"] = str(title)[:80]
+                    hit = True
+                if dur and int(it.get("d") or 0) != int(dur):
+                    it["d"] = int(dur)
+                    hit = True
+        if hit:
+            self._pl_list_save(cur)
+            self._safe("bgm_redraw", self._bgm_redraw)
+
+    PL_MQ_SPEED = 26.0           # 흐르는 제목의 속도 (px/초)
+    PL_MQ_WAIT = 0.6             # 커서를 올리고 흐르기 시작할 때까지
+    # 프레임 간격 — 맥 Tk 는 캔버스 그리기가 느려 한 단계 늦춘다.
+    # 창이 떠 있을 때만 도는 것이라 체감은 없다 (지뢰 136).
+    BGM_TICK_HOV = 60 if IS_MAC else 40
+    BGM_TICK_EQ = 90 if IS_MAC else 60
+
+    def _pl_marquee(self, text, w, h, col, pt, now, t0):
+        """곡 제목이 옆으로 흐르는 **그림 띠** 한 장 (투명 바탕).
+
+        캔버스는 제 그림을 못 자르므로(지뢰 22) 글자를 그리고 넘친 데를
+        덮는 방법을 썼더니, 줄 밖으로 나간 꼬리를 다 못 덮어 끊겨 보였다
+        (제보). 잘라 낸 그림을 얹으면 애초에 넘칠 수가 없다.
+
+        글자 띠는 **제목 + 틈 + 제목** 으로 한 번 그려 두고 프레임마다
+        잘라 붙이기만 한다 — 끝에서 되돌아오지 않고 이어서 돈다.
+        """
+        w, h = int(w), int(h)
+        if w < 8:
+            return None
+        S = 2
+        fpx = max(8, int(round(float(pt) * self._tk_ppp()))) * S
+        key = ("plmq", str(text), fpx, str(col))
+        got = self._mq_cache.get(key)
+        if got is None:
+            try:
+                font = self._pil_font(fpx, True)
+                d0 = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+                tw = int(d0.textlength(str(text), font=font))
+                gap = max(int(fpx * 1.4), 8)
+                per = tw + gap
+                strip = Image.new("RGBA", (per + tw + gap, int(fpx * 1.7)),
+                                  (0, 0, 0, 0))
+                dr = ImageDraw.Draw(strip)
+                for x9 in (0, per):
+                    dr.text((x9, int(fpx * 0.18)), str(text), font=font,
+                            fill=col)
+                got = (strip, per)
+            except Exception:
+                got = False
+            if len(self._mq_cache) > 24:          # 상한 (지뢰 18)
+                for k9 in list(self._mq_cache)[:12]:
+                    self._mq_cache.pop(k9, None)
+            self._mq_cache[key] = got
+        if not got:
+            return None
+        strip, per = got
+        inner = w * S
+        if strip.width <= inner or per <= 0:
+            return None
+        el = max(0.0, float(now) - float(t0) - self.PL_MQ_WAIT)
+        off = int((el * self.PL_MQ_SPEED * S) % per)
+        off = max(0, min(strip.width - inner, off))
+        self._pl_mq_off = off            # 검사가 '흐르는가'를 재는 자리
+        band = strip.crop((off, 0, off + inner, strip.height))
+        band = band.resize((w, max(1, int(strip.height / S))), Image.LANCZOS)
+        return ImageTk.PhotoImage(band)
+
+    # ── 친구들의 플레이리스트 ────────────────────────────────────────
+    def _pl_friends_ok(self):
+        """친구 목록 기능을 쓰는가 — config 의 pl_friends (지금은 내 도로롱)."""
+        return bool(self.cfg.get("pl_friends", True))
+
+    def _pl_hash(self, songs):
+        """목록의 짧은 해시 — 자리 신호에 늘 실려 '바뀌었나'를 알린다."""
+        raw = "|".join(str(it.get("u") or "") for it in songs)
+        if not raw:
+            return ""
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+
+    def _pl_share_pack(self):
+        """친구에게 보내는 내 목록 — 영상 번호(11자)·짧은 제목·길이만.
+
+        주소를 통째로 실으면 곡당 세 배다. 받는 쪽이 번호를 주소로
+        되살린다. 곡 수도 PL_SHARE_MAX 에서 자른다 (봉인 후 상한 안).
+        """
+        out = []
+        # 화면용(_pl_songs_mine)은 길이를 떨어뜨린다 — 원본 목록에서 싣는다
+        for it in self._pl_list()[:self.PL_SHARE_MAX]:
+            u9 = str(it.get("u") or "")
+            vid, lst = self._yt_ids(u9)
+            if vid:
+                u9 = vid
+            elif lst:
+                u9 = u9[:60]
+            else:
+                continue
+            out.append({"u": u9,
+                        "t": (str(it.get("t") or "")
+                              or self._pl_short(str(it.get("u") or "")))[:30],
+                        "d": int(it.get("d") or 0)})
+        return out
+
+    def _pl_peers_path(self):
+        return os.path.join(self.state_dir, ".room_pl.json")
+
+    def _pl_peers_get(self):
+        """받아 둔 친구 목록 (읽기 가드 — 지뢰 92)."""
+        d = getattr(self, "_pl_peers", None)
+        if d is None:
+            d = _load_json(self._pl_peers_path(), {})
+            self._pl_peers = d if isinstance(d, dict) else {}
+        return self._pl_peers
+
+    def _pl_peers_save(self):
+        try:
+            if not _load_failed(self._pl_peers_path()):
+                _save_json(self._pl_peers_path(), self._pl_peers_get())
+        except Exception:
+            pass
+
+    def _room_pl_take(self, people):
+        """신호에 실려 온 친구 목록을 받아 둔다 (그리기와 무관하게 · 지뢰 97)."""
+        got = False
+        for q in people or []:
+            if not isinstance(q, dict):
+                continue
+            slot = str(q.get("slot") or "")
+            h9 = str(q.get("plh") or "")
+            pl = q.get("pl")
+            if not (slot and h9 and isinstance(pl, list)) or slot == self.char:
+                continue
+            peers = self._pl_peers_get()
+            cur = peers.get(slot)
+            if isinstance(cur, dict) and cur.get("h") == h9:
+                continue                  # 이미 받아 둔 것
+            songs = []
+            for it in pl[:self.PL_SHARE_MAX]:
+                if not isinstance(it, dict):
+                    continue
+                u9 = str(it.get("u") or "")[:80]
+                if len(u9) == 11 and "/" not in u9 and "." not in u9:
+                    u9 = "https://youtu.be/" + u9
+                if not self._song_ok(u9):
+                    continue
+                songs.append({"u": u9, "t": str(it.get("t") or "")[:40],
+                              "d": int(it.get("d") or 0)})
+            peers[slot] = {"h": h9, "at": int(time.time()), "songs": songs}
+            if len(peers) > 40:                        # 상한 (지뢰 18)
+                for k9 in sorted(peers, key=lambda k: int(
+                        (peers[k] or {}).get("at") or 0))[:20]:
+                    peers.pop(k9, None)
+            got = True
+        if not got:
+            return
+        self._pl_peers_save()
+        if getattr(self, "_pl_src", "") == "friend":
+            self._pl_sync_i()             # 번호가 아니라 주소로 (지뢰 133)
+        if self._pl_friends_open():
+            self._bgm_redraw()
+
+    def _pl_friends_open(self):
+        """친구 화면을 보고 있는가 (창이 떠 있고 그 화면일 때)."""
+        w = getattr(self, "_bgm_winref", None)
+        try:
+            if w is None or not w.winfo_exists() or not w.winfo_ismapped():
+                return False
+        except Exception:
+            return False
+        st9 = getattr(self, "_bgm_st", None) or {}
+        return bool(getattr(self, "_bgm_tab", "pl") == "pl"
+                    and st9.get("view") == "friends")
+
+    def _room_pl_net(self, people):
+        """친구 목록 재청 그물 — 보고 있는 동안, 해시가 다를 때만 (지뢰 134).
+
+        청이 어디서 새든 '광고된 해시 ≠ 받아 둔 해시'가 남으므로 그것만
+        본다. 받으면 저절로 멈춘다. 안 보고 있을 때는 아예 안 청한다 —
+        전송량을 아낀다 (지뢰 47).
+        """
+        if self.room_net is None or not self._pl_friends_ok():
+            return
+        if not (self._pl_friends_open()
+                or getattr(self, "_pl_src", "") == "friend"):
+            return
+        peers = self._pl_peers_get()
+        for q in people or []:
+            if not isinstance(q, dict):
+                continue
+            slot = str(q.get("slot") or "")
+            h9 = str(q.get("plh") or "")
+            if (not slot or slot == self.char or not h9 or q.get("off")
+                    or isinstance(q.get("pl"), list)):
+                continue              # 목록이 같이 실려 왔으면 청할 것 없다
+            cur = peers.get(slot)
+            if not (isinstance(cur, dict) and cur.get("h") == h9):
+                self._pl_ask(slot)
+
+    def _pl_ask(self, slot):
+        """'목록 좀 보내 줘' — 자리마다 PL_ASK_GAP 에 한 번만."""
+        if self.room_net is None:
+            return False
+        now = time.time()
+        ask = self._pl_askat
+        if now - float(ask.get(slot) or 0.0) < self.PL_ASK_GAP:
+            return False
+        ask[slot] = now
+        if len(ask) > 60:                        # 상한 (지뢰 18)
+            for old in list(ask)[:30]:
+                ask.pop(old, None)
+        try:
+            self.room_net.send(slot, "plq")
+            return True
+        except Exception:
+            return False
+
+    def _pl_ask_all(self):
+        """친구 화면을 여는 순간 — 해시가 다른 사람들에게 한꺼번에 청한다."""
+        self._room_pl_net(list(self.room_people or []))
+
+    def _pl_friends(self):
+        """지금 켜 둔 친구 중 목록이 있는 사람들 (자리 순서대로).
+
+        받아 둔 목록이 해시와 다르면(바뀐 뒤 아직 못 받음) 옛것을 그대로
+        보여 주고 stale 로 표시한다 — 빈 칸보다 낫고 새것이 오면 바뀐다.
+        """
+        out = []
+        peers = self._pl_peers_get()
+        for q in self._room_seats():
+            slot = str(q.get("slot") or "")
+            if not slot or slot == self.char or q.get("off"):
+                continue
+            n9 = int(q.get("plc") or 0)
+            if n9 <= 0:
+                continue
+            h9 = str(q.get("plh") or "")
+            cur = peers.get(slot)
+            songs = (list(cur.get("songs") or [])
+                     if isinstance(cur, dict) else None)
+            out.append({"slot": slot,
+                        "n": (str(q.get("n") or "")
+                              or self.ROOM_NAME.get(slot, "")),
+                        "c": n9, "now": str(q.get("pln") or ""), "h": h9,
+                        "songs": songs,
+                        "stale": bool(isinstance(cur, dict)
+                                      and cur.get("h") != h9)})
+        return out
+
+    def _pl_friend_songs(self):
+        cur = self._pl_peers_get().get(getattr(self, "_pl_friend", ""))
+        return list(cur.get("songs") or []) if isinstance(cur, dict) else []
+
+    def _pl_friend_name(self):
+        slot = getattr(self, "_pl_friend", "")
+        for q in self.room_people or []:
+            if isinstance(q, dict) and q.get("slot") == slot and q.get("n"):
+                return str(q["n"])[:14]
+        try:
+            w9 = self._room_who_get().get(slot)
+            if isinstance(w9, dict) and w9.get("n"):
+                return str(w9["n"])[:14]
+        except Exception:
+            pass
+        return self.ROOM_NAME.get(slot, "친구")
+
+    def _pl_now_label(self):
+        """아래 '지금 곡' 글 — 친구 목록이면 누구의 것인지 앞에 붙인다."""
+        src9 = getattr(self, "_pl_src", "room")
+        if src9 not in ("mine", "friend"):
+            return ""
+        songs = self._pl_songs()
+        if not (songs and 0 <= self._pl_i < len(songs)):
+            return ""
+        t9 = str(songs[self._pl_i].get("t") or "")
+        if src9 == "friend":
+            return "♪ %s의 목록 · %s" % (self._pl_friend_name(), t9)
+        return "♪ " + t9
+
+    def _pl_face(self, slot, d):
+        """친구 얼굴 동그라미 — 앉은 모습(seat.png)의 머리를 오려 낸다.
+
+        (자리, 크기, 폼) 으로 캐시한다. 그림이 없으면 None (빈 동그라미).
+        """
+        d = max(8, int(d))
+        key = (slot, d, self._slot_form(slot))
+        cache = self._pl_face_cache
+        got = cache.get(key)
+        if got is not None:
+            return got
+        p = self._room_art_file(slot, "seat.png")
+        if p is None:
+            return None
+        try:
+            from PIL import ImageDraw
+            src = Image.open(p).convert("RGBA")
+            head = src.crop((0, 0, src.width, int(src.height * 0.80)))
+            bb = head.getbbox()
+            if bb:
+                head = head.crop(bb)
+            S = 4
+            D = d * S
+            sc = (D * 0.92) / float(max(head.width, head.height))
+            head = head.resize((max(1, int(head.width * sc)),
+                                max(1, int(head.height * sc))),
+                               Image.LANCZOS)
+            lay = Image.new("RGBA", (D, D), (0, 0, 0, 0))
+            soft = self.card.get("soft") or "#fbf3f7"
+            ImageDraw.Draw(lay).ellipse((0, 0, D - 1, D - 1),
+                                        fill=self._hex_rgb(soft) + (255,))
+            lay.paste(head, ((D - head.width) // 2, (D - head.height) // 2),
+                      head)
+            mask = Image.new("L", (D, D), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, D - 1, D - 1), fill=255)
+            lay.putalpha(mask)
+            ph = ImageTk.PhotoImage(lay.resize((d, d), Image.LANCZOS))
+        except Exception:
+            return None
+        if len(cache) > 40:                          # 상한 (지뢰 18)
+            for k9 in list(cache)[:20]:
+                cache.pop(k9, None)
+        cache[key] = ph
+        return ph
+
+    @staticmethod
+    def _hex_rgb(h):
+        h = str(h).lstrip("#")
+        try:
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+        except (ValueError, IndexError):
+            return (251, 243, 247)
+
+    def _vid_ok(self):
+        """영상 보기를 쓸 수 있는가 — config 로 켠 캐릭터 · 윈도우만.
+
+        맥은 프로세스 사이에 창을 끼워 넣는 길이 없어 빠져 있다.
+        """
+        return bool(IS_WIN and self.cfg.get("video", True))
+
+    def _vid_on(self):
+        return bool(self._vid_ok() and self.us.get("yt_video"))
+
+    def _vid_h(self, w9):
+        """영상 칸 높이 — 16:9."""
+        return int((w9 - self._ui(36)) * 9 / 16.0)
+
+    def _vid_sync(self, win, st):
+        """영상 칸 자리를 재생기에 알린다 (없으면 떼어 낸다).
+
+        끼워 넣기(SetParent)라 창을 끌거나 크기를 바꿔도 저절로 따라오고
+        밖으로 나간 부분은 잘린다. 보내는 좌표는 **부모의 클라이언트
+        기준**인데, 표시줄이 없는 창이라 캔버스 좌표와 같다 (실측 확인).
+        """
+        box = st.get("vidbox") if self._bgm_tab == "pl" else None
+        if not box or not self._vid_on() or not self._yt_alive():
+            self._vid_park()
+            return
+        try:
+            h9 = int(win.winfo_id())
+        except Exception:
+            return
+        want = (h9,) + tuple(int(v) for v in box)
+        old = getattr(self, "_vid_at", None)
+        if want == old:
+            return
+        if old is not None and old[0] == h9:
+            ok9 = self._yt_send(c="vidbox", x=want[1], y=want[2], w=want[3],
+                                h=want[4], r=int(self._ui(self.VID_R)))
+        else:
+            ok9 = self._yt_send(c="embed", p=h9, x=want[1], y=want[2],
+                                w=want[3], h=want[4],
+                                r=int(self._ui(self.VID_R)))
+        self._vid_at = want if ok9 else None
+
+    def _vid_park(self):
+        """영상 창을 떼어 다시 화면 밖으로.
+
+        **창을 닫기 전에 반드시** 불러야 한다 — 자식 창은 부모가 사라지면
+        같이 사라지고, 그러면 소리까지 끊긴다.
+        """
+        if getattr(self, "_vid_at", None) is None:
+            return
+        self._vid_at = None
+        self._yt_send(c="unembed")
+
+    def _bgm_redraw(self):
+        fn = getattr(self, "_bgm_draw", None)
+        if fn is not None:
+            fn()
+
+    def _bgm_menu_new(self):
+        """'플레이리스트' 옆에 빨간 점을 띄울까 — 아직 한 번도 안 눌렀으면.
+
+        깃발이 아니라 '눌러 봤나' 하나만 저장한다 (지뢰 30). 끄는 쪽이
+        안 불려 점이 켜진 채 굳는 일이 없다.
+        """
+        return not bool(self.us.get("bgm_seen"))
+
+    def _bgm_menu_seen(self):
+        """눌렀다 = 봤다. 그 자리에서 점을 끈다.
+
+        저장이 실패해도 메모리 값은 올린다 — 최악이 '다음에 한 번 더
+        뜨는 것'이다 (지뢰 30).
+        """
+        if not self._bgm_menu_new():
+            return
+        self.us["bgm_seen"] = True
+        self._safe("bgm_seen", self._save_settings)
+        m = getattr(self, "_menu", None)
+        idx = getattr(self, "_bgm_menu_idx", None)
+        if m is not None and idx is not None:
+            try:
+                m.entryconfig(idx, label="플레이리스트", foreground="")
+            except Exception:
+                pass
+
+    def _bgm_open(self):
+        """메뉴에서 연다 — 빨간 점을 끄고 창을 띄운다."""
+        self._safe("bgm_seen_menu", self._bgm_menu_seen)
+        return self._bgm_win()
+
+    def _bgm_open_pl(self):
+        return self._bgm_win("pl")
+
+    def _bgm_open_amb(self):
+        return self._bgm_win("amb")
+
+    def _bgm_win(self, tab=None):
+        """플레이리스트 · 환경음 — 한 창에 탭 둘 (요청).
+
+        **OS 표시줄을 안 쓴다** (요청) — 창 안에 제목과 최소화·닫기를
+        그리고, 제목 띠를 잡아 끌어 옮긴다. 모서리를 둥글게 두려고 색상키
+        창으로 만들고, 바탕 카드만 키 색과 섞어 그린다 (_soft_shape ·
+        지뢰 65·124). 그 위에 얹는 것들은 카드 위에 겹쳐 그려지므로
+        평소 도우미를 그대로 쓴다.
+        """
+        if tab in ("pl", "amb"):
+            self._bgm_tab = tab
+        got = getattr(self, "_bgm_winref", None)
+        try:
+            if got is not None and got.winfo_exists():
+                got.deiconify()
+                self._bgm_redraw()
+                self._win_top(got)
+                return got
+        except Exception:
+            pass
+        self._pl_migrate()
+        u, cd = self._ui, self.card
+        W, H = int(u(self.BGM_W)), int(u(self.BGM_H))
+        wh9 = self.us.get("bgm_wh")
+        if isinstance(wh9, (list, tuple)) and len(wh9) == 2:
+            try:
+                W = max(int(u(self.BGM_MINW)),
+                        min(int(u(self.BGM_MAXW)), int(wh9[0])))
+                H = max(int(u(self.BGM_MINH)),
+                        min(int(u(self.BGM_MAXH)), int(wh9[1])))
+            except (TypeError, ValueError):
+                pass
         win = tk.Toplevel(self.root)
-        self._amb_winref = win
-        win.title("환경음")
-        win.configure(bg=cd["panel"])
-        win.resizable(False, False)
-        self._keep_front(win, focus=False)
-        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+        self._bgm_winref = win
+        win.title("플레이리스트")
+        key = TRANSPARENT
+        bare = IS_WIN                # 맥 Tk 는 표시줄 없는 창이 글자를 못 받는다
+        # 크기 조절 — 표시줄이 없는 윈도우는 가장자리를 직접 잡고(edge_at),
+        # 표시줄이 있는 맥은 **OS 창틀**에 맡긴다 (지뢰 168).
+        win.resizable(not bare, not bare)
+        if not bare:
+            win.minsize(int(u(self.BGM_MINW)), int(u(self.BGM_MINH)))
+        if bare:
+            win.overrideredirect(True)
+            try:
+                win.attributes("-transparentcolor", key)
+            except Exception:
+                key = cd["panel"]
+        else:
+            key = cd["panel"]
+        win.configure(bg=key)
+        cv = tk.Canvas(win, width=W, height=H, bg=key,
                        highlightthickness=0, bd=0)
         cv.pack()
-        line = self._tint(cd["fill"], 0.55)
-        pad = u(14)
-        BARW = u(5)                                # 스크롤 막대 굵기
-        RX = W - pad - (u(12) if SCROLL else 0)    # 줄의 오른쪽 끝
-        sx0, sx1 = pad + u(16), RX - u(16)         # 슬라이더 양 끝
+        ent = tk.Entry(cv, bd=0, relief="flat", bg="#ffffff", fg=cd["text"],
+                       font=self._uf(10), highlightthickness=0,
+                       insertbackground=cd["fill"])
+        st = {"hits": [], "off": {"pl": 0.0, "amb": 0.0, "fr": 0.0},
+              "drag": None,
+              "bar": False, "move": None, "vol": False, "rz": None,
+              "cur": "", "titles": [], "hov": None, "hov_at": 0.0,
+              "hovjob": None, "eq": None, "eqjob": None, "mqimg": None,
+              "nowmq": None, "nowimg": None, "nowbox": None,
+              "hovrow": None, "rows": [], "vidbox": None, "mqspec": None,
+              "view": "mine", "fsel": "", "frows": [], "frh": 0.0}
+        self._bgm_st = st
 
-        def row_y(i):
-            return TOP + RH * i - sc["off"]
+        # ── 자리 계산 ────────────────────────────────────────────────
+        def geo():
+            """탭마다 쓰는 세로 자리 (px).
 
-        def bar_track():
-            """스크롤 막대의 홈통 (위, 아래, 손잡이 높이)."""
-            ty0, ty1 = TOP + u(6), H - BOT - u(6)
-            th = max(u(28), (ty1 - ty0) * LIST_H / float(max(1, CONT_H)))
-            return ty0, ty1, th
+            **줄 수는 창 높이에서 계산한다** — 창을 늘리면 더 보인다 (요청).
+            아래 조작줄은 창 아래끝에 붙으므로 그 몫을 먼저 빼 둔다.
+            """
+            g = {"tabs": u(58), "body": u(98)}
+            if self._bgm_tab == "pl":
+                g["ent"] = u(98)
+                g["preset"] = u(146)      # 프리셋 단추 줄 (요청)
+                # 영상 칸 (열었을 때) — 그만큼 목록이 아래로 내려간다
+                g["vid"] = u(188)
+                g["vidh"] = self._vid_h(W) if self._vid_on() else 0
+                g["list"] = u(188) + (g["vidh"] + u(self.VID_GAP)
+                                      if g["vidh"] else 0)
+                # 친구 화면 — 머리말 아래부터 가름선 위까지
+                g["fr"] = u(98) + u(48)
+                g["frlist"] = max(u(40), H - u(196) - u(22) - g["fr"])
+                g["rowh"] = u(self.BGM_PLROW)
+                g["sep"] = H - u(196)     # 재생 조작·방식·볼륨·계정 몫
+            else:
+                g["list"] = u(118)
+                g["rowh"] = u(self.BGM_AMBROW)
+                g["sep"] = H - u(50)      # 아래 요약 한 줄 몫
+            avail = g["sep"] - u(22) - g["list"]
+            g["vis"] = max(1, int(avail // g["rowh"]))
+            g["listh"] = g["rowh"] * g["vis"]
+            g["hint"] = g["list"] + g["listh"] + u(8)
+            return g
 
-        def bar_y():
-            ty0, ty1, th = bar_track()
-            f = (sc["off"] / MAXOFF) if MAXOFF else 0.0
-            return ty0 + (ty1 - ty0 - th) * f, th
+        def edge_at(x, y):
+            """가장자리를 잡았나 — 'l/r' + 't/b' (아니면 빈 글자).
 
-        def bar_set(y):
-            ty0, ty1, th = bar_track()
-            f = (y - ty0 - th / 2.0) / max(1.0, (ty1 - ty0 - th))
-            sc["off"] = max(0.0, min(MAXOFF, f * MAXOFF))
+            맥은 OS 창틀이 크기를 맡으므로 여기서는 늘 빈 글자다.
+            """
+            if not bare:
+                return ""
+            e9 = int(u(self.BGM_EDGE))
+            out = ""
+            if x <= e9:
+                out += "l"
+            elif x >= W - e9:
+                out += "r"
+            if y <= e9:
+                out += "t"
+            elif y >= H - e9:
+                out += "b"
+            return out
 
-        def val_of(name):
-            return self._amb_mix().get(name, self.AMB_DEFAULT_VOL)
+        def do_resize(e):
+            nonlocal W, H
+            ed, xr0, yr0, w0, h0, wx, wy = st["rz"]
+            dx9, dy9 = e.x_root - xr0, e.y_root - yr0
+            nw, nh = w0, h0
+            if "r" in ed:
+                nw = w0 + dx9
+            elif "l" in ed:
+                nw = w0 - dx9
+            if "b" in ed:
+                nh = h0 + dy9
+            elif "t" in ed:
+                nh = h0 - dy9
+            nw = max(int(u(self.BGM_MINW)), min(int(u(self.BGM_MAXW)),
+                                                int(nw)))
+            nh = max(int(u(self.BGM_MINH)), min(int(u(self.BGM_MAXH)),
+                                                int(nh)))
+            nx = wx + (w0 - nw) if "l" in ed else wx
+            ny = wy + (h0 - nh) if "t" in ed else wy
+            if (nw, nh) != (W, H):
+                W, H = nw, nh
+                cv.config(width=W, height=H)
+                draw()
+            win.geometry("%dx%d+%d+%d" % (W, H, nx, ny))
 
+        def rows_now():
+            if self._bgm_tab == "pl":
+                return self._pl_songs_mine()
+            return list(self._amb.names) if self._amb is not None else []
+
+        def maxoff(g):
+            n = len(rows_now())
+            return max(0.0, n * g["rowh"] - g["listh"])
+
+        def scrolling(g):
+            return len(rows_now()) * g["rowh"] > g["listh"] + 1
+
+        def right_x(g):
+            """줄의 오른쪽 끝 — 스크롤 막대가 있으면 그만큼 비켜 준다."""
+            return W - u(18) - (u(12) if scrolling(g) else 0)
+
+        def hit(x0, y0, x1, y1, act, dat=None):
+            st["hits"].append((x0, y0, x1, y1, act, dat))
+
+        # ── 그리기 ───────────────────────────────────────────────────
         def draw():
+            if not win.winfo_exists():
+                return
             cv.delete("all")
-            mix = self._amb_mix()
-            for i, name in enumerate(names):
-                y0 = row_y(i)
-                if y0 >= H - BOT or y0 + RH <= TOP:
-                    continue                   # 화면 밖 — 안 그린다
-                y1 = y0 + RH - u(6)
-                on = name in mix
-                bg = self._tint(cd["fill"], 0.82) if on else "#ffffff"
-                self._rr_soft(cv, pad, y0, RX, y1, u(14), fill=bg,
-                              outline=cd["fill"] if on else line,
-                              width=1, tags="row")
-                # 동그란 체크 — 켜면 테마색으로 찬다
-                cx, cy, r = pad + u(18), y0 + u(19), u(9)
-                self._oval(cv, cx - r, cy - r, cx + r, cy + r,
-                               fill=cd["fill"] if on else "#ffffff",
-                               outline=cd["fill"] if on else line, width=2)
+            st["hits"] = []
+            g = geo()
+            line = self._tint(cd["fill"], 0.55)
+            # 바탕 카드 — 색상키와 섞어 모서리를 매끈하게 (지뢰 124).
+            # **끄는 동안에는 안 굽는다** — 한 장이 창 전체라 매 픽셀마다
+            # 4배로 그려 줄이면 끌기가 뚝뚝 끊긴다 (놓으면 다시 매끈해진다).
+            card = None
+            if not st.get("rz"):
+                card = self._soft_shape(W - 2, H - 2, u(14), cd["panel"],
+                                        self._tint(cd["border"], 0.35), lw=2)
+            if card is not None:
+                cv.create_image(0, 0, image=card, anchor="nw")
+                self._bgm_card = card
+            else:
+                cv.create_rectangle(0, 0, W, H, fill=cd["panel"], outline="")
+            # ── 제목 줄 (잡고 끌면 창이 움직인다)
+            # 제목은 아이콘과 **세로 가운데를 맞춘다** (요청 — 안내 글을
+            # 빼면서 위로 치우쳐 보였다)
+            self._soft_dot(cv, u(30), u(30), u(13), cd["fill"])
+            self._gl_note(cv, u(30), u(30), u(16), "#ffffff")
+            cv.create_text(u(50), u(30), anchor="w", text="플레이리스트",
+                           font=self._uf(13, True), fill=cd["text"])
+            hit(0, 0, W - u(70), u(52), "move")
+            # 최소화 · 닫기
+            for dx, act in ((u(54), "min"), (u(26), "close")):
+                bx = W - dx
+                self._soft_dot(cv, bx, u(28), u(10), cd["track"])
+                if act == "min":
+                    cv.create_line(bx - u(4), u(29), bx + u(4), u(29),
+                                   fill=cd["sub"], width=2, capstyle="round")
+                else:
+                    for s9 in (1, -1):
+                        cv.create_line(bx - u(3), u(28) - u(3) * s9,
+                                       bx + u(3), u(28) + u(3) * s9,
+                                       fill=cd["sub"], width=2,
+                                       capstyle="round")
+                hit(bx - u(11), u(17), bx + u(11), u(39), act)
+            if self._pl_friends_ok():
+                # 친구들의 플레이리스트 — 최소화 왼쪽 (요청)
+                fx9 = W - u(82)
+                fon9 = (st.get("view") == "friends")
+                self._soft_dot(cv, fx9, u(28), u(10),
+                               cd["fill"] if fon9 else cd["track"])
+                self._gl_person(cv, fx9, u(28), u(8),
+                                "#ffffff" if fon9 else cd["text"])
+                hit(fx9 - u(11), u(17), fx9 + u(11), u(39), "friends")
+            # ── 탭 둘
+            ty = g["tabs"]
+            self._rr_soft(cv, u(18), ty, W - u(18), ty + u(30), u(15),
+                          fill=cd["track"], outline="", width=0)
+            tw = (W - u(36) - u(6)) / 2.0
+            for i9, (name, lab) in enumerate((("pl", "플레이리스트"),
+                                              ("amb", "환경음"))):
+                x0 = u(21) + i9 * (tw + u(6))
+                on = (self._bgm_tab == name)
                 if on:
-                    cv.create_line(cx - u(4), cy, cx - u(1), cy + u(4),
-                                   cx + u(5), cy - u(5),
-                                   fill="#ffffff", width=2,
-                                   capstyle="round", joinstyle="round")
-                cv.create_text(pad + u(34), cy, anchor="w", text=name,
-                               font=self._uf(11, True),
+                    self._rr_soft(cv, x0, ty + u(3), x0 + tw, ty + u(27),
+                                  u(12), fill="#ffffff", outline="", width=0)
+                cv.create_text(x0 + tw / 2.0, ty + u(15), text=lab,
+                               font=self._uf(9, True),
                                fill=cd["text"] if on else cd["sub"])
-                cv.create_text(RX - u(14), cy, anchor="e",
-                               text=str(mix.get(name, val_of(name))),
+                hit(x0, ty, x0 + tw, ty + u(30), "tab", name)
+            if self._bgm_tab == "pl":
+                if st.get("view") == "friends" and self._pl_friends_ok():
+                    draw_friends(g, line)
+                else:
+                    draw_pl(g, line)
+            else:
+                draw_amb(g, line)
+            # 영상 창은 캔버스가 아니라 **진짜 자식 창**이라, 그린 뒤에
+            # 자리를 맞춰 준다 (탭이 바뀌면 여기서 떼어 낸다).
+            self._safe("vid_sync", self._vid_sync, win, st)
+
+        def clip(g):
+            """목록 밖으로 넘친 줄을 판 색으로 덮는다 (캔버스는 못 자른다)."""
+            cv.create_rectangle(u(2), g["list"] - u(2), W - u(2), g["list"],
+                                fill=cd["panel"], outline="", tags=("clipr",))
+            cv.create_rectangle(u(2), g["list"] + g["listh"], W - u(2),
+                                g["sep"] - u(2), fill=cd["panel"], outline="",
+                                tags=("clipr",))
+
+        def mq_draw():
+            """흐르는 제목 띠 한 장만 갈아 끼운다.
+
+            예전에는 프레임마다 draw() 로 창을 통째로 다시 그렸다 — 맥에서
+            커서를 긴 제목에 올려 두면 CPU 34% (러너 실측). 띠 그림 하나만
+            바꾸면 나머지는 그대로다.
+            """
+            sp = st.get("mqspec")
+            if not sp:
+                return
+            full9, lim, hh, col, pt, x9, y9 = sp
+            band = self._pl_marquee(full9, lim, hh, col, pt, time.time(),
+                                    st.get("hov_at", 0.0))
+            if band is None:
+                return
+            cv.delete("mq")
+            cv.create_image(x9, y9, image=band, anchor="w", tags=("mq",))
+            st["mqimg"] = band
+            cv.tag_raise("clipr")           # 목록 밖으로 나간 띠는 덮인다
+
+        def scrollbar(g):
+            n = len(rows_now())
+            if not scrolling(g):
+                return
+            bx1 = W - u(12)
+            bx0 = bx1 - u(4)
+            ty0, ty1 = g["list"] + u(2), g["list"] + g["listh"] - u(2)
+            self._rr_soft(cv, bx0, ty0, bx1, ty1, u(2),
+                          fill=cd["track"], outline="", width=0)
+            th = max(u(26), (ty1 - ty0) * g["listh"] / float(n * g["rowh"]))
+            mo = maxoff(g)
+            f = (st["off"][self._bgm_tab] / mo) if mo else 0.0
+            ky = ty0 + (ty1 - ty0 - th) * f
+            self._rr_soft(cv, bx0, ky, bx1, ky + th, u(2),
+                          fill=self._tint(cd["fill"], 0.35), outline="",
+                          width=0)
+            hit(bx0 - u(6), ty0, bx1 + u(6), ty1, "bar")
+
+        # ── 플레이리스트 탭 ──────────────────────────────────────────
+        def eq_draw():
+            """재생 중 막대 넷 — 동그라미 **한가운데**에 놓고 오르내린다.
+
+            예전에는 왼쪽 끝에서부터 그려 오른쪽으로 쏠려 있었다 (제보).
+            """
+            cv.delete("eq")
+            e9 = st.get("eq")
+            if not e9:
+                return
+            cx9, cy9 = e9
+            bw9 = max(2.0, u(2.6))
+            gp9 = max(3.0, u(4.4))
+            hi9 = u(9)
+            x9 = cx9 - (gp9 * 3 + bw9) / 2.0
+            t9 = time.time() * 3.4
+            for j9 in range(4):
+                f9v = 0.34 + 0.66 * abs(math.sin(t9 + j9 * 1.15))
+                h9 = max(2.0, hi9 * f9v)
+                cv.create_rectangle(x9 + j9 * gp9, cy9 - h9 / 2.0,
+                                    x9 + j9 * gp9 + bw9, cy9 + h9 / 2.0,
+                                    fill="#ffffff", outline="", tags=("eq",))
+
+        def now_draw():
+            """아래 '지금 곡' 제목 — 길면 띠로 흐른다 (호버와 같은 그림)."""
+            cv.delete("nowmq")
+            n9 = st.get("nowmq")
+            if not n9:
+                return
+            text9, w9, y9, _k = n9
+            if "now_t0" not in st:
+                st["now_t0"] = time.time()
+            band = self._pl_marquee(text9, w9, int(u(20)), cd["text"], 9,
+                                    time.time(), st["now_t0"])
+            if band is None:
+                cv.create_text(W / 2.0, y9, text=text9, font=self._uf(9, True),
+                               fill=cd["text"], tags=("nowmq",))
+                return
+            cv.create_image(W / 2.0, y9, image=band, anchor="center",
+                            tags=("nowmq",))
+            st["nowimg"] = band
+
+        def eq_tick():
+            st["eqjob"] = None
+            if not win.winfo_exists():
+                return
+            if (st.get("eq") or st.get("nowmq")) and self._bgm_tab == "pl":
+                if st.get("eq"):
+                    self._safe("bgm_eq", eq_draw)
+                if st.get("nowmq"):
+                    self._safe("bgm_now", now_draw)
+                st["eqjob"] = win.after(
+                    self.BGM_TICK_EQ,
+                    lambda: self._safe("bgm_eqtick", eq_tick))
+
+        def draw_pl(g, line):
+            songs = self._pl_songs_mine()
+            now9 = time.time()
+            st["titles"] = []
+            st["rows"] = []
+            st["vidbox"] = None
+            st["mqspec"] = None
+            st["eq"] = None
+            st["nowmq"] = None
+            st["nowbox"] = None
+            # 주소 넣기
+            ey = g["ent"]
+            self._rr_soft(cv, u(18), ey, W - u(84), ey + u(34), u(17),
+                          fill="#ffffff", outline=self._tint(cd["border"],
+                                                             0.3), width=1)
+            cv.create_window(u(34), ey + u(17), anchor="w", window=ent,
+                             width=int(W - u(84) - u(50)), height=int(u(22)))
+            self._rr_soft(cv, W - u(76), ey, W - u(18), ey + u(34), u(17),
+                          fill=cd["fill"], outline="", width=0)
+            cv.create_text(W - u(47), ey + u(17), text="+ 추가",
+                           font=self._uf(9, True), fill="#ffffff")
+            hit(W - u(76), ey, W - u(18), ey + u(34), "add")
+            # 프리셋 셋 — 목록을 세 벌 두고 골라 쓴다 (요청).
+            # 고른 것은 채워서, 나머지는 흰 알약으로.
+            py9 = g["preset"]
+            pw9 = (W - u(36) - u(12)) / 3.0
+            cur9 = self._pl_set_i()
+            for i9 in range(self.PL_SETS):
+                x0p = u(18) + i9 * (pw9 + u(6))
+                on9 = (i9 == cur9)
+                self._rr_soft(cv, x0p, py9, x0p + pw9, py9 + u(32), u(15),
+                              fill=cd["fill"] if on9 else "#ffffff",
+                              outline=("" if on9
+                                       else self._tint(cd["border"], 0.35)),
+                              width=0 if on9 else 1)
+                n9 = self._pl_count(i9)
+                cv.create_text(x0p + pw9 / 2.0, py9 + u(11),
+                               text="목록 %d" % (i9 + 1),
+                               font=self._uf(9, True),
+                               fill="#ffffff" if on9 else cd["text"])
+                cv.create_text(x0p + pw9 / 2.0, py9 + u(23),
+                               text=("%d곡" % n9) if n9 else "비어 있어요",
+                               font=self._uf(7, True),
+                               fill="#ffffff" if on9 else cd["sub"])
+                hit(x0p, py9, x0p + pw9, py9 + u(32), "set", i9)
+            if g.get("vidh"):
+                # 영상 칸 — 실제 그림은 재생기 창이 이 자리에 들어와 그린다
+                # (_vid_sync). 여기서 그리는 것은 그 뒤에 깔리는 바탕이다.
+                vy9 = g["vid"]
+                self._rr_soft(cv, u(18), vy9, W - u(18), vy9 + g["vidh"],
+                              u(self.VID_R), fill="#1b1620", outline="",
+                              width=0)
+                if not self._yt_alive():
+                    cv.create_text(W / 2.0, vy9 + g["vidh"] / 2.0,
+                                   text="노래를 틀면 영상이 나와요",
+                                   font=self._uf(9, True), fill="#9a91a8")
+                st["vidbox"] = (u(18), vy9, W - u(36), g["vidh"])
+            if not songs:
+                by = g["list"]
+                self._rr_soft(cv, u(18), by, W - u(18), by + g["listh"],
+                              u(18), fill=cd["soft"], outline="", width=0)
+                cy = by + g["listh"] / 2.0
+                self._soft_dot(cv, W / 2.0, cy - u(34), u(26),
+                               self._tint(cd["fill"], 0.65))
+                self._gl_note(cv, W / 2.0, cy - u(34), u(32), cd["fill"])
+                cv.create_text(W / 2.0, cy + u(4), text="아직 곡이 없어요",
+                               font=self._uf(11, True), fill=cd["text"])
+                cv.create_text(W / 2.0, cy + u(26),
+                               text="위 칸에 유튜브 주소를 붙여 넣고 추가를 눌러요",
+                               font=self._uf(8, True), fill=cd["sub"])
+                cv.create_text(W / 2.0, cy + u(42),
+                               text="재생목록 주소도 통째로 넣을 수 있어요",
+                               font=self._uf(8, True), fill=cd["sub"])
+            else:
+                mine = (getattr(self, "_pl_src", "room") == "mine"
+                        and getattr(self, "_pl_on", False))
+                for i9, sg in enumerate(songs):
+                    y0 = g["list"] + g["rowh"] * i9 - st["off"]["pl"]
+                    if y0 >= g["list"] + g["listh"] or \
+                            y0 + g["rowh"] <= g["list"]:
+                        continue
+                    on = bool(mine and i9 == self._pl_i)
+                    y1 = y0 + g["rowh"] - u(6)
+                    rx = right_x(g)
+                    # 줄을 누르면 그 곡으로 간다 (요청 — 시중 재생기처럼).
+                    # **오른쪽 단추들보다 먼저** 적는다: find 가 뒤에서부터
+                    # 찾으므로 나중에 적은 ✕·▲▼·▶ 가 이긴다.
+                    st["rows"].append((u(18), y0, rx - u(88), y1, i9))
+                    hit(u(18), y0, rx - u(88), y1, "pick", i9)
+                    hv9 = bool(st.get("hovrow") == i9 and not on)
+                    self._rr_soft(cv, u(18), y0, rx, y1, u(14),
+                                  fill=(self._tint(cd["fill"], 0.82) if on
+                                        else (self._tint(cd["fill"], 0.90)
+                                              if hv9 else "#ffffff")),
+                                  outline=(cd["fill"] if on else
+                                           (self._tint(cd["fill"], 0.5) if hv9
+                                            else self._tint(cd["border"],
+                                                            0.5))),
+                                  width=1)
+                    cy = (y0 + y1) / 2.0
+                    # 제목 + 부제를 한 덩어리로 세로 정중앙 (요청).
+                    # **✕·▲▼ 앞에서 끊는다** — 예전 한계가 느슨해 긴 제목이
+                    # 단추와 겹쳤다 (제보). 대신 커서를 올리면 흐른다.
+                    full9 = str(sg.get("t") or "")
+                    lim = rx - u(100) - u(62)     # ✕ 상자 앞 16px 까지
+                    f9 = self._uf(10, True)
+                    fits9 = self._mw(full9, f9) <= lim
+                    t9 = full9
+                    if not fits9:
+                        while t9 and self._mw(t9 + "…", f9) > lim:
+                            t9 = t9[:-1]
+                        t9 = (t9 + "…") if t9 else "…"
+                    band9 = None
+                    if not fits9 and st.get("hov") == i9:
+                        # 커서를 올린 줄 — 통째로 옆으로 흐른다 (요청).
+                        # **그림 띠 한 장**으로 만든다. 예전에는 글자를 그린
+                        # 뒤 넘친 데를 사각형으로 덮었는데, 줄 밖으로 삐져
+                        # 나간 꼬리를 다 못 덮어 '뚝 끊겼다 뒤에서 다시
+                        # 나오는' 것처럼 보였다 (제보).
+                        band9 = self._pl_marquee(
+                            full9, int(lim), int(u(20)), cd["text"], 10,
+                            now9, st.get("hov_at", now9))
+                    if band9 is not None:
+                        cv.create_image(u(62), cy - u(6), image=band9,
+                                        anchor="w", tags=("mq",))
+                        st["mqimg"] = band9
+                        # 다음 프레임부터는 창을 통째로 다시 그리지 않고
+                        # **이 띠만** 갈아 끼운다 (mq_draw · 맥 CPU 제보)
+                        st["mqspec"] = (full9, int(lim), int(u(20)),
+                                        cd["text"], 10, u(62), cy - u(6))
+                    else:
+                        cv.create_text(u(62), cy - u(7), anchor="w", text=t9,
+                                       font=f9, fill=cd["text"])
+                    st["titles"].append((u(62), cy - u(17), u(62) + lim,
+                                         cy + u(1), i9, fits9))
+                    it9 = self._pl_list()[i9] if i9 < len(self._pl_list()) \
+                        else {}
+                    cv.create_text(u(62), cy + u(8), anchor="w",
+                                   text=self._pl_sub(it9),
+                                   font=self._uf(8, True), fill=cd["sub"])
+                    self._soft_dot(cv, u(40), cy, u(13),
+                                   cd["fill"] if on else cd["track"])
+                    if on:
+                        # 재생 중 — 막대가 실제로 오르내린다 (요청).
+                        # 자리만 적어 두고 그리기는 eq_draw 가 맡는다
+                        # (프레임마다 창을 통째로 다시 안 그리게).
+                        st["eq"] = (u(40), cy)
+                        eq_draw()
+                    else:
+                        cv.create_text(u(40), cy, text=str(i9 + 1),
+                                       font=self._uf(9, True), fill=cd["sub"])
+                    # 오른쪽 — 재생/멈춤 · 순서 · 빼기
+                    bx = rx - u(22)
+                    self._soft_dot(cv, bx, cy, u(11),
+                                   cd["fill"] if on else cd["track"])
+                    if on and self._yt.get("playing"):
+                        self._gl_pause(cv, bx, cy, u(9), "#ffffff")
+                    else:
+                        self._gl_play(cv, bx, cy, u(8),
+                                      "#ffffff" if on else cd["fill"])
+                    hit(bx - u(12), cy - u(12), bx + u(12), cy + u(12),
+                        "row", i9)
+                    cv.create_text(bx - u(30), cy - u(5), text="▲",
+                                   font=self._uf(7, True), fill=cd["sub"])
+                    cv.create_text(bx - u(30), cy + u(6), text="▼",
+                                   font=self._uf(7, True), fill=cd["sub"])
+                    hit(bx - u(38), cy - u(12), bx - u(22), cy, "up", i9)
+                    hit(bx - u(38), cy, bx - u(22), cy + u(12), "down", i9)
+                    for s9 in (1, -1):
+                        cv.create_line(bx - u(55), cy - u(3) * s9,
+                                       bx - u(49), cy + u(3) * s9,
+                                       fill=self._tint(cd["sub"], 0.3),
+                                       width=2, capstyle="round")
+                    hit(bx - u(62), cy - u(11), bx - u(42), cy + u(11),
+                        "del", i9)
+                clip(g)
+                scrollbar(g)
+                # 곡이 보이는 칸보다 적으면 안내를 **마지막 줄 바로 아래**로
+                # 올린다 (창을 키웠을 때 가운데가 휑해 보이지 않게)
+                hy9 = g["list"] + g["rowh"] * min(g["vis"], len(songs)) + u(8)
+                cv.create_text(W / 2.0, hy9,
+                               text="%d곡 · 휠로 내려 더 봐요 · ▲▼로 순서를 바꿔요"
+                                    % len(songs),
+                               font=self._uf(8, True), fill=cd["sub"])
+            draw_ctrl(g, line)
+
+        def draw_ctrl(g, line):
+            """아래 조작줄 — 지금 곡·재생바·방식·볼륨·계정.
+
+            내 목록 화면과 친구 화면이 같이 쓴다.
+            """
+            # 조작줄 — **지금 곡이 재생바 위**에 온다 (요청)
+            sy = g["sep"]
+            cv.create_line(u(18), sy, W - u(18), sy, fill=line)
+            ny9 = sy + u(21)
+            now9 = self._pl_now_label()     # 친구 목록이면 누구 것인지도
+            f9n = self._uf(11, True)          # 한 단계 크게 (요청)
+            lim9 = W - u(56) - (u(46) if self._vid_ok() else 0)
+            fitn9 = (not now9) or self._mw(now9, f9n) <= lim9
+            st["nowbox"] = (W / 2.0 - lim9 / 2.0, ny9 - u(12),
+                            W / 2.0 + lim9 / 2.0, ny9 + u(12), fitn9)
+            if not fitn9 and st.get("hov") == "now":
+                # 커서를 올렸을 때만 흐른다 (요청 — 늘 흐르니 안 예뻤다)
+                st["nowmq"] = (now9, int(lim9), ny9, now9)
+                now_draw()
+            else:
+                t9n = now9
+                if not fitn9:
+                    while t9n and self._mw(t9n + "…", f9n) > lim9:
+                        t9n = t9n[:-1]
+                    t9n = (t9n + "…") if t9n else "…"
+                cv.create_text(W / 2.0, ny9,
+                               text=t9n or "틀 곡을 골라 주세요", font=f9n,
+                               fill=cd["text"] if now9 else cd["sub"])
+            if self._vid_ok():
+                # 제목 **앞**에 여닫기 단추 (요청). 제목은 가운데 정렬이라
+                # 글자 폭을 재서 그 왼쪽에 둔다.
+                tw9 = min(self._mw(now9 or "틀 곡을 골라 주세요", f9n), lim9)
+                bx9 = W / 2.0 - tw9 / 2.0 - u(22)      # ♪ 와 닿지 않게
+                on9 = self._vid_on()
+                self._soft_dot(cv, bx9, ny9, u(11),
+                               cd["fill"] if on9 else "#ffffff",
+                               outline=("" if on9
+                                        else self._tint(cd["border"], 0.3)),
+                               width=0 if on9 else 1.5)
+                # 캠코더 그림 — 동그라미 안 한가운데, 테두리와 여유를 둔다
+                self._gl_video(cv, bx9, ny9, u(7),
+                               "#ffffff" if on9 else cd["fill"])
+                hit(bx9 - u(12), ny9 - u(12), bx9 + u(12), ny9 + u(12),
+                    "vidtoggle")
+            cy = sy + u(56)
+            playing = bool(self._yt.get("playing"))
+            for dx, act in ((-u(52), "prev"), (0, "toggle"), (u(52), "next")):
+                r9 = u(18) if act == "toggle" else u(13)
+                bx = W / 2.0 + dx
+                self._soft_dot(cv, bx, cy, r9,
+                               cd["fill"] if act == "toggle" else "#ffffff",
+                               outline=("" if act == "toggle"
+                                        else self._tint(cd["border"], 0.3)),
+                               width=0 if act == "toggle" else 1.5)
+                if act == "toggle":
+                    if playing:
+                        self._gl_pause(cv, bx, cy, u(14), "#ffffff")
+                    else:
+                        self._gl_play(cv, bx, cy, u(13), "#ffffff")
+                else:
+                    self._gl_skip(cv, bx, cy, u(9), cd["fill"],
+                                  1 if act == "next" else -1)
+                hit(bx - r9, cy - r9, bx + r9, cy + r9, act)
+            if (st.get("eq") or st.get("nowmq")) and st.get("eqjob") is None:
+                st["eqjob"] = win.after(
+                    self.BGM_TICK_EQ,
+                    lambda: self._safe("bgm_eqtick", eq_tick))
+            # 재생 방식
+            my = cy + u(38)
+            pw = u(86)
+            gp = u(8)
+            x9 = W / 2.0 - (pw * 3 + gp * 2) / 2.0
+            for name, lab in (("seq", "순서대로"), ("shuffle", "섞어서"),
+                              ("one", "한 곡 반복")):
+                on = (self._pl_mode() == name)
+                self._rr_soft(cv, x9, my, x9 + pw, my + u(26), u(13),
+                              fill=cd["fill"] if on else "#ffffff",
+                              outline="" if on else self._tint(cd["border"],
+                                                               0.3),
+                              width=0 if on else 1)
+                cv.create_text(x9 + pw / 2.0, my + u(13), text=lab,
+                               font=self._uf(9, True),
+                               fill="#ffffff" if on else cd["sub"])
+                hit(x9, my, x9 + pw, my + u(26), "mode", name)
+                x9 += pw + gp
+            # 볼륨
+            vy = my + u(44)
+            self._gl_speaker(cv, u(32), vy, cd["sub"])
+            vx0, vx1 = u(52), W - u(52)
+            v9 = max(0, min(100, int(self.us.get("yt_volume", 55))))
+            self._rr_soft(cv, vx0, vy - u(3), vx1, vy + u(3), u(3),
+                          fill=cd["track"], outline="", width=0)
+            kx = vx0 + (vx1 - vx0) * v9 / 100.0
+            if kx > vx0 + u(4):
+                self._rr_soft(cv, vx0, vy - u(3), kx, vy + u(3), u(3),
+                              fill=self._tint(cd["fill"], 0.45), outline="",
+                              width=0)
+            self._soft_dot(cv, kx, vy, u(7), "#ffffff", outline=cd["fill"],
+                           width=1.5)
+            cv.create_text(W - u(44), vy, anchor="w", text="%d%%" % v9,
+                           font=self._uf(8, True), fill=cd["sub"])
+            hit(vx0 - u(8), vy - u(12), vx1 + u(8), vy + u(12), "vol")
+            # 계정
+            ay = H - u(30)
+            signed = bool(self.us.get("yt_signed"))
+            self._soft_dot(cv, u(30), ay, u(4),
+                           "#8fd18f" if signed else cd["sub"])
+            cv.create_text(u(40), ay, anchor="w",
+                           text="유튜브 계정 · " + ("로그인됨" if signed
+                                                else "로그인 안 됨"),
+                           font=self._uf(8, True),
+                           fill=cd["text"] if signed else cd["sub"])
+            self._rr_soft(cv, W - u(96), ay - u(11), W - u(18), ay + u(11),
+                          u(11), fill=cd["track"], outline="", width=0)
+            cv.create_text(W - u(57), ay, text="다시 로그인",
+                           font=self._uf(8, True), fill=cd["sub"])
+            hit(W - u(96), ay - u(11), W - u(18), ay + u(11), "login")
+
+        # ── 환경음 탭 ────────────────────────────────────────────────
+
+        def draw_friends(g, line):
+            """친구들의 플레이리스트 — 목업 그대로.
+
+            사람 칸(얼굴·이름·곡 수·지금 곡·▶)이 자리 순으로 서고, 누른
+            사람은 펼쳐져 곡이 나온다. 목록은 통신 바퀴가 받아 둔 것
+            (_room_pl_take)이고, 여기서는 그리기만 한다 (지뢰 97).
+            """
+            st["titles"] = []
+            st["rows"] = []
+            st["frows"] = []
+            st["vidbox"] = None
+            st["mqspec"] = None
+            st["eq"] = None
+            st["nowmq"] = None
+            st["nowbox"] = None
+            hy0 = u(98)
+            cv.create_text(u(18), hy0 + u(10), anchor="w",
+                           text="친구들의 플레이리스트",
+                           font=self._uf(13, True), fill=cd["text"])
+            cv.create_text(u(18), hy0 + u(30), anchor="w",
+                           text="지금 켜 둔 친구들의 목록이에요 · 눌러서 같이 들어요",
+                           font=self._uf(8, True), fill=cd["sub"])
+            self._rr_soft(cv, W - u(108), hy0 + u(8), W - u(18), hy0 + u(30),
+                          u(11), fill=self._tint(cd["fill"], 0.82),
+                          outline="", width=0)
+            cv.create_text(W - u(63), hy0 + u(19), text="‹ 내 목록",
+                           font=self._uf(8, True), fill=cd["text"])
+            hit(W - u(108), hy0 + u(8), W - u(18), hy0 + u(30), "fback")
+            people = self._pl_friends()
+            top9 = g["fr"]
+            lim9 = top9 + g["frlist"]
+            if not people:
+                cy = top9 + g["frlist"] / 2.0
+                self._soft_dot(cv, W / 2.0, cy - u(30), u(26),
+                               self._tint(cd["fill"], 0.65))
+                self._gl_person(cv, W / 2.0, cy - u(30), u(20), cd["fill"])
+                cv.create_text(W / 2.0, cy + u(8),
+                               text="목록을 켜 둔 친구가 아직 없어요",
+                               font=self._uf(11, True), fill=cd["text"])
+                cv.create_text(W / 2.0, cy + u(30),
+                               text="친구가 플레이리스트에 곡을 넣고 켜 두면 여기 떠요",
+                               font=self._uf(8, True), fill=cd["sub"])
+                draw_ctrl(g, line)
+                return
+            y = top9 - st["off"]["fr"]
+            rh9 = u(58)
+            sh9 = u(34)
+            x0, x1 = u(18), W - u(18)
+            fsel = st.get("fsel") or ""
+            playing_slot = (getattr(self, "_pl_friend", "")
+                            if (getattr(self, "_pl_on", False)
+                                and getattr(self, "_pl_src", "") == "friend")
+                            else "")
+            for pe in people:
+                slot = pe["slot"]
+                sel = (slot == fsel)
+                y1 = y + rh9
+                if y1 > top9 - u(2) and y < lim9 + u(2):
+                    self._rr_soft(cv, x0, y, x1, y1, u(16),
+                                  fill=(self._tint(cd["fill"], 0.90) if sel
+                                        else "#ffffff"),
+                                  outline=(cd["fill"] if sel
+                                           else self._tint(cd["border"], 0.5)),
+                                  width=1.2)
+                    cy = (y + y1) / 2.0
+                    ar9 = u(20)
+                    self._soft_dot(cv, x0 + u(30), cy, ar9 + u(1.5),
+                                   cd["fill"] if sel
+                                   else self._tint(cd["border"], 0.2))
+                    face = self._pl_face(slot, ar9 * 2)
+                    if face is not None:
+                        cv.create_image(x0 + u(30), cy, image=face,
+                                        anchor="center")
+                        st.setdefault("faces", []).append(face)
+                    else:
+                        self._soft_dot(cv, x0 + u(30), cy, ar9, cd["soft"])
+                    cv.create_text(x0 + u(60), cy - u(13), anchor="w",
+                                   text=pe["n"] or "친구",
+                                   font=self._uf(11, True), fill=cd["text"])
+                    cv.create_text(x0 + u(60), cy + u(3), anchor="w",
+                                   text="목록 · %d곡%s" % (
+                                       pe["c"], " · 받아 오는 중…"
+                                       if pe["songs"] is None else ""),
+                                   font=self._uf(8, True), fill=cd["sub"])
+                    if pe["now"]:
+                        cv.create_text(x0 + u(60), cy + u(15), anchor="w",
+                                       text=("♪ " + pe["now"])[:34],
+                                       font=self._uf(8, True),
+                                       fill=cd["fill"] if sel else cd["sub"])
+                    st["frows"].append((x0, y, x1 - u(44), y1))
+                    hit(x0, y, x1 - u(44), y1, "fsel", slot)
+                    bx = x1 - u(26)
+                    on9 = (slot == playing_slot)
+                    self._soft_dot(cv, bx, cy, u(12),
+                                   cd["fill"] if on9 else "#ffffff",
+                                   outline=("" if on9
+                                            else self._tint(cd["border"], 0.3)),
+                                   width=0 if on9 else 1.5)
+                    if on9 and self._yt.get("playing"):
+                        self._gl_pause(cv, bx, cy, u(9), "#ffffff")
+                    else:
+                        self._gl_play(cv, bx, cy, u(9),
+                                      "#ffffff" if on9 else cd["fill"])
+                    hit(bx - u(13), cy - u(13), bx + u(13), cy + u(13),
+                        "fplay", slot)
+                y = y1 + u(8)
+                if not sel:
+                    continue
+                songs = pe["songs"]
+                if songs is None:
+                    cv.create_text(W / 2.0, y + u(10), text="목록을 받아 오는 중…",
+                                   font=self._uf(8, True), fill=cd["sub"])
+                    y += u(24)
+                    continue
+                for i9, sg in enumerate(songs):
+                    sy0, sy1 = y, y + sh9
+                    if sy1 > top9 - u(2) and sy0 < lim9 + u(2):
+                        on9 = (slot == playing_slot and i9 == self._pl_i)
+                        self._rr_soft(cv, x0 + u(22), sy0, x1, sy1, u(12),
+                                      fill=(self._tint(cd["fill"], 0.93) if on9
+                                            else "#ffffff"),
+                                      outline=(cd["fill"] if on9 else
+                                               self._tint(cd["border"], 0.7)),
+                                      width=1)
+                        cy9 = (sy0 + sy1) / 2.0
+                        self._soft_dot(cv, x0 + u(40), cy9, u(9),
+                                       cd["fill"] if on9
+                                       else self._tint(cd["fill"], 0.85))
+                        if on9:
+                            st["eq"] = (x0 + u(40), cy9)
+                        else:
+                            cv.create_text(x0 + u(40), cy9, text=str(i9 + 1),
+                                           font=self._uf(8, True),
+                                           fill=cd["text"])
+                        t9 = str(sg.get("t") or "노래")
+                        f9 = self._uf(9, True)
+                        lim = x1 - u(70) - (x0 + u(56))
+                        while t9 and self._mw(t9, f9) > lim:
+                            t9 = t9[:-1]
+                        cv.create_text(x0 + u(56), cy9, anchor="w", text=t9,
+                                       font=f9, fill=cd["text"])
+                        d9 = self._pl_dur(sg.get("d"))
+                        if d9:
+                            cv.create_text(x1 - u(14), cy9, anchor="e", text=d9,
+                                           font=self._uf(8, True),
+                                           fill=cd["sub"])
+                        hit(x0 + u(22), sy0, x1, sy1, "frow", (slot, i9))
+                    y = sy1 + u(5)
+                y += u(4)
+            st["frh"] = (y + st["off"]["fr"]) - top9
+            if st.get("eq"):
+                eq_draw()
+            # 목록 밖으로 넘친 것을 덮는다 (캔버스는 못 자른다 · 지뢰 22)
+            cv.create_rectangle(u(2), hy0 + u(40), W - u(2), top9,
+                                fill=cd["panel"], outline="", tags=("clipr",))
+            cv.create_rectangle(u(2), lim9, W - u(2), g["sep"] - u(2),
+                                fill=cd["panel"], outline="", tags=("clipr",))
+            cv.create_text(W / 2.0, g["sep"] - u(12),
+                           text="친구 %d명%s" % (
+                               len(people),
+                               " · 휠로 내려 더 봐요"
+                               if st["frh"] > g["frlist"] else ""),
+                           font=self._uf(8, True), fill=cd["sub"])
+            draw_ctrl(g, line)
+
+        def draw_amb(g, line):
+            if self._amb is None:
+                cv.create_text(W / 2.0, u(160), text="이 캐릭터에는 환경음이 없어요",
+                               font=self._uf(10), fill=cd["sub"])
+                return
+            names = list(self._amb.names)
+            mixv = self._amb_mix()
+            cv.create_text(u(20), u(104), anchor="w",
+                           text="여러 개를 겹쳐 틀 수 있어요 · 각자 볼륨을 줘요",
+                           font=self._uf(8, True), fill=cd["sub"])
+            for i9, name in enumerate(names):
+                y0 = g["list"] + g["rowh"] * i9 - st["off"]["amb"]
+                if y0 >= g["list"] + g["listh"] or \
+                        y0 + g["rowh"] <= g["list"]:
+                    continue
+                on = name in mixv
+                y1 = y0 + g["rowh"] - u(8)
+                rx = right_x(g)
+                self._rr_soft(cv, u(18), y0, rx, y1, u(14),
+                              fill=(self._tint(cd["fill"], 0.86) if on
+                                    else "#ffffff"),
+                              outline=(self._tint(cd["fill"], 0.2) if on
+                                       else self._tint(cd["border"], 0.5)),
+                              width=1)
+                cy = y0 + u(18)
+                self._soft_dot(cv, u(40), cy, u(13),
+                               cd["fill"] if on else cd["track"])
+                self._gl_amb(cv, u(40), cy, name,
+                             "#ffffff" if on else cd["sub"], u(15))
+                cv.create_text(u(62), cy, anchor="w", text=name,
                                font=self._uf(10, True),
                                fill=cd["text"] if on else cd["sub"])
-                # 슬라이더 — 홈통·채움·손잡이를 직접 그린다
-                gy = y0 + u(41)
-                gh = u(5)
-                self._rr_soft(cv, sx0, gy - gh, sx1, gy + gh, gh,
-                              fill="#ffffff" if on else cd["panel"],
-                              outline="", width=0, tags="row")
-                v = max(5, min(100, val_of(name)))
-                fx = sx0 + (sx1 - sx0) * (v - 5) / 95.0
-                if fx > sx0 + gh:
-                    self._rr_soft(cv, sx0, gy - gh, fx, gy + gh, gh,
-                                  fill=cd["fill"] if on else line,
-                                  outline="", width=0, tags="row")
-                kr = u(8)
-                self._oval(cv, fx - kr, gy - kr, fx + kr, gy + kr,
-                               fill="#ffffff",
-                               outline=cd["fill"] if on else line, width=2)
-            # 목록 밖으로 넘친 줄을 판 색으로 덮는다 (캔버스는 못 자른다)
-            if SCROLL:
-                cv.create_rectangle(0, 0, W, TOP, fill=cd["panel"],
-                                    outline="")
-                cv.create_rectangle(0, H - BOT, W, H, fill=cd["panel"],
-                                    outline="")
-            cv.create_text(W / 2, u(24), text="환경음",
-                           font=self._uf(13, True), fill=cd["text"])
-            cv.create_text(W / 2, u(46),
-                           text=("휠이나 오른쪽 막대로 더 볼 수 있어요"
-                                 if SCROLL else "여러 개를 같이 틀 수 있어요"),
-                           font=self._uf(8), fill=cd["sub"])
-            if SCROLL:
-                ty0, ty1, _th = bar_track()
-                bx1 = W - pad + u(2)
-                bx0 = bx1 - BARW
-                self._rr_soft(cv, bx0, ty0, bx1, ty1, BARW / 2.0,
-                              fill=self._tint(cd["fill"], 0.86), outline="",
-                              width=0)
-                ky, kh = bar_y()
-                self._rr_soft(cv, bx0, ky, bx1, ky + kh, BARW / 2.0,
-                              fill=cd["fill"], outline="", width=0)
-            # 아래 단추 둘
-            by0 = H - BOT + u(8)
-            by1 = H - u(14)
-            self._amb_btn_off = (pad, by0, pad + u(84), by1)
-            self._rr_soft(cv, pad, by0, pad + u(84), by1, u(13),
-                          fill="#f2edf4", outline=line, width=1)
-            cv.create_text((pad + pad + u(84)) / 2, (by0 + by1) / 2,
-                           text="모두 끄기", font=self._uf(9),
-                           fill=cd["text"])
-            self._amb_btn_close = (W - pad - u(84), by0, W - pad, by1)
-            self._rr_soft(cv, W - pad - u(84), by0, W - pad, by1, u(13),
-                          fill=cd["fill"], outline="", width=0)
-            cv.create_text(W - pad - u(42), (by0 + by1) / 2, text="닫기",
-                           font=self._uf(9, True), fill="#ffffff")
+                # 켬/끔 알약 스위치
+                sx = rx - u(44)
+                self._rr_soft(cv, sx, cy - u(8), sx + u(32), cy + u(8), u(8),
+                              fill=cd["fill"] if on else cd["track"],
+                              outline="", width=0)
+                self._soft_dot(cv, sx + (u(24) if on else u(8)), cy, u(6),
+                               "#ffffff")
+                hit(sx - u(4), cy - u(12), sx + u(36), cy + u(12),
+                    "amb_toggle", name)
+                # 볼륨 — 오른쪽 끝을 숫자 앞에서 끊는다 (제보: 글자와 맞닿음)
+                gy = y0 + u(38)
+                tx0, tx1 = u(62), rx - u(38)
+                v9 = max(5, min(100, mixv.get(name, self.AMB_DEFAULT_VOL)))
+                self._rr_soft(cv, tx0, gy - u(3), tx1, gy + u(3), u(3),
+                              fill=cd["track"], outline="", width=0)
+                kx = tx0 + (tx1 - tx0) * (v9 - 5) / 95.0
+                if on and kx > tx0 + u(4):
+                    self._rr_soft(cv, tx0, gy - u(3), kx, gy + u(3), u(3),
+                                  fill=self._tint(cd["fill"], 0.35),
+                                  outline="", width=0)
+                self._soft_dot(cv, kx, gy, u(6), "#ffffff",
+                               outline=(cd["fill"] if on
+                                        else self._tint(cd["sub"], 0.4)),
+                               width=1.5)
+                cv.create_text(rx - u(28), gy, anchor="w", text=str(v9),
+                               font=self._uf(8, True), fill=cd["sub"])
+                hit(tx0 - u(8), gy - u(11), tx1 + u(8), gy + u(11),
+                    "amb_vol", name)
+                st["ax"] = (tx0, tx1)
+            clip(g)
+            scrollbar(g)
+            hy9 = g["list"] + g["rowh"] * min(g["vis"], len(names)) + u(8)
+            cv.create_text(W / 2.0, hy9,
+                           text="%d가지 · 휠로 내려 더 봐요" % len(names),
+                           font=self._uf(8, True), fill=cd["sub"])
+            sy = g["sep"]
+            cv.create_line(u(18), sy, W - u(18), sy, fill=line)
+            ay = H - u(30)
+            n_on = len(mixv)
+            self._soft_dot(cv, u(30), ay, u(4),
+                           cd["fill"] if n_on else cd["sub"])
+            txt = ("켜진 소리 %d개 · %s" % (n_on, " + ".join(list(mixv)[:2]))
+                   if n_on else "켜진 소리가 없어요")
+            cv.create_text(u(40), ay, anchor="w", text=txt[:32],
+                           font=self._uf(8, True),
+                           fill=cd["text"] if n_on else cd["sub"])
+            self._rr_soft(cv, W - u(90), ay - u(11), W - u(18), ay + u(11),
+                          u(11), fill=cd["track"], outline="", width=0)
+            cv.create_text(W - u(54), ay, text="모두 끄기",
+                           font=self._uf(8, True), fill=cd["sub"])
+            hit(W - u(90), ay - u(11), W - u(18), ay + u(11), "amb_off")
+            self._amb_btn_off = (W - u(90), ay - u(11), W - u(18), ay + u(11))
 
-        def hit_row(y):
-            if y < TOP or y >= H - BOT:
-                return None
-            i = int((y - TOP + sc["off"]) // RH)
-            return i if 0 <= i < len(names) else None
+        # ── 클릭 ─────────────────────────────────────────────────────
+        def find(x, y):
+            for x0, y0, x1, y1, act, dat in reversed(st["hits"]):
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    return act, dat
+            return None, None
 
-        def in_box(box, x, y):
-            return box and box[0] <= x <= box[2] and box[1] <= y <= box[3]
+        def vol_at(x, x0, x1, lo=0):
+            f = (x - x0) / max(1.0, float(x1 - x0))
+            return int(round(lo + (100 - lo) * max(0.0, min(1.0, f))))
 
-        drag = {"i": None}
-
-        def val_at(x):
-            f = (x - sx0) / max(1.0, float(sx1 - sx0))
-            return int(round((5 + f * 95) / 5.0)) * 5
+        def vid_toggle():
+            """영상 칸 여닫기 — 창이 그만큼 키가 커졌다 작아진다 (요청)."""
+            nonlocal H
+            on9 = not self._vid_on()
+            self.us["yt_video"] = on9
+            self._safe("bgm_save", self._save_settings)
+            # 열며 더해 준 만큼 닫으며 돌려준다 — 그 사이 창 폭이 바뀌면
+            # 다시 계산한 값과 어긋나 창이 조금씩 줄어든다 (검사가 잡았다).
+            dh9 = self._vid_h(W) + u(self.VID_GAP)
+            if on9:
+                self._vid_add = dh9
+            else:
+                dh9 = getattr(self, "_vid_add", None) or dh9
+                self._vid_add = None
+            nh9 = max(int(u(self.BGM_MINH)),
+                      min(int(u(self.BGM_MAXH)),
+                          int(H + (dh9 if on9 else -dh9))))
+            if nh9 != H:
+                H = nh9
+                cv.config(height=H)
+                win.geometry("%dx%d" % (W, H))
+                self.us["bgm_wh"] = [W, H]
+            if not on9:
+                self._vid_park()
+            draw()
 
         def on_press(e):
-            # 창 안 어디를 눌러도 '똑' — 슬라이더를 끄는 동안에는
-            # _ui_click 의 간격 제한이 알아서 막아 준다
+            ed9 = edge_at(e.x, e.y)
+            if ed9:
+                # 가장자리가 먼저다 — 제목 띠·단추보다 앞
+                st["rz"] = (ed9, e.x_root, e.y_root, W, H,
+                            win.winfo_x(), win.winfo_y())
+                return
             self._safe("ui_click", self._ui_click)
-            if in_box(getattr(self, "_amb_btn_close", None), e.x, e.y):
+            act, dat = find(e.x, e.y)
+            if act is None:
+                return
+            g = geo()
+            if act == "move":
+                st["move"] = (e.x_root - win.winfo_x(),
+                              e.y_root - win.winfo_y())
+                return
+            if act == "vidtoggle":
+                vid_toggle()
+                return
+            if act in ("friends", "fback"):
+                fon9 = (act == "friends" and st.get("view") != "friends")
+                st["view"] = "friends" if fon9 else "mine"
+                st["off"]["fr"] = 0.0
+                if fon9:
+                    # 여는 순간 해시가 다른 사람들에게 청한다 — 그 뒤로는
+                    # 통신 바퀴의 그물이 맡는다 (_room_pl_net)
+                    self._safe("pl_ask_all", self._pl_ask_all)
+                    if self.room_net is not None:
+                        self.room_net.idle = False
+                        try:
+                            self.room_net.wake()
+                        except Exception:
+                            pass
+                draw()
+                return
+            if act == "fsel":
+                st["fsel"] = "" if st.get("fsel") == dat else dat
+                draw()
+                return
+            if act == "fplay":
+                self._pl_friend = dat
+                self._pl_src = "friend"
+                if (getattr(self, "_pl_on", False) and self._yt.get("playing")
+                        and getattr(self, "_pl_friend", "") == dat
+                        and self._pl_songs()):
+                    self._yt_toggle()          # 트는 중이면 멈춤
+                else:
+                    self._safe("pl_play", self._pl_play, 0)
+                draw()
+                return
+            if act == "frow":
+                self._pl_friend, i9 = dat
+                self._pl_src = "friend"
+                self._safe("pl_play", self._pl_play, int(i9))
+                draw()
+                return
+            if act == "close":
+                # 창이 사라지기 **전에** 떼어 낸다 — 자식 창은 부모와
+                # 함께 죽고, 그러면 음악까지 끊긴다.
+                self._vid_park()
                 win.destroy()
                 return
-            if in_box(getattr(self, "_amb_btn_off", None), e.x, e.y):
+            if act == "min":
+                self._vid_park()
+                win.withdraw()
+                return
+            if act == "tab":
+                self._bgm_tab = dat
+                self.us["bgm_tab"] = dat
+                self._safe("bgm_save", self._save_settings)
+                draw()
+                return
+            if act == "bar":
+                st["bar"] = True
+                bar_set(e.y, g)
+                return
+            if act == "add":
+                do_add()
+                return
+            if act == "set":
+                self._pl_set_pick(dat)
+                st["off"]["pl"] = 0.0
+                draw()
+                return
+            if act == "pick":
+                # 줄을 누르면 그 곡이 선택된다 — 지금 트는 줄을 눌러도
+                # 멈추지는 않는다 (멈춤은 ⏸ 단추 몫).
+                if (getattr(self, "_pl_on", False)
+                        and getattr(self, "_pl_src", "") == "mine"
+                        and self._pl_i == dat):
+                    return
+                self._pl_src = "mine"
+                self._safe("pl_play", self._pl_play, dat)
+                draw()
+                return
+            if act == "row":
+                self._pl_src = "mine"
+                if (getattr(self, "_pl_on", False)
+                        and self._pl_i == dat and self._yt.get("playing")):
+                    self._yt_toggle()
+                else:
+                    self._safe("pl_play", self._pl_play, dat)
+                draw()
+                return
+            if act in ("up", "down"):
+                lst = self._pl_list()
+                j = dat + (-1 if act == "up" else 1)
+                if 0 <= j < len(lst):
+                    lst[dat], lst[j] = lst[j], lst[dat]
+                    self._pl_list_save(lst)
+                    self._pl_shuf = None
+                    self._pl_sync_i()
+                    draw()
+                return
+            if act == "del":
+                lst = self._pl_list()
+                if 0 <= dat < len(lst):
+                    gone = lst.pop(dat)
+                    self._pl_list_save(lst)
+                    self._pl_shuf = None
+                    if (getattr(self, "_pl_src", "") == "mine"
+                            and str(getattr(self, "_pl_url", ""))
+                            == str(gone.get("u"))):
+                        self._safe("pl_stop", self._pl_stop)
+                    draw()
+                return
+            if act == "toggle":
+                if self._yt.get("playing"):
+                    self._yt_toggle()
+                else:
+                    if getattr(self, "_pl_src", "") != "friend":
+                        self._pl_src = "mine"
+                    i9 = self._pl_i if self._pl_i >= 0 else 0
+                    self._safe("pl_play", self._pl_play, i9)
+                draw()
+                return
+            if act in ("prev", "next"):
+                if getattr(self, "_pl_src", "") != "friend":
+                    self._pl_src = "mine"
+                songs = self._pl_songs()
+                if not songs:
+                    return
+                if act == "next":
+                    i9 = self._pl_next_i(max(0, self._pl_i), songs)
+                else:
+                    i9 = (max(0, self._pl_i) - 1) % len(songs)
+                self._safe("pl_play", self._pl_play, i9)
+                draw()
+                return
+            if act == "mode":
+                self.us["yt_mode"] = dat
+                self._pl_shuf = None
+                self._safe("bgm_save", self._save_settings)
+                draw()
+                return
+            if act == "vol":
+                st["vol"] = True
+                set_vol(e.x)
+                return
+            if act == "login":
+                win.destroy()
+                self._yt_stop()
+                self.root.after(200, self._yt_login)
+                return
+            if act == "amb_toggle":
+                self._amb_toggle(dat, dat not in self._amb_mix())
+                draw()
+                return
+            if act == "amb_vol":
+                st["drag"] = dat
+                set_amb_vol(dat, e.x)
+                return
+            if act == "amb_off":
                 for nm in list(self._amb_mix()):
                     self._amb_toggle(nm, False)
                 draw()
                 return
-            if SCROLL and e.x >= W - pad - u(6) and TOP <= e.y < H - BOT:
-                sc["bar"] = True
-                bar_set(e.y)
+
+        def set_vol(x):
+            v9 = max(0, min(100, vol_at(x, u(52), W - u(52))))
+            if int(self.us.get("yt_volume", 55)) != v9:
+                self.us["yt_volume"] = v9
+                self._yt_send(c="vol", v=v9)
                 draw()
+
+        def set_amb_vol(name, x):
+            ax = st.get("ax") or (u(62), W - u(56))
+            v9 = max(5, min(100, vol_at(x, ax[0], ax[1], 5)))
+            if name not in self._amb_mix():
+                self._amb_toggle(name, True, v9)
+            elif self._amb_mix().get(name) != v9:
+                self._amb_setvol(name, v9)
+            else:
                 return
-            i = hit_row(e.y)
-            if i is None:
-                return
-            name = names[i]
-            y0 = row_y(i)
-            if e.y >= y0 + u(32):            # 슬라이더 줄
-                drag["i"] = i
-                v = max(5, min(100, val_at(e.x)))
-                if name not in self._amb_mix():
-                    self._amb_toggle(name, True, v)
-                else:
-                    self._amb_setvol(name, v)
-                draw()
-                return
-            self._amb_toggle(name, name not in self._amb_mix())
             draw()
 
+        def bar_set(y, g):
+            ty0, ty1 = g["list"] + u(2), g["list"] + g["listh"] - u(2)
+            mo = maxoff(g)
+            f = (y - ty0) / max(1.0, float(ty1 - ty0))
+            st["off"][self._bgm_tab] = max(0.0, min(mo, f * mo))
+            draw()
+
+        def do_add():
+            url = ""
+            try:
+                url = ent.get().strip()
+            except Exception:
+                url = ""
+            if not url:
+                return
+            if self._pl_add(url):
+                ent.delete(0, "end")
+                st["off"]["pl"] = maxoff(geo())
+                draw()
+                if (not self.us.get("yt_signed")
+                        and not self.us.get("yt_asked")):
+                    # 처음 노래를 넣은 때 — 로그인부터 권한다 (옛 창과 같다).
+                    # 로그인 창을 닫으면 기억해 둔 이 곡으로 이어진다.
+                    self._yt_stop()
+                    self.root.after(200, self._yt_login)
+                elif not getattr(self, "_pl_on", False):
+                    self._pl_src = "mine"
+                    self._safe("pl_play", self._pl_play,
+                               len(self._pl_songs_mine()) - 1)
+                    draw()
+            else:
+                self._room_toast = ("주소가 이상하거나 이미 있는 곡이에요",
+                                    time.time())
+                try:
+                    ent.selection_range(0, "end")
+                    ent.focus_set()
+                except Exception:
+                    pass
+
         def on_drag(e):
-            if sc["bar"]:
-                bar_set(e.y)
-                draw()
+            if st.get("rz"):
+                do_resize(e)
                 return
-            i = drag["i"]
-            if i is None:
+            if st["move"] is not None:
+                win.geometry("+%d+%d" % (e.x_root - st["move"][0],
+                                         e.y_root - st["move"][1]))
                 return
-            name = names[i]
-            v = max(5, min(100, val_at(e.x)))
-            if self._amb_mix().get(name) != v:
-                self._amb_setvol(name, v)
-                draw()
+            if st["bar"]:
+                bar_set(e.y, geo())
+                return
+            if st["vol"]:
+                set_vol(e.x)
+                return
+            if st["drag"] is not None:
+                set_amb_vol(st["drag"], e.x)
 
         def on_up(_e):
-            drag["i"] = None
-            sc["bar"] = False
+            if st.get("rz"):
+                st["rz"] = None
+                self.us["bgm_wh"] = [int(W), int(H)]
+                self._safe("bgm_save", self._save_settings)
+                draw()                 # 놓으면 모서리를 다시 매끈하게
+            st["move"] = None
+            st["bar"] = False
+            st["vol"] = False
+            st["drag"] = None
+
+        def hov_tick():
+            """흐르는 동안만 도는 프레임 (닫을 때 거둔다 · 지뢰 20)."""
+            st["hovjob"] = None
+            if not win.winfo_exists() or st.get("hov") is None:
+                return
+            if st.get("mqspec"):
+                mq_draw()                   # 띠만 (창 통째는 안 그린다)
+            else:
+                draw()
+            st["hovjob"] = win.after(
+                self.BGM_TICK_HOV,
+                lambda: self._safe("bgm_hovtick", hov_tick))
+
+        def hov_set(i9, row9=None):
+            """커서가 무엇 위인가 — 흐를 제목(i9)과 물들일 줄(row9).
+
+            둘을 한 번에 받는다. 따로 두면 한 번 움직일 때마다 창을 두 번
+            다시 그린다.
+            """
+            ch9 = False
+            if st.get("hovrow") != row9:
+                st["hovrow"] = row9
+                ch9 = True
+            if st.get("hov") != i9:
+                st["hov"] = i9
+                st["hov_at"] = time.time()
+                st["now_t0"] = time.time()
+                if i9 is None and st.get("hovjob"):
+                    try:
+                        win.after_cancel(st["hovjob"])
+                    except Exception:
+                        pass
+                    st["hovjob"] = None
+                ch9 = True
+            if not ch9:
+                return
+            draw()
+            # 곡 줄은 통째로 다시 그려야 하고(줄 안에 그림이 얹힌다), 아래
+            # '지금 곡' 은 띠만 갈아 끼우면 되므로 eq 틱이 맡는다.
+            if isinstance(i9, int) and st.get("hovjob") is None:
+                st["hovjob"] = win.after(
+                    self.BGM_TICK_HOV,
+                    lambda: self._safe("bgm_hovtick", hov_tick))
+
+        def on_hover(e):
+            """가장자리 위에서는 커서를 바꿔 주고, 긴 제목 위면 흐르게 한다."""
+            hit9 = None
+            row9 = None
+            if self._bgm_tab == "pl" and not st.get("rz"):
+                for x0r, y0r, x1r, y1r, i9 in st.get("rows", []):
+                    if x0r <= e.x <= x1r and y0r <= e.y <= y1r:
+                        row9 = i9
+                        break
+                for x0h, y0h, x1h, y1h, i9, fits9 in st.get("titles", []):
+                    if (not fits9 and x0h <= e.x <= x1h
+                            and y0h <= e.y <= y1h):
+                        hit9 = i9
+                        break
+                nb9 = st.get("nowbox")
+                if (hit9 is None and nb9 and not nb9[4]
+                        and nb9[0] <= e.x <= nb9[2]
+                        and nb9[1] <= e.y <= nb9[3]):
+                    hit9 = "now"        # 아래 '지금 곡' 도 커서를 올리면 흐른다
+            hov_set(hit9, row9)
+            cur = {"l": "sb_h_double_arrow", "r": "sb_h_double_arrow",
+                   "t": "sb_v_double_arrow", "b": "sb_v_double_arrow",
+                   "lt": "size_nw_se", "rb": "size_nw_se",
+                   "rt": "size_ne_sw", "lb": "size_ne_sw"}.get(
+                       edge_at(e.x, e.y), "")
+            if not cur and row9 is not None:
+                cur = "hand2"           # 누를 수 있다는 표시
+            if not cur and self._bgm_tab == "pl" and st.get("view") == "friends":
+                for x0f, y0f, x1f, y1f in st.get("frows", []):
+                    if x0f <= e.x <= x1f and y0f <= e.y <= y1f:
+                        cur = "hand2"
+                        break
+            if cur != st.get("cur"):
+                st["cur"] = cur
+                try:
+                    cv.config(cursor=cur)
+                except Exception:
+                    pass
 
         def on_wheel(e):
-            """휠로 스크롤 — 윈도우·맥은 delta, 리눅스는 Button-4/5.
-
-            **안 쓰는 칸을 Tk 가 '??' 라는 글자로 채운다** — 그대로 int()
-            하면 예외가 나고, _safe 가 삼켜서 '휠이 그냥 안 먹는' 것으로
-            보인다 (검사가 잡았다).
-            """
-            if not SCROLL:
+            g = geo()
+            fr9 = (self._bgm_tab == "pl" and st.get("view") == "friends")
+            key9 = "fr" if fr9 else self._bgm_tab
+            mo = (max(0.0, float(st.get("frh") or 0.0) - g["frlist"])
+                  if fr9 else maxoff(g))
+            if mo <= 0:
                 return
 
             def num_of(v):
@@ -23704,29 +25452,277 @@ class Mascot:
                 except (TypeError, ValueError):
                     return 0.0
 
-            d = num_of(getattr(e, "delta", 0))
+            d9 = num_of(getattr(e, "delta", 0))
             num = int(num_of(getattr(e, "num", 0)))
             if num == 4:
-                step = -RH * 0.8
+                step = -g["rowh"] * 0.8
             elif num == 5:
-                step = RH * 0.8
-            elif d:
-                # 윈도우는 ±120, 맥은 ±1 — 부호만 쓴다
-                step = (-1.0 if d > 0 else 1.0) * RH * 0.8
+                step = g["rowh"] * 0.8
+            elif d9:
+                step = (-1.0 if d9 > 0 else 1.0) * g["rowh"] * 0.8
             else:
                 return
-            sc["off"] = max(0.0, min(MAXOFF, sc["off"] + step))
+            st["off"][key9] = max(0.0, min(mo, st["off"][key9] + step))
             draw()
 
-        draw()
-        self._amb_draw = draw             # 밖에서도 다시 그릴 수 있게
-        cv.bind("<Button-1>", lambda e: self._safe("amb_click", on_press, e))
-        cv.bind("<B1-Motion>", lambda e: self._safe("amb_drag", on_drag, e))
+        self._bgm_draw = draw
+        # 옛 이름들 — 부르는 곳과 검사가 그대로 통하게 같은 창을 가리킨다
+        self._amb_winref = win
+        self._yt_win = win
+        self._amb_draw = draw
+        cv.bind("<Button-1>", lambda e: self._safe("bgm_click", on_press, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe("bgm_drag", on_drag, e))
         cv.bind("<ButtonRelease-1>", on_up)
+        cv.bind("<Motion>", lambda e: self._safe("bgm_hover", on_hover, e))
+        if not bare:
+            # 맥 — OS 가 창틀을 끌어 준다. 크기가 **실제로** 바뀐 때만 다시
+            # 그린다 (창을 옮기는 동안에도 <Configure> 가 초당 수십 번 온다).
+            def on_cfg(e):
+                nonlocal W, H
+                if e.widget is not win:
+                    return
+                nw9, nh9 = int(e.width), int(e.height)
+                if (nw9, nh9) == (W, H) or nw9 < 40 or nh9 < 40:
+                    return
+                W, H = nw9, nh9
+                cv.config(width=W, height=H)
+                self.us["bgm_wh"] = [W, H]
+                self._safe("bgm_save", self._save_settings)
+                draw()
+
+            win.bind("<Configure>",
+                     lambda e: self._safe("bgm_cfg", on_cfg, e), add="+")
+        cv.bind("<Leave>", lambda _e: self._safe("bgm_leave", hov_set, None))
+        # 어떤 길로 닫히든 떼어 낸다 (그물 — 보통은 close·min 에서 뗀다)
+        win.bind("<Destroy>",
+                 lambda e: (self._safe("vid_park", self._vid_park)
+                            if e.widget is win else None), add="+")
+        def on_gone(e):
+            if e.widget is not win:
+                return
+            for k9 in ("hovjob", "eqjob"):
+                if st.get(k9):
+                    try:
+                        win.after_cancel(st[k9])
+                    except Exception:
+                        pass
+                    st[k9] = None
+
+        win.bind("<Destroy>", lambda e: self._safe("bgm_gone", on_gone, e),
+                 add="+")
         for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            cv.bind(ev, lambda e: self._safe("amb_wheel", on_wheel, e))
-            win.bind(ev, lambda e: self._safe("amb_wheel", on_wheel, e))
+            cv.bind(ev, lambda e: self._safe("bgm_wheel", on_wheel, e))
+            win.bind(ev, lambda e: self._safe("bgm_wheel", on_wheel, e))
+        ent.bind("<Return>", lambda _e: self._safe("bgm_add", do_add))
         win.bind("<Escape>", lambda _e: win.destroy())
+        draw()
+        win.geometry("%dx%d" % (W, H))
+        self._keep_front(win, focus=False)
+        if not getattr(win, "_ena_saved_pos", False):
+            self._place_near(win)
+        try:
+            ent.focus_set()
+        except Exception:
+            pass
+        return win
+
+    def _pl_songs_mine(self):
+        """내 목록을 화면용으로 (출처와 무관하게 늘 내 것)."""
+        out = []
+        for it in self._pl_list():
+            u9 = str(it.get("u") or "")
+            out.append({"slot": self.char, "n": "", "u": u9,
+                        "t": str(it.get("t") or "") or self._pl_short(u9),
+                        "lk": 0})
+        return out
+
+    # ── 작은 아이콘 (PIL 로 굽는다 — Tk 도형은 계단이 진다) ───────────
+    # 모양은 0~1 로 적어 두고 크기에 맞춰 늘린다. 4배로 그려 줄이므로
+    # 가장자리가 매끈하다 (제보 — '픽셀이 깨져 보인다').
+    GL_MAX = 300                 # 아이콘 그림 캐시 상한 (지뢰 18)
+
+    def _gl_make(self, kind, d, col, raw=False):
+        """아이콘 한 장 (PIL 4배 렌더 → 축소). 모르는 종류면 None."""
+        S = 4
+        n = int(d) * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+
+        def box(x0, y0, x1, y1):
+            return [x0 * n, y0 * n, x1 * n, y1 * n]
+
+        def poly(*pts):
+            dr.polygon([v * n for v in pts], fill=col)
+
+        if kind == "note":
+            # 흔한 8분음표 — 머리·대·깃발이 **이어져 있어야** 한다
+            # (제보: 조각조각 떨어져 보인다)
+            dr.ellipse(box(0.08, 0.58, 0.52, 0.90), fill=col)
+            dr.rectangle(box(0.44, 0.10, 0.525, 0.78), fill=col)
+            poly(0.525, 0.10, 0.90, 0.26, 0.90, 0.46, 0.525, 0.30)
+        elif kind == "play":
+            # 무게중심이 한가운데 오도록 밑변을 왼쪽으로 (폭의 1/3)
+            poly(0.287, 0.13, 0.287, 0.87, 0.927, 0.50)
+        elif kind == "pause":
+            r9 = 0.05 * n
+            dr.rounded_rectangle(box(0.25, 0.13, 0.43, 0.87), radius=r9,
+                                 fill=col)
+            dr.rounded_rectangle(box(0.57, 0.13, 0.75, 0.87), radius=r9,
+                                 fill=col)
+        elif kind in ("next", "prev"):
+            pts = [(0.18, 0.18, 0.18, 0.82, 0.54, 0.50),
+                   (0.58, 0.18, 0.58, 0.82, 0.94, 0.50)]
+            for p in pts:
+                if kind == "prev":
+                    p = (1 - p[0], p[1], 1 - p[2], p[3], 1 - p[4], p[5])
+                poly(*p)
+        elif kind == "person":
+            # 머리 동그라미 + 어깨 (동그라미 안에 넉넉히)
+            dr.ellipse(box(0.35, 0.16, 0.65, 0.46), fill=col)
+            dr.pieslice(box(0.14, 0.50, 0.86, 1.10), 180, 360, fill=col)
+        elif kind == "video":
+            # 캠코더 — 네모 몸통 + 오른쪽 렌즈 세모 (한가운데 정렬)
+            dr.rounded_rectangle(box(0.10, 0.30, 0.62, 0.70),
+                                 radius=0.07 * n, fill=col)
+            poly(0.66, 0.50, 0.90, 0.32, 0.90, 0.68)
+        elif kind in ("up", "down"):
+            p9 = (0.14, 0.68, 0.86, 0.68, 0.50, 0.28)
+            if kind == "down":
+                p9 = (p9[0], 1 - p9[1], p9[2], 1 - p9[3], p9[4], 1 - p9[5])
+            poly(*p9)
+        elif kind == "speaker":
+            poly(0.06, 0.36, 0.28, 0.36, 0.52, 0.12, 0.52, 0.88,
+                 0.28, 0.64, 0.06, 0.64)
+            dr.arc(box(0.46, 0.24, 0.86, 0.76), -60, 60, fill=col,
+                   width=max(1, int(0.07 * n)))
+        elif kind == "rain":
+            dr.ellipse(box(0.08, 0.24, 0.52, 0.56), fill=col)
+            dr.ellipse(box(0.38, 0.18, 0.86, 0.56), fill=col)
+            dr.rounded_rectangle(box(0.10, 0.38, 0.86, 0.58),
+                                 radius=0.10 * n, fill=col)
+            for x9 in (0.24, 0.46, 0.68):
+                dr.line([x9 * n, 0.66 * n, (x9 - 0.06) * n, 0.92 * n],
+                        fill=col, width=max(1, int(0.08 * n)))
+        elif kind == "fire":
+            # 끝이 뾰족하고 아래가 넉넉한 불꽃 (동그란 물방울처럼 안 보이게)
+            poly(0.50, 0.03, 0.74, 0.36, 0.69, 0.52, 0.82, 0.63,
+                 0.72, 0.88, 0.50, 0.97, 0.28, 0.88, 0.18, 0.63,
+                 0.33, 0.45, 0.39, 0.22)
+        elif kind == "leaf":
+            # 비스듬한 나뭇잎 — 양끝이 뾰족한 렌즈 모양
+            pts = []
+            rot = math.radians(-30)
+            cs, sn = math.cos(rot), math.sin(rot)
+            for side in (1, -1):
+                for t9 in range(0, 25):
+                    t = t9 / 24.0 if side > 0 else 1.0 - t9 / 24.0
+                    dx = side * 0.20 * math.sin(math.pi * t)
+                    dy = -0.42 + 0.84 * t
+                    pts += [(0.5 + dx * cs - dy * sn) * n,
+                            (0.5 + dx * sn + dy * cs) * n]
+            dr.polygon(pts, fill=col)
+        elif kind == "bird":
+            w9 = max(1, int(0.10 * n))
+            dr.arc(box(0.02, 0.24, 0.50, 0.76), 200, 340, fill=col, width=w9)
+            dr.arc(box(0.50, 0.24, 0.98, 0.76), 200, 340, fill=col, width=w9)
+        elif kind == "key":
+            dr.rounded_rectangle(box(0.04, 0.26, 0.96, 0.74),
+                                 radius=0.10 * n, fill=col)
+            # 자판 — 알파 0 으로 칠하면 구멍이 뚫린다 (섞지 않고 덮어쓴다)
+            for i9 in range(4):
+                x9 = 0.13 + i9 * 0.19
+                dr.rounded_rectangle(box(x9, 0.35, x9 + 0.12, 0.48),
+                                     radius=0.03 * n, fill=(0, 0, 0, 0))
+            dr.rounded_rectangle(box(0.22, 0.56, 0.78, 0.66),
+                                 radius=0.03 * n, fill=(0, 0, 0, 0))
+        elif kind == "cup":
+            dr.rounded_rectangle(box(0.14, 0.30, 0.66, 0.84),
+                                 radius=0.10 * n, fill=col)
+            dr.arc(box(0.58, 0.36, 0.92, 0.66), -90, 90, fill=col,
+                   width=max(1, int(0.09 * n)))
+        elif kind == "wave":
+            w9 = max(1, int(0.09 * n))
+            for dy in (0.34, 0.62):
+                pts = []
+                for i9 in range(0, 25):
+                    x9 = 0.06 + i9 * (0.88 / 24.0)
+                    pts += [x9 * n,
+                            (dy + 0.11 * math.sin(i9 / 24.0 * 6.283)) * n]
+                dr.line(pts, fill=col, width=w9, joint="curve")
+        else:
+            return None
+        im = im.resize((int(d), int(d)), Image.LANCZOS)
+        return im if raw else ImageTk.PhotoImage(im)
+
+    def _gl_icon(self, cv, cx, cy, kind, d, col, tags="dyn"):
+        """아이콘을 (cx, cy) 한가운데에 그린다. 같은 것은 캐시해 다시 쓴다."""
+        d = max(5, int(round(d)))
+        key = ("gl", kind, d, str(col))
+        ph = self._soft_cache.get(key)
+        if ph is None:
+            ph = self._gl_make(kind, d, col)
+            if ph is None:
+                return
+            if len(self._soft_cache) > self.GL_MAX:
+                for k9 in list(self._soft_cache)[:self.GL_MAX // 2]:
+                    self._soft_cache.pop(k9, None)
+            self._soft_cache[key] = ph
+        cv.create_image(int(round(cx)), int(round(cy)), image=ph,
+                        anchor="center", tags=tags)
+
+    # 아이콘 그림에서 실제 그려지는 세로 폭 (0~1) — 겉보기 크기를 맞춘다
+    GL_SPAN = {"play": 0.74, "pause": 0.74, "next": 0.64, "prev": 0.64,
+               "note": 0.80, "speaker": 0.76, "up": 0.40, "down": 0.40,
+               "video": 0.40, "person": 0.64}
+
+    def _gl_pause(self, cv, cx, cy, h, col, tags="dyn"):
+        """멈춤 — 같은 길이의 둥근 막대 둘 (제보: 길이가 달랐다)."""
+        self._gl_icon(cv, cx, cy, "pause", h / self.GL_SPAN["pause"], col,
+                      tags)
+
+    def _gl_play(self, cv, cx, cy, h, col, tags="dyn"):
+        """재생 세모 — 무게중심이 (cx, cy) 에 온다."""
+        self._gl_icon(cv, cx, cy, "play", h / self.GL_SPAN["play"], col, tags)
+
+    def _gl_skip(self, cv, cx, cy, h, col, sign, tags="dyn"):
+        """이전·다음 겹세모. sign 1 = 다음, -1 = 이전."""
+        self._gl_icon(cv, cx, cy, "next" if sign > 0 else "prev",
+                      h / self.GL_SPAN["next"], col, tags)
+
+    def _gl_person(self, cv, cx, cy, h, col, tags="dyn"):
+        """사람 모양 (친구들의 플레이리스트 단추)."""
+        self._gl_icon(cv, cx, cy, "person", h / self.GL_SPAN["person"], col,
+                      tags)
+
+    def _gl_video(self, cv, cx, cy, h, col, tags="dyn"):
+        """영상 보기 단추 그림 (캠코더)."""
+        self._gl_icon(cv, cx, cy, "video", h / self.GL_SPAN["video"], col,
+                      tags)
+
+    def _gl_caret(self, cv, cx, cy, h, col, up=True, tags="dyn"):
+        """접기·펴기 세모 (영상 칸 여닫기)."""
+        k9 = "up" if up else "down"
+        self._gl_icon(cv, cx, cy, k9, h / self.GL_SPAN[k9], col, tags)
+
+    def _gl_note(self, cv, cx, cy, h, col, tags="dyn"):
+        self._gl_icon(cv, cx, cy, "note", h / self.GL_SPAN["note"], col, tags)
+
+    def _gl_speaker(self, cv, cx, cy, col, k=1.0, tags="dyn"):
+        self._gl_icon(cv, cx, cy, "speaker", 18 * k, col, tags)
+
+    AMB_ICON = (("비", "rain"), ("빗", "rain"), ("모닥", "fire"),
+                ("불", "fire"), ("바다", "wave"), ("파도", "wave"),
+                ("숲", "leaf"), ("새", "bird"), ("키보드", "key"),
+                ("카페", "cup"), ("동굴", "wave"))
+
+    def _gl_amb(self, cv, cx, cy, name, col, d=15.0, tags="dyn"):
+        """환경음 이름에 어울리는 작은 그림 (없으면 물결)."""
+        kind = "wave"
+        for word, k9 in self.AMB_ICON:
+            if word in str(name):
+                kind = k9
+                break
+        self._gl_icon(cv, cx, cy, kind, d, col, tags)
 
     def _slime_close(self):
         if self.slime is None:
@@ -27696,6 +29692,32 @@ class Mascot:
                 # 사라진다 (지뢰 56 — 실측 최악 49980자). 릴레이는 다음
                 # 신호(8초 뒤)에 실리면 그만이다.
                 out.pop("rly", None)
+        if self._pl_friends_ok():
+            # 친구들의 플레이리스트 — 곡 수·해시·지금 곡은 늘(수십 자),
+            # 목록 본체는 청(plq)받았을 때 20초 동안만. 본체를 실을 때는
+            # cd·rly 를 뺀다 — 셋이 겹치면 봉인 후 상한(32000)을 넘긴다
+            # (지뢰 56·92). 옛 판 받는 쪽은 모르는 열쇠라 그냥 버린다.
+            try:
+                mine9 = self._pl_songs_mine()
+                if mine9:
+                    out["plc"] = len(mine9)
+                    out["plh"] = self._pl_hash(mine9)
+                    if (getattr(self, "_pl_on", False)
+                            and getattr(self, "_pl_src", "") == "mine"
+                            and 0 <= self._pl_i < len(mine9)):
+                        out["pln"] = str(mine9[self._pl_i].get("t")
+                                         or "")[:30]
+                    now3 = time.time()
+                    if getattr(self, "_pl_push", False) and for_net:
+                        self._pl_push = False
+                        self._pl_burst = now3 + self.PL_BURST
+                    if (getattr(self, "_pl_push", False)
+                            or now3 < getattr(self, "_pl_burst", 0.0)):
+                        out["pl"] = self._pl_share_pack()
+                        out.pop("cd", None)
+                        out.pop("rly", None)
+            except Exception:
+                self._log_error("pl_share")
         return out
 
     def _room_start(self):
@@ -29265,7 +31287,8 @@ class Mascot:
             self._room_stop()
             self._room_start()
             return
-        self.room_net.idle = (self.room_win is None)
+        self.room_net.idle = (self.room_win is None
+                              and not self._pl_friends_open())
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now(for_net=True))
@@ -29298,6 +31321,9 @@ class Mascot:
             # 때만 돌아서, 청이 한 번 새면 재청이 영영 안 올 수 있다
             # (지뢰 97 — 화면과 무관하게 필요한 일은 통신 바퀴에).
             self._safe("cd_net", self._room_cd_net, people)
+            # 친구들의 플레이리스트 — 같은 짜임 (받기 · 재청 그물)
+            self._safe("pl_take", self._room_pl_take, people)
+            self._safe("pl_net", self._room_pl_net, people)
             for q in people:              # 깜빡임 완충용 — 마지막 모습
                 sl9 = q.get("slot") or ""
                 if sl9 and not q.get("off"):
@@ -30378,6 +32404,16 @@ class Mascot:
 
     def _room_event(self, ev):
         """남이 보낸 신호 — 내 캐릭터가 반응한다."""
+        if ev.get("k") == "plq":
+            # '플레이리스트 좀 보내 줘' — cdq 와 같은 짜임 (통신이라 방패
+            # 보다 먼저, PL_PUSH_GAP 에 한 번만 응한다)
+            now9 = time.time()
+            if (self._pl_friends_ok()
+                    and now9 - getattr(self, "_plq_at", 0.0) > self.PL_PUSH_GAP):
+                self._plq_at = now9
+                self._pl_push = True
+                self._safe("room_push", self._room_push_now)
+            return
         if ev.get("k") == "cdq":
             # 방 그림을 다시 보내 달라는 청 — 반응이 아니라 통신이라
             # mute·방패보다 먼저 본다. 20초에 한 번만 응한다.
@@ -32893,6 +34929,7 @@ class Mascot:
         # 재생 중인 곡 제목은 **제 줄에** 둔다. 예전에는 볼륨 막대와 같은
         # 자리(오른쪽 끝·같은 높이)에 그려서 글자와 막대가 겹쳐 보였다(제보).
         playing = bool(can_play and self._pl_on
+                       and getattr(self, "_pl_src", "room") == "room"
                        and 0 <= self._pl_i < len(songs))
         head = (94 if playing else (74 if can_play else 48)) * k
         max_rows = max(1, int((H - py - head - 30 * k) // rh))
@@ -32960,7 +34997,8 @@ class Mascot:
                            font=self._uf(9), fill=P["sub"], tags="dyn")
         f = self._uf(9)
         for i2, s2 in enumerate(rows):
-            if can_play and self._pl_on and i2 == self._pl_i:
+            if (can_play and self._pl_on and i2 == self._pl_i
+                    and getattr(self, "_pl_src", "room") == "room"):
                 self._rr(cv, px + 8 * k, yy - rh / 2 + 2 * k, px + pw - 8 * k,
                          yy + rh / 2 - 2 * k, 8 * k,
                          fill=self._tint(mine, 0.68), width=0)
@@ -32994,13 +35032,21 @@ class Mascot:
 
         주소가 이상한 곡은 건너뛴다 — 전부 이상하면 포기한다.
         """
-        songs = self._room_pl_songs()
+        songs = self._pl_songs()
         if not songs:
-            self._room_toast = ("오늘 올라온 노래가 없어요", time.time())
+            src9 = getattr(self, "_pl_src", "room")
+            self._room_toast = ({"mine": "목록에 곡이 없어요",
+                                 "friend": "친구 목록을 아직 못 받았어요"}
+                                .get(src9, "오늘 올라온 노래가 없어요"),
+                                time.time())
             return
         i %= len(songs)
         if not self._yt_alive():
             if not self._yt_spawn():
+                # 재생기를 못 띄웠으면 트는 중이 아니다 — 목록을 끄고
+                # 카드 위 단추도 되돌린다 (안 끄면 멈춤 표시로 굳는다)
+                self._pl_on = False
+                self._safe("card", self._relayout_card)
                 self._room_toast = ("음악을 켤 수 없어요", time.time())
                 return
         for tries in range(len(songs)):
@@ -33066,6 +35112,10 @@ class Mascot:
         self._yt_want = False
         self._yt_send(c="pause")
 
+    def _room_pl_src(self):
+        """홈 패널에서 고르면 모두의 목록으로 갈아탄다 (내 창은 mine)."""
+        self._pl_src = "room"
+
     def _room_pl_act(self, act, mx=None):
         """패널 안 클릭 — 줄(곡)·재생·멈춤·다음곡·소리 크기.
 
@@ -33082,13 +35132,18 @@ class Mascot:
                 if self._song_ok(songs[i]["u"]):
                     self._open_url(songs[i]["u"])
                 return
+            self._room_pl_src()
             self._pl_play(i)
         elif kind == "play":
+            self._room_pl_src()
             self._pl_play(self._pl_i if self._pl_i >= 0 else 0)
         elif kind == "stop":
             self._pl_stop()
         elif kind == "next":
-            self._pl_play((self._pl_i + 1) if self._pl_i >= 0 else 0)
+            self._room_pl_src()
+            self._pl_play(self._pl_next_i(max(0, self._pl_i),
+                                          self._room_pl_songs())
+                          if self._pl_i >= 0 else 0)
         elif kind == "vol":
             if mx is not None:
                 self._pl_set_vol(act[1], act[2], mx)
