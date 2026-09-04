@@ -1,7 +1,7 @@
 {
- "version": 1788531249,
+ "version": 1788532334,
  "files": {
-  "mascot.py": "9d5ba11981c6c541096930e4e9875420a58cd52e38af62cdf9be63dc0d9c0d03",
+  "mascot.py": "264fd99650e8b0e04773255995ab28a8420d7c105c6aecf9ee5aa22dc44bb578",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -595,8 +595,7 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "플레이리스트 주소 칸에 붙여넣기 단추를 넣었어요 — 맥에서 Cmd+V 가 안 먹을 때 쓰세요. 복사해 둔 주소가 노래면 바로 목록에 들어가요",
-  "'바탕화면에 친구들 두기'에서 친구 캐릭터가 안 뜨고 어두운 얼룩만 보이던 것을 고쳤어요 — 그림을 못 받았을 때도 다시 받아 오고, 받는 동안에는 옅은 동그라미로 보여요"
+  "캐릭터가 가끔 깜빡이면서 거의 안 보이고 그 자리를 눌러도 반응이 없던 것을 고쳤어요 — 펜(윈도우 잉크)·작업 보기처럼 화면을 덮는 창과 계속 자리 싸움을 하던 게 원인이었어요"
  ],
  "silent": true
 }

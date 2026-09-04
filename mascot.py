@@ -6370,6 +6370,8 @@ class Mascot:
                                                              self.state_dir)
         self._update_win = None      # 업데이트 안내 팝업 (한 번만)
         self._menu_up = False        # 우클릭 메뉴가 떠 있는가 (z 복구를 쉰다)
+        self._z_lose = {}            # 창 클래스별로 z순서 싸움에 진 횟수
+        self._z_skip = {}            # 못 이겨서 한동안 못 본 척하는 창들
         self._front_wins = []        # '항상 위'보다 앞을 지켜 줄 창들 (_keep_front)
         self._dot_btn = None         # 안 본 업데이트 점 자리 (x, y, 반지름)
         self._read_ver = None        # 어디까지 읽었는지 (파일에서 한 번만 읽음)
@@ -12483,6 +12485,8 @@ class Mascot:
         self._panel_z = 0.0
 
     Z_PIN = 1.0              # 이 간격으로 '내가 아직 맨 앞인가'를 본다
+    Z_GIVEUP = 60.0          # 올려도 또 덮는 창은 이만큼 못 본 척한다
+    Z_LOSE = 3               # 이만큼 연달아 지면 그 창은 못 이기는 상대다
 
     def _u32_pid(self):
         """창 주인(프로세스)을 묻는 데 쓸 user32 손잡이 — 따로 연다.
@@ -12610,24 +12614,57 @@ class Mascot:
         r = (ctypes.c_long * 4)()
         cur = u.GetTopWindow(0)
         buried = False
+        cls_now = ""
+        skip9 = getattr(self, "_z_skip", None)
+        if skip9 is None:
+            skip9 = self._z_skip = {}
         while cur and cur != self._main_hwnd:
             if not is_mine(cur) and u.IsWindowVisible(cur):
                 u.GetWindowRect(cur, ctypes.byref(r))
                 if not (r[2] <= bx0 or bx1 <= r[0]
                         or r[3] <= by0 or by1 <= r[1]):
+                    if not self._z_real_cover(u, cur):
+                        cur = u.GetWindow(cur, 2)
+                        continue           # 가리는 게 아니다 — 안 싸운다
+                    cls_now = self._z_class(u, cur)
+                    if now - float(skip9.get(cls_now) or 0.0) < self.Z_GIVEUP:
+                        cur = u.GetWindow(cur, 2)
+                        continue           # 못 이기는 상대 — 한동안 쉰다
                     buried = True
                     break
             cur = u.GetWindow(cur, 2)          # GW_HWNDNEXT
         if not buried:
+            self._z_lose = {}
+            return
+        # 올렸는데 같은 창에 또 덮였다 — 몇 번 지면 그 창은 포기한다.
+        # 계속 싸우면 서로 올려 대며 **눈에 띄게 깜빡인다** (제리·개 제보:
+        # 펜의 ShellHandwritingCanvas·작업 보기·항상 위 브라우저).
+        lose9 = getattr(self, "_z_lose", None)
+        if lose9 is None:
+            lose9 = self._z_lose = {}
+        n9 = int(lose9.get(cls_now) or 0) + 1
+        lose9[cls_now] = n9
+        if len(lose9) > 20:
+            lose9.clear()
+        if n9 >= self.Z_LOSE:
+            skip9[cls_now] = now
+            lose9.pop(cls_now, None)
+            if len(skip9) > 20:
+                for k9 in list(skip9)[:10]:
+                    skip9.pop(k9, None)
+            self._z_note("giveup %s (%d번 졌다 — %.0f초 쉰다)"
+                         % (cls_now, n9, self.Z_GIVEUP))
             return
         # 무엇에 묻혔는지 남긴다 — 창 종류(클래스)와 자리만 (제목은 안 남긴다)
         try:
             cls9 = ctypes.create_unicode_buffer(48)
             u.GetClassNameW(cur, cls9, 48)
             ex9 = u.GetWindowLongW(cur, -20)
-            self._z_note("buried_by %s topmost=%d rect=%d,%d,%d,%d"
+            self._z_note("buried_by %s topmost=%d rect=%d,%d,%d,%d 진 횟수=%d"
                          % (cls9.value[:24], 1 if ex9 & 0x8 else 0,
-                            r[0], r[1], r[2], r[3]))
+                            r[0], r[1], r[2], r[3],
+                            int((getattr(self, "_z_lose", None)
+                                 or {}).get(cls_now) or 0)))
         except Exception:
             pass
         # HWND_TOP(0) — HWND_TOPMOST(-1)는 이미 항상 위인 창에는 무효라
@@ -12639,6 +12676,42 @@ class Mascot:
         self._last_pos = None
         self._panel_z = 0.0
         self._z_check = 0.0
+
+    @staticmethod
+    def _z_class(u, hwnd):
+        """그 창의 클래스 이름 (진단·비교용)."""
+        try:
+            buf = ctypes.create_unicode_buffer(48)
+            u.GetClassNameW(hwnd, buf, 48)
+            return buf.value[:32]
+        except Exception:
+            return "?"
+
+    @staticmethod
+    def _z_real_cover(u, hwnd):
+        """이 창이 정말 캐릭터를 가리는가.
+
+        클릭이 통과하는 창(WS_EX_TRANSPARENT)과 투명도 0 인 창은 덮어도
+        보이는 것을 가리지 않는다 — 펜의 잉크 오버레이·게임 오버레이가
+        그렇다. 그런 창과 z순서 싸움을 하면 **깜빡이기만 한다**.
+        """
+        try:
+            ex = u.GetWindowLongW(hwnd, -20)
+            if ex & 0x20:                       # WS_EX_TRANSPARENT
+                return False
+            if ex & 0x80000:                    # WS_EX_LAYERED
+                # wt(wintypes)는 이 파일에서 전역이 아니다 — ctypes 로 (지뢰 21)
+                key9 = ctypes.c_ulong()
+                al9 = ctypes.c_ubyte()
+                fl9 = ctypes.c_ulong()
+                if u.GetLayeredWindowAttributes(hwnd, ctypes.byref(key9),
+                                                ctypes.byref(al9),
+                                                ctypes.byref(fl9)):
+                    if (fl9.value & 0x2) and al9.value <= 8:
+                        return False            # 거의 투명하다
+        except Exception:
+            pass
+        return True
 
     Z_NOTE_GAP = 600.0       # 같은 z순서 사건은 10분에 한 번만 기록한다
 
