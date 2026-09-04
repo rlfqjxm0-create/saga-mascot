@@ -1684,7 +1684,11 @@ class TeamStrip:
                                  for i in (1, 3, 5))
                     ph = ImageTk.PhotoImage(flat_on_key(im, key2))
                     self._ph_cache.append((im, ph))
-                    if len(self._ph_cache) > 4:
+                    # 숨쉬기로 몇 장이 돌아가며 온다 — 그만큼 들되 용량으로
+                    # 상한을 잡는다 (지뢰 42)
+                    mx9 = max(2, min(12, int(20000000
+                                             / max(1, im.width * im.height * 4))))
+                    while len(self._ph_cache) > mx9:
                         self._ph_cache.pop(0)
                 self.canvas.config(width=im.width, height=im.height)
                 self.canvas.delete("all")
@@ -6634,6 +6638,13 @@ class Mascot:
         # grab_release를 안 하면 메뉴를 닫은 뒤에도 마우스를 붙잡고 있어
         # 다음 클릭이 엉뚱하게 먹힌다
         def _pop(e):
+            # 카드 위 내 각오 말풍선을 우클릭하면 메뉴 대신 **고치는 창**을
+            # 연다 (요청). _safe 는 돌려주는 값이 없어 여기서 직접 감싼다.
+            try:
+                if self._vow_rclick(e.x, e.y):
+                    return
+            except Exception:
+                self._log_error("vow_rclick")
             # 메뉴는 켤 때 한 번만 만든다. 지금 상태(꺼내 놨는지·어떤 종류인지)는
             # 띄우기 직전에 맞춰 준다 — 안 그러면 처음 값에 굳어 있다.
             self._safe("slime_menu_sync", self._slime_menu_sync)
@@ -6993,6 +7004,7 @@ class Mascot:
         self._strip = None
         self._strip_at = 0.0
         self._strip_key = None
+        self._strip_bre = None     # 마지막으로 그린 숨쉬기 값 (진폭, 깊이)
         self._strip_im = None
         self._strip_z = 0.0
         self._strip_seat_cache = {}
@@ -7110,6 +7122,9 @@ class Mascot:
         self._room_fx = []           # 지금 보이는 연출
         self._char_fx = []           # 캐릭터 창에서 터지는 연출 (남이 눌러 줬을 때)         # 배경을 그려 둔 상태 (크기·색이 그대로면 다시 안 그린다)
         self._room_body = []         # 숨쉬며 움직이는 몸 그림
+        self._room_pil_cache = {}    # 홈 카드 그림 (PIL · 테두리까지)
+        self._room_bre_cache = {}    # 숨쉬기 깊이별 판 (상한 있음)
+        self._room_bre_d = {}        # 칸마다 마지막으로 올린 깊이
         self._room_key_last = None
         self._sl_fg = 0.0            # 앞 창을 마지막으로 확인한 시각
         # 물성은 종류마다 다르다. 꺼낼 때 정하지만 여기서도 만들어 둔다
@@ -19120,8 +19135,13 @@ class Mascot:
         who = self._strip_who
         anim = (not fx) and bool(who) and any(p[2] == "집중" for p in who)
         gap9 = 0.04 if (fx or bye9) else (self.STRIP_ANIM_DT if anim else 1.0)
+        # 숨쉬기는 **눌린 깊이가 바뀔 때만** 다시 그린다 (요청). 정수 px 라
+        # 한 주기에 몇 번뿐이고, 그 몇 장은 시트 캐시에 그대로 남는다.
+        bre9 = (0, 0) if fx else self._strip_breath(
+            now, self._ui(1) * self._strip_size() / 100.0)
         if (self._strip_key is not None and self._strip_im is not None
-                and who is not None and now - self._strip_at < gap9):
+                and who is not None and now - self._strip_at < gap9
+                and bre9 == self._strip_bre):
             # 캐릭터가 움직였을 때만 따라간다. **본체가 이미 재 둔 자리**
             # (_last_pos, 한 프레임 전)와 견준다 — 여기서 Tk 에 창 좌표를
             # 다시 물으면 안 그리는 프레임에도 네 번씩 나가 맥에서 프레임당
@@ -19131,6 +19151,7 @@ class Mascot:
                 self._strip_follow()
             return
         self._strip_at = now
+        self._strip_bre = bre9
         who = self._strip_people()
         self._strip_who = who
         if not who and not byes:
@@ -19144,9 +19165,12 @@ class Mascot:
         size9 = self._strip_size()
         gap9 = self._strip_gap()
         key9 = (tuple((p[0], p[1], p[2], round(float(p[3] or 0), 2))
-                      for p in who), size9, gap9,
+                      for p in who), size9, gap9, self._strip_vgap(), bre9,
                 int(now * 25) if (fx or bye9) else
-                (self._strip_step(now) if anim else 0),
+                # 자세는 **번갈아 두 장뿐**이라 홀짝만 넣는다. 예전에는
+                # 걸음 수를 그대로 넣어 열쇠가 0.7초마다 새것이 되는 바람에
+                # 시트 캐시가 한 번도 안 맞았다 (지뢰 161 을 반만 고친 셈).
+                (self._strip_step(now) % 2 if anim else 0),
                 getattr(self, "_strip_hov", None),
                 tuple(b9[0] for b9 in byes))
         if key9 != self._strip_key or self._strip_im is None:
@@ -19162,8 +19186,14 @@ class Mascot:
             else:
                 self._strip_im = self._strip_sheet(who, now, fx, byes)
                 if not (fx or bye9):
-                    if len(self._strip_sheets) > 8:          # 상한 (지뢰 18)
-                        for k9 in list(self._strip_sheets)[:4]:
+                    # 숨쉬기 한 주기치(자세 두 장 x 눌린 깊이)를 담아 두면
+                    # 그 뒤로는 합성이 없다. 한 장이 사람 수에 비례해 커지니
+                    # 장수가 아니라 **용량**으로 상한을 잡는다 (지뢰 42).
+                    im9 = self._strip_im
+                    by9 = max(1, im9.width * im9.height * 4)
+                    max9 = max(4, min(12, int(30000000 / by9)))
+                    if len(self._strip_sheets) > max9:       # 상한 (지뢰 18)
+                        for k9 in list(self._strip_sheets)[:max(1, max9 // 2)]:
                             self._strip_sheets.pop(k9, None)
                     self._strip_sheets[key9] = (
                         self._strip_im, list(self._strip_cols),
@@ -19212,6 +19242,73 @@ class Mascot:
             return max(0, min(80, int(30 if v is None else v)))
         except (TypeError, ValueError):
             return 30
+
+    def _strip_vgap(self):
+        """말풍선과 캐릭터 머리 사이 여백 보정 (요청). 0 이 예전 자리다.
+
+        음수로 내리면 말풍선이 머리 쪽으로 내려오는데, 토마토를 덮기
+        직전까지만 (그 선은 _strip_sheet 가 사람들의 머리 높이를 보고
+        잡는다 — 말풍선은 한 줄에 나란히 서야 하므로 다 같이 멈춘다).
+        """
+        v = self.us.get("pomo_strip_vgap")
+        try:
+            return max(-30, min(60, int(0 if v is None else v)))
+        except (TypeError, ValueError):
+            return 0
+
+    STRIP_BREATH_W = 2.0         # 숨쉬기 각속도 (마스코트 본체와 같다)
+
+    def _breath_depth(self, now, amp, ph=0.0):
+        """지금 눌린 깊이 (0~amp, 정수 px) — 띠와 홈이 같이 쓴다.
+
+        값이 정수라 한 주기(약 3.1초)에 여섯 번쯤만 바뀌고, 그 사이에는
+        만들어 둔 그림이 그대로라 다시 만들지 않는다 (지뢰 161·165).
+        """
+        if amp <= 0:
+            return 0
+        c9 = math.cos(now * self.STRIP_BREATH_W + ph)
+        return int(round(amp * (1.0 - c9) / 2.0))
+
+    def _breath_phase(self, slot):
+        """캐릭터마다 다른 박자. hash() 는 실행할 때마다 달라지므로 글자에서
+        만든다 — 껐다 켜도 같은 박자여야 검사도 사람도 헷갈리지 않는다."""
+        return (sum(ord(c9) for c9 in str(slot)) % 7) * 0.9
+
+    def _strip_breath(self, now, k):
+        """띠의 숨쉬기 — (진폭, 지금 눌린 깊이).
+
+        캐릭터는 **책상선 위만** 이 깊이만큼 세로로 눌린다. 띠는 여러 사람이
+        한 장(시트)에 그려지므로 **모두 같은 값**을 쓰고, 이웃끼리만 반대
+        박자로 (i0 % 2) 어긋낸다 — 사람마다 다른 위상을 주면 조합이 터져
+        시트 캐시가 못 버틴다 (홈은 사람마다 그림이 따로라 제 박자를 쓴다).
+        """
+        # 진폭을 3px 로 묶는 것은 눈보다 **메모리** 때문이다 — 깊이 하나가
+        # 시트 한 장(사람 일곱이면 3MB)이라, 4px 로 두면 한 주기치가 30MB
+        # 상한을 넘겨 캐시가 매 주기 갈린다 (지뢰 42).
+        amp = max(2, min(3, int(round(2.2 * k))))
+        return amp, self._breath_depth(now, amp)
+
+    def _breath_squash(self, im, slot, dy):
+        """책상선 위만 dy 만큼 눌린 그림 — 책상(키보드·타블렛)은 그대로.
+
+        누르는 구역의 **아래끝이 책상선**이라 이음매가 생기지 않는다.
+        띠는 시트가 캐시되므로 그때그때 만들고(실측 0.3ms), 홈은 그림이
+        곧 화면에 얹히는 것이라 깊이별로 캐시해 둔다.
+        """
+        if im is None or dy <= 0:
+            return im
+        try:
+            line = self._room_deskline(slot)
+            d9 = int(im.height * float(line if line else 0.78))
+            d9 = max(dy + 2, min(im.height, d9))
+            up = im.crop((0, 0, im.width, d9)).resize(
+                (im.width, d9 - dy), Image.LANCZOS)
+            out = im.copy()
+            out.paste((0, 0, 0, 0), (0, 0, im.width, d9))
+            out.paste(up, (0, dy))
+            return out
+        except Exception:
+            return im
 
     def _strip_pos(self, im):
         """띠의 화면 자리 — 내 캐릭터 창 기준 (끌어 옮긴 값이 있으면 그것)."""
@@ -19349,6 +19446,7 @@ class Mascot:
         H = int(self.STRIP_SEAT * k)
         gap = int(u(self._strip_gap()))
         margin = int(u(16))
+        amp9, bd9 = (0, 0) if fx else self._strip_breath(now, k)
         f_v = self._pil_font(int(round(9 * k / u(1) * u(1))), True)
         f_s = self._pil_font(int(round(8 * k / u(1) * u(1))), True)
         bh = int(24 * k)            # 말풍선 높이
@@ -19384,8 +19482,17 @@ class Mascot:
                 vow = (vow + "…") if vow else ""
             bw = (tw_of(vow) + int(18 * k)) if vow else 0
             cols.append((slot, vow, stt, fr, seat, sw, bw, full))
+        # 말풍선을 머리 쪽으로 내리는 보정 (요청) — 다만 토마토를 덮기
+        # 직전에서 다 같이 멈춘다. 기준은 **토마토가 가장 높이 얹힌 사람**
+        # (머리 위 빈 여백이 가장 적은 사람) 이다.
+        vg = int(u(self._strip_vgap()))
+        try:
+            ht_min = min(self._seat_head_top(c9[0], H) for c9 in cols)
+        except Exception:
+            ht_min = 0
+        vg = max(vg, -(int(ht_min) + int(2.6 * k)))
         # 위에서부터: 말풍선 · 토마토(머리 위) · 캐릭터 · 상태 알약
-        head = (bh + th + int(6 * k)) + (tsz - tdip) + int(u(28))
+        head = (bh + th + int(6 * k) + vg) + (tsz - tdip) + int(u(28))
         base_y = head + H
         Wt = sum(c[5] for c in cols) + gap * max(0, len(cols) - 1) \
             + margin * 2
@@ -19413,11 +19520,15 @@ class Mascot:
                 self._strip_cols.append((x - gap / 2.0, x + cw + gap / 2.0,
                                          slot))
             dy = (-abs(math.sin(t * 6.0 + i * 0.8)) * u(9)) if fx else 0.0
+            # 숨쉬기 — 이웃끼리 반대 박자. 책상선 위만 눌리므로 머리가
+            # 가장 많이 움직이고 책상은 가만히 있다 (요청).
+            bdy = (bd9 if i % 2 == 0 else amp9 - bd9) if amp9 else 0
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
             # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
             d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
                        base_y + 6 * k), fill=(0, 0, 0, 60))
             if seat is not None:
+                seat = self._breath_squash(seat, slot, bdy)
                 tgt.alpha_composite(seat, (int(cx - seat.width / 2),
                                            int(base_y - seat.height + dy)))
                 d = ImageDraw.Draw(tgt)
@@ -19426,7 +19537,8 @@ class Mascot:
                                  (bw / 2.0 - 6 * k, bw / 2.0 + 6 * k,
                                   bw / 2.0, th),
                                  "#fffdf7", self._tint(fg, 0.45), 1.3)
-                by0 = int(base_y - H - (tsz - tdip) - bh - th - 6 * k + dy)
+                by0 = int(base_y - H - (tsz - tdip) - bh - th - 6 * k
+                          - vg + dy)
                 tgt.alpha_composite(bub, (int(cx - bw / 2), by0))
                 d = ImageDraw.Draw(tgt)
                 if f_v is not None:
@@ -19458,8 +19570,12 @@ class Mascot:
             # 여백만큼 내려간다. 캐릭터보다 나중에 그려 위로.
             tom = self._strip_tomato(tsz, fr)
             ht9 = self._seat_head_top(slot, H)
+            # 토마토는 머리에 얹혀 있으니 숨쉬기만큼 같이 내려간다. 누르는
+            # 구역의 아래끝(책상선)에서 멀수록 많이 움직인다.
+            dpx = max(1.0, H * float(self._room_deskline(slot) or 0.78))
+            tdy = bdy * max(0.0, 1.0 - ht9 / dpx)
             tgt.alpha_composite(tom, (int(cx - tsz / 2),
-                                      int(base_y - H + ht9 - tdip + dy)))
+                                      int(base_y - H + ht9 + tdy - tdip + dy)))
             if leaving:
                 bye_at[slot] = (cx, sw, base_y - H + ht9)
                 im.alpha_composite(self._bye_alpha_im(tgt, a9))
@@ -19716,7 +19832,7 @@ class Mascot:
 
     STRIP_TIP = ("바탕화면에 친구들이 떴어요!",
                  "친구를 우클릭하면 채찍질·콕·쓰담·응원을 보낼 수 있고,",
-                 "빈 자리를 우클릭하면 캐릭터 크기와 가로 여백을 바꿀 수 있어요.",
+                 "빈 자리를 우클릭하면 크기와 여백(가로·말풍선)을 바꿀 수 있어요.",
                  "띠를 끌어서 원하는 자리에 둘 수도 있어요.",
                  "이 띠는 뽀모도로 창을 닫아 두었을 때 보여요 (창을 열면 잠시 숨어요).")
 
@@ -19768,7 +19884,7 @@ class Mascot:
             pass
         u, cd = self._ui, self.card
         line = self._tint(cd["fill"], 0.55)
-        W, H = int(u(230)), int(u(158))
+        W, H = int(u(230)), int(u(202))
         win = tk.Toplevel(self.root)
         self._strip_menu_ref = win
         win.title("친구들 띠")
@@ -19780,11 +19896,15 @@ class Mascot:
         cv.pack()
         st = {"drag": None, "hits": []}
         rows = (("캐릭터 크기", "pomo_strip_size", 50, 150, "%d%%"),
-                ("가로 여백", "pomo_strip_gap", 0, 80, "%dpx"))
+                ("가로 여백", "pomo_strip_gap", 0, 80, "%dpx"),
+                ("말풍선 여백", "pomo_strip_vgap", -30, 60, "%dpx"))
 
         def cur(key):
-            return self._strip_size() if key == "pomo_strip_size" \
-                else self._strip_gap()
+            if key == "pomo_strip_size":
+                return self._strip_size()
+            if key == "pomo_strip_gap":
+                return self._strip_gap()
+            return self._strip_vgap()
 
         def draw():
             if not win.winfo_exists():
@@ -19809,7 +19929,7 @@ class Mascot:
                            fill="#ffffff", outline=cd["fill"])
                 st["hits"].append((gx0, gy - u(13), gx1, gy + u(13),
                                    key, lo, hi))
-            y2 = u(102)
+            y2 = u(146)
             cv.create_line(u(12), y2, W - u(12), y2, fill=line)
             for j, (lab, act) in enumerate((("뽀모도로 창 열기", "open"),
                                             ("바탕화면에서 숨기기", "hide"))):
@@ -19908,6 +20028,23 @@ class Mascot:
             self._vow_keep = sh
         self.canvas.create_text(bx + bw / 2.0, y0 + bh / 2.0, text=vow,
                                 font=f, fill=self._shade(fg, 0.15))
+
+    def _vow_rclick(self, x, y):
+        """카드 위 내 각오 말풍선을 우클릭했나 — 그러면 고치는 창을 연다.
+
+        말풍선이 곧 각오라, 뽀모도로 창을 열어 내 칸을 찾아 누르는 것보다
+        여기가 가깝다 (요청). 자리는 호버가 쓰는 상자(_vow_box)와 같은
+        것을 쓴다 — 둘이 어긋나면 '커서는 반응하는데 우클릭은 안 되는'
+        칸이 생긴다.
+        """
+        b = getattr(self, "_vow_box", None)
+        if not b or not self._tm:
+            return False
+        if not (b[0] - 4 <= x <= b[2] + 4 and b[1] - 2 <= y <= b[3] + 2):
+            return False
+        self._safe("ui_click", self._ui_click)
+        self._safe("vow_win", self._team_vow_win)
+        return True
 
     def _vow_pointer(self):
         """커서의 캔버스 좌표 (검사가 갈아 끼우는 자리)."""
@@ -30577,7 +30714,8 @@ class Mascot:
         이번 실행에서 바로 보인다 (지뢰 62).
         """
         for cache in (self._room_img_cache, self._room_head_cache,
-                      self._room_dxc, self._strip_seat_cache):
+                      self._room_dxc, self._strip_seat_cache,
+                      self._room_pil_cache, self._room_bre_cache):
             for k9 in [k for k in cache
                        if isinstance(k, tuple) and slot in k]:
                 cache.pop(k9, None)
@@ -30721,23 +30859,20 @@ class Mascot:
         out.paste(im, (pad, 0))
         return out
 
-    def _room_img(self, slot, tag):
-        """방에 그릴 그림 — (몸, 책상) 두 조각. 아직 없으면 None.
+    def _room_fig_pil(self, slot, tag):
+        """방 카드에 그릴 캐릭터 한 장 (PIL · 흰 테두리까지 입힌 것).
 
-        숨쉬듯 위아래로 움직이는 것은 몸뿐이어야 한다. 통째로 흔들면
-        책상까지 떠올라 어색하다. 책상이 시작되는 높이는 그림을 만들 때
-        같이 적어 둔다(seat_meta.json). 없으면 통짜로 돌려준다.
+        테두리 만들기가 비싸서(두 배 크기에서 만들어 줄인다) 한 번만 하고
+        _room_img 와 숨쉬기 판(_room_breath_img)이 나눠 쓴다.
         """
         # 폼이 열쇠에 없으면 사가가 변신해도 남의 화면이 안 바뀐다 (지뢰 89)
         f9 = self._slot_form(slot)
-        k = (slot, tag, f9)
-        got = self._room_img_cache.get(k)
+        key = ("pil", slot, tag, f9)
+        got = self._room_pil_cache.get(key)
         if got is not None:
             return got
         p = self._room_art_file(slot, tag + ".png")
         if p is None:
-            if tag not in ("seat", "seat_idle"):
-                return self._room_img(slot, "seat")   # 옛 배포본 — 기본 자세로
             return None
         try:
             im = Image.open(p).convert("RGBA")
@@ -30782,34 +30917,39 @@ class Mascot:
                     round(im.width / 2 - (bb2[0] + bb2[2]) / 2) if bb2 else 0)
             except Exception:
                 self._room_dxc[(slot, tag, f9)] = 0
-            hline = self._room_headline(slot)
-            if hline and 0.05 < hline < 0.9:
-                # 머리/몸 분리 — 전신은 고정하고 머리 조각만 숨쉬게 한다.
-                # 머리 조각은 목 아래로 살짝 겹쳐 잘라, 위로 떠도 틈이 없다.
-                lap = int(4 * self._room_k())
-                cut0 = int(h * hline)
-                hcut = min(h, cut0 + lap)
-                # 전신 조각에서 **머리 자리를 지운다.** 안 지우면 제자리에
-                # 있는 머리(와 그 흰 테두리)가 그대로 남아, 위로 들썩이는
-                # 머리와 어긋나 보인다 (제보 — '흰 테두리가 고정돼 있다').
-                # 머리 조각이 목 아래로 lap 만큼 겹쳐 내려오므로 이음매는
-                # 안 보인다 (숨쉬기 폭 1.6k < lap 4k).
-                rest = im.copy()
-                rest.paste((0, 0, 0, 0), (0, 0, im.width, cut0))
-                pair = (ImageTk.PhotoImage(im.crop((0, 0, im.width, hcut))),
-                        ImageTk.PhotoImage(rest), h, "head")
-            elif line and 0.2 < line < 0.95:
-                # 옛 배포본(머리선 없음) — 몸이 숨쉬고 책상 조각이 위에 덮는다.
-                cut = int(h * line)
-                # 겹침은 숨쉬기 진폭만 가릴 만큼만 (크면 잘린 선으로 보인다 —
-                # 연어 제보, 8k였을 때)
-                lap = int(3 * self._room_k())
-                cut2 = max(0, cut - lap)
-                pair = (ImageTk.PhotoImage(im),
-                        ImageTk.PhotoImage(im.crop((0, cut2, im.width, h))),
-                        h - cut2, "desk")
-            else:
-                pair = (ImageTk.PhotoImage(im), None, 0, "desk")
+        except Exception:
+            self._room_art_bad.add(slot)
+            return None
+        if len(self._room_pil_cache) > 24:      # 상한 (지뢰 18)
+            for old in list(self._room_pil_cache)[:12]:
+                self._room_pil_cache.pop(old, None)
+        self._room_pil_cache[key] = im
+        return im
+
+    def _room_img(self, slot, tag):
+        """방에 그릴 그림 — (몸, 덮개, 겹침, 방식). 아직 없으면 None.
+
+        책상선을 아는 캐릭터는 방식이 "breath" 다 — 그림은 한 장이고,
+        숨쉬기는 **책상선 위만 눌린 판**으로 갈아 끼워 낸다 (요청 — 머리
+        조각을 통째로 들썩이던 예전 방식보다 자연스럽다). 책상선을 모르는
+        옛 배포본만 예전처럼 통짜로 위아래로 흔든다.
+        """
+        f9 = self._slot_form(slot)
+        k = (slot, tag, f9)
+        got = self._room_img_cache.get(k)
+        if got is not None:
+            return got
+        if self._room_art_file(slot, tag + ".png") is None:
+            if tag not in ("seat", "seat_idle"):
+                return self._room_img(slot, "seat")   # 옛 배포본 — 기본 자세로
+            return None
+        im = self._room_fig_pil(slot, tag)
+        if im is None:
+            return None
+        line = self._room_deskline(slot)
+        try:
+            pair = (ImageTk.PhotoImage(im), None, 0,
+                    "breath" if (line and 0.2 < line < 0.95) else "desk")
         except Exception:
             self._room_art_bad.add(slot)
             return None
@@ -30818,6 +30958,81 @@ class Mascot:
                 self._room_img_cache.pop(old, None)
         self._room_img_cache[k] = pair
         return pair
+
+    def _room_breath_amp(self, slot):
+        """홈 카드의 숨쉬기 진폭 (px). 그림 높이에 비례한다."""
+        return max(1, min(3, int(round(2.2 * self._room_k()
+                                       * self.ROOM_SIZE.get(slot, 1.0)))))
+
+    def _room_breath_img(self, slot, tag, d):
+        """책상선 위만 d px 눌린 판 (캐시). 없으면 None.
+
+        깊이가 정수라 캐릭터마다 서너 장뿐이고, 한 번 만들면 프레임마다
+        갈아 끼우기만 한다 (지뢰 165).
+        """
+        if d <= 0:
+            got9 = self._room_img(slot, tag)
+            return got9[0] if got9 else None
+        f9 = self._slot_form(slot)
+        key = ("bre", slot, tag, f9, int(d))
+        got = self._room_bre_cache.get(key)
+        if got is not None:
+            return got
+        pil = self._room_fig_pil(slot, tag)
+        if pil is None:
+            # 그 자세 그림이 없는 옛 배포본 — _room_img 와 같이 기본 자세로
+            return (self._room_breath_img(slot, "seat", d)
+                    if tag not in ("seat", "seat_idle") else None)
+        try:
+            got = ImageTk.PhotoImage(self._breath_squash(pil, slot, int(d)))
+        except Exception:
+            return None
+        # 장수가 아니라 **용량**으로 (지뢰 42) — 한 장이 배율에 따라 커진다
+        mx9 = max(24, min(160, int(24000000
+                                   / max(1, pil.width * pil.height * 4))))
+        if len(self._room_bre_cache) > mx9:
+            for k2 in list(self._room_bre_cache)[:mx9 // 2]:
+                self._room_bre_cache.pop(k2, None)
+        self._room_bre_cache[key] = got
+        return got
+
+    def _room_head_dy(self, slot, tag, d):
+        """숨쉬기로 머리 꼭대기가 내려가는 만큼 — 왕관·축하가 따라오게.
+
+        누르는 구역의 아래끝(책상선)에서 멀수록 많이 움직인다.
+        """
+        if d <= 0:
+            return 0.0
+        got = self._room_head(slot, tag)
+        if not got:
+            return float(d)
+        hy, ih = got[1], got[4]
+        dpx = max(1.0, ih * float(self._room_deskline(slot) or 0.78))
+        return d * max(0.0, 1.0 - hy / dpx)
+
+    def _room_mini_breath(self, slot, hpx, d):
+        """'모두 보기' 캡슐의 작은 그림 — 같은 방식으로 눌린 판."""
+        if d <= 0:
+            return self._room_mini(slot, hpx)
+        key = ("minib", slot, int(hpx), self._slot_form(slot), int(d))
+        got = self._room_bre_cache.get(key)
+        if got is not None:
+            return got
+        p = self._room_art_file(slot, "seat.png")
+        if p is None:
+            return None
+        try:
+            im = Image.open(p).convert("RGBA")
+            w2 = max(1, int(im.width * hpx / im.height))
+            im = im.resize((w2, int(hpx)), Image.LANCZOS)
+            got = ImageTk.PhotoImage(self._breath_squash(im, slot, int(d)))
+        except Exception:
+            return None
+        if len(self._room_bre_cache) > 160:
+            for k2 in list(self._room_bre_cache)[:80]:
+                self._room_bre_cache.pop(k2, None)
+        self._room_bre_cache[key] = got
+        return got
 
     def _room_head(self, slot, tag):
         """방 카드 그림에서 머리 자리 — (중심 x, 꼭대기 y, 반폭, 그림 폭, 높이).
@@ -31445,22 +31660,44 @@ class Mascot:
         key = self._room_key()
         if key != self._room_key_last or not self._room_body:
             self._room_key_last = key
+            self._room_bre_d = {}      # 칸이 새로 생기니 기록도 새로
             self._room_draw()
             return
 
         now = time.time()
-        for i, (item, desk_item, slot, base, sleeping, pose) in enumerate(
-                self._room_body):
-            # 깡총 뛰기는 어색하다는 제보로 뺐다 — 숨쉬기만 잔잔하게
-            bob = math.sin(now * 1.7 + hash(slot) % 7) * (1.6 * self._room_k())
-            if sleeping:
-                bob *= 0.6
+        for i, ent in enumerate(self._room_body):
+            item, desk_item, slot, base, sleeping, pose = ent[:6]
+            mode = ent[6] if len(ent) > 6 else "desk"
+            hpx = ent[7] if len(ent) > 7 else 0
             try:
-                x, y = cv.coords(item)
-                # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
-                # 옮기면 그 자리를 다시 칠하느라 CPU만 쓴다.
-                if abs((base + bob) - y) >= 1.0:
-                    cv.coords(item, x, base + bob)
+                if mode in ("breath", "mini"):
+                    # 그림을 갈아 끼운다 — 자리는 붙박이다. 깊이가 정수라
+                    # 한 주기에 몇 번뿐이고, 안 바뀌면 아무 일도 안 한다.
+                    amp9 = self._room_breath_amp(slot)
+                    if mode == "mini":
+                        amp9 = max(1, amp9 - 1)     # 캡슐은 작으니 얕게
+                    if sleeping:
+                        amp9 = max(1, amp9 - 1)
+                    d9 = self._breath_depth(now, amp9,
+                                            self._breath_phase(slot))
+                    if d9 != self._room_bre_d.get(item):
+                        img9 = (self._room_mini_breath(slot, hpx, d9)
+                                if mode == "mini"
+                                else self._room_breath_img(slot, pose, d9))
+                        if img9 is not None:
+                            cv.itemconfigure(item, image=img9)
+                            self._room_bre_d[item] = d9
+                else:
+                    # 옛 배포본 — 통짜로 위아래로 (깡총 뛰기는 제보로 뺐다)
+                    bob = math.sin(now * 1.7 + self._breath_phase(slot)) \
+                        * (1.6 * self._room_k())
+                    if sleeping:
+                        bob *= 0.6
+                    x, y = cv.coords(item)
+                    # 실제로 픽셀이 바뀔 때만 옮긴다. 소수점만 달라진 것으로
+                    # 옮기면 그 자리를 다시 칠하느라 CPU만 쓴다.
+                    if abs((base + bob) - y) >= 1.0:
+                        cv.coords(item, x, base + bob)
                 q = next((r for r in self.room_people
                           if r.get("slot") == slot), None)
                 want = self._room_pose(q) if q else pose
@@ -31470,8 +31707,9 @@ class Mascot:
                         cv.itemconfigure(item, image=got[0])
                         if desk_item and got[1] is not None:
                             cv.itemconfigure(desk_item, image=got[1])
+                        self._room_bre_d.pop(item, None)
                         self._room_body[i] = (item, desk_item, slot, base,
-                                              sleeping, want)
+                                              sleeping, want, mode, hpx)
             except Exception:
                 self._room_body = []
                 return
@@ -31507,7 +31745,8 @@ class Mascot:
                                 anchor="nw", tags=("dyn", "msgmq"))
         # 노래가 걸린 카드 — 캐릭터 옆에 음표가 둥실거린다
         cv.delete("songfx")
-        for item, _d2, slot, base, _s2, _p2 in self._room_body:
+        for ent in self._room_body:
+            item, slot, base = ent[0], ent[2], ent[3]
             if slot not in self._room_song_slots:
                 continue
             try:
@@ -31532,7 +31771,8 @@ class Mascot:
             kk = getattr(self, "_room_card_k", None) or self._room_k()
             if self._room_view() == 1:
                 kk = self._room_k() * 0.5    # 캡슐 크기에 맞춰 반짝이도 작게
-            for item, _d, slot, base, _s, _p in self._room_body:
+            for ent in self._room_body:
+                item, slot, base = ent[0], ent[2], ent[3]
                 try:
                     x, _y = cv.coords(item)
                 except Exception:
@@ -32140,6 +32380,7 @@ class Mascot:
         cw, chh = int(self.ROOM_CW * k), int(self.ROOM_CH * k)
         self._room_hit = []
         self._room_body = []
+        self._room_bre_d = {}
         self._room_msg_boxes = {}    # 말풍선 마퀴 자리 (카드 모드에서도)
         self._room_cal_btns = {}
         self._room_song_hits = {}
@@ -32374,6 +32615,7 @@ class Mascot:
         """'모두 보기' — 전원을 캡슐로 (그림·이름·레벨·칭호·게이지·시간)."""
         self._room_hit = []
         self._room_body = []
+        self._room_bre_d = {}
         self._room_cal_btns = {}
         self._room_song_hits = {}
         self._room_song_box = {}
@@ -32436,7 +32678,8 @@ class Mascot:
             self._safe("soft_btn", self._soft_dot, cv, x0 + ch2 / 2 + 2 * k,
                        cyc, ch2 / 2 - 5 * k, "#ffffff",
                        outline=self._tint(col, 0.4), width=1.5)
-            mini = self._room_mini(slot, ch2 - 12 * k)
+            mh9 = ch2 - 12 * k           # 숨쉬기 판도 같은 높이로 만든다
+            mini = self._room_mini(slot, mh9)
             mitem = None
             if mini is not None:
                 mitem = cv.create_image(x0 + ch2 / 2 + 2 * k, yy1 - 5 * k,
@@ -32599,7 +32842,7 @@ class Mascot:
                 # 심플모드에서도 숨쉬기·음표·반짝이 돌게 등록한다.
                 # pose "mini"는 프레임의 자세 갈아끼우기를 건너뛴다.
                 self._room_body.append((mitem, None, slot, yy1 - 5 * k,
-                                        sleeping, "mini"))
+                                        sleeping, "mini", "mini", int(mh9)))
             self._room_hit.append((x0, yy0, x1, yy1, slot, False))
         # 빈 칸도 캡슐 모양으로 채운다 — 일반모드의 아홉 칸과 같은 마음
         mut = "#b9a7b4"
@@ -33006,32 +33249,36 @@ class Mascot:
         got = self._room_img(slot, self._room_pose(p))
         if got is not None:
             body, over, cut, mode = got
-            # 숨쉬듯 아주 살짝 — 머리 조각(있으면)만 들썩이고 몸·책상은 고정
-            bob = math.sin(time.time() * 1.7 + hash(slot) % 7) * (1.6 * k)
-            if sleeping:
-                bob *= 0.6
             base = floor + 4 * k
             pose = self._room_pose(p)
             f8 = self._slot_form(slot)
             cx = (kx0 + kx1) / 2 + self._room_dxc.get(
                 (slot, pose, f8), self._room_dxc.get((slot, "seat", f8), 0))
-            if mode == "head" and over is not None:
-                # body = 머리 조각(움직임), over = 전신(고정)
-                ditem = cv.create_image(cx, base, image=over, anchor="s",
-                                        tags="dyn")
-                reg = base - over.height() + body.height()
-                item = cv.create_image(cx, reg + bob, image=body, anchor="s",
-                                       tags="dyn")
+            ditem = None
+            if mode == "breath":
+                # 책상선 위만 눌린다 — 머리가 가장 많이 움직이고 책상은
+                # 가만히 있다 (요청 · 띠와 같은 결)
+                amp9 = self._room_breath_amp(slot)
+                if sleeping:
+                    amp9 = max(1, amp9 - 1)
+                d9 = 0 if off else self._breath_depth(
+                    time.time(), amp9, self._breath_phase(slot))
+                reg = base
+                item = cv.create_image(
+                    cx, base,
+                    image=(self._room_breath_img(slot, pose, d9) or body),
+                    anchor="s", tags="dyn")
+                self._room_bre_d[item] = d9
+                bob = self._room_head_dy(slot, pose, d9)
             else:
+                # 옛 배포본(책상선 모름) — 통짜로 위아래로 흔든다
+                bob = math.sin(time.time() * 1.7
+                               + self._breath_phase(slot)) * (1.6 * k)
+                if sleeping:
+                    bob *= 0.6
                 reg = base
                 item = cv.create_image(cx, base + bob, image=body, anchor="s",
                                        tags="dyn")
-                ditem = None
-                if over is not None:
-                    # 책상을 나중에 그려 위에 덮는다 — 뒤에서 몸이 움직여도
-                    # 책상은 붙박이고 이음매도 안 보인다.
-                    ditem = cv.create_image(cx, base, image=over, anchor="s",
-                                            tags="dyn")
             if float(p.get("p") or 0) >= 1.0:
                 # 목표를 다 채운 사람 — 남들 화면에서도 축하 모습으로
                 self._safe("room_party", self._room_party_draw,
@@ -33039,7 +33286,7 @@ class Mascot:
             if not off:
                 # 안 켠 사람은 숨쉬지 않는다 — 켜 있는 사람과 구분이 된다
                 self._room_body.append((item, ditem, slot, reg, sleeping,
-                                        pose))
+                                        pose, mode, 0))
         else:
             self._oval(cv, (kx0 + kx1) / 2 - 26 * k, floor - 56 * k,
                            (kx0 + kx1) / 2 + 26 * k, floor - 4 * k,

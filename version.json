@@ -1,7 +1,7 @@
 {
- "version": 1788482979,
+ "version": 1788497887,
  "files": {
-  "mascot.py": "db077818a2561c32605e9ea9c5937501699ebc5fec1a6e24514aa3d791be0610",
+  "mascot.py": "559c6db82307c382eb07d4cfe1c0e3f53536ec42e523ac96042db3941bc3d2aa",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -594,6 +594,10 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "바탕화면에 둔 친구들이 숨을 쉬어요 — 책상선 위쪽만 살짝 눌렸다 펴져서 머리가 가장 많이 움직이고 키보드·타블렛은 가만히 있어요. 이웃끼리 반대 박자라 다 같이 움직이는 느낌이 안 나요",
+  "홈 화면 캐릭터들의 숨쉬기도 같은 방식으로 바꿨어요 — 예전에는 머리 조각만 통째로 위아래로 움직여서 목이 늘었다 줄었다 하는 것처럼 보였어요. '모두 보기'의 작은 캐릭터들도 같이 숨쉬어요",
+  "바탕화면 친구들 띠를 우클릭하면 '말풍선 여백'을 조절할 수 있어요 — 말풍선과 캐릭터 머리 사이 틈을 취향대로. 끝까지 줄여도 토마토를 덮지는 않아요",
+  "같이하기 중 타이머 카드 위에 뜨는 내 각오 한마디 말풍선을 우클릭하면 그 자리에서 바로 고칠 수 있어요 (뽀모도로 창을 열지 않아도 돼요)"
+ ]
 }
