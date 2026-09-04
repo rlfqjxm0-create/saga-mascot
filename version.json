@@ -1,7 +1,7 @@
 {
- "version": 1788481936,
+ "version": 1788482979,
  "files": {
-  "mascot.py": "df9304fcba198b8ba0e520635273c922b9468d6129184dd763d2bd25c504e476",
+  "mascot.py": "db077818a2561c32605e9ea9c5937501699ebc5fec1a6e24514aa3d791be0610",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -594,9 +594,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "우클릭 메뉴가 캐릭터 타이머 뒤로 가려지던 것을 고쳤어요 (바로 앞 업데이트에서 생긴 문제예요)",
-  "'업데이트 소식' 창이 할 일·마감 말풍선 뒤에서 깜빡이며 가려지던 것을 고쳤어요 — 이제 늘 앞에 있어요",
-  "채찍질을 다시 보낼 수 있는 간격이 5분에서 1분으로 줄었어요"
- ]
+ "notes": [],
+ "silent": true
 }

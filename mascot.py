@@ -6998,6 +6998,7 @@ class Mascot:
         self._strip_seat_cache = {}
         self._strip_tom_cache = {}
         self._strip_menu_ref = None
+        self._strip_pop_menu = None  # 맥 — 띠 반응 메뉴 (OS 메뉴)
         self._strip_cols = []       # 띠에서 누가 어느 x 구간인지
         self._tom_top_cache = {}    # 카드 위 내 토마토 그림
         self._pomo_tom_box = None
@@ -19549,7 +19550,15 @@ class Mascot:
 
         헤더(할 일 None)·구분선("-")·항목. 항목을 누르거나 창 밖을 누르면
         (포커스가 나가면) 닫힌다. Esc 도 닫는다.
+
+        **맥은 OS 메뉴를 쓴다.** 직접 그린 이 창이 맥에서 새하얗게 뜨고
+        아무것도 안 눌렸다 (사가 제보 — 맥 러너에서도 글자 8개가 만들어져
+        있는데 화면 픽셀은 비어 있었다). 이 창을 만든 이유는 윈도우에서
+        Tk 메뉴가 '항상 위' 띠 뒤로 숨는 것이었는데, 맥 메뉴는 OS 가
+        띄우므로 그 문제가 없고 색상키 필터도 안 탄다.
         """
+        if IS_MAC:
+            return self._strip_popup_mac(items, xr, yr)
         old = getattr(self, "_strip_pop_ref", None)
         try:
             if old is not None and old.winfo_exists():
@@ -19644,6 +19653,37 @@ class Mascot:
                                win.focus_force() if win.winfo_exists()
                                else None))
         return win
+
+    def _strip_popup_mac(self, items, xr, yr):
+        """맥 — OS 메뉴로 띄운다 (지뢰 49: 띄우면 그 자리에서 멈춘다).
+
+        메뉴는 색상키 필터를 안 타고(apply_all 이 클래스로 걸러 낸다)
+        OS 가 늘 맨 앞에 그려 준다. 검사는 띄우지 말고 `_strip_pop_menu`
+        의 항목을 읽어 확인할 것 (지뢰 49 — 띄우면 그 자리에서 멈춘다).
+        """
+        m9 = tk.Menu(self.root, tearoff=0)
+        # 이름은 `_strip_menu_ref` 와 겹치면 안 된다 — 그쪽은 크기·여백
+        # 판(Toplevel)이 이미 쓰고 있다 (지뢰 85: 새 이름은 반드시 grep).
+        self._strip_pop_menu = m9
+        self._strip_pop_ref = None       # 직접 그린 창이 아니다
+        for lab, cb in items:
+            if lab == "-":
+                m9.add_separator()
+            elif cb is None:
+                m9.add_command(label=lab, state="disabled")
+            else:
+                m9.add_command(label=lab,
+                               command=lambda f9=cb: (
+                                   self._safe("ui_click", self._ui_click),
+                                   f9()))
+        try:
+            m9.tk_popup(int(xr), int(yr))
+        finally:
+            try:
+                m9.grab_release()
+            except Exception:
+                pass
+        return m9
 
     def _strip_off(self):
         self.us["pomo_strip"] = False
@@ -22920,6 +22960,11 @@ class Mascot:
                 cv.move("all", self._pomo_ox, 0)
 
         def on_click(e):
+            # **창 안 어디를 눌러도 '똑'** (요청 — 타이머를 만지는 모든
+            # 자리에서 나야 한다). 예전에는 단추마다 따로 불러서 시간 조절
+            # 화살표·게이지·빈 자리에서는 소리가 없었다. 연타·드래그는
+            # _ui_click 의 간격 제한(UI_SND_GAP)이 알아서 막는다.
+            self._safe("ui_click", self._ui_click)
             # 그림만 창 정중앙으로 옮겨 두었다 — 누르는 자리는 옮기지
             # 않았으므로 여기서 그만큼 되돌려 본다 (요청)
             e.x = e.x - getattr(self, "_pomo_ox", 0.0)
