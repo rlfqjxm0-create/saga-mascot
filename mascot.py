@@ -1629,6 +1629,10 @@ class TeamStrip:
         self._press = None
         self._moved = False
         self._premul = CharLayer._premul
+        # CharLayer.push 를 그대로 빌려 쓴다 — 그쪽이 보는 값도 같이 갖춘다.
+        # (안 갖추면 push 가 AttributeError 로 터져 띠가 통째로 안 뜬다)
+        self.fail = 0
+        self._show_at = 0.0
         u = layer_api()[0] if IS_WIN else None
         if u is not None:
             try:
@@ -6953,7 +6957,8 @@ class Mascot:
         self._room_tone_cache = {}
         self._room_pastel_cache = {}
         self._room_pal_cache = {}
-        self._room_art_bad = set()   # 그림을 못 받은 자리 (다시 안 조른다)
+        self._room_art_bad = {}      # 그림을 못 받은 자리 → 그때 시각
+        #                              (ART_RETRY 뒤에는 다시 해 본다)
         self._room_art_th = None
         self._photo_after = None     # 단체사진 안내 예약
         self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
@@ -19519,9 +19524,24 @@ class Mascot:
             # 가장 많이 움직이고 책상은 가만히 있다 (요청).
             bdy = (bd9 if i % 2 == 0 else amp9 - bd9) if amp9 else 0
             bg, fg = self.TEAM_ST_COL.get(stt, self.TEAM_ST_COL["휴식"])
-            # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게
-            d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
-                       base_y + 6 * k), fill=(0, 0, 0, 60))
+            # 발 아래 옅은 그림자 — 창 배경이 없어 바닥에 떠 보이지 않게.
+            # **앉은 그림이 없으면 그리지 않는다** — 그림자만 남으면 맥에서
+            # 시커먼 얼룩으로 보인다 (사가 제보 · 맥 CI 캡처로 확인).
+            if seat is not None:
+                d.ellipse((cx - sw * 0.36, base_y - 6 * k, cx + sw * 0.36,
+                           base_y + 6 * k), fill=(0, 0, 0, 60))
+            else:
+                # 그림을 아직 못 받았다 — '받아 오는 중'으로 읽히게 둔다
+                r9 = sw * 0.34
+                cy9 = base_y - H * 0.42
+                d.ellipse((cx - r9, cy9 - r9, cx + r9, cy9 + r9),
+                          fill=self._hex_rgb(self._tint(fg, 0.72)) + (255,),
+                          outline=self._hex_rgb(self._tint(fg, 0.35)) + (255,),
+                          width=max(1, int(1.4 * k)))
+                if f_v is not None:
+                    nm9 = str(self._note_name(slot) or "?")[:1]
+                    d.text((cx, cy9), nm9, font=f_v,
+                           fill=self._shade(fg, 0.15), anchor="mm")
             if seat is not None:
                 seat = self._breath_squash(seat, slot, bdy)
                 tgt.alpha_composite(seat, (int(cx - seat.width / 2),
@@ -24513,8 +24533,16 @@ class Mascot:
             self._rr_soft(cv, u(18), ey, W - u(84), ey + u(34), u(17),
                           fill="#ffffff", outline=self._tint(cd["border"],
                                                              0.3), width=1)
+            # 붙여넣기 — 맥은 Cmd+V 가 칸에 안 닿을 때가 있다 (제보).
+            # 칸 오른쪽 **안쪽**에 두어 칸 폭만 그만큼 줄인다.
             cv.create_window(u(34), ey + u(17), anchor="w", window=ent,
-                             width=int(W - u(84) - u(50)), height=int(u(22)))
+                             width=int(W - u(84) - u(50) - u(24)),
+                             height=int(u(22)))
+            px9 = W - u(98)
+            self._soft_dot(cv, px9, ey + u(17), u(11),
+                           self._tint(cd["fill"], 0.86))
+            self._gl_clip(cv, px9, ey + u(17), u(11), cd["fill"])
+            hit(px9 - u(13), ey + u(4), px9 + u(13), ey + u(30), "paste")
             self._rr_soft(cv, W - u(76), ey, W - u(18), ey + u(34), u(17),
                           fill=cd["fill"], outline="", width=0)
             cv.create_text(W - u(47), ey + u(17), text="+ 추가",
@@ -25167,6 +25195,9 @@ class Mascot:
                 st["bar"] = True
                 bar_set(e.y, g)
                 return
+            if act == "paste":
+                do_paste()
+                return
             if act == "add":
                 do_add()
                 return
@@ -25293,6 +25324,34 @@ class Mascot:
             f = (y - ty0) / max(1.0, float(ty1 - ty0))
             st["off"][self._bgm_tab] = max(0.0, min(mo, f * mo))
             draw()
+
+        def do_paste():
+            """클립보드의 주소를 칸에 넣는다 (맥에서 붙여넣기가 안 된다는 제보).
+
+            Tk 의 클립보드를 그대로 읽는다 — 굳힌 앱에 없는 모듈을 안 쓴다
+            (지뢰 21). 못 읽으면 조용히 알려만 준다.
+            """
+            txt9 = ""
+            for kw9 in ({}, {"type": "STRING"}, {"type": "UTF8_STRING"}):
+                try:
+                    txt9 = str(self.root.clipboard_get(**kw9) or "").strip()
+                except Exception:
+                    txt9 = ""
+                if txt9:
+                    break
+            if not txt9:
+                self._room_toast = ("복사해 둔 주소가 없어요", time.time())
+                return
+            try:
+                ent.delete(0, "end")
+                ent.insert(0, txt9[:400])
+                ent.focus_set()
+                ent.icursor("end")
+            except Exception:
+                return
+            # 주소처럼 보이면 바로 넣어 준다 — 한 번 더 누르게 하지 않는다
+            if self._yt_ids(txt9)[0] or self._yt_ids(txt9)[1]:
+                do_add()
 
         def do_add():
             url = ""
@@ -25576,6 +25635,14 @@ class Mascot:
                 if kind == "prev":
                     p = (1 - p[0], p[1], 1 - p[2], p[3], 1 - p[4], p[5])
                 poly(*p)
+        elif kind == "clip":
+            # 클립보드 — 판 + 위쪽 집게. 동그라미 안에 넉넉히 들어간다
+            dr.rounded_rectangle(box(0.20, 0.22, 0.80, 0.90),
+                                 radius=0.10 * n, fill=col)
+            dr.rounded_rectangle(box(0.30, 0.32, 0.70, 0.80),
+                                 radius=0.06 * n, fill=(0, 0, 0, 0))
+            dr.rounded_rectangle(box(0.36, 0.10, 0.64, 0.28),
+                                 radius=0.07 * n, fill=col)
         elif kind == "person":
             # 머리 동그라미 + 어깨 (동그라미 안에 넉넉히)
             dr.ellipse(box(0.35, 0.16, 0.65, 0.46), fill=col)
@@ -25673,7 +25740,7 @@ class Mascot:
     # 아이콘 그림에서 실제 그려지는 세로 폭 (0~1) — 겉보기 크기를 맞춘다
     GL_SPAN = {"play": 0.74, "pause": 0.74, "next": 0.64, "prev": 0.64,
                "note": 0.80, "speaker": 0.76, "up": 0.40, "down": 0.40,
-               "video": 0.40, "person": 0.64}
+               "video": 0.40, "person": 0.64, "clip": 0.80}
 
     def _gl_pause(self, cv, cx, cy, h, col, tags="dyn"):
         """멈춤 — 같은 길이의 둥근 막대 둘 (제보: 길이가 달랐다)."""
@@ -25688,6 +25755,10 @@ class Mascot:
         """이전·다음 겹세모. sign 1 = 다음, -1 = 이전."""
         self._gl_icon(cv, cx, cy, "next" if sign > 0 else "prev",
                       h / self.GL_SPAN["next"], col, tags)
+
+    def _gl_clip(self, cv, cx, cy, h, col, tags="dyn"):
+        """붙여넣기 단추 그림 (클립보드)."""
+        self._gl_icon(cv, cx, cy, "clip", h / self.GL_SPAN["clip"], col, tags)
 
     def _gl_person(self, cv, cx, cy, h, col, tags="dyn"):
         """사람 모양 (친구들의 플레이리스트 단추)."""
@@ -32620,12 +32691,29 @@ class Mascot:
         os.makedirs(d, exist_ok=True)
         return d
 
+    ART_RETRY = 600.0            # 그림을 못 받은 자리를 다시 해 보는 간격
+
+    def _art_bad(self, slot):
+        """지금 이 자리를 건너뛸까 — 한참 전 실패는 잊는다.
+
+        예전에는 한 번 실패하면 그 세션 내내 다시 안 받았다. 맥에서 잠깐
+        통신이 걸리면 그 친구의 앉은 그림이 영영 안 와서, 띠에 말풍선만
+        뜨고 캐릭터 자리에는 시커먼 얼룩만 남았다 (사가 제보).
+        """
+        t9 = self._room_art_bad.get(slot)
+        if not t9:
+            return False
+        if time.time() - float(t9) > self.ART_RETRY:
+            self._room_art_bad.pop(slot, None)
+            return False
+        return True
+
     def _room_want_art(self, people):
         """없는 그림만 뒤에서 조용히 받아 둔다 (그리기와 따로)."""
         need = []
         for p in people:
             slot = p.get("slot") or ""
-            if slot not in self.ROOM_ART or slot in self._room_art_bad:
+            if slot not in self.ROOM_ART or self._art_bad(slot):
                 continue
             # 그 사람이 폼을 입고 있으면 그 폼 그림도 같이 받아 둔다
             # (사가의 변신 전). 폼이 없으면 form9 는 빈 값이라 예전 그대로다.
@@ -32688,7 +32776,7 @@ class Mascot:
                     # **폼 그림도 마찬가지다** — 아직 안 구운 폼이면
                     # 기본 모습으로 물러나면 되지 그 사람을 막으면 안 된다.
                     if tag != "wg_head.png" and not sub9:
-                        self._room_art_bad.add(slot)
+                        self._room_art_bad[slot] = time.time()
             self._room_art_th = None
 
         self._room_art_th = threading.Thread(target=work, daemon=True)
@@ -32954,7 +33042,7 @@ class Mascot:
             except Exception:
                 self._room_dxc[(slot, tag, f9)] = 0
         except Exception:
-            self._room_art_bad.add(slot)
+            self._room_art_bad[slot] = time.time()
             return None
         if len(self._room_pil_cache) > 24:      # 상한 (지뢰 18)
             for old in list(self._room_pil_cache)[:12]:
@@ -32987,7 +33075,7 @@ class Mascot:
             pair = (ImageTk.PhotoImage(im), None, 0,
                     "breath" if (line and 0.2 < line < 0.95) else "desk")
         except Exception:
-            self._room_art_bad.add(slot)
+            self._room_art_bad[slot] = time.time()
             return None
         if len(self._room_img_cache) > 40:      # 상한 (지뢰 18)
             for old in list(self._room_img_cache)[:20]:
