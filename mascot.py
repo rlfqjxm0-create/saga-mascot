@@ -614,7 +614,11 @@ window.ytVol=function(x){ if(!ready){ pendVol=x; return; } try{player.setVolume(
 // 영상을 보일 때만 유튜브에 맡긴다.
 var fit=false;
 window.ytFit=function(on){ fit=!!on;
-  try{ if(!fit) player.setPlaybackQuality('small'); }catch(e){} };
+  // 소리만 들을 때는 144p 로 묶고, 영상을 보일 때는 **되돌린다**.
+  // 예전에는 묶음을 풀기만 해서 화질이 144p 그대로였다.
+  try{ player.setPlaybackQuality(fit?'default':'small'); }catch(e){}
+  try{ if(fit&&player.getIframe){ var f=player.getIframe();
+        if(f){ f.style.width='100%'; f.style.height='100%'; } } }catch(e){} };
 var t=document.createElement('script'); t.src="https://www.youtube.com/iframe_api";
 document.head.appendChild(t);
 </script></body></html>"""
@@ -653,6 +657,7 @@ def _mac_yt_player_main():
           "vid_on": False,      # 영상 칸에 들어가 있는가
           "show": True,         # 지금 보여도 되는가 (부모가 알려 준다)
           "login": False,       # 로그인 화면인가
+          "lg_at": 0.0,         # 로그인 진단을 마지막으로 남긴 시각
           "signed": None}       # 로그인돼 있는가 (모르면 None)
 
     def emit(d):
@@ -889,6 +894,23 @@ def _mac_yt_player_main():
                 win.orderFrontRegardless()
         except Exception:
             pass
+        vid_tell()
+
+    def vid_tell():
+        """영상 창이 지금 어디에 어떤 모습으로 있는지 한 줄 (지뢰 51).
+
+        '까맣게 나온다' 는 자리·알파·모드 어디서든 날 수 있는데 화면만
+        봐서는 못 가른다. 부모가 이 줄을 `.yt_err.txt` 에 적어 둔다.
+        """
+        try:
+            f9 = win.frame()
+            emit({"vw": "%d,%d,%dx%d a=%.2f on=%d show=%d %s"
+                  % (int(f9.origin.x), int(f9.origin.y),
+                     int(f9.size.width), int(f9.size.height),
+                     float(win.alphaValue()), int(bool(st["vid_on"])),
+                     int(bool(st["show"])), st.get("mode") or "?")})
+        except Exception:
+            pass
 
     def begin_login(x, y, w, h):
         """로그인 화면 — 평범한 창으로 바꿔 화면 안에 띄운다.
@@ -954,18 +976,36 @@ def _mac_yt_player_main():
             place(0, 0, 400, 300)
             win.setLevel_(0)
         vid_apply()
-        emit({"signed": bool(st["signed"]), "login": False})
+        # **모르는 것은 안 싣는다.** bool(None) 은 False 라, 확인을 못 한
+        # 채로 창을 닫으면 '로그인 안 됨' 이라는 사실이 아닌 주장이
+        # 부모에게 저장됐다.
+        out9 = {"login": False}
+        if st["signed"] is not None:
+            out9["signed"] = bool(st["signed"])
+        emit(out9)
 
-    def check_login():
-        """로그인이 끝났는지 본다 — 유튜브로 돌아왔고 계정이 붙었으면 끝."""
-        js = ("(function(){try{return (location.href.indexOf('youtube.com')>=0"
-              " && !!(window.ytcfg && ytcfg.get('LOGGED_IN')))?1:0;}"
-              "catch(e){return 0}})()")
+    def check_login(tell=False):
+        """로그인이 끝났는지 본다 — 유튜브로 돌아왔고 계정이 붙었으면 끝.
+
+        tell 이면 무엇을 봤는지도 한 줄 보낸다. 구글이 WKWebView 안에서
+        로그인을 막는 일이 흔한데, 그때는 사람 눈에는 '로그인했는데 왜
+        안 됐다고 하지' 로만 보인다 — 어느 주소에서 무엇을 읽었는지
+        남겨야 갈린다 (지뢰 51·131).
+        """
+        js = ("(function(){try{var h=location.host||'';"
+              "var y=(h.indexOf('youtube.com')>=0);"
+              "var c=(typeof window.ytcfg!=='undefined');"
+              "var i=c?(!!ytcfg.get('LOGGED_IN')):false;"
+              "return h+'|'+(y?1:0)+(c?1:0)+(i?1:0);}"
+              "catch(e){return 'err|000'}})()")
 
         def done(val, err):
             try:
-                if val and int(val) == 1:
+                txt9 = str(val or "")
+                if txt9.endswith("|111"):
                     end_login(True)
+                elif tell:
+                    emit({"lg": txt9[:80]})
             except Exception:
                 pass
 
@@ -980,7 +1020,17 @@ def _mac_yt_player_main():
             # 재생 페이지로 되돌린다 (윈도우 재생기와 같은 규칙).
             try:
                 if st["login"]:
-                    end_login(None)
+                    # **닫기 전에 한 번 더 확인한다.** 로그인을 마치고 바로
+                    # 닫으면 폴링이 못 따라잡아 '로그인 안 됨' 으로 굳었다
+                    # (사가 제보). 확인은 비동기라 잠깐 기다려 준다.
+                    check_login(True)
+
+                    def later9(_t=None):
+                        if st["login"]:
+                            end_login(None)
+
+                    NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                        0.4, False, later9)
                     return False
             except Exception:
                 pass
@@ -1013,8 +1063,13 @@ def _mac_yt_player_main():
 
     def pump(_timer=None):
         if st["login"]:
-            # 로그인 화면 — 명령은 계속 받되(quit 등) 상태 대신 로그인 확인
-            check_login()
+            # 로그인 화면 — 명령은 계속 받되(quit 등) 상태 대신 로그인 확인.
+            # 3초에 한 번은 무엇을 보고 있는지도 남긴다 (지뢰 51).
+            now9 = time.time()
+            tell9 = (now9 - st.get("lg_at", 0.0) > 3.0)
+            if tell9:
+                st["lg_at"] = now9
+            check_login(tell9)
         # 페이지가 아직 안 떴으면 명령을 쌓아 둔다. **로그인 중에는 예외** —
         # 그때는 재생 페이지가 아니라 구글 페이지가 떠 있으므로, 안 풀면
         # quit·login_done 이 영영 안 처리된다.
@@ -12049,6 +12104,13 @@ class Mascot:
                 self._yt_fatal = str(s.get("fatal"))[:300]
                 self._safe("yt_fatal", self._yt_log,
                            "재생기가 못 떴어요: " + self._yt_fatal)
+            if s.get("vw"):
+                # 영상 창이 어디에 어떤 모습으로 있는지 (맥 '까맣게 나옴')
+                self._safe("yt_vw", self._yt_log, "영상 창: " + str(s["vw"]))
+            if s.get("lg"):
+                # 재생기가 로그인 창에서 무엇을 보고 있는지 (지뢰 51·131 —
+                # 보내는 진단은 받는 쪽까지 만들어야 뜻이 있다)
+                self._safe("yt_lg", self._yt_log, "로그인 화면: " + str(s["lg"]))
             was = self._yt.get("title", "")
             self._yt = s
             if s.get("signed") and not self.us.get("yt_signed"):
@@ -25628,13 +25690,23 @@ class Mascot:
             """
             if not g.get("vidh"):
                 return
-            self._rr_soft(cv, u(18), vy9, W - u(18), vy9 + g["vidh"],
-                          u(self.VID_R), fill="#1b1620", outline="",
-                          width=0)
+            # **맥은 우리 앱이 맨 앞일 때만 영상을 띄운다** (지뢰 182 —
+            # 남의 창 사이에 끼우는 길이 없다). 그동안 검은 바탕을 그대로
+            # 두면 사람 눈에는 아무 말 없는 '까만 네모'만 남는다 (사가
+            # 제보). 그때는 밝은 칸으로 그리고 왜 그런지 적어 준다.
+            say9, dark9 = "", True
             if not self._yt_alive():
-                cv.create_text(W / 2.0, vy9 + g["vidh"] / 2.0,
-                               text="노래를 틀면 영상이 나와요",
-                               font=self._uf(9, True), fill="#9a91a8")
+                say9 = "노래를 틀면 영상이 나와요"
+            elif IS_MAC and not self._fg_is_self():
+                say9, dark9 = "이 창을 누르면 영상이 보여요", False
+            self._rr_soft(cv, u(18), vy9, W - u(18), vy9 + g["vidh"],
+                          u(self.VID_R),
+                          fill="#1b1620" if dark9 else cd["soft"],
+                          outline="", width=0)
+            if say9:
+                cv.create_text(W / 2.0, vy9 + g["vidh"] / 2.0, text=say9,
+                               font=self._uf(9, True),
+                               fill="#9a91a8" if dark9 else cd["sub"])
             st["vidbox"] = (u(18), vy9, W - u(36), g["vidh"])
 
         def draw_pl(g, line):
