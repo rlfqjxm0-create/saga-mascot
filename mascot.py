@@ -135,6 +135,18 @@ class _MacChromaKey:
         self.filter = None
         self._srgb = None        # 창 색공간 고정용 (아래 apply_all 참고)
         self._keep = []          # 해제되면 안 되는 ObjC 객체를 붙잡아 둔다
+        self.skipped = 0         # 건너뛴 창 수 (진단 — 지뢰 13)
+        self.status_line = ""    # 창별 현황 (진단)
+        # 화면을 옮기면 창 백킹의 색공간이 그 화면 프로필로 되돌아간다
+        # (지뢰 66). 그때 compositingFilter 포인터는 그대로라 apply_all 이
+        # '걸림' 으로 보고 건너뛰어, 큐브(sRGB)와 어긋난 채로 굳는다.
+        # 이 깃발이 서면 다음 바퀴에 필터를 벗겼다 다시 걸고 다시 그리게 한다.
+        self.force = False
+        try:                     # scan_all 이 '키색 기운' 을 셀 때 쓴다
+            self.key_rgb = tuple(int(str(key_hex).lstrip("#")[i:i + 2], 16)
+                                 for i in (0, 2, 4))
+        except Exception:
+            self.key_rgb = (93, 0, 81)
         try:
             self._setup(key_hex)
         except Exception as e:
@@ -252,6 +264,16 @@ class _MacChromaKey:
         return [self._msg(arr, "objectAtIndex:", i, argtypes=(ctypes.c_ulong,))
                 for i in range(n)]
 
+    def rearm(self):
+        """다음 apply_all 이 필터를 **처음부터 다시** 걸게 한다.
+
+        화면(디스플레이)을 옮겼을 때 부른다. 색공간은 매 바퀴 다시
+        못 박지만 필터는 '이미 걸림' 이면 건너뛰므로(아래), 백킹만
+        새 색공간으로 바뀌고 레이어는 다시 그려질 이유가 없어 그
+        프레임이 굳는다 — 사가의 '검은 줄' 제보 갈래 ② (지뢰 66).
+        """
+        self.force = True
+
     def apply_all(self):
         """색상키를 칠하는 창에만 필터를 건다.
 
@@ -273,6 +295,8 @@ class _MacChromaKey:
         if not self.filter:
             return 0
         done = 0
+        force = self.force               # 화면이 바뀌었다 — 다시 건다
+        self.force = False
         self.skipped = skipped = 0       # 건너뛴 창 수 (진단 기록에 남는다)
         seen9 = []                       # 창별 현황 — 진단 로그용 (지뢰 51)
         for w in self.windows():
@@ -302,6 +326,19 @@ class _MacChromaKey:
                 if self._srgb is None:
                     self._srgb = self._hold(self._msg(
                         self._cls("NSColorSpace"), "sRGBColorSpace"))
+                # **못 박기 전에** 지금 색공간 이름을 읽어 둔다. 이 값이
+                # sRGB 가 아니면 그 순간 화면 프로필로 되돌아가 있었다는
+                # 뜻이고, 그것이 '검은 줄' 제보의 지문이다 (지뢰 66·51).
+                # 보내기만 하고 읽는 곳이 없으면 없는 것과 같다 (지뢰 131) —
+                # 아래 status_line 에 실어 로그로 나간다. nil 에 메시지를
+                # 보내도 0 이 오므로 안전하다.
+                try:
+                    cs9 = (self._msg(
+                        self._msg(self._msg(w, "colorSpace"), "localizedName"),
+                        "UTF8String", restype=ctypes.c_char_p)
+                        or b"").decode("utf-8", "replace")
+                except Exception:
+                    cs9 = "?"
                 # **매번 다시 건다.** 한 번만 걸도록 아꼈다가 되돌렸다 —
                 # 화면을 옮기면 창의 색공간이 화면 프로필로 되돌아가는데
                 # (지뢰 66, 사가 신티크 검은 줄), 한 번만 걸면 그때 못 잡는다.
@@ -324,12 +361,23 @@ class _MacChromaKey:
                                                 restype=ctypes.c_long))
                 except Exception:
                     sz9 = "#?"
-                if self._msg(lay, "compositingFilter") == self.filter:
-                    seen9.append(sz9 + ":걸림")
+                # 색공간이 sRGB 가 아니었으면 창 번호 뒤에 그 이름을 적는다.
+                tag9 = "" if cs9.startswith("sRGB") else "(%s)" % cs9
+                if (not force
+                        and self._msg(lay, "compositingFilter") == self.filter):
+                    seen9.append(sz9 + ":걸림" + tag9)
                     continue
+                if force:
+                    # 같은 객체를 그대로 다시 넣으면 CoreAnimation 이
+                    # '안 바뀌었다' 로 보고 건너뛸 수 있다. 벗겼다 다시 걸고,
+                    # 백킹이 새 색공간으로 다시 그려지게 표시한다.
+                    self._msg(lay, "setCompositingFilter:", None,
+                              argtypes=(ctypes.c_void_p,))
+                    self._msg(cv, "setNeedsDisplay:", True,
+                              argtypes=(ctypes.c_bool,))
                 self._msg(lay, "setCompositingFilter:", self.filter,
                           argtypes=(ctypes.c_void_p,))
-                seen9.append(sz9 + ":새로")
+                seen9.append(sz9 + (":다시" if force else ":새로") + tag9)
                 done += 1
             except Exception:
                 seen9.append("?:실패")
@@ -425,6 +473,20 @@ class _MacChromaKey:
                     n = 0
                     x0 = y0 = 10 ** 9
                     x1 = y1 = -1
+                    # '가장자리가 검다' 를 숫자로 가른다. 채널 순서
+                    # (ARGB/BGRA)를 확실히 모르므로 **정렬해서** 견준다 —
+                    # 알파로 보이는 255 하나를 뺀 나머지 셋을 sorted(키색)
+                    # 과 대 본다. 순서가 어느 쪽이든 같은 답이 나온다.
+                    ksort = tuple(sorted(getattr(self, "key_rgb",
+                                                 (93, 0, 81))))
+                    kn = 0
+                    kx0 = ky0 = 10 ** 9
+                    kx1 = ky1 = -1
+                    ktal = {}
+                    # 파이썬 루프라 훑는 양을 묶는다 (레티나면 픽셀이 네 배).
+                    # 줄을 건너뛰어 창 위아래를 고루 표본한다.
+                    ystep = max(1, ph // 300)
+                    left = 300000
                     for y in range(ph):
                         plane = buf[y * row:y * row + pw * spp:spp]
                         nz = len(plane) - plane.count(0)
@@ -438,6 +500,29 @@ class _MacChromaKey:
                             (i for i, b in enumerate(plane[::-1]) if b), 0)
                         x0 = min(x0, fx)
                         x1 = max(x1, lx)
+                        if left > 0 and y % ystep == 0:
+                            base9 = y * row
+                            for x9 in range(fx, lx + 1):
+                                if not plane[x9]:
+                                    continue
+                                left -= 1
+                                if left <= 0:
+                                    break
+                                px9 = tuple(buf[base9 + x9 * spp:
+                                                base9 + x9 * spp + spp])
+                                s9 = sorted(px9)
+                                if len(s9) == 4 and s9[3] >= 250:
+                                    s9 = s9[:3]       # 알파 하나를 뺀다
+                                if len(s9) != 3:
+                                    continue
+                                if max(abs(s9[i] - ksort[i])
+                                       for i in range(3)) > 45:
+                                    continue
+                                kn += 1
+                                kx0, kx1 = min(kx0, x9), max(kx1, x9)
+                                ky0, ky1 = min(ky0, y), max(ky1, y)
+                                if len(ktal) < 2048 or px9 in ktal:
+                                    ktal[px9] = ktal.get(px9, 0) + 1
                     line = "#%d %dx%d 남은픽셀 %d" % (
                         wid, fr.size.width, fr.size.height, n)
                     if n:
@@ -447,6 +532,15 @@ class _MacChromaKey:
                         col = tuple(buf[o + i] for i in range(spp))
                         line += " 상자=(%d,%d~%d,%d) 색=%s" % (
                             x0, y0, x1, y1, col)
+                    line += " 키색기운 %d(줄1/%d표본)" % (kn, ystep)
+                    if kn:
+                        top9 = sorted(ktal.items(),
+                                      key=lambda kv: -kv[1])[:3]
+                        line += " 키상자=(%d,%d~%d,%d) 잦은색=%s" % (
+                            kx0, ky0, kx1, ky1,
+                            " ".join("%s×%d" % (k9, c9) for k9, c9 in top9))
+                    if left <= 0:
+                        line += " (표본상한)"
                     out.append(line)
                 except Exception as e:
                     out.append("창 스캔 실패 %r" % (e,))
@@ -507,7 +601,8 @@ function onYouTubeIframeAPIReady(){
                 enablejsapi:1},
     events:{
       'onReady':function(){ ready=true; applyPend(); send({ready:true}); report(); },
-      'onStateChange':function(e){ report(); if(e.data===0){ send({ended:true}); } },
+      'onStateChange':function(e){ report(); if(e.data===0){ send({ended:true}); }
+        if(e.data===1&&!fit){ try{player.setPlaybackQuality('small');}catch(x){} } },
       'onError':function(e){ send({err:e.data||1}); }
     }});
 }
@@ -515,6 +610,11 @@ window.ytLoad=function(v,list){ if(!ready){ pend={v:v,list:list}; return; } doLo
 window.ytPlay=function(){ if(player&&ready) player.playVideo(); };
 window.ytPause=function(){ if(player&&ready) player.pauseVideo(); };
 window.ytVol=function(x){ if(!ready){ pendVol=x; return; } try{player.setVolume(x);}catch(e){} };
+// 소리만 들을 때는 가장 낮은 화질로 묶는다 (맥북 팬이 돌지 않게).
+// 영상을 보일 때만 유튜브에 맡긴다.
+var fit=false;
+window.ytFit=function(on){ fit=!!on;
+  try{ if(!fit) player.setPlaybackQuality('small'); }catch(e){} };
 var t=document.createElement('script'); t.src="https://www.youtube.com/iframe_api";
 document.head.appendChild(t);
 </script></body></html>"""
@@ -548,10 +648,19 @@ def _mac_yt_player_main():
     #        보내므로, 안 막으면 곡 하나 끝에 ended 가 여러 번 나가
     #        부모가 다음 곡을 건너뛸 수 있다.
     st = {"mode": "iframe", "vid": "", "title": "", "vol": None, "home": "",
-          "loop": 1, "esent": False}
+          "loop": 1, "esent": False,
+          # 영상 보기 · 로그인 (요청)
+          "vid_on": False,      # 영상 칸에 들어가 있는가
+          "show": True,         # 지금 보여도 되는가 (부모가 알려 준다)
+          "login": False,       # 로그인 화면인가
+          "signed": None}       # 로그인돼 있는가 (모르면 None)
 
     def emit(d):
         try:
+            # 로그인 상태는 알게 된 뒤로 늘 같이 보낸다 — 부모가 이 값으로
+            # '유튜브 계정 · 로그인됨' 을 저장한다 (윈도우와 같은 열쇠).
+            if st.get("signed") is not None and "signed" not in d:
+                d = dict(d, signed=bool(st["signed"]))
             sys.stdout.write("@YT " + json.dumps(d) + "\n")
             sys.stdout.flush()
         except Exception:
@@ -722,11 +831,166 @@ def _mac_yt_player_main():
         AppKit.NSBackingStoreBuffered, False)
     win.setContentView_(web)
     win.setOpaque_(False)
+    # **배경색까지 비워야** 둥근 모서리 밖으로 시스템 창 배경이 안 남는다
+    # (setOpaque_ 만으로는 안 된다 — _mac_clear_bg 와 같은 이야기).
+    try:
+        win.setBackgroundColor_(AppKit.NSColor.clearColor())
+    except Exception:
+        pass
     win.setAlphaValue_(0.0)
     win.setIgnoresMouseEvents_(True)
     win.orderFrontRegardless()
     web.loadRequest_(NSURLRequest.requestWithURL_(
         NSURL.URLWithString_(st["home"])))
+
+    LOGIN_URL = ("https://accounts.google.com/ServiceLogin"
+                 "?continue=https%3A%2F%2Fwww.youtube.com%2F&hl=ko")
+    # 창을 만들 때의 모습 — 로그인이 끝나면 그대로 되돌린다
+    BARE = AppKit.NSWindowStyleMaskBorderless
+    TITLED = (AppKit.NSWindowStyleMaskTitled
+              | AppKit.NSWindowStyleMaskClosable
+              | AppKit.NSWindowStyleMaskMiniaturizable
+              | AppKit.NSWindowStyleMaskResizable)
+
+    def _flip(y, h):
+        """Tk 화면 좌표(왼쪽 위 기준) → 코코아(왼쪽 아래 기준).
+
+        코코아의 전역 좌표는 **주 화면**의 왼쪽 아래가 원점이다.
+        """
+        try:
+            return float(AppKit.NSScreen.screens()[0].frame().size.height) \
+                - float(y) - float(h)
+        except Exception:
+            return float(y)
+
+    def place(x, y, w, h):
+        try:
+            win.setFrame_display_(
+                NSMakeRect(float(x), _flip(y, h), float(w), float(h)), True)
+        except Exception:
+            pass
+
+    def round_corners(r):
+        """창 모서리를 카드에 맞춰 둥글게 (0 이면 각지게)."""
+        try:
+            web.setWantsLayer_(True)
+            lay = web.layer()
+            lay.setCornerRadius_(float(r))
+            lay.setMasksToBounds_(bool(r))
+        except Exception:
+            pass
+
+    def vid_apply():
+        """지금 상태대로 창을 보이거나 숨긴다."""
+        try:
+            on = bool(st["vid_on"] and st["show"] and not st["login"])
+            win.setAlphaValue_(1.0 if on else 0.0)
+            if on:
+                win.orderFrontRegardless()
+        except Exception:
+            pass
+
+    def begin_login(x, y, w, h):
+        """로그인 화면 — 평범한 창으로 바꿔 화면 안에 띄운다.
+
+        테두리 없는 창은 키 창이 못 되어 글자를 못 친다. 끝나면 그대로
+        되돌린다. 쿠키는 WebKit 저장소에 남아 다음 실행부터 적용된다.
+        """
+        st["login"] = True
+        try:
+            win.setStyleMask_(TITLED)
+            win.setTitle_("유튜브 로그인")
+            win.setLevel_(0)
+            win.setIgnoresMouseEvents_(False)
+            win.setOpaque_(True)
+            try:
+                win.setBackgroundColor_(AppKit.NSColor.windowBackgroundColor())
+            except Exception:
+                pass
+            win.setAlphaValue_(1.0)
+            round_corners(0)
+            place(x, y, w, h)
+            AppKit.NSApp().setActivationPolicy_(
+                AppKit.NSApplicationActivationPolicyRegular)
+            AppKit.NSApp().activateIgnoringOtherApps_(True)
+            win.makeKeyAndOrderFront_(None)
+        except Exception:
+            pass
+        try:
+            web.loadRequest_(NSURLRequest.requestWithURL_(
+                NSURL.URLWithString_(LOGIN_URL)))
+        except Exception:
+            pass
+
+    def end_login(signed):
+        """로그인 화면을 접고 재생 페이지로 돌아간다."""
+        if not st["login"]:
+            return
+        st["login"] = False
+        if signed is not None:
+            st["signed"] = bool(signed)
+        try:
+            win.setStyleMask_(BARE)
+            win.setOpaque_(False)
+            try:
+                win.setBackgroundColor_(AppKit.NSColor.clearColor())
+            except Exception:
+                pass
+            win.setIgnoresMouseEvents_(True)
+            AppKit.NSApp().setActivationPolicy_(
+                AppKit.NSApplicationActivationPolicyAccessory)
+        except Exception:
+            pass
+        try:
+            web.loadRequest_(NSURLRequest.requestWithURL_(
+                NSURL.URLWithString_(st["home"])))
+        except Exception:
+            pass
+        if st["vid_on"]:
+            place(*st.get("box", (0, 0, 400, 300)))
+            round_corners(st.get("radius", 0))
+            win.setLevel_(3)          # NSFloatingWindowLevel
+        else:
+            place(0, 0, 400, 300)
+            win.setLevel_(0)
+        vid_apply()
+        emit({"signed": bool(st["signed"]), "login": False})
+
+    def check_login():
+        """로그인이 끝났는지 본다 — 유튜브로 돌아왔고 계정이 붙었으면 끝."""
+        js = ("(function(){try{return (location.href.indexOf('youtube.com')>=0"
+              " && !!(window.ytcfg && ytcfg.get('LOGGED_IN')))?1:0;}"
+              "catch(e){return 0}})()")
+
+        def done(val, err):
+            try:
+                if val and int(val) == 1:
+                    end_login(True)
+            except Exception:
+                pass
+
+        try:
+            web.evaluateJavaScript_completionHandler_(js, done)
+        except Exception:
+            pass
+
+    class WinDelegate(NSObject):
+        def windowShouldClose_(self, sender):
+            # 로그인 창을 닫으면 재생기까지 죽는다 — 닫기를 취소하고
+            # 재생 페이지로 되돌린다 (윈도우 재생기와 같은 규칙).
+            try:
+                if st["login"]:
+                    end_login(None)
+                    return False
+            except Exception:
+                pass
+            return True
+
+    windel = WinDelegate.alloc().init()
+    try:
+        win.setDelegate_(windel)
+    except Exception:
+        pass
 
     def reader():
         try:
@@ -748,7 +1012,13 @@ def _mac_yt_player_main():
     threading.Thread(target=reader, daemon=True).start()
 
     def pump(_timer=None):
-        if not page_ready[0]:
+        if st["login"]:
+            # 로그인 화면 — 명령은 계속 받되(quit 등) 상태 대신 로그인 확인
+            check_login()
+        # 페이지가 아직 안 떴으면 명령을 쌓아 둔다. **로그인 중에는 예외** —
+        # 그때는 재생 페이지가 아니라 구글 페이지가 떠 있으므로, 안 풀면
+        # quit·login_done 이 영영 안 처리된다.
+        if not page_ready[0] and not st["login"]:
             return
         drained = 0
         while drained < 50:
@@ -778,6 +1048,52 @@ def _mac_yt_player_main():
                        % (json.dumps(v), json.dumps(lst)))
                 if st.get("vol") is not None:
                     run_js("window.ytVol(%d)" % int(st["vol"]))
+            elif k == "embed":
+                # 영상 칸에 들어간다 — 좌표는 **화면** 기준 (부모가 준다)
+                st["vid_on"] = True
+                st["show"] = bool(c.get("show", 1))
+                st["box"] = (c.get("x", 0), c.get("y", 0),
+                             c.get("w", 320), c.get("h", 180))
+                st["radius"] = c.get("r", 0)
+                if not st["login"]:
+                    place(*st["box"])
+                    round_corners(st["radius"])
+                    try:
+                        win.setLevel_(3)      # NSFloatingWindowLevel
+                        win.setIgnoresMouseEvents_(True)
+                    except Exception:
+                        pass
+                    vid_apply()
+                run_js("window.ytFit&&window.ytFit(1)")
+            elif k == "vidbox":
+                if st["vid_on"]:
+                    st["box"] = (c.get("x", 0), c.get("y", 0),
+                                 c.get("w", 320), c.get("h", 180))
+                    st["radius"] = c.get("r", st.get("radius", 0))
+                    if not st["login"]:
+                        place(*st["box"])
+                        round_corners(st["radius"])
+            elif k == "vidshow":
+                # 우리 앱이 맨 앞이 아니면 숨긴다 (남의 창 위에 뜨지 않게)
+                st["show"] = bool(c.get("on", 1))
+                if not st["login"]:
+                    vid_apply()
+            elif k == "unembed":
+                st["vid_on"] = False
+                if not st["login"]:
+                    try:
+                        win.setAlphaValue_(0.0)
+                        win.setLevel_(0)
+                    except Exception:
+                        pass
+                    round_corners(0)
+                    place(0, 0, 400, 300)
+                run_js("window.ytFit&&window.ytFit(0)")
+            elif k == "login":
+                begin_login(c.get("x", 200), c.get("y", 120),
+                            c.get("w", 560), c.get("h", 720))
+            elif k == "login_done":
+                end_login(None)
             elif k == "play":
                 run_js("window.ytPlay()")
             elif k == "pause":
@@ -5780,6 +6096,14 @@ class RoomNet:
     # 8초였는데, 홈이 닫힌 채 받는 것이 대부분이라 체감 지연의 대부분이
     # 여기였다. 5초로 줄이면 시간당 요청이 450 → 720번이지만 실측 통신량이
     # 0.32MB/시간이라 여유가 크다.
+    # 친구 목록을 막 청했을 때만 잠깐 쓰는 간격. 청(plq)은 신호로 나가고
+    # 답(목록 본체)은 **명단(room_list)** 에 실려 오므로 명단만 자주 받으면
+    # 된다 — 자리 알림·신호 받기는 그대로 둔다.
+    HOT_LIST = 2.0
+    # **클래스에도 기본값을 둔다.** 감시견과 검사가 `RoomNet.__new__` 로
+    # 껍데기를 만들어 _loop 의 판단을 그대로 돌려 보므로, __init__ 에만
+    # 있으면 AttributeError 로 통신 바퀴가 통째로 죽는다 (지뢰 161).
+    hot_until = 0.0
 
     def __init__(self, slot, code=None, state=None):
         # 보낼 값은 **만들 때 같이 받는다.** 스레드가 __init__ 끝에서 바로
@@ -5803,6 +6127,7 @@ class RoomNet:
         self.ok_at = 0.0          # 마지막으로 성공한 시각
         self.born = time.time()   # 언제 시작했나 (멈춤 판정에 쓴다)
         self.idle = True          # 홈 창이 닫혀 있는가 (열면 바로 빨라진다)
+        self.hot_until = 0.0      # 이때까지는 명단을 자주 받는다 (목록 청)
         self._wake = True         # 다음 바퀴에 곧바로 한 번씩 부른다
         self._kick = False        # 보낼 신호가 생기면 잠을 깨운다
         self.calls = 0            # 지금까지 서버를 부른 횟수 (검사·진단용)
@@ -5838,11 +6163,19 @@ class RoomNet:
             self._state_at = time.time()
 
     def send(self, to_slot, kind, extra=None):
-        """콕 찌르기 같은 한 번짜리 신호. 다음 바퀴를 기다리지 않는다."""
+        """콕 찌르기 같은 한 번짜리 신호. 다음 바퀴를 기다리지 않는다.
+
+        **담았는지 돌려준다.** 칸이 8개뿐이라 한꺼번에 밀면 뒤쪽이
+        버려지는데, 예전에는 늘 None 이라 부르는 쪽이 '보냈다'고 기록해
+        다음 기회를 한참 뒤로 미뤘다 (적대 검토).
+        """
+        got9 = False
         with self._lock:
             if len(self._out) < 8:
                 self._out.append((str(to_slot)[:40], str(kind)[:16], extra))
+                got9 = True
         self._kick = True         # 바퀴 사이 잠(최대 1초)을 깨워 바로 보낸다
+        return got9
 
     def take_sent(self):
         """서버가 받아 준 신호를 꺼내 간다 (앞에서 꺼내 비운다 — 지뢰 26)."""
@@ -5896,6 +6229,11 @@ class RoomNet:
                                           self.IDLE_TAKE)
             else:
                 i_beat, i_list, i_take = self.BEAT, self.LIST, self.TAKE
+            if now < self.hot_until:
+                # 친구 목록을 막 청했다 — 답이 명단에 실려 오므로 잠깐
+                # 자주 받는다. 시각으로만 판단하니 지나면 저절로 원래
+                # 간격으로 돌아온다 (깃발을 저장하지 않는다 · 지뢰 30).
+                i_list = min(i_list, self.HOT_LIST)
             if self.stat.get("beat") != "보냄":
                 # 아직 한 번도 자리를 못 알렸다. 남에게는 안 켠 것으로
                 # 보이는 상태라, 느린 간격(30초)을 기다리지 않는다.
@@ -6962,6 +7300,9 @@ class Mascot:
         self._room_art_bad = {}      # 그림을 못 받은 자리 → 그때 시각
         #                              (ART_RETRY 뒤에는 다시 해 본다)
         self._room_art_th = None
+        # 내려받기 스레드가 '이 슬롯 캐시를 비워 달라'고 남기는 자리.
+        # 스레드가 직접 비우면 안 된다 — 까닭은 _room_art_drain 에.
+        self._room_art_q = []
         self._photo_after = None     # 단체사진 안내 예약
         self._room_ask_win = None    # 홈에 처음 들어갈 때 묻는 창
         self._room_pick = None       # 방에서 고른 사람 (없으면 방 전체)
@@ -7130,11 +7471,15 @@ class Mascot:
         self._pl_friend = ""         # 지금 트는 친구 목록의 자리
         self._pl_push = False        # 청을 받아 다음 신호에 목록을 싣는다
         self._pl_burst = 0.0         # 목록을 계속 싣는 시간창 끝
+        self._pl_sent_h = ""         # 목록을 마지막으로 실어 보낸 해시
+        self._pl_push_at = 0.0       # 마지막으로 곧바로 알린 시각 (연타 방지)
         self._plq_at = 0.0           # 마지막으로 청에 응한 시각
         self._pl_i = -1              # 지금 트는 곡 번호
         self._pl_src = "room"        # 트는 목록의 출처 (room=모두 / mine=내 것)
         self._pl_shuf = None         # 섞기 한 바퀴 순서
         self._pl_title_q = []        # 받아 온 제목 (스레드가 넣고 루프가 뺀다)
+        self._pl_kid_q = []          # 펼친 재생목록 (스레드가 넣고 루프가 뺀다)
+        self._pl_expanding = set()   # 지금 펼치는 중인 재생목록 주소
         self._bgm_tab = "pl"         # 플레이리스트 창의 지금 탭
         self._bgm_winref = None
         self._bgm_draw = None
@@ -9453,6 +9798,22 @@ class Mascot:
                     lambda: self._safe("bubble_btn", fn))
                 self._press = None
                 return
+            # 단추가 달린 말풍선의 **몸통**을 눌렀다 — 그냥 닫는다.
+            # 사이클 끝 말풍선은 5분(POMO_DONE_SEC)이나 떠 있는데, 단추를
+            # 정확히 누르지 않으면 사라지지 않았다 (제보 — 같이하기 참가자).
+            # 단추가 어떤 이유로든 못 그려져도 이 길로 닫힌다 (그물).
+            # 오늘의 운세(hold)는 위에서 이미 처리한다.
+            bx9 = getattr(self, "_bubble_box", None)
+            if (act and bx9 and bx9[0] <= px <= bx9[2]
+                    and bx9[1] <= py <= bx9[3]):
+                self.bubble = None
+                self._bubble_act = None
+                self._bubble_btn = None
+                self._bubble_box = None
+                self._bubble_shape = None
+                self._safe("ui_click", self._ui_click)
+                self._press = None
+                return
             # 음악 버튼·환경음 알약이 카드 윗변에 걸쳐 있으므로 카드보다 먼저
             if (ab and ab[0] <= px <= ab[2] and ab[1] <= py <= ab[3]):
                 self._safe("ui_click", self._ui_click)
@@ -11574,11 +11935,18 @@ class Mascot:
             return
         # 개인 노래도 이제 **목록**이다 — 처음 누르면 내 목록을 튼다 (요청).
         # 곡이 하나도 없으면 창을 열어 넣게 한다.
-        lst9 = self._pl_list()
+        # **친구 목록을 고른 상태면 그것을 지킨다.** 무조건 "mine" 으로
+        # 적으면 친구 목록을 틀려다 내 목록 첫 곡이 나온다 (검사가 잡았다).
+        # 바로 아래 toggle·prev·next 가 이미 쓰는 규칙과 같게 맞췄다.
+        if getattr(self, "_pl_src", "") != "friend":
+            self._pl_src = "mine"
+        lst9 = self._pl_songs()
+        if not lst9:
+            self._pl_src = "mine"
+            lst9 = self._pl_list()
         if not lst9:
             return self._bgm_win("pl")
         if not self._yt_alive():
-            self._pl_src = "mine"
             self._safe("pl_play", self._pl_play,
                        self._pl_i if 0 <= self._pl_i < len(lst9) else 0)
             return
@@ -11589,12 +11957,26 @@ class Mascot:
             self._yt_want = True
             self._yt_send(c="play")
 
+    def _yt_login_ok(self):
+        """이 컴퓨터에서 유튜브 로그인을 쓸 수 있는가.
+
+        맥 재생기도 이제 `login` 을 안다 — 창을 평범한 창으로 바꿔 띄우고,
+        쿠키는 WebKit 저장소에 남아 다음부터 그 계정으로 재생된다.
+        """
+        return bool(IS_WIN or IS_MAC)
+
     def _yt_login(self):
         """유튜브 로그인 창을 띄운다.
 
         로그인해 두면 그 계정으로 재생되므로, 프리미엄이면 광고가 빠진다.
-        쿠키는 캐릭터 폴더의 .ytprofile에 남아 다음부터는 저절로 들어간다.
+        쿠키는 윈도우면 캐릭터 폴더의 .ytprofile 에, 맥이면 WebKit 저장소에
+        남아 다음부터는 저절로 들어간다 (맥 재생기는 --profile 을 안 읽는다).
         """
+        if not self._yt_login_ok():
+            # 맥은 로그인 없이 그냥 재생된다 (광고는 나온다)
+            self._room_toast = ("맥은 로그인 없이 바로 들을 수 있어요",
+                                time.time())
+            return
         if not self._yt_spawn():
             self._say("음악을 켤 수 없어요.", 3.0)
             return
@@ -11605,7 +11987,7 @@ class Mascot:
         y = int(mt + max(30, (mb - mt - 720) / 2))
         self._yt_want = True
         self._yt_send(c="vol", v=int(self.us.get("yt_volume", 55)))
-        self._yt_send(c="login", x=x, y=y)
+        self._yt_send(c="login", x=x, y=y, w=560, h=720)
         # 로그인 창을 닫으면 이 곡부터 튼다 (재생기가 기억해 둔다)
         vid, lst = self._yt_ids(str(self.us.get("yt_url") or ""))
         if vid or lst:
@@ -14255,6 +14637,11 @@ class Mascot:
         font = self._cf_n(max(6, round((13 if big else 11)
                                        * getattr(self, "font_k", 1.0))))
         lines = self._wrap_lines(text, font, self.W - 46)
+        # **접기 전 원문**을 들고 있어야 한다. 아래에서 단추를 붙일지
+        # 정할 때 `_bubble_act[0]`(원문)과 견주는데, 접은 글자와 견주면
+        # 줄이 나뉘는 순간 늘 어긋나 단추가 통째로 안 그려진다 — 글꼴을
+        # 키운 사람에게만 나던 '말풍선이 안 사라진다'의 뿌리다.
+        raw9 = text
         text = "\n".join(lines)
         lh = self._mh(font) + (4 if len(lines) > 1 else 0)
         w = max(max(self._mw(ln, font) for ln in lines)
@@ -14264,7 +14651,7 @@ class Mascot:
         # 단추가 붙는 말풍선 — 글자 아래에 자리를 더 낸다. 지금 떠 있는
         # 말과 짝이 맞을 때만 (다른 말로 바뀌었으면 단추는 따라가지 않는다)
         act = getattr(self, "_bubble_act", None)
-        act = act if (act and act[0] == text) else None
+        act = act if (act and act[0] == raw9) else None
         bf = bh = bw = 0
         if act:
             bf = self._fit(act[1], 9, self.W - 60)
@@ -17719,8 +18106,13 @@ class Mascot:
         self._safe("wg_wipe", self._wg_wipe_once)
         self._safe("day_roll", self._day_roll, now)
         self._safe("room_diag", self._room_diag, now)
+        # 그림 캐시 비우기는 **본 스레드에서** (지뢰 150). _room_tick 안이
+        # 아니라 밖에 둔다 — 수박게임도 _room_want_art 를 부르므로 방이
+        # 꺼져 있어도 큐가 쌓인다.
+        self._safe("art_forget", self._room_art_drain)
         self._safe("room", self._room_tick, now)
         self._safe("pomo", self._pomo_tick, now)
+        self._safe("vid_tick", self._vid_tick, now)
         # 그림자: 본체를 따라오고, 주기적으로 z순서(본체 바로 아래) 재고정
         # 창이 실제로 움직였을 때만 따라 옮긴다. 위치가 그대로인데도 주기적으로
         # z순서를 다시 밀어넣으면 그림자가 눈에 띄게 깜빡인다.
@@ -17821,6 +18213,10 @@ class Mascot:
         # 한다 (_yt_tick 은 재생기가 떠 있을 때만 불린다 · 지뢰 169)
         if getattr(self, "_pl_title_q", None):
             self._safe("pl_title_tick", self._pl_title_tick)
+        # 펼쳐 온 재생목록도 같은 자리에서 받는다 — 스레드가 tkinter 를
+        # 건드리면 'main thread is not in main loop' 로 죽는다 (지뢰 150)
+        if getattr(self, "_pl_kid_q", None):
+            self._safe("pl_kid_tick", self._pl_kid_tick)
         # 음악 재생기가 보낸 상태 (재생기를 띄운 적 있을 때만)
         if self._yt_q or self._yt_proc is not None:
             self._safe("yt", self._yt_tick, now)
@@ -23570,7 +23966,13 @@ class Mascot:
     # ── 플레이리스트 · 환경음 (한 창 두 탭) ──────────────────────────
     PL_MAX = 200                 # 목록에 담을 수 있는 곡 수
     PL_SHARE_MAX = 120           # 친구에게 보내는 곡 수 (신호 상한 안에서)
-    PL_ASK_GAP = 60.0            # 자리마다 목록을 다시 청하는 간격
+    # 친구 화면 갱신 — 서명이 바뀔 때만 다시 그리므로 조용할 때는 싸다.
+    # 맥 Tk 는 캔버스 그리기가 느려 한 단계 늦춘다 (지뢰 174).
+    BGM_TICK_FR = 2500 if IS_MAC else 1500
+    PL_ASK_GAP = 60.0            # 보는 동안 자리마다 다시 청하는 간격
+    PL_ASK_IDLE_GAP = 600.0      # 안 볼 때 미리 받아 두는 간격 (자리마다)
+    PL_ASK_BURST = 8             # 한 바퀴에 청하는 자리 수 (보낼 칸이 8개)
+    PL_HOT = 20.0                # 청한 뒤 명단을 자주 받는 시간
     PL_PUSH_GAP = 20.0           # 청에 응하고 다음 청까지 (cdq 와 같다)
     PL_BURST = 20.0              # 목록을 신호에 계속 싣는 시간 (cd 와 같다)
     VID_GAP = 12                 # 영상 칸과 목록 사이 여백
@@ -23603,6 +24005,9 @@ class Mascot:
             changed = True
         if changed:
             self._safe("pl_save", self._save_settings)
+        # 재생목록 항목을 곡들로 펼쳐 둔다 — 옛 항목과 지난번에 실패한 것
+        # (켤 때 한 번 · 창을 열 때마다 한 번 · 지뢰 19)
+        self._safe("pl_expand_need", self._pl_expand_need)
 
     PL_SETS = 3                  # 프리셋 (목록) 수
 
@@ -23648,10 +24053,14 @@ class Mascot:
         self._pl_i = -1
 
     def _pl_count(self, i9):
-        """그 프리셋에 든 곡 수."""
+        """그 프리셋에 든 곡 수 — 재생목록은 **펼친 곡**으로 센다."""
         try:
-            return len([it for it in self._pl_sets()[int(i9)]
-                        if isinstance(it, dict) and str(it.get("u") or "")])
+            n9 = 0
+            for it in self._pl_sets()[int(i9)]:
+                if not (isinstance(it, dict) and str(it.get("u") or "")):
+                    continue
+                n9 += len(self._pl_kids(it)) or 1
+            return n9
         except Exception:
             return 0
 
@@ -23662,6 +24071,17 @@ class Mascot:
         틀어 봐야 알 수 있으므로, 그 전에는 oEmbed 로 받아 둔 채널 이름을
         쓴다.
         """
+        if self._pl_is_set(it):
+            kids9 = self._pl_kids(it)
+            if kids9:
+                # 제목이 이미 '재생목록 (N곡)' 이라 곡 수를 또 적지 않는다.
+                # 대신 전체 길이를 알려 준다 — 목록에서 쓸모 있는 값이다.
+                tot9 = sum(int(k9.get("d") or 0) for k9 in kids9)
+                d9 = self._pl_dur(tot9)
+                return ("재생목록 · 모두 %s" % d9) if d9 else "재생목록"
+            if (it or {}).get("kt"):
+                return "재생목록 · 목록을 못 불러왔어요"
+            return "재생목록 · 곡을 불러오는 중…"
         d9 = self._pl_dur((it or {}).get("d"))
         if d9:
             a9 = str((it or {}).get("a") or "")
@@ -23677,10 +24097,25 @@ class Mascot:
 
     def _pl_list_save(self, lst):
         sets9 = self._pl_sets()
-        sets9[self._pl_set_i()] = list(lst)[:self.PL_MAX]
+        i9 = self._pl_set_i()
+        was9 = "|".join(str(it.get("u") or "") for it in (sets9[i9] or [])
+                        if isinstance(it, dict))
+        sets9[i9] = list(lst)[:self.PL_MAX]
         self.us["yt_sets"] = sets9
         self.us["yt_list"] = sets9[0]        # 옛 열쇠도 맞춰 둔다
         self._safe("pl_save", self._save_settings)
+        now9 = "|".join(str(it.get("u") or "") for it in sets9[i9]
+                        if isinstance(it, dict))
+        t9 = time.time()
+        if (now9 != was9 and self.room_net is not None
+                and t9 - getattr(self, "_pl_push_at", 0.0) > 3.0):
+            self._pl_push_at = t9
+            # 곡이 늘거나 줄거나 자리를 바꿨다 — 다음 주기(최대 10초)를
+            # 기다리지 말고 곧바로 알린다. **실을지 말지는 여기서 안
+            # 정한다** — 그 판단은 _room_state_now 한 곳이 해시로 한다
+            # (표가 둘이면 어긋난다 · 지뢰 55). 제목·길이만 채워진
+            # 저장은 주소가 그대로라 여기서 걸러진다.
+            self._safe("pl_push", self._room_push_now)
 
     @staticmethod
     def _pl_short(url):
@@ -23735,6 +24170,60 @@ class Mascot:
             return order[(p + 1) % n]
         return (i + 1) % n
 
+    PL_KIDS_MAX = 200            # 재생목록 하나에서 가져오는 곡 수 상한
+    PL_EXPAND_RETRY = 600.0      # 못 불러온 목록을 다시 시도하기까지 (지뢰 19)
+    PL_EXPAND_AT_ONCE = 3        # 한 번에 띄우는 펼치기 스레드 수
+
+    @staticmethod
+    def _pl_is_set(it):
+        """이 항목이 '재생목록' 인가 — list 만 있는 주소."""
+        return bool(isinstance(it, dict) and str(it.get("list") or ""))
+
+    @staticmethod
+    def _pl_kids(it):
+        """펼쳐 둔 곡들 (없거나 꼴이 깨졌으면 빈 목록)."""
+        v9 = (it or {}).get("kids")
+        if not isinstance(v9, list):
+            return []
+        return [k9 for k9 in v9
+                if isinstance(k9, dict) and str(k9.get("u") or "").strip()]
+
+    def _pl_flat(self):
+        """재생목록을 펼친 '실제로 트는 곡들' — 원본 dict 그대로.
+
+        **펼침 토글(open)과 무관하게 늘 펼쳐진다** — 접어 두어도 전곡이
+        재생돼야 한다. 길이·채널이 살아 있어야 하므로 화면용
+        (_pl_songs_mine)이 아니라 이것을 공유·제목 적기의 바탕으로 쓴다.
+        """
+        out = []
+        for it in self._pl_list():
+            kids9 = self._pl_kids(it)
+            out.extend(kids9 if kids9 else [it])
+        return out
+
+    def _pl_rows(self):
+        """창에 그릴 줄들 — ("item"|"kid", 항목번호, 자식번호, 곡 dict).
+
+        재생 목록(_pl_flat)과 달리 이쪽만 펼침 토글을 따른다.
+        """
+        out = []
+        for pi9, it in enumerate(self._pl_list()):
+            out.append(("item", pi9, -1, it))
+            if it.get("open"):
+                for ci9, kd9 in enumerate(self._pl_kids(it)):
+                    out.append(("kid", pi9, ci9, kd9))
+        return out
+
+    def _pl_flat_i(self, url):
+        """그 주소가 펼친 목록에서 몇 번째인가 (없으면 -1 · 지뢰 133)."""
+        url = str(url or "")
+        if not url:
+            return -1
+        for i9, sg9 in enumerate(self._pl_flat()):
+            if str(sg9.get("u") or "") == url:
+                return i9
+        return -1
+
     def _pl_songs(self):
         """지금 트는 목록 — 홈에서 고르면 모두의 것, 내 창이면 내 것.
 
@@ -23759,9 +24248,20 @@ class Mascot:
         cur = self._pl_list()
         if any(str(it.get("u") or "") == url for it in cur):
             return False                      # 이미 있는 곡
-        cur.append({"u": url, "t": "", "d": 0})
+        it9 = {"u": url, "t": "", "d": 0}
+        if lst and not vid:
+            # 재생목록 주소 — 곡들로 펼쳐 담는다. 유튜브에게 맡기면
+            # (loadPlaylist) 다음 곡을 정하는 쪽이 둘이 되어 첫 곡만
+            # 되풀이된다 (지뢰 98)
+            it9["list"] = lst
+            it9["t"] = "재생목록"
+            it9["open"] = True
+        cur.append(it9)
         self._pl_list_save(cur)
-        self._safe("pl_title", self._pl_fetch_title, url)
+        if it9.get("list"):
+            self._safe("pl_expand", self._pl_expand, url, lst)
+        else:
+            self._safe("pl_title", self._pl_fetch_title, url)
         return True
 
     def _pl_fetch_title(self, url):
@@ -23800,10 +24300,11 @@ class Mascot:
         if not q:
             return
         cur = self._pl_list()
+        flat9 = self._pl_flat()          # 재생목록 안의 곡까지 (같은 dict)
         hit = False
         while q:
             url, t, a = q.pop(0)
-            for it in cur:
+            for it in flat9:
                 if str(it.get("u") or "") != url:
                     continue
                 if t and not it.get("t"):
@@ -23822,7 +24323,7 @@ class Mascot:
             return
         cur = self._pl_list()
         hit = False
-        for it in cur:
+        for it in self._pl_flat():       # 재생목록 안의 곡까지 (같은 dict)
             v9, _l9 = self._yt_ids(str(it.get("u") or ""))
             if v9 == vid:
                 if str(it.get("t") or "") != title:
@@ -23834,6 +24335,312 @@ class Mascot:
         if hit:
             self._pl_list_save(cur)
             self._safe("bgm_redraw", self._bgm_redraw)
+
+    # ── 재생목록 펼치기 ───────────────────────────────────────
+    # 주소 한 줄을 유튜브에게 통째로 맡기면(loadPlaylist) 다음 곡을 정하는
+    # 쪽이 둘이 되어 첫 곡만 되풀이된다 (지뢰 98). 그래서 곡 목록을 우리가
+    # 미리 받아 두고 곡 단위로만 load 를 보낸다.
+    PL_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/124.0.0.0 Safari/537.36")
+    PL_VID_CH = ("abcdefghijklmnopqrstuvwxyz"
+                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+    def _pl_expand(self, url, lst):
+        """재생목록을 곡들로 펼친다 — 스레드에서, 표준 라이브러리만.
+
+        굳힌 exe·맥 앱에는 pip 꾸러미가 없다 (지뢰 21). 결과는 큐로
+        그리기 루프에 넘긴다 — 스레드에서 tkinter 를 건드리면 죽는다
+        (지뢰 150).
+        """
+        url, lst = str(url or ""), str(lst or "")
+        if not (url and lst):
+            return False
+        if url in self._pl_expanding:
+            return False
+        self._pl_expanding.add(url)
+
+        def work():
+            kids9 = None
+            try:
+                kids9 = self._pl_fetch_set(lst)
+            except Exception:
+                kids9 = None
+            self._pl_kid_q.append((url, kids9))
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
+    def _pl_fetch_set(self, lst):
+        """재생목록의 곡들 (스레드에서 부른다). 못 받으면 None.
+
+        두 곳을 차례로 본다 —
+        ① watch?list=… 의 playlistPanelVideoRenderer (실측 200곡 · 제목·
+           길이가 다 있다 · 내려받기 0.82초 · 파싱 0.01초)
+        ② playlist?list=… 의 lockupViewModel(새 꼴 100곡) / 옛
+           playlistVideoRenderer
+        `feeds/videos.xml?playlist_id=` 는 **지금 404 다** — 실측으로
+        확인했으니 폴백으로 쓰지 말 것.
+        https 에는 반드시 _ssl_ctx() — 굳힌 맥 앱은 인증서가 없어 모든
+        요청이 CERTIFICATE_VERIFY_FAILED 로 막힌다 (지뢰 21).
+        """
+        for u9, fn9 in (
+                ("https://www.youtube.com/watch?"
+                 + urllib.parse.urlencode({"list": lst, "hl": "ko"}),
+                 self._pl_parse_panel),
+                ("https://www.youtube.com/playlist?"
+                 + urllib.parse.urlencode({"list": lst, "hl": "ko"}),
+                 self._pl_parse_page)):
+            try:
+                req9 = urllib.request.Request(u9, headers={
+                    "User-Agent": self.PL_UA,
+                    "Accept-Language": "ko,en;q=0.8"})
+                with urllib.request.urlopen(req9, timeout=12,
+                                            context=_ssl_ctx()) as r9:
+                    html9 = r9.read(4000000).decode("utf-8", "replace")
+            except Exception:
+                continue
+            got9 = fn9(html9)
+            if got9:
+                return got9[:self.PL_KIDS_MAX]
+        return None
+
+    @staticmethod
+    def _pl_yt_data(html):
+        """ytInitialData 덩어리만 잘라 낸다 — 정규식 없이 raw_decode 로.
+
+        json.JSONDecoder().raw_decode 는 그 자리에서 **한 덩어리만** 읽고
+        멈추므로 2MB 짜리 페이지에서도 0.01초다 (실측). 중괄호를 손으로
+        세지 않아도 되고 글자 안의 괄호에도 안 속는다.
+        """
+        for mark9 in ("var ytInitialData =", 'window["ytInitialData"] =',
+                      "ytInitialData ="):
+            i9 = html.find(mark9)
+            if i9 < 0:
+                continue
+            i9 = html.find("{", i9 + len(mark9))
+            if i9 < 0:
+                continue
+            try:
+                obj9, _end9 = json.JSONDecoder().raw_decode(html, i9)
+            except ValueError:
+                continue
+            if isinstance(obj9, dict):
+                return obj9
+        return None
+
+    @staticmethod
+    def _pl_walk(obj, key, cap=400):
+        """중첩 dict/list 에서 그 열쇠의 값을 **문서 순서대로** 모은다.
+
+        재귀를 안 쓴다(깊이 제한에 안 걸린다). 자식을 거꾸로 쌓아 꺼내므로
+        형제들의 순서가 그대로 남는다 — 재생목록은 순서가 곧 뜻이다.
+        개수와 걸음 수 둘 다에 상한을 둔다.
+        """
+        out = []
+        stack = [obj]
+        steps = 0
+        while stack and len(out) < cap:
+            cur = stack.pop()
+            steps += 1
+            if steps > 400000:
+                break
+            if isinstance(cur, dict):
+                sub = []
+                for k9, v9 in cur.items():
+                    if k9 == key:
+                        out.append(v9)
+                    elif isinstance(v9, (dict, list)):
+                        sub.append(v9)
+                stack.extend(reversed(sub))
+            elif isinstance(cur, list):
+                stack.extend(reversed([v9 for v9 in cur
+                                       if isinstance(v9, (dict, list))]))
+        return out
+
+    @classmethod
+    def _pl_vid_ok(cls, vid):
+        vid = str(vid or "")
+        return len(vid) == 11 and all(c9 in cls.PL_VID_CH for c9 in vid)
+
+    @staticmethod
+    def _pl_secs(txt):
+        """'4:42' · '1:02:03' · '282' → 초. 못 읽으면 0."""
+        n9 = 0
+        for part9 in str(txt or "").strip().split(":"):
+            if not part9.isdigit():
+                return 0
+            n9 = n9 * 60 + int(part9)
+        return n9 if 0 < n9 < 172800 else 0
+
+    @classmethod
+    def _pl_kid(cls, vid, title, secs):
+        if not cls._pl_vid_ok(vid):
+            return None
+        return {"u": "https://youtu.be/" + str(vid),
+                "t": str(title or "")[:80], "d": max(0, int(secs or 0))}
+
+    @staticmethod
+    def _pl_dedup(kids):
+        """같은 영상이 두 번 들어오지 않게 (재생목록에 중복이 흔하다)."""
+        out, seen = [], set()
+        for k9 in kids:
+            if k9["u"] in seen:
+                continue
+            seen.add(k9["u"])
+            out.append(k9)
+        return out
+
+    def _pl_parse_panel(self, html):
+        """watch?list= 페이지 — playlistPanelVideoRenderer (200곡)."""
+        data9 = self._pl_yt_data(html)
+        if data9 is None:
+            return []
+        out = []
+        for r9 in self._pl_walk(data9, "playlistPanelVideoRenderer",
+                                self.PL_KIDS_MAX):
+            if not isinstance(r9, dict):
+                continue
+            t9 = r9.get("title")
+            txt9 = str(t9.get("simpleText") or "") if isinstance(t9, dict) \
+                else ""
+            d9 = r9.get("lengthText")
+            dtx9 = str(d9.get("simpleText") or "") if isinstance(d9, dict) \
+                else ""
+            kid9 = self._pl_kid(r9.get("videoId"), txt9, self._pl_secs(dtx9))
+            if kid9:
+                out.append(kid9)
+        return self._pl_dedup(out)
+
+    def _pl_parse_page(self, html):
+        """playlist?list= 페이지 — 옛 꼴과 새 꼴(lockupViewModel) 둘 다.
+
+        유튜브가 목록 페이지를 갈아엎어 playlistVideoRenderer 가 사라지고
+        lockupViewModel 이 됐다 (실측). 옛 꼴을 먼저 보고, 없으면 새 꼴을
+        본다 — 지역·실험군에 따라 둘 다 나올 수 있다.
+        """
+        data9 = self._pl_yt_data(html)
+        if data9 is None:
+            return []
+        out = []
+        for r9 in self._pl_walk(data9, "playlistVideoRenderer",
+                                self.PL_KIDS_MAX):
+            if not isinstance(r9, dict):
+                continue
+            t9 = r9.get("title")
+            txt9 = ""
+            if isinstance(t9, dict):
+                txt9 = str(t9.get("simpleText") or "")
+                if not txt9:
+                    runs9 = t9.get("runs")
+                    if isinstance(runs9, list) and runs9 \
+                            and isinstance(runs9[0], dict):
+                        txt9 = str(runs9[0].get("text") or "")
+            kid9 = self._pl_kid(r9.get("videoId"), txt9,
+                                self._pl_secs(r9.get("lengthSeconds")))
+            if kid9:
+                out.append(kid9)
+        if out:
+            return self._pl_dedup(out)
+        for r9 in self._pl_walk(data9, "lockupViewModel", self.PL_KIDS_MAX):
+            if not isinstance(r9, dict):
+                continue
+            if str(r9.get("contentType") or "") != "LOCKUP_CONTENT_TYPE_VIDEO":
+                continue
+            md9 = (r9.get("metadata") or {})
+            md9 = md9.get("lockupMetadataViewModel") or {}
+            txt9 = str((md9.get("title") or {}).get("content") or "")
+            secs9 = 0
+            for b9 in self._pl_walk(r9.get("contentImage") or {},
+                                    "thumbnailBadgeViewModel", 6):
+                if isinstance(b9, dict):
+                    secs9 = self._pl_secs(b9.get("text"))
+                    if secs9:
+                        break
+            kid9 = self._pl_kid(r9.get("contentId"), txt9, secs9)
+            if kid9:
+                out.append(kid9)
+        return self._pl_dedup(out)
+
+    def _pl_kid_tick(self):
+        """펼쳐 온 곡들을 목록에 적는다 (그리기 루프에서 · 지뢰 150).
+
+        큐는 앞에서 꺼내 비운다 — 통째로 갈아 끼우면 스레드는 처음 받은
+        목록에 계속 넣어 그때부터 한 줄도 안 들어온다 (지뢰 26).
+        """
+        q = self._pl_kid_q
+        if not q:
+            return
+        now9 = time.time()
+        hit9 = False
+        play_u9 = ""
+        while q:
+            url9, kids9 = q.pop(0)
+            self._pl_expanding.discard(url9)
+            for sets9 in self._pl_sets():
+                for it in sets9:
+                    if not (isinstance(it, dict)
+                            and str(it.get("u") or "") == url9):
+                        continue
+                    it["kt"] = int(now9)          # 다시 시도할 때 쓴다
+                    hit9 = True
+                    if not kids9:
+                        continue                  # 못 받았다 — 옛 방식으로
+                    # 펼친 곡을 합쳐도 목록 상한을 넘지 않게 (지뢰 18)
+                    n9 = 0
+                    for o9 in sets9:
+                        if isinstance(o9, dict) and str(o9.get("u") or ""):
+                            n9 += len(self._pl_kids(o9)) or 1
+                    room9 = self.PL_MAX - (n9 - 1)
+                    keep9 = kids9[:max(1, min(self.PL_KIDS_MAX, room9))]
+                    it["kids"] = keep9
+                    if str(it.get("t") or "") in ("", "재생목록"):
+                        it["t"] = "재생목록 (%d곡)" % len(keep9)
+                    if (getattr(self, "_pl_src", "") == "mine"
+                            and str(getattr(self, "_pl_url", "")) == url9):
+                        play_u9 = str(keep9[0].get("u") or "")
+        if not hit9:
+            return
+        self._safe("pl_save", self._save_settings)
+        self._pl_shuf = None
+        if play_u9:
+            # 목록 주소로 틀고 있었으면 첫 곡으로 갈아탄다 — 그래야 다음
+            # 곡을 정하는 쪽이 하나가 된다 (지뢰 98). 그 곡은 처음부터
+            # 다시 시작하지만, 안 그러면 유튜브와 우리가 계속 다툼다.
+            self._pl_url = play_u9
+            i9 = self._pl_flat_i(play_u9)
+            if getattr(self, "_pl_on", False) and i9 >= 0:
+                self._safe("pl_play", self._pl_play, i9)
+        self._safe("pl_sync", self._pl_sync_i)
+        self._safe("bgm_redraw", self._bgm_redraw)
+
+    def _pl_expand_need(self):
+        """아직 안 펼쳐진 재생목록을 몇 개만 펼친다 (켤 때·창 열 때).
+
+        실패는 잊게 한다 — 한 번 못 받았다고 영영 안 받으면 인터넷이 잠깐
+        끊긴 사람은 영원히 첫 곡만 듣는다 (지뢰 19).
+        """
+        now9 = time.time()
+        n9 = 0
+        for sets9 in self._pl_sets():
+            for it in sets9:
+                if n9 >= self.PL_EXPAND_AT_ONCE:
+                    return
+                if not (isinstance(it, dict) and str(it.get("u") or "")):
+                    continue
+                u9 = str(it["u"])
+                lst9 = str(it.get("list") or "")
+                if not lst9:
+                    v9, l9 = self._yt_ids(u9)
+                    if not (l9 and not v9):
+                        continue          # 곡 하나짜리 — 펼칠 것이 없다
+                    lst9 = l9
+                if self._pl_kids(it):
+                    continue
+                if now9 - float(it.get("kt") or 0.0) < self.PL_EXPAND_RETRY:
+                    continue
+                if self._pl_expand(u9, lst9):
+                    n9 += 1
 
     PL_MQ_SPEED = 26.0           # 흐르는 제목의 속도 (px/초)
     PL_MQ_WAIT = 0.6             # 커서를 올리고 흐르기 시작할 때까지
@@ -23912,8 +24719,10 @@ class Mascot:
         되살린다. 곡 수도 PL_SHARE_MAX 에서 자른다 (봉인 후 상한 안).
         """
         out = []
-        # 화면용(_pl_songs_mine)은 길이를 떨어뜨린다 — 원본 목록에서 싣는다
-        for it in self._pl_list()[:self.PL_SHARE_MAX]:
+        # 화면용(_pl_songs_mine)은 길이를 떨어뜨린다 — 원본에서 싣는다.
+        # **펼친 곡**을 보낸다 (_pl_flat) — 안 그러면 친구에게는 재생목록
+        # 주소 한 줄만 가서 그쪽에서도 첫 곡만 나온다.
+        for it in self._pl_flat()[:self.PL_SHARE_MAX]:
             u9 = str(it.get("u") or "")
             vid, lst = self._yt_ids(u9)
             if vid:
@@ -23980,6 +24789,13 @@ class Mascot:
             got = True
         if not got:
             return
+        # 기다리던 답이 왔다 — 명단을 다시 느긋하게 받는다. 안 끄면 남은
+        # 시간 내내 큰 blob(분사 중인 자리는 15KB)을 계속 받는다.
+        try:
+            if self.room_net is not None:
+                self.room_net.hot_until = 0.0
+        except Exception:
+            pass
         self._pl_peers_save()
         if getattr(self, "_pl_src", "") == "friend":
             self._pl_sync_i()             # 번호가 아니라 주소로 (지뢰 133)
@@ -23999,18 +24815,27 @@ class Mascot:
                     and st9.get("view") == "friends")
 
     def _room_pl_net(self, people):
-        """친구 목록 재청 그물 — 보고 있는 동안, 해시가 다를 때만 (지뢰 134).
+        """친구 목록 재청 그물 — 해시가 다를 때만 (지뢰 134).
 
         청이 어디서 새든 '광고된 해시 ≠ 받아 둔 해시'가 남으므로 그것만
-        본다. 받으면 저절로 멈춘다. 안 보고 있을 때는 아예 안 청한다 —
-        전송량을 아낀다 (지뢰 47).
+        본다. 받으면 저절로 멈춘다 (깃발이 아니라 계산 · 지뢰 30).
+
+        보는 동안은 60초, **안 볼 때도 자리마다 10분에 한 번** 청해 미리
+        받아 둔다. 받은 것은 창과 무관하게 저장되므로(_room_pl_take) 친구
+        화면이 캐시로 곧바로 열린다. 해시가 맞으면 한 줄도 안 나가니
+        정상 상태의 비용은 0이다.
+
+        한 바퀴에 청하는 자리 수를 묶는다 — RoomNet 의 보낼 칸이 8개뿐이라
+        (send 의 `len(self._out) < 8`) 열셋을 한꺼번에 밀면 뒤쪽이 **조용히
+        버려지는데** 청한 것으로 기록돼 다음 기회가 10분 뒤가 된다.
         """
         if self.room_net is None or not self._pl_friends_ok():
             return
-        if not (self._pl_friends_open()
-                or getattr(self, "_pl_src", "") == "friend"):
-            return
+        watch = (self._pl_friends_open()
+                 or getattr(self, "_pl_src", "") == "friend")
+        gap9 = self.PL_ASK_GAP if watch else self.PL_ASK_IDLE_GAP
         peers = self._pl_peers_get()
+        n9 = 0
         for q in people or []:
             if not isinstance(q, dict):
                 continue
@@ -24021,57 +24846,105 @@ class Mascot:
                 continue              # 목록이 같이 실려 왔으면 청할 것 없다
             cur = peers.get(slot)
             if not (isinstance(cur, dict) and cur.get("h") == h9):
-                self._pl_ask(slot)
+                if self._pl_ask(slot, gap9):
+                    n9 += 1
+                    if n9 >= self.PL_ASK_BURST:
+                        break
+        if n9:
+            # **청했으면 답을 받을 만큼은 자주 받는다.** 서버는 자리 blob 을
+            # 마지막 것 하나만 남기고 상대의 분사는 20초뿐인데, 안 볼 때
+            # 명단 주기가 120초라 그냥 두면 대부분 놓치고 다음 기회가
+            # 10분 뒤가 된다 (적대 검토 · _room_cd_ask 주석의 그 실패
+            # 모드다). 받으면 _room_pl_take 가 그 자리에서 끈다.
+            try:
+                self.room_net.hot_until = time.time() + self.PL_HOT
+            except Exception:
+                pass
 
-    def _pl_ask(self, slot):
-        """'목록 좀 보내 줘' — 자리마다 PL_ASK_GAP 에 한 번만."""
+    def _pl_ask(self, slot, gap=None):
+        """'목록 좀 보내 줘' — 자리마다 gap 에 한 번만.
+
+        간격은 부르는 쪽(_room_pl_net)이 정한다 — 보는 동안은 PL_ASK_GAP,
+        안 볼 때는 PL_ASK_IDLE_GAP. 시각은 표 하나(_pl_askat)에만 적는다
+        (표가 둘이면 어긋난다 · 지뢰 55). 그래서 미리 받으려고 방금 청한
+        자리는 창을 열어도 60초 안에는 다시 안 청한다 — 이미 답을
+        기다리는 중이라 그것이 맞다.
+        """
         if self.room_net is None:
             return False
         now = time.time()
+        gap = self.PL_ASK_GAP if gap is None else float(gap)
         ask = self._pl_askat
-        if now - float(ask.get(slot) or 0.0) < self.PL_ASK_GAP:
+        if now - float(ask.get(slot) or 0.0) < gap:
+            return False
+        try:
+            if not self.room_net.send(slot, "plq"):
+                # 보낼 칸이 찼다 — **청한 것으로 치지 않는다.** 치면 다음
+                # 기회가 gap(최대 10분) 뒤가 된다 (적대 검토).
+                return False
+        except Exception:
             return False
         ask[slot] = now
         if len(ask) > 60:                        # 상한 (지뢰 18)
             for old in list(ask)[:30]:
                 ask.pop(old, None)
-        try:
-            self.room_net.send(slot, "plq")
-            return True
-        except Exception:
-            return False
+        return True
 
     def _pl_ask_all(self):
         """친구 화면을 여는 순간 — 해시가 다른 사람들에게 한꺼번에 청한다."""
         self._room_pl_net(list(self.room_people or []))
 
     def _pl_friends(self):
-        """지금 켜 둔 친구 중 목록이 있는 사람들 (자리 순서대로).
+        """목록이 있는 친구들 (자리 순서대로 — 켜 둔 사람이 앞).
 
         받아 둔 목록이 해시와 다르면(바뀐 뒤 아직 못 받음) 옛것을 그대로
         보여 주고 stale 로 표시한다 — 빈 칸보다 낫고 새것이 오면 바뀐다.
+
+        **꺼진 사람도 보여 준다** (요청). 꺼져 있으면 자리 신호가 없어
+        곡 수(plc)·해시(plh)가 안 오고 청(plq)도 못 보낸다 — 그래서 곡
+        수를 **받아 둔 목록(.room_pl.json)의 길이**에서 뽑고, 목록이
+        캐시에 있을 때만 줄을 세운다. 곡 수만 알고 목록이 없으면 영영
+        '받아 오는 중…' 으로 굳으므로 그 상태는 아예 안 만든다.
+        차례는 _room_seats() 가 이미 '켜진 사람 먼저'로 준다.
         """
         out = []
         peers = self._pl_peers_get()
         for q in self._room_seats():
             slot = str(q.get("slot") or "")
-            if not slot or slot == self.char or q.get("off"):
+            if not slot or slot == self.char:
                 continue
-            n9 = int(q.get("plc") or 0)
-            if n9 <= 0:
-                continue
-            h9 = str(q.get("plh") or "")
             cur = peers.get(slot)
             songs = (list(cur.get("songs") or [])
                      if isinstance(cur, dict) else None)
+            poff = bool(q.get("off"))
+            if poff:
+                if not songs:            # 받아 둔 목록이 없으면 안 보인다
+                    continue
+                n9, h9 = len(songs), ""
+            else:
+                n9 = int(q.get("plc") or 0)
+                if n9 <= 0:
+                    continue
+                h9 = str(q.get("plh") or "")
             out.append({"slot": slot,
                         "n": (str(q.get("n") or "")
                               or self.ROOM_NAME.get(slot, "")),
-                        "c": n9, "now": str(q.get("pln") or ""), "h": h9,
-                        "songs": songs,
-                        "stale": bool(isinstance(cur, dict)
+                        "c": n9,
+                        "now": "" if poff else str(q.get("pln") or ""),
+                        "h": h9, "songs": songs, "off": poff,
+                        "stale": bool(not poff and isinstance(cur, dict)
                                       and cur.get("h") != h9)})
         return out
+
+    def _pl_want_art(self):
+        """친구 화면에 설 사람들의 앉은 그림만 받아 둔다.
+
+        _room_tick 은 **홈 창이 떠 있을 때만** 꺼진 자리까지 넘긴다.
+        홈을 한 번도 안 연 사람은 꺼진 친구의 seat.png 가 없어 얼굴이
+        빈 동그라미가 된다.
+        """
+        self._room_want_art([{"slot": p9["slot"]}
+                             for p9 in self._pl_friends()])
 
     def _pl_friend_songs(self):
         cur = self._pl_peers_get().get(getattr(self, "_pl_friend", ""))
@@ -24157,11 +25030,13 @@ class Mascot:
             return (251, 243, 247)
 
     def _vid_ok(self):
-        """영상 보기를 쓸 수 있는가 — config 로 켠 캐릭터 · 윈도우만.
+        """영상 보기를 쓸 수 있는가.
 
-        맥은 프로세스 사이에 창을 끼워 넣는 길이 없어 빠져 있다.
+        윈도우는 자식 창으로 **끼워 넣고**, 맥은 창을 그 자리로 **따라다니게**
+        한다 (맥에는 프로세스 사이 SetParent 가 없다). 둘 다 재생기 창
+        하나를 옮기는 것이라 새 창이 생기지는 않는다.
         """
-        return bool(IS_WIN and self.cfg.get("video", True))
+        return bool((IS_WIN or IS_MAC) and self.cfg.get("video", True))
 
     def _vid_on(self):
         return bool(self._vid_ok() and self.us.get("yt_video"))
@@ -24182,6 +25057,56 @@ class Mascot:
             self._vid_park()
             return
         try:
+            # 최소화·숨김이면 뗀다 (맥의 노란 단추 포함). **ismapped 로 보면
+            # 안 된다** — 창을 만든 직후 잠깐 거짓이라 첫 동기화가 통째로
+            # 죽는다 (검사가 잡았다 · 지뢰 179 와 같은 함정).
+            if not win.winfo_exists() or                     str(win.state()) in ("iconic", "withdrawn"):
+                self._vid_park()
+                return
+        except Exception:
+            return
+        # 창 안으로 자른다 — 자리 계산이 어긋나도 밖으로는 못 나간다.
+        try:
+            cw9, ch9 = int(win.winfo_width()), int(win.winfo_height())
+        except Exception:
+            cw9 = ch9 = 0
+        if cw9 > 1 and ch9 > 1:
+            bx9, by9 = max(0, int(box[0])), max(0, int(box[1]))
+            bw9 = min(int(box[0]) + int(box[2]) - bx9, cw9 - bx9)
+            bh9 = min(int(box[1]) + int(box[3]) - by9, ch9 - by9)
+            if bw9 < 8 or bh9 < 8:
+                self._vid_park()
+                return
+            box = (bx9, by9, bw9, bh9)
+        r9 = int(self._ui(self.VID_R))
+        if IS_MAC:
+            # 맥은 **화면 좌표**로 준다 (창 안에 끼워 넣는 게 아니다).
+            # 그리고 우리 앱이 맨 앞일 때만 보인다 — 남의 창 위에 영상
+            # 네모만 둥둥 뜨지 않게. 앞 창 질의는 0.5초 캐시다 (지뢰 161).
+            try:
+                rx9, ry9 = win.winfo_rootx(), win.winfo_rooty()
+            except Exception:
+                return
+            show9 = 1 if self._fg_is_self() else 0
+            want = ("mac", int(rx9 + box[0]), int(ry9 + box[1]),
+                    int(box[2]), int(box[3]), show9)
+            old = getattr(self, "_vid_at", None)
+            if want == old:
+                return
+            if old is not None and old[0] == "mac":
+                if want[1:5] != old[1:5]:
+                    ok9 = self._yt_send(c="vidbox", x=want[1], y=want[2],
+                                        w=want[3], h=want[4], r=r9)
+                else:
+                    ok9 = True
+                if want[5] != old[5]:
+                    ok9 = self._yt_send(c="vidshow", on=want[5]) and ok9
+            else:
+                ok9 = self._yt_send(c="embed", x=want[1], y=want[2],
+                                    w=want[3], h=want[4], r=r9, show=want[5])
+            self._vid_at = want if ok9 else None
+            return
+        try:
             h9 = int(win.winfo_id())
         except Exception:
             return
@@ -24191,12 +25116,38 @@ class Mascot:
             return
         if old is not None and old[0] == h9:
             ok9 = self._yt_send(c="vidbox", x=want[1], y=want[2], w=want[3],
-                                h=want[4], r=int(self._ui(self.VID_R)))
+                                h=want[4], r=r9)
         else:
             ok9 = self._yt_send(c="embed", p=h9, x=want[1], y=want[2],
-                                w=want[3], h=want[4],
-                                r=int(self._ui(self.VID_R)))
+                                w=want[3], h=want[4], r=r9)
         self._vid_at = want if ok9 else None
+
+    def _vid_tick(self, now):
+        """앞 창이 바뀌면 영상도 따라 숨는다.
+
+        보이고 숨기는 판정(`_fg_is_self`)은 창을 **다시 그릴 때만** 도는데,
+        남의 프로그램으로 넘어가는 것은 우리 창을 다시 그리지 않는다 —
+        그러면 남의 창 위에 영상만 둥둥 뜬 채로 남는다 (지뢰 147 과 같은
+        엣지 트리거). 1초에 한 번 다시 잰다. 앞 창 질의는 0.5초 캐시라
+        싸고, 자리가 그대로면 `_vid_sync` 가 곧바로 돌아온다.
+        """
+        if not IS_MAC or getattr(self, "_vid_at", None) is None:
+            return
+        if now - getattr(self, "_vid_tick_at", 0.0) < 1.0:
+            return
+        self._vid_tick_at = now
+        win9 = getattr(self, "_yt_win", None)
+        st9 = getattr(self, "_bgm_st", None)
+        if st9 is None or win9 is None:
+            self._vid_park()
+            return
+        try:
+            if not win9.winfo_exists():
+                self._vid_park()
+                return
+        except Exception:
+            return
+        self._vid_sync(win9, st9)
 
     def _vid_park(self):
         """영상 창을 떼어 다시 화면 밖으로.
@@ -24293,6 +25244,7 @@ class Mascot:
         win.resizable(not bare, not bare)
         if not bare:
             win.minsize(int(u(self.BGM_MINW)), int(u(self.BGM_MINH)))
+            win.maxsize(int(u(self.BGM_MAXW)), int(u(self.BGM_MAXH)))
         if bare:
             win.overrideredirect(True)
             try:
@@ -24315,7 +25267,8 @@ class Mascot:
               "hovjob": None, "eq": None, "eqjob": None, "mqimg": None,
               "nowmq": None, "nowimg": None, "nowbox": None,
               "hovrow": None, "rows": [], "vidbox": None, "mqspec": None,
-              "view": "mine", "fsel": "", "frows": [], "frh": 0.0}
+              "view": "mine", "fsel": "", "frows": [], "frh": 0.0,
+              "frjob": None, "frsig": None}
         self._bgm_st = st
 
         # ── 자리 계산 ────────────────────────────────────────────────
@@ -24331,11 +25284,30 @@ class Mascot:
                 g["preset"] = u(146)      # 프리셋 단추 줄 (요청)
                 # 영상 칸 (열었을 때) — 그만큼 목록이 아래로 내려간다
                 g["vid"] = u(188)
-                g["vidh"] = self._vid_h(W) if self._vid_on() else 0
+                vh9 = self._vid_h(W) if self._vid_on() else 0
+                if vh9:
+                    # **창이 낮으면 칸을 줄인다.** 맥 영상은 잘라 줄 부모
+                    # 창이 없어서(따로 뜬 NSWindow) 그대로 두면 창 밖으로
+                    # 삐져나와 영상만 둥둥 뜬다. 가름선 위까지만 쓴다 —
+                    # 아래 조작줄(재생 단추가 sep+56)을 덮으면 멈출 수조차
+                    # 없다. 자리가 모자라면 아예 접는다 (늘리면 돌아온다).
+                    # 목록 한 줄과 여백까지 남긴다 — 안 남기면 vis 가
+                    # 1 로 바닥을 쳐서 그 한 줄이 가름선을 넘어 조작줄
+                    # 위에 그려진다 (적대 검토가 계산으로 잡았다).
+                    room9 = int(H - u(196) - u(22) - g["vid"]
+                                - u(self.VID_GAP) - u(self.BGM_PLROW))
+                    vh9 = 0 if room9 < u(80) else min(int(vh9), room9)
+                g["vidh"] = vh9
                 g["list"] = u(188) + (g["vidh"] + u(self.VID_GAP)
                                       if g["vidh"] else 0)
-                # 친구 화면 — 머리말 아래부터 가름선 위까지
-                g["fr"] = u(98) + u(48)
+                # 친구 화면 — 머리말 아래부터 가름선 위까지.
+                # 설명 줄을 뺐다 (요청) — 머리말이 그만큼 짧다.
+                # 영상 칸은 내 목록 화면과 **같은 높이**(g["vidh"])를 쓰고
+                # 자리만 위로 올라간다. 상한을 화면마다 따로 재면 화면을
+                # 오갈 때 칸 크기가 튀고 자리 표가 둘로 갈린다 (지뢰 55).
+                g["frvid"] = u(98) + u(36)
+                g["fr"] = g["frvid"] + (g["vidh"] + u(self.VID_GAP)
+                                        if g["vidh"] else 0)
                 g["frlist"] = max(u(40), H - u(196) - u(22) - g["fr"])
                 g["rowh"] = u(self.BGM_PLROW)
                 g["sep"] = H - u(196)     # 재생 조작·방식·볼륨·계정 몫
@@ -24394,13 +25366,24 @@ class Mascot:
             win.geometry("%dx%d+%d+%d" % (W, H, nx, ny))
 
         def rows_now():
+            # **그릴 줄** 이지 트는 곡이 아니다 — 접어 둔 재생목록의 자식은
+            # 화면에 없으므로 스크롤 길이에도 안 들어간다
             if self._bgm_tab == "pl":
-                return self._pl_songs_mine()
+                return self._pl_rows()
             return list(self._amb.names) if self._amb is not None else []
 
         def maxoff(g):
             n = len(rows_now())
             return max(0.0, n * g["rowh"] - g["listh"])
+
+        def frmaxoff(g):
+            """친구 화면에서 내려갈 수 있는 만큼.
+
+            지난 프레임에 잰 내용 높이(st["frh"])를 쓴다. 영상 칸을 열면
+            g["frlist"] 가 줄어드니 휠뿐 아니라 그리는 쪽에서도 이 값으로
+            눌러 준다 — 같은 식을 두 곳에 적으면 어긋난다 (지뢰 55).
+            """
+            return max(0.0, float(st.get("frh") or 0.0) - g["frlist"])
 
         def scrolling(g):
             return len(rows_now()) * g["rowh"] > g["listh"] + 1
@@ -24591,11 +25574,77 @@ class Mascot:
                     self.BGM_TICK_EQ,
                     lambda: self._safe("bgm_eqtick", eq_tick))
 
+        def fr_sig():
+            """친구 화면에 보이는 것들의 서명 — 바뀌었을 때만 다시 그린다.
+
+            화면에 나오는 값을 **전부** 넣는다 (지뢰 89·103) — 이름·곡
+            수·꺼짐·지금 곡·해시·받아 왔는지.
+            """
+            out9 = []
+            for p9 in self._pl_friends():
+                out9.append((p9.get("slot"), p9.get("n"), p9.get("c"),
+                             bool(p9.get("off")), p9.get("now"), p9.get("h"),
+                             p9.get("songs") is None))
+            return tuple(out9)
+
+        def fr_tick():
+            """친구 화면이 떠 있는 동안만 도는 프레임 (닫을 때 거둔다).
+
+            `_bgm_redraw` 는 클릭·휠·도착에서만 불려서, 친구가 켜지거나
+            꺼져도 사용자가 뭔가 누르기 전까지 화면이 그대로였다
+            (지뢰 103). 서명이 바뀌었을 때만 다시 그리므로 조용할 때는
+            값이 거의 안 든다.
+            """
+            st["frjob"] = None
+            if not win.winfo_exists():
+                return
+            if self._bgm_tab == "pl" and st.get("view") == "friends":
+                # **_safe 로 감싸면 안 된다** — 값을 안 돌려주므로 서명이
+                # 늘 None 이 되어 한 번도 다시 안 그린다 (지뢰 63·110의
+                # 친척). 값이 필요한 자리는 직접 try 로 감싼다.
+                try:
+                    sig9 = fr_sig()
+                except Exception:
+                    self._log_error("bgm_frsig")
+                    sig9 = None
+                if sig9 is not None and sig9 != st.get("frsig"):
+                    st["frsig"] = sig9
+                    self._safe("bgm_frdraw", draw)
+                # 얼굴 그림은 다른 내려받기 스레드와 겹치면 그냥 돌아온다
+                # — 여기서 다시 해 본다 (지뢰 97).
+                self._safe("pl_art", self._pl_want_art)
+            st["frjob"] = win.after(
+                self.BGM_TICK_FR,
+                lambda: self._safe("bgm_frtick", fr_tick))
+
+        def draw_vid(g, vy9):
+            """영상 칸 바탕 — 내 목록 화면과 친구 화면이 같이 쓴다.
+
+            실제 그림은 재생기 창이 이 자리에 들어와 그린다 (_vid_sync).
+            여기서 그리는 것은 그 뒤에 깔리는 바탕이고, 자리를
+            st["vidbox"] 에 남겨 draw() 끝의 _vid_sync 가 그대로 쓴다.
+            **넘친 것을 덮는 판(clipr)보다 나중에** 불러야 한다 — 캔버스는
+            제 그림을 못 자르므로 먼저 그리면 바탕이 지워진다 (지뢰 22).
+            """
+            if not g.get("vidh"):
+                return
+            self._rr_soft(cv, u(18), vy9, W - u(18), vy9 + g["vidh"],
+                          u(self.VID_R), fill="#1b1620", outline="",
+                          width=0)
+            if not self._yt_alive():
+                cv.create_text(W / 2.0, vy9 + g["vidh"] / 2.0,
+                               text="노래를 틀면 영상이 나와요",
+                               font=self._uf(9, True), fill="#9a91a8")
+            st["vidbox"] = (u(18), vy9, W - u(36), g["vidh"])
+
         def draw_pl(g, line):
-            songs = self._pl_songs_mine()
+            songs = self._pl_songs_mine()     # 펼친 '트는 곡들' (접힘 무관)
+            rows9 = self._pl_rows()           # 화면에 그릴 줄 (접힘 반영)
             now9 = time.time()
             st["titles"] = []
             st["rows"] = []
+            st["rowu"] = {}                   # 곡 번호 → 곡 주소 (지뢰 133)
+            st["itemu"] = {}                  # 항목 번호 → 항목 주소
             st["vidbox"] = None
             st["mqspec"] = None
             st["eq"] = None
@@ -24644,18 +25693,7 @@ class Mascot:
                                font=self._uf(7, True),
                                fill="#ffffff" if on9 else cd["sub"])
                 hit(x0p, py9, x0p + pw9, py9 + u(32), "set", i9)
-            if g.get("vidh"):
-                # 영상 칸 — 실제 그림은 재생기 창이 이 자리에 들어와 그린다
-                # (_vid_sync). 여기서 그리는 것은 그 뒤에 깔리는 바탕이다.
-                vy9 = g["vid"]
-                self._rr_soft(cv, u(18), vy9, W - u(18), vy9 + g["vidh"],
-                              u(self.VID_R), fill="#1b1620", outline="",
-                              width=0)
-                if not self._yt_alive():
-                    cv.create_text(W / 2.0, vy9 + g["vidh"] / 2.0,
-                                   text="노래를 틀면 영상이 나와요",
-                                   font=self._uf(9, True), fill="#9a91a8")
-                st["vidbox"] = (u(18), vy9, W - u(36), g["vidh"])
+            draw_vid(g, g["vid"])
             if not songs:
                 by = g["list"]
                 self._rr_soft(cv, u(18), by, W - u(18), by + g["listh"],
@@ -24673,26 +25711,55 @@ class Mascot:
                                text="재생목록 주소도 통째로 넣을 수 있어요",
                                font=self._uf(8, True), fill=cd["sub"])
             else:
+                # 재생목록은 접었다 폈다 하므로 '그릴 줄'(rows9)과 '트는
+                # 곡'(songs)이 다르다. 켜짐은 번호가 아니라 **주소**로
+                # 본다 — 펼치기가 도착하면 번호가 밀린다 (지뢰 133).
                 mine = (getattr(self, "_pl_src", "room") == "mine"
                         and getattr(self, "_pl_on", False))
-                for i9, sg in enumerate(songs):
+                curu9 = str(getattr(self, "_pl_url", "") or "") if mine else ""
+                if mine and not curu9 and 0 <= self._pl_i < len(songs):
+                    # 아직 주소를 안 적어 둔 판(상태 복원·검사) — 번호로
+                    # 물러난다. 그러면 어느 줄이 켜졌는지 늘 정해진다.
+                    curu9 = str(songs[self._pl_i].get("u") or "")
+                fmap9 = {}
+                for j9, s9m in enumerate(songs):
+                    fmap9.setdefault(str(s9m.get("u") or ""), j9)
+                rx = right_x(g)          # 줄마다 다시 세면 O(n²) 이다
+                for i9, (kind9, pi9, _ci9, sg) in enumerate(rows9):
                     y0 = g["list"] + g["rowh"] * i9 - st["off"]["pl"]
                     if y0 >= g["list"] + g["listh"] or \
                             y0 + g["rowh"] <= g["list"]:
                         continue
-                    on = bool(mine and i9 == self._pl_i)
+                    kid9 = (kind9 == "kid")
+                    kids9 = [] if kid9 else self._pl_kids(sg)
+                    if kids9:
+                        # 펼쳐 둔 재생목록 — 이 줄이 가리키는 곡은 첫 곡,
+                        # 켜짐은 '그 안의 곡이 나오는 중인가'
+                        pu9 = str(kids9[0].get("u") or "")
+                        on = bool(curu9 and any(str(k9.get("u") or "") == curu9
+                                                for k9 in kids9))
+                    else:
+                        pu9 = str(sg.get("u") or "")
+                        on = bool(curu9 and pu9 == curu9)
+                    fi9 = fmap9.get(pu9, 0)
+                    st["rowu"][fi9] = pu9
+                    if not kid9:
+                        st["itemu"][pi9] = str(sg.get("u") or "")
+                    lx9 = u(38) if kid9 else u(18)      # 자식은 들여쓴다
+                    dx9 = u(58) if kid9 else u(40)      # 왼쪽 동그라미
+                    tx9 = u(80) if kid9 else u(62)      # 제목 시작
                     y1 = y0 + g["rowh"] - u(6)
-                    rx = right_x(g)
                     # 줄을 누르면 그 곡으로 간다 (요청 — 시중 재생기처럼).
                     # **오른쪽 단추들보다 먼저** 적는다: find 가 뒤에서부터
-                    # 찾으므로 나중에 적은 ✕·▲▼·▶ 가 이긴다.
-                    st["rows"].append((u(18), y0, rx - u(88), y1, i9))
-                    hit(u(18), y0, rx - u(88), y1, "pick", i9)
+                    # 찾으므로 나중에 적은 ✕·▲▼·▶·▸ 가 이긴다.
+                    st["rows"].append((lx9, y0, rx - u(88), y1, i9))
+                    hit(lx9, y0, rx - u(88), y1, "pick", fi9)
                     hv9 = bool(st.get("hovrow") == i9 and not on)
-                    self._rr_soft(cv, u(18), y0, rx, y1, u(14),
+                    self._rr_soft(cv, lx9, y0, rx, y1, u(14),
                                   fill=(self._tint(cd["fill"], 0.82) if on
                                         else (self._tint(cd["fill"], 0.90)
-                                              if hv9 else "#ffffff")),
+                                              if hv9 else (cd["soft"] if kid9
+                                                           else "#ffffff"))),
                                   outline=(cd["fill"] if on else
                                            (self._tint(cd["fill"], 0.5) if hv9
                                             else self._tint(cd["border"],
@@ -24722,34 +25789,47 @@ class Mascot:
                             full9, int(lim), int(u(20)), cd["text"], 10,
                             now9, st.get("hov_at", now9))
                     if band9 is not None:
-                        cv.create_image(u(62), cy - u(6), image=band9,
+                        cv.create_image(tx9, cy - u(6), image=band9,
                                         anchor="w", tags=("mq",))
                         st["mqimg"] = band9
                         # 다음 프레임부터는 창을 통째로 다시 그리지 않고
                         # **이 띠만** 갈아 끼운다 (mq_draw · 맥 CPU 제보)
                         st["mqspec"] = (full9, int(lim), int(u(20)),
-                                        cd["text"], 10, u(62), cy - u(6))
+                                        cd["text"], 10, tx9, cy - u(6))
                     else:
-                        cv.create_text(u(62), cy - u(7), anchor="w", text=t9,
+                        cv.create_text(tx9, cy - u(7), anchor="w", text=t9,
                                        font=f9, fill=cd["text"])
-                    st["titles"].append((u(62), cy - u(17), u(62) + lim,
+                    st["titles"].append((tx9, cy - u(17), tx9 + lim,
                                          cy + u(1), i9, fits9))
-                    it9 = self._pl_list()[i9] if i9 < len(self._pl_list()) \
-                        else {}
-                    cv.create_text(u(62), cy + u(8), anchor="w",
-                                   text=self._pl_sub(it9),
+                    cv.create_text(tx9, cy + u(8), anchor="w",
+                                   text=self._pl_sub(sg),
                                    font=self._uf(8, True), fill=cd["sub"])
-                    self._soft_dot(cv, u(40), cy, u(13),
+                    self._soft_dot(cv, dx9, cy, u(11) if kid9 else u(13),
                                    cd["fill"] if on else cd["track"])
-                    if on:
+                    if kids9:
+                        # 펼치기 ▸▾ — 동그라미가 곧 단추다. 카드 위쪽 띠처럼
+                        # 자리가 좁아 번호 옆에 따로 둘 수 없다 (지뢰 88).
+                        # pick 보다 **뒤에** 적어야 이긴다 (find 는 역순).
+                        # **이퀄라이저보다 이쪽이 먼저다** — 안 그러면 그
+                        # 목록의 곡이 나오는 동안 접을 방법이 사라진다.
+                        # 트는 중인 것은 줄 색이 이미 알려 준다.
+                        # 켜진 줄은 동그라미가 채움색이라 세모를 흰색으로
+                        # 해야 보인다 (▶ 단추와 같은 규칙).
+                        self._gl_tri(cv, dx9, cy, u(13),
+                                     "#ffffff" if on else cd["sub"],
+                                     bool(sg.get("open")))
+                        hit(dx9 - u(14), cy - u(14), dx9 + u(14), cy + u(14),
+                            "plopen", str(sg.get("u") or ""))
+                    elif on:
                         # 재생 중 — 막대가 실제로 오르내린다 (요청).
                         # 자리만 적어 두고 그리기는 eq_draw 가 맡는다
                         # (프레임마다 창을 통째로 다시 안 그리게).
-                        st["eq"] = (u(40), cy)
+                        st["eq"] = (dx9, cy)
                         eq_draw()
                     else:
-                        cv.create_text(u(40), cy, text=str(i9 + 1),
-                                       font=self._uf(9, True), fill=cd["sub"])
+                        cv.create_text(dx9, cy, text=str(fi9 + 1),
+                                       font=self._uf(8 if kid9 else 9, True),
+                                       fill=cd["sub"])
                     # 오른쪽 — 재생/멈춤 · 순서 · 빼기
                     bx = rx - u(22)
                     self._soft_dot(cv, bx, cy, u(11),
@@ -24760,25 +25840,27 @@ class Mascot:
                         self._gl_play(cv, bx, cy, u(8),
                                       "#ffffff" if on else cd["fill"])
                     hit(bx - u(12), cy - u(12), bx + u(12), cy + u(12),
-                        "row", i9)
+                        "row", fi9)
+                    if kid9:
+                        continue      # 순서·빼기는 **재생목록 단위**다 (요청)
                     cv.create_text(bx - u(30), cy - u(5), text="▲",
                                    font=self._uf(7, True), fill=cd["sub"])
                     cv.create_text(bx - u(30), cy + u(6), text="▼",
                                    font=self._uf(7, True), fill=cd["sub"])
-                    hit(bx - u(38), cy - u(12), bx - u(22), cy, "up", i9)
-                    hit(bx - u(38), cy, bx - u(22), cy + u(12), "down", i9)
+                    hit(bx - u(38), cy - u(12), bx - u(22), cy, "up", pi9)
+                    hit(bx - u(38), cy, bx - u(22), cy + u(12), "down", pi9)
                     for s9 in (1, -1):
                         cv.create_line(bx - u(55), cy - u(3) * s9,
                                        bx - u(49), cy + u(3) * s9,
                                        fill=self._tint(cd["sub"], 0.3),
                                        width=2, capstyle="round")
                     hit(bx - u(62), cy - u(11), bx - u(42), cy + u(11),
-                        "del", i9)
+                        "del", pi9)
                 clip(g)
                 scrollbar(g)
                 # 곡이 보이는 칸보다 적으면 안내를 **마지막 줄 바로 아래**로
                 # 올린다 (창을 키웠을 때 가운데가 휑해 보이지 않게)
-                hy9 = g["list"] + g["rowh"] * min(g["vis"], len(songs)) + u(8)
+                hy9 = g["list"] + g["rowh"] * min(g["vis"], len(rows9)) + u(8)
                 cv.create_text(W / 2.0, hy9,
                                text="%d곡 · 휠로 내려 더 봐요 · ▲▼로 순서를 바꿔요"
                                     % len(songs),
@@ -24890,18 +25972,26 @@ class Mascot:
             # 계정
             ay = H - u(30)
             signed = bool(self.us.get("yt_signed"))
+            can9 = self._yt_login_ok()
             self._soft_dot(cv, u(30), ay, u(4),
-                           "#8fd18f" if signed else cd["sub"])
-            cv.create_text(u(40), ay, anchor="w",
-                           text="유튜브 계정 · " + ("로그인됨" if signed
-                                                else "로그인 안 됨"),
-                           font=self._uf(8, True),
-                           fill=cd["text"] if signed else cd["sub"])
-            self._rr_soft(cv, W - u(96), ay - u(11), W - u(18), ay + u(11),
-                          u(11), fill=cd["track"], outline="", width=0)
-            cv.create_text(W - u(57), ay, text="다시 로그인",
-                           font=self._uf(8, True), fill=cd["sub"])
-            hit(W - u(96), ay - u(11), W - u(18), ay + u(11), "login")
+                           "#8fd18f" if (signed or not can9) else cd["sub"])
+            if not can9:
+                # 맥은 로그인 자리가 아예 없다 — 있는 척하지 않는다 (제보)
+                cv.create_text(u(40), ay, anchor="w",
+                               text="로그인 없이 바로 들을 수 있어요",
+                               font=self._uf(8, True), fill=cd["sub"])
+            else:
+                cv.create_text(u(40), ay, anchor="w",
+                               text="유튜브 계정 · " + ("로그인됨" if signed
+                                                    else "로그인 안 됨"),
+                               font=self._uf(8, True),
+                               fill=cd["text"] if signed else cd["sub"])
+                self._rr_soft(cv, W - u(96), ay - u(11), W - u(18),
+                              ay + u(11), u(11), fill=cd["track"],
+                              outline="", width=0)
+                cv.create_text(W - u(57), ay, text="다시 로그인",
+                               font=self._uf(8, True), fill=cd["sub"])
+                hit(W - u(96), ay - u(11), W - u(18), ay + u(11), "login")
 
         # ── 환경음 탭 ────────────────────────────────────────────────
 
@@ -24915,24 +26005,33 @@ class Mascot:
             st["titles"] = []
             st["rows"] = []
             st["frows"] = []
+            st["faces"] = []          # 안 비우면 영원히 쌓인다 (지뢰 18)
             st["vidbox"] = None
             st["mqspec"] = None
             st["eq"] = None
             st["nowmq"] = None
             st["nowbox"] = None
             hy0 = u(98)
-            cv.create_text(u(18), hy0 + u(10), anchor="w",
-                           text="친구들의 플레이리스트",
-                           font=self._uf(13, True), fill=cd["text"])
-            cv.create_text(u(18), hy0 + u(30), anchor="w",
-                           text="지금 켜 둔 친구들의 목록이에요 · 눌러서 같이 들어요",
-                           font=self._uf(8, True), fill=cd["sub"])
-            self._rr_soft(cv, W - u(108), hy0 + u(8), W - u(18), hy0 + u(30),
-                          u(11), fill=self._tint(cd["fill"], 0.82),
-                          outline="", width=0)
-            cv.create_text(W - u(63), hy0 + u(19), text="‹ 내 목록",
-                           font=self._uf(8, True), fill=cd["text"])
-            hit(W - u(108), hy0 + u(8), W - u(18), hy0 + u(30), "fback")
+
+            def draw_fr_head():
+                """머리말 — **칸과 덮개를 다 그린 뒤에** 부른다.
+
+                목록을 내리면 칸이 이 자리까지 올라오므로, 먼저 그리면
+                제목과 '‹ 내 목록' 이 통째로 덮인다. hit 도 마찬가지다 —
+                find() 가 뒤에서부터 찾으므로 나중에 적어야 칸을 이긴다
+                (실측: 단추 한가운데에서 친구 칸이 먼저 잡혔다).
+                """
+                cv.create_text(u(18), hy0 + u(10), anchor="w",
+                               text="친구들의 플레이리스트",
+                               font=self._uf(13, True), fill=cd["text"])
+                self._rr_soft(cv, W - u(108), hy0 + u(8), W - u(18),
+                              hy0 + u(30), u(11),
+                              fill=self._tint(cd["fill"], 0.82),
+                              outline="", width=0)
+                cv.create_text(W - u(63), hy0 + u(19), text="‹ 내 목록",
+                               font=self._uf(8, True), fill=cd["text"])
+                hit(W - u(108), hy0 + u(8), W - u(18), hy0 + u(30), "fback")
+
             people = self._pl_friends()
             top9 = g["fr"]
             lim9 = top9 + g["frlist"]
@@ -24947,8 +26046,13 @@ class Mascot:
                 cv.create_text(W / 2.0, cy + u(30),
                                text="친구가 플레이리스트에 곡을 넣고 켜 두면 여기 떠요",
                                font=self._uf(8, True), fill=cd["sub"])
+                draw_vid(g, g["frvid"])
+                draw_fr_head()
                 draw_ctrl(g, line)
                 return
+            # 영상 칸을 열면 g["frlist"] 가 줄어든다 — 끝까지 내려간 채로
+            # 칸이 줄면 아래가 휑해지므로 지난 프레임에 잰 높이로 누른다.
+            st["off"]["fr"] = min(st["off"]["fr"], frmaxoff(g))
             y = top9 - st["off"]["fr"]
             rh9 = u(58)
             sh9 = u(34)
@@ -24986,8 +26090,11 @@ class Mascot:
                                    font=self._uf(11, True), fill=cd["text"])
                     cv.create_text(x0 + u(60), cy + u(3), anchor="w",
                                    text="목록 · %d곡%s" % (
-                                       pe["c"], " · 받아 오는 중…"
-                                       if pe["songs"] is None else ""),
+                                       pe["c"],
+                                       " · 오프라인" if pe.get("off")
+                                       else (" · 받아 오는 중…"
+                                             if pe["songs"] is None
+                                             else "")),
                                    font=self._uf(8, True), fill=cd["sub"])
                     if pe["now"]:
                         cv.create_text(x0 + u(60), cy + u(15), anchor="w",
@@ -25033,7 +26140,9 @@ class Mascot:
                         self._soft_dot(cv, x0 + u(40), cy9, u(9),
                                        cd["fill"] if on9
                                        else self._tint(cd["fill"], 0.85))
-                        if on9:
+                        if on9 and sy0 >= top9 and sy1 <= lim9:
+                            # 반쯤 가려진 줄에 세우면 막대가 덮개·영상 칸
+                            # 위로 올라온다 (eq_draw 가 나중에 그린다).
                             st["eq"] = (x0 + u(40), cy9)
                         else:
                             cv.create_text(x0 + u(40), cy9, text=str(i9 + 1),
@@ -25057,14 +26166,25 @@ class Mascot:
             st["frh"] = (y + st["off"]["fr"]) - top9
             if st.get("eq"):
                 eq_draw()
-            # 목록 밖으로 넘친 것을 덮는다 (캔버스는 못 자른다 · 지뢰 22)
-            cv.create_rectangle(u(2), hy0 + u(40), W - u(2), top9,
+            # 목록 밖으로 넘친 것을 덮는다 (캔버스는 못 자른다 · 지뢰 22).
+            # **본문 위끝부터** 덮는다 — 예전에는 hy0+u(40) 부터라 머리말을
+            # 줄이자 위아래가 뒤집혀 한 픽셀도 안 덮였고, 목록을 내리면
+            # 카드가 제목·단추를 통째로 가렸다. 머리말은 이 뒤에 다시 그린다.
+            cv.create_rectangle(u(2), g["body"] - u(2), W - u(2),
+                                max(g["body"] - u(2), top9),
                                 fill=cd["panel"], outline="", tags=("clipr",))
             cv.create_rectangle(u(2), lim9, W - u(2), g["sep"] - u(2),
                                 fill=cd["panel"], outline="", tags=("clipr",))
+            # 영상 칸과 머리말은 **덮개 뒤에** 그린다 — 바로 위 덮개가
+            # 본문 위끝부터 목록 꼭대기까지를 통째로 칠하는데 둘 다 그
+            # 사이에 있어서, 먼저 그리면 지워진다 (지뢰 22).
+            draw_vid(g, g["frvid"])
+            draw_fr_head()
+            noff9 = sum(1 for p9 in people if p9.get("off"))
             cv.create_text(W / 2.0, g["sep"] - u(12),
-                           text="친구 %d명%s" % (
+                           text="친구 %d명%s%s" % (
                                len(people),
+                               " · 오프라인 %d명" % noff9 if noff9 else "",
                                " · 휠로 내려 더 봐요"
                                if st["frh"] > g["frlist"] else ""),
                            font=self._uf(8, True), fill=cd["sub"])
@@ -25166,6 +26286,28 @@ class Mascot:
             f = (x - x0) / max(1.0, float(x1 - x0))
             return int(round(lo + (100 - lo) * max(0.0, min(1.0, f))))
 
+        def flat_i(i9):
+            """곡 번호를 **주소로** 다시 확인한다 (지뢰 133).
+
+            그린 뒤에 목록이 바뀌면(제목·펼치기가 도착하면) 같은 번호가
+            딴 곡을 가리킨다.
+            """
+            u9 = (st.get("rowu") or {}).get(i9)
+            if not u9:
+                return i9
+            j9 = self._pl_flat_i(u9)
+            return j9 if j9 >= 0 else i9
+
+        def item_i(i9):
+            """항목 번호를 주소로 다시 확인한다 (순서·빼기용 · 지뢰 133)."""
+            u9 = (st.get("itemu") or {}).get(i9)
+            if not u9:
+                return i9
+            for j9, it9 in enumerate(self._pl_list()):
+                if str(it9.get("u") or "") == u9:
+                    return j9
+            return i9
+
         def vid_toggle():
             """영상 칸 여닫기 — 창이 그만큼 키가 커졌다 작아진다 (요청)."""
             nonlocal H
@@ -25175,14 +26317,17 @@ class Mascot:
             # 열며 더해 준 만큼 닫으며 돌려준다 — 그 사이 창 폭이 바뀌면
             # 다시 계산한 값과 어긋나 창이 조금씩 줄어든다 (검사가 잡았다).
             dh9 = self._vid_h(W) + u(self.VID_GAP)
-            if on9:
-                self._vid_add = dh9
-            else:
+            if not on9:
                 dh9 = getattr(self, "_vid_add", None) or dh9
                 self._vid_add = None
             nh9 = max(int(u(self.BGM_MINH)),
                       min(int(u(self.BGM_MAXH)),
                           int(H + (dh9 if on9 else -dh9))))
+            if on9:
+                # **상한을 건 뒤의 실제 증분**을 적는다. 예전에는 바라던
+                # 값을 그대로 적어서, 창이 이미 상한이면 열 때 안 커졌는데
+                # 닫을 때만 줄어 창이 스스로 작아졌다 (적대 검토).
+                self._vid_add = nh9 - H
             if nh9 != H:
                 H = nh9
                 cv.config(height=H)
@@ -25219,6 +26364,9 @@ class Mascot:
                     # 여는 순간 해시가 다른 사람들에게 청한다 — 그 뒤로는
                     # 통신 바퀴의 그물이 맡는다 (_room_pl_net)
                     self._safe("pl_ask_all", self._pl_ask_all)
+                    # 꺼진 친구의 앉은 그림은 홈 창을 한 번도 안 열면
+                    # 안 받아 둔다 — 여기서 필요한 것만 받는다.
+                    self._safe("pl_art", self._pl_want_art)
                     if self.room_net is not None:
                         self.room_net.idle = False
                         try:
@@ -25279,9 +26427,23 @@ class Mascot:
                 st["off"]["pl"] = 0.0
                 draw()
                 return
+            if act == "plopen":
+                # 재생목록 접기·펴기 (dat 은 항목 주소 — 지뢰 133)
+                lst = self._pl_list()
+                for it9 in lst:
+                    if str(it9.get("u") or "") != dat:
+                        continue
+                    it9["open"] = not it9.get("open")
+                    self._pl_list_save(lst)
+                    # 접으면 줄이 줄어든다 — 스크롤 자리를 다시 묶는다
+                    st["off"]["pl"] = min(st["off"]["pl"], maxoff(geo()))
+                    break
+                draw()
+                return
             if act == "pick":
                 # 줄을 누르면 그 곡이 선택된다 — 지금 트는 줄을 눌러도
                 # 멈추지는 않는다 (멈춤은 ⏸ 단추 몫).
+                dat = flat_i(dat)
                 if (getattr(self, "_pl_on", False)
                         and getattr(self, "_pl_src", "") == "mine"
                         and self._pl_i == dat):
@@ -25291,6 +26453,7 @@ class Mascot:
                 draw()
                 return
             if act == "row":
+                dat = flat_i(dat)
                 self._pl_src = "mine"
                 if (getattr(self, "_pl_on", False)
                         and self._pl_i == dat and self._yt.get("playing")):
@@ -25301,9 +26464,10 @@ class Mascot:
                 return
             if act in ("up", "down"):
                 lst = self._pl_list()
-                j = dat + (-1 if act == "up" else 1)
-                if 0 <= j < len(lst):
-                    lst[dat], lst[j] = lst[j], lst[dat]
+                i0 = item_i(dat)
+                j = i0 + (-1 if act == "up" else 1)
+                if 0 <= i0 < len(lst) and 0 <= j < len(lst):
+                    lst[i0], lst[j] = lst[j], lst[i0]
                     self._pl_list_save(lst)
                     self._pl_shuf = None
                     self._pl_sync_i()
@@ -25311,13 +26475,17 @@ class Mascot:
                 return
             if act == "del":
                 lst = self._pl_list()
-                if 0 <= dat < len(lst):
-                    gone = lst.pop(dat)
+                i0 = item_i(dat)
+                if 0 <= i0 < len(lst):
+                    gone = lst.pop(i0)
                     self._pl_list_save(lst)
                     self._pl_shuf = None
+                    # 재생목록을 빼면 **그 안의 곡**이 나오는 중일 수도 있다
+                    urls9 = [str(gone.get("u") or "")]
+                    urls9 += [str(k9.get("u") or "")
+                              for k9 in self._pl_kids(gone)]
                     if (getattr(self, "_pl_src", "") == "mine"
-                            and str(getattr(self, "_pl_url", ""))
-                            == str(gone.get("u"))):
+                            and str(getattr(self, "_pl_url", "")) in urls9):
                         self._safe("pl_stop", self._pl_stop)
                     draw()
                 return
@@ -25438,7 +26606,8 @@ class Mascot:
                 ent.delete(0, "end")
                 st["off"]["pl"] = maxoff(geo())
                 draw()
-                if (not self.us.get("yt_signed")
+                if (self._yt_login_ok()
+                        and not self.us.get("yt_signed")
                         and not self.us.get("yt_asked")):
                     # 처음 노래를 넣은 때 — 로그인부터 권한다 (옛 창과 같다).
                     # 로그인 창을 닫으면 기억해 둔 이 곡으로 이어진다.
@@ -25493,6 +26662,10 @@ class Mascot:
                 return
             if st.get("mqspec"):
                 mq_draw()                   # 띠만 (창 통째는 안 그린다)
+            elif st.get("hov") == "now" and st.get("nowmq"):
+                # 친구 화면에는 mqspec 이 없다 — 그래도 '지금 곡' 하나
+                # 때문에 창을 통째로 다시 그리면 안 된다 (지뢰 161).
+                now_draw()
             else:
                 draw()
             st["hovjob"] = win.after(
@@ -25573,8 +26746,7 @@ class Mascot:
             g = geo()
             fr9 = (self._bgm_tab == "pl" and st.get("view") == "friends")
             key9 = "fr" if fr9 else self._bgm_tab
-            mo = (max(0.0, float(st.get("frh") or 0.0) - g["frlist"])
-                  if fr9 else maxoff(g))
+            mo = frmaxoff(g) if fr9 else maxoff(g)
             if mo <= 0:
                 return
 
@@ -25598,6 +26770,9 @@ class Mascot:
             draw()
 
         self._bgm_draw = draw
+        # 친구 화면 갱신 바퀴 — 창이 사는 동안 돈다 (닫을 때 거둔다 · 지뢰 20)
+        st["frjob"] = win.after(
+            self.BGM_TICK_FR, lambda: self._safe("bgm_frtick", fr_tick))
         # 옛 이름들 — 부르는 곳과 검사가 그대로 통하게 같은 창을 가리킨다
         self._amb_winref = win
         self._yt_win = win
@@ -25615,6 +26790,10 @@ class Mascot:
                     return
                 nw9, nh9 = int(e.width), int(e.height)
                 if (nw9, nh9) == (W, H) or nw9 < 40 or nh9 < 40:
+                    # 크기는 그대로고 **자리만** 바뀐 것 — 영상 창을
+                    # 따라 옮긴다 (맥은 창 안에 끼워 넣은 게 아니다).
+                    # 자리가 그대로면 _vid_sync 가 곧바로 돌아온다.
+                    self._safe("vid_sync", self._vid_sync, win, st)
                     return
                 W, H = nw9, nh9
                 cv.config(width=W, height=H)
@@ -25625,6 +26804,18 @@ class Mascot:
             win.bind("<Configure>",
                      lambda e: self._safe("bgm_cfg", on_cfg, e), add="+")
         cv.bind("<Leave>", lambda _e: self._safe("bgm_leave", hov_set, None))
+        # 창이 화면에 올라온 뒤 자리를 한 번 더 맞춘다. **만들 때는 늦다** —
+        # 그때 winfo_rootx() 는 아직 0 이라 영상이 엉뚱한 자리로 간다
+        # (맥은 화면 좌표로 주기 때문 · 검사가 잡았다). 최소화를 풀 때도
+        # 이 길로 다시 끼운다.
+        win.bind("<Map>",
+                 lambda e: (self._safe("vid_sync", self._vid_sync, win, st)
+                            if e.widget is win else None), add="+")
+        # 최소화(맥의 노란 단추)·숨김 — 창이 화면에서 사라지면 영상도 뗀다.
+        # 안 떼면 맥에서는 창 없이 영상만 둥둥 뜬다.
+        win.bind("<Unmap>",
+                 lambda e: (self._safe("vid_park", self._vid_park)
+                            if e.widget is win else None), add="+")
         # 어떤 길로 닫히든 떼어 낸다 (그물 — 보통은 close·min 에서 뗀다)
         win.bind("<Destroy>",
                  lambda e: (self._safe("vid_park", self._vid_park)
@@ -25632,7 +26823,7 @@ class Mascot:
         def on_gone(e):
             if e.widget is not win:
                 return
-            for k9 in ("hovjob", "eqjob"):
+            for k9 in ("hovjob", "eqjob", "frjob"):
                 if st.get(k9):
                     try:
                         win.after_cancel(st[k9])
@@ -25659,9 +26850,13 @@ class Mascot:
         return win
 
     def _pl_songs_mine(self):
-        """내 목록을 화면용으로 (출처와 무관하게 늘 내 것)."""
+        """내 목록을 '트는 곡' 단위로 (출처와 무관하게 늘 내 것).
+
+        재생목록 항목은 **펼친 곡들로 갈아** 넣는다 — 그래야 이전/다음·
+        ended·번호(_pl_i)가 곡 단위로 맞물린다 (지뢰 98).
+        """
         out = []
-        for it in self._pl_list():
+        for it in self._pl_flat():
             u9 = str(it.get("u") or "")
             out.append({"slot": self.char, "n": "", "u": u9,
                         "t": str(it.get("t") or "") or self._pl_short(u9),
@@ -25730,6 +26925,13 @@ class Mascot:
             if kind == "down":
                 p9 = (p9[0], 1 - p9[1], p9[2], 1 - p9[3], p9[4], 1 - p9[5])
             poly(*p9)
+        elif kind in ("tri_r", "tri_d"):
+            # 펼치기 세모 ▸ ▾ — 같은 삼각형을 90도 돌려 써서 둘이 같은
+            # 크기로 보인다 (0.42 x 0.68). Tk 도형은 계단이 진다 (지뢰 169)
+            if kind == "tri_r":
+                poly(0.32, 0.16, 0.32, 0.84, 0.74, 0.50)
+            else:
+                poly(0.16, 0.32, 0.84, 0.32, 0.50, 0.74)
         elif kind == "speaker":
             poly(0.06, 0.36, 0.28, 0.36, 0.52, 0.12, 0.52, 0.88,
                  0.28, 0.64, 0.06, 0.64)
@@ -25813,7 +27015,8 @@ class Mascot:
     # 아이콘 그림에서 실제 그려지는 세로 폭 (0~1) — 겉보기 크기를 맞춘다
     GL_SPAN = {"play": 0.74, "pause": 0.74, "next": 0.64, "prev": 0.64,
                "note": 0.80, "speaker": 0.76, "up": 0.40, "down": 0.40,
-               "video": 0.40, "person": 0.64, "clip": 0.80}
+               "video": 0.40, "person": 0.64, "clip": 0.80,
+               "tri_r": 0.68, "tri_d": 0.42}
 
     def _gl_pause(self, cv, cx, cy, h, col, tags="dyn"):
         """멈춤 — 같은 길이의 둥근 막대 둘 (제보: 길이가 달랐다)."""
@@ -25847,6 +27050,14 @@ class Mascot:
         """접기·펴기 세모 (영상 칸 여닫기)."""
         k9 = "up" if up else "down"
         self._gl_icon(cv, cx, cy, k9, h / self.GL_SPAN[k9], col, tags)
+
+    def _gl_tri(self, cv, cx, cy, d, col, open_=False, tags="dyn"):
+        """재생목록 펼치기 세모 — 닫힘 ▸ / 열림 ▾.
+
+        d 는 아이콘 상자 크기다 (긴 변 ≈ 0.68 x d). 둘을 같은 상자로
+        부르므로 ▸ 와 ▾ 의 겉보기 크기가 같다.
+        """
+        self._gl_icon(cv, cx, cy, "tri_d" if open_ else "tri_r", d, col, tags)
 
     def _gl_note(self, cv, cx, cy, h, col, tags="dyn"):
         self._gl_icon(cv, cx, cy, "note", h / self.GL_SPAN["note"], col, tags)
@@ -29844,8 +31055,26 @@ class Mascot:
             try:
                 mine9 = self._pl_songs_mine()
                 if mine9:
-                    out["plc"] = len(mine9)
-                    out["plh"] = self._pl_hash(mine9)
+                    # **광고는 실제로 보낼 수 있는 만큼만.** 해시를 200곡
+                    # 전량으로 만들면 121번째 뒤만 바꿔도 해시가 바뀌어
+                    # 분사가 도는데 내용은 한 글자도 안 바뀐다(헛분사).
+                    # 곡 수도 마찬가지 — '150곡'이라 써 놓고 120줄만 왔다.
+                    share9 = mine9[:self.PL_SHARE_MAX]
+                    out["plc"] = len(share9)
+                    out["plh"] = self._pl_hash(share9)
+                    # 목록이 바뀌면 **묻기를 기다리지 않고** 곧바로 싣는다
+                    # (cd 와 같은 20초 분사). 받는 쪽은 창과 무관하게 받아
+                    # 두므로(_room_pl_take) 그 뒤로는 캐시로 곧바로 열린다.
+                    # 바뀌었는지는 광고하는 해시로만 본다 — 받는 쪽이 그
+                    # 해시로 중복을 거르므로 해시가 그대로면 보내 봐야
+                    # 버려진다. 프리셋 전환처럼 _pl_list_save 를 안 거치는
+                    # 길도 여기서 저절로 잡힌다.
+                    # **그리기(for_net=False)가 이 셈을 소모하면 안 된다**
+                    # (지뢰 97 — 화면이 통신 상태를 먹는 것).
+                    if (for_net
+                            and out["plh"] != getattr(self, "_pl_sent_h", "")):
+                        self._pl_sent_h = out["plh"]
+                        self._pl_push = True
                     if (getattr(self, "_pl_on", False)
                             and getattr(self, "_pl_src", "") == "mine"
                             and 0 <= self._pl_i < len(mine9)):
@@ -32839,10 +34068,25 @@ class Mascot:
                     tmp = os.path.join(self._room_art_dir(), nm9 + ".tmp")
                     with open(tmp, "wb") as fp:
                         fp.write(raw)
+                    old9 = None
+                    try:
+                        if os.path.isfile(tmp[:-4]):
+                            with open(tmp[:-4], "rb") as fp2:
+                                old9 = fp2.read()
+                    except Exception:
+                        old9 = None
                     os.replace(tmp, tmp[:-4])
+                    if old9 == raw:
+                        # **바이트가 그대로면 캐시를 비울 이유가 없다.**
+                        # fresh 판정이 켤 때마다 전량을 다시 받게 하므로
+                        # 실제로는 이 가지가 거의 전부다 (실측: 66개가
+                        # 16.5초에 한꺼번에 갱신). 예전에는 여기서도
+                        # 비워, 홈을 처음 열면 그동안 캐릭터가 번쩍였다.
+                        continue
                     # 새로 받았으면 그리기 캐시도 비워 이번 실행에서 바로
-                    # 새 그림이 보이게 한다 (안 비우면 재시작 전까지 옛 그림)
-                    self._room_art_forget(slot)
+                    # 새 그림이 보이게 한다 (안 비우면 재시작 전까지 옛 그림).
+                    # **비우는 일은 본 스레드에 맡긴다** (지뢰 150).
+                    self._room_art_q.append(slot)
                 except Exception:
                     # 게임 머리는 아직 배포 안 된 레포에서 404 가 날 수
                     # 있다 — 그것 때문에 자리(seat)까지 막으면 안 된다.
@@ -32902,6 +34146,37 @@ class Mascot:
             break
         w9 = self._room_who_get().get(slot)
         return self._form_ok(w9.get("sk")) if isinstance(w9, dict) else ""
+
+    def _room_art_drain(self):
+        """받아 온 그림 때문에 비워야 하는 캐시를 **본 스레드에서** 비운다.
+
+        내려받기 스레드가 그 자리에서 비우면 안 된다 (지뢰 150). 캐시
+        entry 가 ImageTk.PhotoImage 의 마지막 파이썬 참조라, pop 하는
+        순간 __del__ 이 tkinter 의 `image delete` 를 부른다. 캔버스는
+        그림을 '이름'으로만 들고 있어서, 이미 걸려 있던 칸이 그대로
+        빈칸이 되고(Tk: 'redisplay as empty areas') 다음 숨쉬기 깊이에서
+        다시 만들어져 붙는다 — 사람에게는 '사라졌다 나타났다 번쩍인다'
+        로 보인다 (하독 제보).
+
+        앞에서 꺼내 비운다 — 목록을 통째로 갈아 끼우면 스레드가 옛
+        목록에 계속 넣어 한 줄도 안 들어온다 (지뢰 26).
+        """
+        q = getattr(self, "_room_art_q", None)
+        if not q:
+            return
+        hit9 = set()
+        while q:
+            hit9.add(q.pop(0))
+        for slot in hit9:
+            self._room_art_forget(slot)
+        # 비운 그림은 **지금 캔버스에 걸려 있다.** 그대로 두면 그 칸이
+        # 빈칸으로 남으므로 다음 프레임에 통째로 다시 그리게 표시한다.
+        self._room_key_last = None
+        self._room_body = []
+        try:
+            self._strip_sheets.clear()   # 띠도 새 앉은 그림으로 다시 굽는다
+        except Exception:
+            pass
 
     def _room_art_forget(self, slot):
         """그 사람의 앉은 그림 캐시를 통째로 비운다 (새로 받았을 때).
@@ -33117,11 +34392,56 @@ class Mascot:
         except Exception:
             self._room_art_bad[slot] = time.time()
             return None
-        if len(self._room_pil_cache) > 24:      # 상한 (지뢰 18)
-            for old in list(self._room_pil_cache)[:12]:
+        # 상한은 장수가 아니라 **용량**으로 본다 (지뢰 42). 한 장이
+        # k=1.0 에서 151x112(67KB), k=1.5 에서 224x168(150KB) — 실측.
+        # 24장이면 사람이 열일곱인 방에서 페이지를 넘길 때마다 밀려나
+        # 매번 다시 굽는다 (한 장 8.5~14ms · 9명 한 페이지 76~126ms).
+        # 여기 담기는 것은 PIL 이라 밀려나도 화면은 안 깨진다 — 느려질 뿐.
+        if len(self._room_pil_cache) > self.ROOM_PIL_MAX:
+            for old in list(self._room_pil_cache)[:self.ROOM_PIL_MAX // 2]:
                 self._room_pil_cache.pop(old, None)
         self._room_pil_cache[key] = im
         return im
+
+    # 홈 그림 캐시 상한 — **한 곳에서만** 정한다 (지뢰 55).
+    #   PIL 판     : 한 장 최대 150KB → 48장 ≈ 7MB
+    #   PhotoImage : 한 장 최대 150KB → 96장 ≈ 14MB
+    ROOM_PIL_MAX = 48
+    ROOM_IMG_MAX = 96
+
+    @staticmethod
+    def _cache_touch(cache, key):
+        """캐시 적중 — 그 항목을 맨 뒤로 옮긴다 (진짜 LRU 로 만든다).
+
+        파이썬 dict 은 넣은 순서를 지키고, 이 프로젝트의 축출은 모두
+        `list(cache)[:상한//2]` 로 **앞쪽 절반**을 버린다. 적중이 순서를
+        안 바꾸면 '오래 떠 있던 지금 화면의 그림'이 가장 먼저 버려진다 —
+        캐시 dict 이 PhotoImage 의 유일한 참조라 그 자리가 빈칸이 된다
+        (적대 검토). 값을 그대로 돌려준다.
+        """
+        try:
+            v = cache.pop(key)
+        except KeyError:
+            return None
+        cache[key] = v
+        return v
+
+    def _room_img_trim(self):
+        """_room_img_cache 를 상한 안으로 — 오래 안 쓴 절반만 (지뢰 18).
+
+        **이 표에서 밀려나면 화면이 깨진다.** 담긴 것이 ImageTk.PhotoImage
+        인데 캔버스는 그림을 '이름'으로만 들고 있어서, 파이썬 쪽 마지막
+        참조가 사라지면 __del__ 이 `image delete` 를 불러 그 칸이 빈칸이
+        된다. 그래서 상한은 한 화면 몫보다 넉넉해야 한다 — 40 이던 것이
+        모자랐다 (카드 9 + '모두 보기' 캡슐 17 + 띠·뽀모 사진).
+
+        세 곳(_room_img · _room_mini · _seat_photo)이 이 표를 나눠 쓰므로
+        상한도 여기 한 곳에 둔다 (지뢰 55).
+        """
+        c9 = self._room_img_cache
+        if len(c9) > self.ROOM_IMG_MAX:
+            for k2 in list(c9)[:self.ROOM_IMG_MAX // 2]:
+                c9.pop(k2, None)
 
     def _room_img(self, slot, tag):
         """방에 그릴 그림 — (몸, 덮개, 겹침, 방식). 아직 없으면 None.
@@ -33133,7 +34453,7 @@ class Mascot:
         """
         f9 = self._slot_form(slot)
         k = (slot, tag, f9)
-        got = self._room_img_cache.get(k)
+        got = self._cache_touch(self._room_img_cache, k)
         if got is not None:
             return got
         if self._room_art_file(slot, tag + ".png") is None:
@@ -33150,9 +34470,7 @@ class Mascot:
         except Exception:
             self._room_art_bad[slot] = time.time()
             return None
-        if len(self._room_img_cache) > 40:      # 상한 (지뢰 18)
-            for old in list(self._room_img_cache)[:20]:
-                self._room_img_cache.pop(old, None)
+        self._room_img_trim()
         self._room_img_cache[k] = pair
         return pair
 
@@ -33172,7 +34490,7 @@ class Mascot:
             return got9[0] if got9 else None
         f9 = self._slot_form(slot)
         key = ("bre", slot, tag, f9, int(d))
-        got = self._room_bre_cache.get(key)
+        got = self._cache_touch(self._room_bre_cache, key)
         if got is not None:
             return got
         pil = self._room_fig_pil(slot, tag)
@@ -34802,9 +36120,7 @@ class Mascot:
                                                Image.LANCZOS))
         except Exception:
             return None
-        if len(self._room_img_cache) > 40:
-            for k2 in list(self._room_img_cache)[:20]:
-                self._room_img_cache.pop(k2, None)
+        self._room_img_trim()
         self._room_img_cache[key] = got
         return got
 
@@ -37292,7 +38608,9 @@ class Mascot:
         key = ("peer", slot, w, h, cdh)
         cache = self._room_deco_cache
         if key in cache:
-            return cache[key]
+            # 적중은 맨 뒤로 — 이 dict 이 그림의 유일한 참조라, 넣은
+            # 순서로 버리면 화면에 걸린 카드 배경이 먼저 사라진다.
+            return self._cache_touch(cache, key)
         got = None
         try:
             p = os.path.join(self.state_dir,
@@ -45188,8 +46506,12 @@ class Mascot:
         # LANCZOS 로 줄이고 있었다 (실측: 한 바퀴에 4.5번, 프레임 비용의
         # 3할). 맥은 그리기가 더 느려 창을 만질 때마다 끊겼다 (퀸시 제보).
         # 열쇠에 폼이 들어가 있어(경로 p) 폼이 바뀌면 저절로 갈린다.
-        key = ("photo", p, int(h), bool(hard))
-        got = self._room_img_cache.get(key)
+        # **열쇠에 slot 을 튜플 원소로 넣는다.** 경로 문자열 안에만
+        # 있으면 _room_art_forget 의 `slot in k` 가 하나도 못 잡아,
+        # 앉은 모습을 고쳐 배포해도 뽀모도로 창·띠 사진은 재시작 전까지
+        # 옛 그림으로 남는다 (지뢰 62 · 적대 검토가 잡았다).
+        key = ("photo", slot, p, int(h), bool(hard))
+        got = self._cache_touch(self._room_img_cache, key)
         if got is not None:
             return got
         try:
@@ -45203,9 +46525,7 @@ class Mascot:
             got = ImageTk.PhotoImage(im)
         except Exception:
             return None
-        if len(self._room_img_cache) > 40:          # 상한 (지뢰 18)
-            for k2 in list(self._room_img_cache)[:20]:
-                self._room_img_cache.pop(k2, None)
+        self._room_img_trim()
         self._room_img_cache[key] = got
         return got
 
@@ -47789,10 +49109,19 @@ class Mascot:
         self.close()
 
     def _mac_log(self, text):
-        """맥 창 설정 진단 기록 — 초기화 중이라 _log_error를 못 쓰는 구간용."""
+        """맥 창 설정 진단 기록 — 초기화 중이라 _log_error를 못 쓰는 구간용.
+
+        **크기를 묶는다.** 주기 바퀴가 찍는 줄이 쌓여 몇 MB 가 되면 사람이
+        받아 봐도 못 읽는다. 512KB 를 넘으면 한 세대만 밀어 둔다.
+        """
         try:
-            with open(os.path.join(self.state_dir, ".macwindow.log"), "a",
-                      encoding="utf-8") as fp:
+            p9 = os.path.join(self.state_dir, ".macwindow.log")
+            try:
+                if os.path.getsize(p9) > 512 * 1024:
+                    os.replace(p9, p9 + ".1")
+            except Exception:
+                pass
+            with open(p9, "a", encoding="utf-8") as fp:
                 fp.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text + os.linesep)
         except Exception:
             pass
@@ -47923,6 +49252,47 @@ class Mascot:
         except Exception as e:
             self._mac_log(f"투명 재적용 실패 → {e!r}")
 
+    def _mac_screen_sig(self):
+        """지금 창이 놓인 화면의 서명 — 바뀌면 색공간을 다시 못 박아야 한다.
+
+        `화면수 · 화면이름 · 배율 · 창 색공간` 한 줄. 창을 다른 화면으로
+        옮기거나 배열·프로필·배율이 바뀌면 이 글자가 달라진다.
+
+        **알림(NSWindowDidChangeScreen…)을 안 쓰는 이유**: 관찰자를 달면
+        Cocoa 가 파이썬을 되부르는데, Tk 콜백 한복판이면 그 자리에서
+        프로세스가 죽는다 (지뢰 125·130). 재는 값이 objc 호출 네 번이라
+        2초 바퀴에서 물어보는 것으로 충분하다.
+
+        AppKit 만 쓴다 — NSScreen 은 이미 mac_monitors 가 쓰고 있어 굳힌
+        앱에 있는 것이 증명돼 있다 (지뢰 21).
+        """
+        if not IS_MAC:
+            return ""
+        try:
+            from AppKit import NSApp, NSScreen
+            out = ["화면%d개" % len(NSScreen.screens())]
+            for w in NSApp.windows():
+                try:
+                    if not bool(w.isVisible()):
+                        continue
+                    sc = w.screen()
+                    if sc is None:
+                        continue
+                    try:                       # localizedName 은 10.15+
+                        nm = str(sc.localizedName())
+                    except Exception:
+                        f9 = sc.frame()
+                        nm = "%d,%d" % (int(f9.origin.x), int(f9.origin.y))
+                    out.append("%s/%.1fx/%s"
+                               % (nm, float(w.backingScaleFactor()),
+                                  str(w.colorSpace().localizedName())))
+                    break
+                except Exception:
+                    continue
+            return " ".join(out)
+        except Exception:
+            return ""
+
     def _mac_chroma_key(self):
         """캔버스에 칠해진 MAC_KEY 색을 합성 단계에서 지운다 (실제 투명화 담당)."""
         if self.canvas_bg != MAC_KEY:
@@ -47939,19 +49309,57 @@ class Mascot:
 
     def _mac_keep_transparent(self):
         """투명 설정을 다시 못 박는다. 창이 나중에 더 생기므로 주기적으로 돈다."""
+        now9 = time.time()
         try:
             self._mac_clear_bg()
+            # **화면이 바뀌었는지 먼저 본다.** 다른 화면(신티크)으로 옮기면
+            # 창 백킹의 색공간이 그 화면 프로필로 되돌아간다 (지뢰 66).
+            # 색공간은 아래 apply_all 이 매 바퀴 다시 못 박지만, 필터는
+            # '이미 걸림' 이면 건너뛰므로 그 프레임이 굳을 수 있다 —
+            # 그때만 rearm 으로 벗겼다 다시 걸게 한다 (필요 없는데 매번
+            # 다시 걸면 깜빡인다 · 지뢰 15).
+            sig9 = self._mac_screen_sig()
+            ck = getattr(self, "_mac_ck", None)
+            if sig9 and sig9 != getattr(self, "_mac_scr_sig", None):
+                first9 = getattr(self, "_mac_scr_sig", None) is None
+                self._mac_scr_sig = sig9
+                self._mac_log(("맥 화면: " if first9 else "맥 화면 바뀜 → ")
+                              + sig9)
+                if not first9 and ck is not None:
+                    try:
+                        ck.rearm()
+                    except Exception:
+                        pass
+                    # 눈이 아니라 픽셀로 확인한다 (지뢰 24). 창스캔은
+                    # 수백 ms 라 이 바퀴에서 바로 부르지 않고 미룬다.
+                    try:
+                        self.root.after(1200, self._mac_verify)
+                    except Exception:
+                        pass
             n = self._mac_chroma_key()
             ck = getattr(self, "_mac_ck", None)
             sk = int(getattr(ck, "skipped", 0) or 0)
-            if n or sk:
-                self._mac_log(f"색상키 적용한 창 수: {n} (건너뜀 {sk})")
+            # **바뀔 때만 남긴다.** 뽀모도로·홈 창이 떠 있으면 sk 가 늘
+            # 1 이상이라 예전 조건(n or sk)은 2초마다 한 줄씩 찍어
+            # 기록을 묻어 버렸다.
+            line8 = "색상키 적용한 창 수: %d (건너뜀 %d)" % (n, sk)
+            if line8 != getattr(self, "_mac_apply_line", ""):
+                self._mac_apply_line = line8
+                self._mac_log(line8)
             # 창별 현황이 바뀌면 남긴다 — 어느 창이 필터를 못 받는지
             # 이 로그 한 줄로 갈린다 (사가 '검은 줄' 제보용, 지뢰 51)
             line9 = str(getattr(ck, "status_line", "") or "")
             if line9 and line9 != getattr(self, "_mac_filt_line", ""):
                 self._mac_filt_line = line9
                 self._mac_log("색상키 창별: " + line9)
+            # 5분마다 심장박동 — '기록에 아무것도 없다' 가 '멀쩡하다' 인지
+            # '이 바퀴가 멈췄다' 인지 갈린다 (지뢰 51·131).
+            if now9 - getattr(self, "_mac_hb_at", 0) > 300:
+                self._mac_hb_at = now9
+                self._mac_log(
+                    "맥 유지 바퀴 살아 있음 · %s · 매끈=%s · 화면=%s"
+                    % (line8, bool(getattr(self, "_smooth_on", False)),
+                       sig9 or "?"))
         except Exception as e:
             self._mac_log(f"투명 유지 실패 → {e!r}")
         try:
@@ -48017,6 +49425,19 @@ class Mascot:
                        str(bool(ws.accessibilityDisplayShouldReduceTransparency())))
         except Exception as e:
             out.append(f"투명도줄이기확인불가={e!r}")
+        # **① 을 가르는 줄.** 8/23 이전 맥 앱에는 Quartz 가 안 담겨
+        # MacCharLayer 가 못 서고 매끈 경로가 조용히 꺼진다 (지뢰 130).
+        # 지금까지는 그 사실이 .macwindow.log 에 한 글자도 안 남았다.
+        out.append("매끈=%s(%s) 시도%d" % (
+            bool(getattr(self, "_smooth_on", False)),
+            getattr(self, "_smooth_why", "") or "-",
+            int(getattr(self, "_smooth_tries", 0) or 0)))
+        try:
+            import Quartz         # noqa: F401  (있는지 확인만)
+            out.append("Quartz=있음")
+        except Exception as e:
+            out.append("Quartz=없음(%s)" % e.__class__.__name__)
+        out.append("화면=" + (self._mac_screen_sig() or "?"))
         return " | ".join(out)
 
     def _dump_debug(self):
