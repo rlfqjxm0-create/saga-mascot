@@ -264,6 +264,50 @@ class _MacChromaKey:
         return [self._msg(arr, "objectAtIndex:", i, argtypes=(ctypes.c_ulong,))
                 for i in range(n)]
 
+    FLOAT_LEVEL = 3          # NSFloatingWindowLevel — 평범한 창(0) 위
+
+    def pin_top(self):
+        """테두리 없는 창의 층이 내려가 있으면 다시 올린다. → (올린 수, 본 수)
+
+        맥 Tk 의 `-topmost` 는 창을 숨겼다 다시 띄우는 과정에 풀리는데 Tk
+        쪽 깃발은 그대로라 '켜져 있다'고 답한다. 그래서 **진짜 창 층을
+        재서** 판단한다 (지뢰 15·160 — 밀렸는지 먼저 재고 나서 올린다).
+        필요 없는데 매번 올리면 깜빡인다.
+
+        대상은 테두리 없는 창뿐이다 — 캐릭터·그림자·말풍선·할 일·마감·
+        친구 띠가 그것이다. 제목 표시줄이 있는 창(홈·환경설정·미니게임·
+        플레이리스트)은 평범한 창이라 건드리면 안 된다. apply_all 이 이미
+        쓰는 것과 같은 가름이다 (지뢰 55).
+        """
+        up9 = seen9 = 0
+        try:
+            for w in self.windows():
+                try:
+                    cls = self._msg(self._msg(w, "className"), "UTF8String",
+                                    restype=ctypes.c_char_p) or b""
+                    if (b"Menu" in cls or b"Popover" in cls
+                            or b"Tooltip" in cls or b"ToolTip" in cls):
+                        continue
+                    if int(self._msg(w, "styleMask",
+                                     restype=ctypes.c_ulong)) & 1:
+                        continue          # 제목 표시줄 = 평범한 창
+                    if not int(self._msg(w, "isVisible",
+                                         restype=ctypes.c_bool)):
+                        continue
+                    seen9 += 1
+                    lv9 = int(self._msg(w, "level", restype=ctypes.c_long))
+                    if lv9 >= self.FLOAT_LEVEL:
+                        continue          # 이미 위에 있다 — 안 건드린다
+                    self._msg(w, "setLevel:",
+                              ctypes.c_long(self.FLOAT_LEVEL),
+                              argtypes=(ctypes.c_long,))
+                    up9 += 1
+                except Exception:
+                    continue
+        except Exception as e:
+            self.err = repr(e)
+        return up9, seen9
+
     def rearm(self):
         """다음 apply_all 이 필터를 **처음부터 다시** 걸게 한다.
 
@@ -388,6 +432,61 @@ class _MacChromaKey:
         return done
 
     # ── 진단: 실제로 투명해졌는지 화면 합성 결과를 직접 읽는다 ──────────
+    def grab_win(self, want_w, want_h=None):
+        """그 창 하나를 PIL 그림으로 찍는다. 못 찍으면 None.
+
+        **화면 기록 권한이 필요 없다** — 자기 앱 창만 찍기 때문이다.
+        맥에서 PIL.ImageGrab 은 `screencapture` 를 따로 실행하는데
+        macOS 15 부터 그것이 권한 대상이라, 브리핑을 찍을 때마다 허용
+        창이 떴다 (사가 진단서 · .error.log 에 7건). 겹친 창이 안 박히는
+        덤도 따라온다 (지뢰 64 와 같은 이야기).
+        """
+        try:
+            from PIL import Image
+        except Exception:
+            return None
+        try:
+            self._cg.CGWindowListCreateImage.restype = ctypes.c_void_p
+            self._cg.CGWindowListCreateImage.argtypes = [
+                _CGRect, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+            null = _CGRect(_CGPoint(float("inf"), float("inf")), _CGSize(0, 0))
+            for w in self.windows():
+                fr = self._msg(w, "frame", restype=_CGRect)
+                if abs(fr.size.width - want_w) > 2:
+                    continue
+                if want_h is not None and abs(fr.size.height - want_h) > 2:
+                    continue
+                wid = self._msg(w, "windowNumber", restype=ctypes.c_long)
+                img = self._cg.CGWindowListCreateImage(
+                    null, 1 << 3, ctypes.c_uint32(wid), 1)
+                if not img:
+                    return None
+                rep9 = self._msg(
+                    self._msg(self._cls("NSBitmapImageRep"), "alloc"),
+                    "initWithCGImage:", img, argtypes=(ctypes.c_void_p,))
+                data = self._msg(rep9, "bitmapData")
+                if not data:
+                    return None
+                pw = self._msg(rep9, "pixelsWide", restype=ctypes.c_long)
+                ph = self._msg(rep9, "pixelsHigh", restype=ctypes.c_long)
+                row = self._msg(rep9, "bytesPerRow", restype=ctypes.c_long)
+                spp = self._msg(rep9, "samplesPerPixel", restype=ctypes.c_long)
+                if pw < 2 or ph < 2 or spp < 3:
+                    return None
+                buf = ctypes.string_at(data, row * ph)
+                mode9 = "RGBA" if spp >= 4 else "RGB"
+                im9 = Image.frombuffer(mode9, (int(pw), int(ph)), buf,
+                                       "raw", mode9, int(row), 1)
+                im9 = im9.convert("RGB")
+                if want_h is not None and (im9.width != int(want_w)
+                                           or im9.height != int(want_h)):
+                    im9 = im9.resize((int(want_w), int(want_h)),
+                                     Image.LANCZOS)
+                return im9
+        except Exception as e:
+            self.err = repr(e)
+        return None
+
     def probe(self, want_w, pts):
         """가로 폭이 want_w 인 창을 캡처해 지정 좌표의 ARGB 를 돌려준다.
 
@@ -678,6 +777,9 @@ def _mac_yt_player_main():
             pass
 
     def go_watch(vid):
+        # **부모에게 알린다.** 예전에는 그냥 돌아가서 '어느 곡이 임베드에
+        # 막혀 우회했는지' 가 어디에도 안 남았다 (지뢰 131).
+        emit({"watchfb": str(vid or "")[:16]})
         st["mode"] = "watch"
         st["esent"] = False
         page_ready[0] = True
@@ -2148,8 +2250,18 @@ class TeamStrip:
                     self.hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
             else:
                 # 맥 — 다른 앱(클립스튜디오) 창이 앞으로 오면 lift 만으로는
-                # 못 이긴다. '항상 위'를 매번 다시 건다 (1초에 한 번).
-                self.top.attributes("-topmost", True)
+                # 못 이긴다. 다만 **꺼져 있을 때만** 다시 건다 — 조건 없이
+                # 매번 걸면 깜빡인다 (지뢰 15). 진짜 창 층이 내려간 경우는
+                # _z_pin 의 pin_top 이 재서 올린다.
+                skip9 = False
+                if IS_MAC:
+                    try:
+                        skip9 = str(self.top.attributes(
+                            "-topmost")) in ("1", "True")
+                    except Exception:
+                        skip9 = False
+                if not skip9:
+                    self.top.attributes("-topmost", True)
                 self.top.lift()
         except Exception:
             pass
@@ -4256,8 +4368,47 @@ def monitor_at(x, y):
     return 0, 0, 1920, 1080
 
 
+def _mac_visible_rects():
+    """맥 화면들의 **작업 영역** 목록 (Tk 좌표 · l, t, r, b). 못 구하면 [].
+
+    `NSScreen.visibleFrame` 은 Dock 과 메뉴 막대를 뺀 자리다. 이걸 안 쓰면
+    창이 Dock 아래에 깔린다 (사가 진단서 05번). 좌표 뒤집기는
+    `_screens_union` 과 같은 규칙 — 주 화면 왼쪽 위가 0,0 인 Tk 좌표로
+    옮긴다 (지뢰 55 — 규칙을 두 벌 두지 않는다).
+    """
+    if not IS_MAC:
+        return []
+    try:
+        from AppKit import NSScreen
+        scr = list(NSScreen.screens())
+        if not scr:
+            return []
+        p = scr[0].frame()
+        top = float(p.origin.y) + float(p.size.height)
+        out = []
+        for sc in scr:
+            v = sc.visibleFrame()
+            x0 = float(v.origin.x)
+            y0 = top - (float(v.origin.y) + float(v.size.height))
+            out.append((int(x0), int(y0),
+                        int(x0 + float(v.size.width)),
+                        int(y0 + float(v.size.height))))
+        return out
+    except Exception:
+        return []
+
+
 def monitor_work(x, y):
-    """그 점이 놓인 화면의 '작업 영역' (작업표시줄 제외). 창 자리 계산용."""
+    """그 점이 놓인 화면의 '작업 영역' (작업표시줄·Dock 제외). 창 자리 계산용."""
+    if IS_MAC:
+        # Dock·메뉴 막대를 뺀 자리 — 안 빼면 창이 Dock 아래에 깔린다
+        for r in _mac_visible_rects():
+            if r[0] <= x < r[2] and r[1] <= y < r[3]:
+                return r
+        # 점이 어느 화면에도 안 걸리면(화면 밖) 첫 화면의 작업 영역으로
+        got9 = _mac_visible_rects()
+        if got9:
+            return got9[0]
     if IS_WIN:
         try:
             hmon = ctypes.windll.user32.MonitorFromPoint(_POINT(x, y), 2)
@@ -5763,15 +5914,42 @@ def _screen_scale(root=None):
 HELLO_FILE = ".hello"        # 두 번째로 실행됐다는 신호 (먼저 뜬 캐릭터가 읽는다)
 
 
-def already_running(char):
+def already_running(char, state_dir=None):
     """같은 캐릭터가 이미 떠 있으면 True. 실패하면 False(그냥 실행).
 
     이 프로세스가 이미 자물쇠를 쥐고 있으면 False다. 안 그러면 같은
     프로세스에서 두 번 물었을 때 자기 자신을 보고 '이미 떠 있다'고 답한다.
     """
-    if not IS_WIN:
-        return False
     if globals().get("_INSTANCE_LOCK"):
+        return False
+    if not IS_WIN:
+        # **맥에도 필요하다.** 두 번 켜면 캐릭터가 둘이 되고, 두 프로세스가
+        # 같은 기록 파일에 번갈아 써서 나중에 닫힌 쪽이 이긴다 (지뢰 36 —
+        # 사가 진단서가 맥에 이 방어가 없다고 짚었다).
+        # **fcntl 은 안 쓴다** — 지금까지 안 쓰던 모듈이라 굳힌 맥 앱에
+        # 안 들어 있을 수 있다 (지뢰 21 · hmac 사건). 이미 쓰는 os 만으로.
+        try:
+            base9 = state_dir or os.path.join(HERE, str(char))
+            p9 = os.path.join(base9, ".pid")
+            old9 = 0
+            try:
+                with open(p9, encoding="utf-8") as fp9:
+                    old9 = int((fp9.read() or "0").strip() or 0)
+            except Exception:
+                old9 = 0
+            if old9 and old9 != os.getpid():
+                try:
+                    os.kill(old9, 0)       # 살아 있으면 예외가 안 난다
+                    return True
+                except Exception:
+                    pass                   # 죽은 프로세스 — 이어받는다
+            tmp9 = p9 + ".tmp"             # 지뢰 35 — 통째로 갈아 끼운다
+            with open(tmp9, "w", encoding="utf-8") as fp9:
+                fp9.write(str(os.getpid()))
+            os.replace(tmp9, p9)
+            globals()["_INSTANCE_LOCK"] = p9
+        except Exception:
+            return False
         return False
     try:
         name = "ena-mascot-" + str(char)
@@ -5796,6 +5974,15 @@ def release_instance_lock():
     """
     h = globals().pop("_INSTANCE_LOCK", None)
     if not h:
+        return
+    if isinstance(h, str):
+        # 맥 — 자물쇠가 PID 파일이다. **반드시 지워야 한다.** 안 지우면
+        # 새로 뜬 쪽이 그 PID(아직 살아 있는 나)를 보고 '이미 떠 있다'며
+        # 물러나고, 곧 이쪽이 닫혀서 캐릭터가 하나도 안 남는다.
+        try:
+            os.remove(h)
+        except Exception:
+            pass
         return
     try:
         ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(h))
@@ -6396,7 +6583,7 @@ class Mascot:
         # 프로세스가 같은 기록 파일에 번갈아 써서 작업 시간·할 일이 서로를
         # 덮어쓴다 (나중에 닫힌 쪽이 이긴다). 그냥 꺼지면 사람은 안 켜진 줄
         # 알므로, 먼저 뜬 쪽이 대답하도록 신호를 남기고 끝낸다.
-        if not preview and already_running(self.char):
+        if not preview and already_running(self.char, self.state_dir):
             say_hello(self.state_dir)
             raise SystemExit(0)
         # 업데이트가 끊겨 파츠가 섞였으면 복구 (알림 신호도 여기서 남는다).
@@ -6859,6 +7046,8 @@ class Mascot:
         # ImageTk 를 담을지가 이 값으로 갈린다 (_pic).
         self._sheet = None           # 지금 몸을 모으고 있는 시트
         self._char_lay = None        # 몸 레이어 창 (처음 그릴 때 만든다)
+        self._mac_keep_job = None    # 맥 투명 유지 바퀴 예약 (하나만 돈다)
+        self._mac_z_note = 0.0       # 창 층 되올림을 마지막으로 남긴 시각
         self._smooth_why = ""        # 껐다면 왜 껐나 (진단)
         self._smooth_spill = 0       # 시트가 못 알아봐 캔버스로 넘어간 그림 수
         self._soft_cache = {}        # 매끈한 둥근 도형 그림 (카드·말풍선·단추)
@@ -11635,6 +11824,15 @@ class Mascot:
             return ("WebView2 런타임을 설치해 주세요",
                     "음악을 켜려면 마이크로소프트 WebView2 런타임이 "
                     "필요해요. 무료로 받을 수 있어요.", "webview2")
+        # 맥 갈래 — 기록에서 실제로 본 문장에만 길을 단다 (지뢰 131)
+        if "certificate_verify_failed" in s or "ssl" in s:
+            return ("인터넷 인증서를 못 읽었어요",
+                    "음악을 켜려면 인터넷이 필요해요. 회사·학교 "
+                    "네트워크라면 잠깐 다른 망에서 해 보세요.", "")
+        if "no module named" in s:
+            return ("앱을 새로 받아 주세요",
+                    "이 앱에는 음악에 필요한 부품이 안 들어 있어요. "
+                    "새로 받은 앱으로 바꾸면 돼요.", "")
         return ("음악을 켤 수 없어요 — 자세한 건 .yt_err.txt",
                 "음악을 켤 수 없어요.", "")
 
@@ -12104,6 +12302,14 @@ class Mascot:
                 self._yt_fatal = str(s.get("fatal"))[:300]
                 self._safe("yt_fatal", self._yt_log,
                            "재생기가 못 떴어요: " + self._yt_fatal)
+            if s.get("nav_fail"):
+                # 재생기가 페이지를 못 띄운 이유 — 예전에는 아무도 안
+                # 읽어서 보내는 줄만 있었다 (지뢰 131)
+                self._safe("yt_nav", self._yt_log,
+                           "페이지를 못 띄움: " + str(s["nav_fail"])[:200])
+            if s.get("watchfb"):
+                self._safe("yt_wfb", self._yt_log,
+                           "임베드가 막혀 우회: " + str(s["watchfb"]))
             if s.get("vw"):
                 # 영상 창이 어디에 어떤 모습으로 있는지 (맥 '까맣게 나옴')
                 self._safe("yt_vw", self._yt_log, "영상 창: " + str(s["vw"]))
@@ -12995,9 +13201,31 @@ class Mascot:
         올릴 필요가 있을 때만 올린다. 필요 없는데 주기적으로 밀어 넣으면
         눈에 띄게 깜빡인다 (그림자에서 겪은 일).
         """
-        if (not IS_WIN or self._fs_hidden or not self._main_hwnd
-                or not self.us.get("topmost", True)
+        if (self._fs_hidden or not self.us.get("topmost", True)
                 or now - self._z_pin_at < self.Z_PIN):
+            return
+        if IS_MAC:
+            # 맥 — 창 층을 재서 내려간 것만 올린다 (요청: 타이머와 친구
+            # 띠가 클립스튜디오 위에 있어야 한다). 메뉴가 떠 있는 동안은
+            # 쉰다 — 메뉴는 캐릭터에 안 가리려고 일부러 내려 두므로.
+            if self._menu_up:
+                return
+            self._z_pin_at = now
+            ck9 = getattr(self, "_mac_ck", None)
+            if ck9 is None:
+                return
+            try:
+                up9, seen9 = ck9.pin_top()
+            except Exception:
+                return
+            if up9 and now - getattr(self, "_mac_z_note", 0) > 60:
+                # 올린 적이 있을 때만 남긴다 (지뢰 51 — 안 남기면 '멀쩡한
+                # 것'과 '이 길이 안 도는 것'이 안 갈린다)
+                self._mac_z_note = now
+                self._safe("mac_zlog", self._mac_log,
+                           "창 층 되올림 %d/%d" % (up9, seen9))
+            return
+        if not IS_WIN or not self._main_hwnd:
             return
         # **우클릭 메뉴가 떠 있는 동안은 쉰다.** 메뉴는 캐릭터에 안 가리려고
         # '항상 위'를 일부러 내려 두는데(_menu_popup), 아래 되걸기가 그걸
@@ -13184,6 +13412,40 @@ class Mascot:
         except Exception:
             pass
 
+    def _all_screens_box(self):
+        """모든 화면을 아우르는 상자 (x, y, w, h).
+
+        **`_screen_box` 와 다른 것이다** — 그쪽은 캐릭터가 놓인 화면 하나의
+        작업 영역(l,t,r,b)이다 (지뢰 85 — 새 이름은 grep 부터).
+
+        맥은 vroot 도 **주 화면만** 알려 준다 — 보조 화면에 둔 창이 켤
+        때마다 주 화면으로 돌아간 원인이다 (사가 제보).
+        """
+        rect = _mac_desktop_rect() if IS_MAC else None
+        if rect:
+            return rect
+        try:
+            vx = (self.root.winfo_vrootx()
+                  if hasattr(self.root, "winfo_vrootx") else 0)
+            vy = (self.root.winfo_vrooty()
+                  if hasattr(self.root, "winfo_vrooty") else 0)
+            vw = max(self.root.winfo_vrootwidth(),
+                     self.root.winfo_screenwidth())
+            vh = max(self.root.winfo_vrootheight(),
+                     self.root.winfo_screenheight())
+            return (vx, vy, int(vw), int(vh))
+        except Exception:
+            return (0, 0, 1920, 1080)
+
+    def _box_on_screen(self, x, y, w, h, edge=40):
+        """그 상자가 어느 화면엔가 걸치는가 (edge 만큼은 보여야 한다)."""
+        try:
+            vx, vy, vw, vh = self._all_screens_box()
+            return not (x + w < vx + edge or x > vx + vw - edge
+                        or y + h < vy + edge or y > vy + vh - edge)
+        except Exception:
+            return True          # 못 재면 그대로 둔다
+
     def _load_win_pos(self, sw, sh):
         """지난번에 두었던 자리. 없거나 화면 밖이면 기본 자리(오른쪽 아래)로.
 
@@ -13199,20 +13461,8 @@ class Mascot:
             x, y = int(d["win_x"]), int(d["win_y"])
         except Exception:
             return base
-        # 맥은 vroot 도 **주 화면만** 알려 준다 — 보조 화면에 둔 캐릭터가
-        # 켤 때마다 주 화면 기본 자리로 돌아간 원인 (사가 제보).
-        rect = _mac_desktop_rect() if IS_MAC else None
-        if rect:
-            vx, vy, vw, vh = rect
-        else:
-            vx = (self.root.winfo_vrootx()
-                  if hasattr(self.root, "winfo_vrootx") else 0)
-            vy = (self.root.winfo_vrooty()
-                  if hasattr(self.root, "winfo_vrooty") else 0)
-            vw = max(self.root.winfo_vrootwidth(), sw)
-            vh = max(self.root.winfo_vrootheight(), sh)
-        if (x + self.W < vx + 40 or x > vx + vw - 40
-                or y + self.H < vy + 40 or y > vy + vh - 40):
+        # 화면 상자는 _screen_box 한 곳에서 잰다 (지뢰 55)
+        if not self._box_on_screen(x, y, self.W, self.H):
             return base                      # 그 자리에 이제 화면이 없다
         return (x, y)
 
@@ -16179,6 +16429,21 @@ class Mascot:
                         top = im.height - wh - bw
                         if 0 <= bw and 0 <= top and im.width >= ww + bw:
                             im = im.crop((bw, top, bw + ww, top + wh))
+                if im is None and IS_MAC:
+                    # **맥에서는 ImageGrab 을 부르지 않는다.** 그것은
+                    # `screencapture` 를 따로 실행하는데 macOS 15 부터
+                    # 화면 기록 권한 대상이라, 브리핑마다 허용 창이 떴다
+                    # (사가 진단서 · 7건). 자기 창만 찍는 길로 간다.
+                    ck9 = getattr(self, "_mac_ck", None)
+                    if ck9 is not None:
+                        # _safe_str 로 감싸면 안 된다 — 값을 돌려주는
+                        # 함수다 (지뢰 63·110). 직접 try 로 감싼다.
+                        try:
+                            im = ck9.grab_win(ww, wh)
+                        except Exception:
+                            im = None
+                    if im is None:
+                        return              # 도장판 그림만 없다
                 if im is None:
                     from PIL import ImageGrab
                     x = win.winfo_rootx()
@@ -19497,8 +19762,12 @@ class Mascot:
         self._tm_back = time.time()
 
     TEAM_BACK = 120.0            # 되살린 방을 확인할 때까지 기다리는 시간
-    TEAM_HOST_GONE = 240.0       # 방장 자리가 이만큼 안 보이면 방이 죽은 것
-    TEAM_MEMBER_GONE = 240.0     # 참가자 자리가 이만큼 안 보이면 명단에서 뺀다
+    # **명단 간격의 네 배로 잡는다.** 홈 창이 닫혀 있으면 명단을 120초에
+    # 한 번 받아 오는데(IDLE_LIST) 240초는 표본이 둘뿐이라, 두 번만 놓치면
+    # 친구가 사라지고 방이 접혔다. 게다가 띠가 뜨는 상황이 곧 홈 창도
+    # 닫힌 상태라 가장 느릴 때다 (사가 진단서).
+    TEAM_HOST_GONE = 500.0       # 방장 자리가 이만큼 안 보이면 방이 죽은 것
+    TEAM_MEMBER_GONE = 500.0     # 참가자 자리가 이만큼 안 보이면 명단에서 뺀다
     TEAM_REINVITE = 45.0         # 답 없는 초대장을 다시 보내는 간격
     TEAM_REST_BACK = 120.0       # '잠깐 쉬기' 중 이만큼 계속 일하면 자동 복귀
     TEAM_BYE_ARM = 8.0           # 방장 마무리 — 두 번째 누름을 기다리는 시간
@@ -19852,9 +20121,18 @@ class Mascot:
         pos = self.us.get("pomo_strip_pos")
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
             try:
-                return rx + int(pos[0]), ry + int(pos[1])
+                x9, y9 = rx + int(pos[0]), ry + int(pos[1])
             except (TypeError, ValueError):
-                pass
+                x9 = None
+            if x9 is not None:
+                if self._box_on_screen(x9, y9, im.width,
+                                       im.height):
+                    return x9, y9
+                # **화면 밖이면 저장된 자리를 버린다.** 안 그러면 한 번
+                # 밖으로 나간 띠는 우클릭도 못 해 되돌릴 길이 없다
+                # (사가 진단서 — 캐릭터 창은 이미 이 검사를 한다).
+                self.us.pop("pomo_strip_pos", None)
+                self._safe("strip_save", self._save_settings)
         return rx + rw + int(self._ui(12)), ry + rh - im.height
 
     def _strip_drag(self, dx, dy):
@@ -20430,7 +20708,7 @@ class Mascot:
             pass
         u, cd = self._ui, self.card
         line = self._tint(cd["fill"], 0.55)
-        W, H = int(u(230)), int(u(202))
+        W, H = int(u(230)), int(u(222))     # '자리 초기화' 한 줄만큼 더
         win = tk.Toplevel(self.root)
         self._strip_menu_ref = win
         win.title("친구들 띠")
@@ -20477,7 +20755,8 @@ class Mascot:
                                    key, lo, hi))
             y2 = u(146)
             cv.create_line(u(12), y2, W - u(12), y2, fill=line)
-            for j, (lab, act) in enumerate((("뽀모도로 창 열기", "open"),
+            for j, (lab, act) in enumerate((("자리 초기화", "home"),
+                                            ("뽀모도로 창 열기", "open"),
                                             ("바탕화면에서 숨기기", "hide"))):
                 yy = y2 + u(14) + j * u(20)
                 cv.create_text(u(14), yy, anchor="w", text=lab,
@@ -20497,7 +20776,14 @@ class Mascot:
             for hit in st["hits"]:
                 if hit[0] <= e.x <= hit[2] and hit[1] <= e.y <= hit[3]:
                     self._safe("ui_click", self._ui_click)
-                    if hit[4] == "open":
+                    if hit[4] == "home":
+                        # 끌어 옮긴 자리를 버리고 캐릭터 옆으로 돌아온다
+                        self.us.pop("pomo_strip_pos", None)
+                        self._safe("strip_save", self._save_settings)
+                        self._strip_key = None
+                        self._strip_at = 0.0
+                        self._safe("strip_follow", self._strip_follow)
+                    elif hit[4] == "open":
                         win.destroy()
                         self._safe("pomo_win", self._pomo_win)
                     elif hit[4] == "hide":
@@ -32732,8 +33018,12 @@ class Mascot:
             self._room_stop()
             self._room_start()
             return
+        # **같이하기 중에는 늦추지 않는다.** 명단이 늦게 오면 친구가
+        # 사라지고 방이 접힌다 — 그런데 띠가 뜨는 상황(뽀모도로 창을 닫은
+        # 상태)이 곧 홈 창도 닫힌 상태라 가장 느릴 때였다 (사가 진단서).
         self.room_net.idle = (self.room_win is None
-                              and not self._pl_friends_open())
+                              and not self._pl_friends_open()
+                              and not (self._tm or {}).get("state"))
         if now - self._room_push > (10.0 if self.room_win is None else 2.0):
             self._room_push = now
             self.room_net.push(self._room_state_now(for_net=True))
@@ -49434,8 +49724,19 @@ class Mascot:
                        sig9 or "?"))
         except Exception as e:
             self._mac_log(f"투명 유지 실패 → {e!r}")
+        # **앞에 걸어 둔 예약을 지우고 새로 건다.** 이 함수는 바깥에서도
+        # 불리는데(창 만들 때 둘, 하드모드 감시 창마다 하나) 그때마다 새
+        # 사슬이 생기고 기존 것은 안 멈췄다 — 진단서 실측으로 한 세션에
+        # 34개까지 늘어 초당 17번 모든 창을 훑고 있었다 (렉의 한 뿌리).
         try:
-            self.root.after(2000, self._mac_keep_transparent)
+            job9 = getattr(self, "_mac_keep_job", None)
+            if job9:
+                try:
+                    self.root.after_cancel(job9)
+                except Exception:
+                    pass
+            self._mac_keep_job = self.root.after(
+                2000, self._mac_keep_transparent)
         except Exception:
             pass
 
