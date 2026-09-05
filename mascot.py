@@ -806,6 +806,17 @@ def _mac_yt_player_main():
                 d = json.loads(body) if isinstance(body, str) else dict(body)
             except Exception:
                 return
+            if "lg" in d:
+                # 로그인 확인의 답 (check_login 이 보낸 스크립트가 올린다)
+                try:
+                    txt9 = str(d.get("lg") or "")
+                    if txt9.endswith("|111"):
+                        end_login(True)
+                    elif d.get("tell"):
+                        emit({"lg": txt9[:80]})
+                except Exception:
+                    pass
+                return
             if d.get("watch"):
                 dur = float(d.get("d") or 0.0)
                 tt = float(d.get("t") or 0.0)
@@ -987,6 +998,13 @@ def _mac_yt_player_main():
         except Exception:
             pass
 
+    # 영상 창의 층. 플레이리스트 창(Tk -topmost)이 3(NSFloatingWindowLevel)
+    # 인데 0.7초마다 다시 올라와서, 같은 3이면 영상이 그 뒤에 묻힌다 —
+    # 화면에는 '까맣다'로만 보인다 (사가 후속 진단서: 창 자체는 정상).
+    # 한 층 위에 두면 순서 싸움이 없다. 우리 앱이 맨 앞일 때만 보이므로
+    # 남의 창 위에 뜨는 일도 없다.
+    VID_LEVEL = 4
+
     def vid_apply():
         """지금 상태대로 창을 보이거나 숨긴다."""
         try:
@@ -1073,7 +1091,7 @@ def _mac_yt_player_main():
         if st["vid_on"]:
             place(*st.get("box", (0, 0, 400, 300)))
             round_corners(st.get("radius", 0))
-            win.setLevel_(3)          # NSFloatingWindowLevel
+            win.setLevel_(VID_LEVEL)  # 플레이리스트 창 위
         else:
             place(0, 0, 400, 300)
             win.setLevel_(0)
@@ -1094,27 +1112,21 @@ def _mac_yt_player_main():
         안 됐다고 하지' 로만 보인다 — 어느 주소에서 무엇을 읽었는지
         남겨야 갈린다 (지뢰 51·131).
         """
+        # 답은 postMessage 로 받는다 (Handler 의 "lg"). evaluateJavaScript 의
+        # completion handler 는 굳힌 앱에서 **한 번도 안 불렸다** — 번들에
+        # pyobjc 의 WebKit 메타데이터가 없어 파이썬 콜백이 블록으로 안
+        # 넘어간다 (사가 후속 진단서: 로그인 세 번에 기록 0줄). 재생 페이지가
+        # 이미 쓰는 postMessage 길은 확실하고, 메시지 핸들러는 페이지가
+        # 구글로 바뀌어도 그대로 살아 있다.
         js = ("(function(){try{var h=location.host||'';"
               "var y=(h.indexOf('youtube.com')>=0);"
               "var c=(typeof window.ytcfg!=='undefined');"
               "var i=c?(!!ytcfg.get('LOGGED_IN')):false;"
-              "return h+'|'+(y?1:0)+(c?1:0)+(i?1:0);}"
-              "catch(e){return 'err|000'}})()")
-
-        def done(val, err):
-            try:
-                txt9 = str(val or "")
-                if txt9.endswith("|111"):
-                    end_login(True)
-                elif tell:
-                    emit({"lg": txt9[:80]})
-            except Exception:
-                pass
-
-        try:
-            web.evaluateJavaScript_completionHandler_(js, done)
-        except Exception:
-            pass
+              "var s=h+'|'+(y?1:0)+(c?1:0)+(i?1:0);"
+              "window.webkit.messageHandlers.yt.postMessage("
+              "JSON.stringify({lg:s,tell:%d}));}"
+              "catch(e){}})()" % (1 if tell else 0))
+        run_js(js)
 
     class WinDelegate(NSObject):
         def windowShouldClose_(self, sender):
@@ -1216,7 +1228,7 @@ def _mac_yt_player_main():
                     place(*st["box"])
                     round_corners(st["radius"])
                     try:
-                        win.setLevel_(3)      # NSFloatingWindowLevel
+                        win.setLevel_(VID_LEVEL)   # 플레이리스트 창 위
                         win.setIgnoresMouseEvents_(True)
                     except Exception:
                         pass
@@ -7703,6 +7715,7 @@ class Mascot:
         self._room_song_box = {}     # 말풍선 그대로의 상자 (마퀴용)
         self._song_hover = None      # 커서가 올라간 노래 말풍선
         self._song_liked = {}        # (slot, 주소) → 마지막으로 보낸 시각
+        self._safe("song_liked", self._song_liked_load)
         self._mq_cache = {}          # 마퀴 글자 띠 (상한 있음)
         self._pl_open = False        # 모두의 플레이리스트 패널 펼침
         self._pl_on = False          # 플레이리스트로 재생 중인가
@@ -12313,9 +12326,10 @@ class Mascot:
             if s.get("vw"):
                 # 영상 창이 어디에 어떤 모습으로 있는지 (맥 '까맣게 나옴')
                 self._safe("yt_vw", self._yt_log, "영상 창: " + str(s["vw"]))
-            if s.get("lg"):
+            if "lg" in s:
                 # 재생기가 로그인 창에서 무엇을 보고 있는지 (지뢰 51·131 —
-                # 보내는 진단은 받는 쪽까지 만들어야 뜻이 있다)
+                # 보내는 진단은 받는 쪽까지 만들어야 뜻이 있다). 빈 글자도
+                # '답이 왔다'는 뜻이라 열쇠의 있고 없음으로 본다.
                 self._safe("yt_lg", self._yt_log, "로그인 화면: " + str(s["lg"]))
             was = self._yt.get("title", "")
             self._yt = s
@@ -13641,8 +13655,12 @@ class Mascot:
         # 어제 몫은 여기서 끝난다. _hist_add 를 탔으면 이미 0이지만,
         # 기록이 꺼져 있거나 1분도 안 된 날은 그 함수를 안 지나가서
         # 어제 획·클릭이 오늘로 새어 들어왔다.
+        # work·other·idle 도 어제 몫이다 — 안 지워서 06시를 넘길 때마다
+        # 그대로 쌓였고, 브리핑에 '딴짓 33시간 · 휴식 20시간'이 떴다
+        # (성실이 제보). 작업 시간은 _today_secs 가 따로 재서 티가 안 났다.
         for k2 in ("strokes", "keys", "clicks", "undo", "px",
-                   "best", "runs", "_run", "first", "last"):
+                   "best", "runs", "_run", "first", "last",
+                   "work", "other", "idle"):
             self.stat[k2] = 0 if isinstance(self.stat.get(k2), int) else 0.0
         self._safe("timer_save", self._timer_save)
         if auto9:
@@ -16029,10 +16047,15 @@ class Mascot:
             streak += 1
             i += 1
         dist = self._dist_m()
+        # 딴짓·휴식은 하루 안에 있어야 한다. 이미 며칠치가 쌓인 사람
+        # (_day_roll 이 안 지우던 판)은 여기서 눌러 보여 주고, 다음 06시에
+        # 지워진다.
+        other9, idle9 = self._day_comp_cap(
+            today, total, int(s.get("other", 0)), int(s.get("idle", 0)))
         return {
             "day": today, "total": total, "goal": goal,
             "pct": min(int(total / goal * 100), 999) if goal else 0,
-            "other": int(s.get("other", 0)), "idle": int(s.get("idle", 0)),
+            "other": other9, "idle": idle9,
             "best": int(s.get("best", 0)), "runs": int(s.get("runs", 0)),
             "first": float(s.get("first", 0) or 0),
             "last": float(s.get("last", 0) or 0),
@@ -16044,6 +16067,30 @@ class Mascot:
             "week": sum(v for _, v in last7), "streak": streak,
             "traced": self._kb is not None,   # 클릭·거리를 잴 수 있는 환경인가
         }
+
+    def _day_comp_cap(self, day, total, other, idle):
+        """딴짓·휴식을 '그 작업일에 흐른 시간' 안으로 누른다.
+
+        작업 + 딴짓 + 휴식이 하루(지난 날은 24시간, 오늘은 06시 이후 흐른
+        만큼)를 넘을 수 없다. 넘는 값은 어제 몫이 안 지워진 것이다.
+        """
+        cap9 = 86400.0
+        try:
+            if day == self._my_workday():
+                # 그 작업일이 시작된 시각 — 경계 시각을 짐작하지 않고
+                # _my_workday 가 그 날짜를 답하는 첫 시각을 찾는다
+                t0 = time.mktime(time.strptime(day, "%Y-%m-%d"))
+                for _i in range(48):
+                    if self._my_workday(t0) == day:
+                        break
+                    t0 += 1800.0
+                cap9 = max(0.0, time.time() - t0)
+        except Exception:
+            pass
+        room9 = max(0, int(cap9) - max(0, int(total)))
+        other = max(0, min(int(other), room9))
+        idle = max(0, min(int(idle), room9 - other))
+        return other, idle
 
     def _open_briefing(self, day_key=None, data=None):
         """오늘의 작업 브리핑 — 시계·구성·흔적·마일스톤·최근 7일.
@@ -24585,6 +24632,12 @@ class Mascot:
             return self._room_pl_songs()
         return self._pl_songs_mine()
 
+    @staticmethod
+    def _pl_list_id_ok(lst):
+        """펼칠 수 있는 재생목록 ID 인가 — RD…(유튜브 믹스)는 못 받아온다."""
+        lst = str(lst or "")
+        return bool(lst) and not lst.startswith("RD")
+
     def _pl_add(self, url):
         """주소 한 줄을 목록 끝에 넣는다. 넣었으면 True."""
         url = str(url or "").strip()[:400]
@@ -24597,10 +24650,13 @@ class Mascot:
         if any(str(it.get("u") or "") == url for it in cur):
             return False                      # 이미 있는 곡
         it9 = {"u": url, "t": "", "d": 0}
-        if lst and not vid:
+        if self._pl_list_id_ok(lst):
             # 재생목록 주소 — 곡들로 펼쳐 담는다. 유튜브에게 맡기면
             # (loadPlaylist) 다음 곡을 정하는 쪽이 둘이 되어 첫 곡만
-            # 되풀이된다 (지뢰 98)
+            # 되풀이된다 (지뢰 98). watch?v=…&list=… (재생 중에 복사한
+            # 주소)도 목록이다 — 사람은 '재생목록을 통째로 넣었다'고
+            # 생각한다 (제보 '토글이 안 보인다'). RD(믹스)는 페이지가
+            # 곡 목록을 안 주므로 그 영상 한 곡으로 둔다.
             it9["list"] = lst
             it9["t"] = "재생목록"
             it9["open"] = True
@@ -24942,7 +24998,10 @@ class Mascot:
                     room9 = self.PL_MAX - (n9 - 1)
                     keep9 = kids9[:max(1, min(self.PL_KIDS_MAX, room9))]
                     it["kids"] = keep9
-                    if str(it.get("t") or "") in ("", "재생목록"):
+                    if (str(it.get("t") or "") in ("", "재생목록")
+                            or not str(it.get("t") or "").startswith("재생목록")):
+                        # watch?v=&list= 로 담긴 것은 제목이 그 영상 것이라
+                        # 목록 머리로는 안 맞는다 — 목록 이름으로 바꾼다
                         it["t"] = "재생목록 (%d곡)" % len(keep9)
                     if (getattr(self, "_pl_src", "") == "mine"
                             and str(getattr(self, "_pl_url", "")) == url9):
@@ -24980,9 +25039,11 @@ class Mascot:
                 lst9 = str(it.get("list") or "")
                 if not lst9:
                     v9, l9 = self._yt_ids(u9)
-                    if not (l9 and not v9):
+                    if not self._pl_list_id_ok(l9):
                         continue          # 곡 하나짜리 — 펼칠 것이 없다
                     lst9 = l9
+                    it["list"] = lst9     # 옛 판이 한 곡으로 담아 둔 목록
+                    it.setdefault("open", True)
                 if self._pl_kids(it):
                     continue
                 if now9 - float(it.get("kt") or 0.0) < self.PL_EXPAND_RETRY:
@@ -30876,6 +30937,119 @@ class Mascot:
         except Exception:
             return False
 
+    SONG_LIKE_KEEP = 2 * 86400    # 내가 누른 좋아요를 기억하는 기간(초)
+
+    def _song_liked_load(self):
+        """내가 누른 좋아요를 설정에서 되살린다.
+
+        메모리에만 있어서 껐다 켜면 카드의 하트가 사라졌다 (제보). 오노추는
+        하루짜리라 이틀만 기억한다.
+        """
+        d = self.us.get("song_liked") if isinstance(
+            getattr(self, "us", None), dict) else None
+        if not isinstance(d, dict):
+            return
+        now = time.time()
+        for k9, t9 in d.items():
+            try:
+                slot9, url9 = str(k9).split("|", 1)
+                t9 = float(t9)
+            except Exception:
+                continue
+            if slot9 and url9 and now - t9 < self.SONG_LIKE_KEEP:
+                self._song_liked[(slot9, url9)] = t9
+
+    def _song_like_mark(self, slot, url):
+        """좋아요를 눌렀다 — 기억하고, 설정에 남기고, 자리 신호에 바로 싣는다."""
+        now = time.time()
+        self._song_liked[(str(slot), str(url))] = now
+        keep = {}
+        for (s9, u9), t9 in self._song_liked.items():
+            if now - float(t9) < self.SONG_LIKE_KEEP:
+                keep["%s|%s" % (s9, u9)] = int(round(float(t9)))
+        for k9 in sorted(keep, key=keep.get)[:-40]:     # 상한 (지뢰 18)
+            keep.pop(k9, None)
+        self.us["song_liked"] = keep
+        self._safe("settings", self._save_settings)
+        self._safe("room_push", self._room_push_now)
+
+    def _song_like_tag(self, slot, url):
+        """자리 신호에 싣는 표식 — '누구의:어느 영상'. 주소째면 세 배다."""
+        try:
+            vid9 = self._yt_ids(url)[0]
+        except Exception:
+            vid9 = ""
+        return "%s:%s" % (str(slot).replace("parts_", "", 1)[:20],
+                          vid9 or str(url)[-11:])
+
+    def _song_like_tags(self):
+        """내가 좋아요 누른 노래들의 표식 (자리 신호의 lk9)."""
+        now = time.time()
+        out = []
+        for (s9, u9), t9 in self._song_liked.items():
+            if now - float(t9) < self.SONG_LIKE_KEEP:
+                out.append(self._song_like_tag(s9, u9))
+        return out[-20:]
+
+    def _song_like_n(self, slot, sg):
+        """노래의 하트 수.
+
+        주인이 세서 되알리는 값(lk)과 '좋아요 표식(lk9)을 실은 자리 수' 중
+        큰 쪽이다. 주인이 꺼져 있거나 신호를 흘려도(2분이면 사라진다)
+        좋아요 누른 사람들의 자리에 표식이 남아 있어 모두가 같은 수를 본다.
+        """
+        if not isinstance(sg, dict):
+            return 0
+        lk = int(sg.get("lk") or 0)
+        url = str(sg.get("u") or "")
+        slot = str(slot or "")
+        if not url:
+            return lk
+        tag9 = self._song_like_tag(slot, url)
+        likers = set()
+        if (slot, url) in self._song_liked:
+            likers.add(self.char)
+        rows = list(self.room_people or [])
+        try:
+            for s9, w9 in (self._room_who_get() or {}).items():
+                if isinstance(w9, dict):
+                    rows.append(dict(w9, slot=s9))
+        except Exception:
+            pass
+        for q in rows:
+            s9 = str(q.get("slot") or "")
+            if not s9 or s9 == slot:
+                continue
+            tags9 = q.get("lk9")
+            if isinstance(tags9, (list, tuple)) and tag9 in tags9:
+                likers.add(s9)
+        return max(lk, len(likers))
+
+    def _song_like_count(self, ev):
+        """내 오노추에 온 좋아요를 센다 — '누가 눌렀나'로 한 사람당 하나.
+
+        누르는 쪽은 다시 보내도 되게 풀어 두었으므로 (옛 버전에게 흘린
+        좋아요를 재시도할 수 있게) 중복 거르기는 여기서 한다. 셌으면 True.
+        """
+        su, _t2 = self._room_song()
+        frm = str(ev.get("f") or "")
+        if not su:
+            return False
+        d2 = self.us.get("room_song_likes") or {}
+        if d2.get("u") != su:
+            d2 = {"u": su, "n": 0, "who": []}
+        likers = list(d2.get("who") or [])
+        if frm and frm in likers:
+            return False
+        if frm:
+            likers.append(frm)
+        self.us["room_song_likes"] = {
+            "u": su, "n": int(d2.get("n") or 0) + 1,
+            "who": likers[-30:]}
+        self._save_settings()
+        self._room_push_now()
+        return True
+
     def _room_song(self):
         """오늘의 노래 (주소, 제목). 날이 바뀌면 비워진다."""
         if str(self.us.get("room_song_day") or "") != self._my_workday():
@@ -31347,6 +31521,14 @@ class Mascot:
                 # 열쇠가 없으면 아무것도 안 그린다 (지뢰 30: 깃발 대신
                 # 값의 있고 없음으로).
                 out["cp"] = ch9
+        # 내가 좋아요 누른 노래들 — 받는 쪽이 이것으로 하트를 센다.
+        # 주인이 세서 되알리는 길(lk)은 주인이 켜져 있어야만 통했다.
+        try:
+            tags9 = self._song_like_tags()
+            if tags9:
+                out["lk9"] = tags9
+        except Exception:
+            pass
         out["v"] = self._my_build()      # 실행 중 판 번호 (버전 확인용)
         if len(getattr(self, "skins", []) or []) > 1:
             # 지금 입은 폼 — 홈·뽀모도로 창·바탕화면 띠의 앉은 모습이
@@ -34171,6 +34353,11 @@ class Mascot:
                 and not self._recv_ok(ev.get("f"), ev.get("k"))):
             return
         if self.us.get("room_mute") and ev.get("f") != self.char:
+            if ev.get("k") == "songlike":
+                # 반응을 꺼 둔 사람도 좋아요는 **센다** — 안 세면 그 사람
+                # 노래의 하트가 남에게 영영 안 보인다 (제보 '하트를 보내도
+                # 적용이 안 된다'). 말풍선·웃음만 건너뛴다.
+                self._safe("songlike_mute", self._song_like_count, ev)
             return
         who = ""
         mine = (ev.get("f") == self.char)     # 내가 나에게 (혼자 눌러 본 것)
@@ -34281,26 +34468,8 @@ class Mascot:
             self._say(("%s님이 감시하고 있어요!" % who) if who
                       else "누가 감시하고 있어요!", 4.0, big=True)
         elif kind == "songlike":
-            # 내 오노추에 좋아요 — '누가 눌렀나'로 세서 한 사람당 하나만.
-            # 누르는 쪽은 다시 보내도 되게 풀어 두었으므로 (옛 버전에게
-            # 흘린 좋아요를 재시도할 수 있게), 중복 거르기는 여기서 한다.
-            su, _t2 = self._room_song()
-            frm = str(ev.get("f") or "")
-            counted = False
-            if su:
-                d2 = self.us.get("room_song_likes") or {}
-                if d2.get("u") != su:
-                    d2 = {"u": su, "n": 0, "who": []}
-                likers = list(d2.get("who") or [])
-                if not frm or frm not in likers:
-                    if frm:
-                        likers.append(frm)
-                    self.us["room_song_likes"] = {
-                        "u": su, "n": int(d2.get("n") or 0) + 1,
-                        "who": likers[-30:]}
-                    self._save_settings()
-                    self._room_push_now()
-                    counted = True
+            # 내 오노추에 좋아요 — 세는 규칙은 _song_like_count 에 있다
+            counted = bool(self._song_like_count(ev))
             if counted:
                 self.smile_until = max(self.smile_until, now + 3.0)
                 self._say(("%s 내 노래를 좋아해요 ♥" % _josa(who)) if who
@@ -36574,7 +36743,7 @@ class Mascot:
             sg = p.get("sg") if isinstance(p.get("sg"), dict) else None
             tagt = ""
             if sg and self._song_ok(sg.get("u")):
-                lk = int(sg.get("lk") or 0)
+                lk = self._song_like_n(str(p.get("slot") or ""), sg)
                 tagt = "♪" + (" ♥%d" % min(lk, 99) if lk else "")
             # 이름·레벨은 흰 알약 위에 — 진한 방 이미지에서도 읽히게
             self._rr_soft(cv, tx - 9 * k, cyc - 27 * k,
@@ -36749,7 +36918,7 @@ class Mascot:
                         "n": str(q.get("n") or "")
                         or self.ROOM_NAME.get(slot, ""),
                         "u": u, "t": str(sg.get("t") or "노래"),
-                        "lk": int(sg.get("lk") or 0)})
+                        "lk": self._song_like_n(slot, sg)})
         return out
 
     def _room_pl_draw(self, cv, W, H, P, k):
@@ -37723,12 +37892,9 @@ class Mascot:
                       outline=edge, width=1, tail=(x0 + 16 * k, 7 * k))
         cv.create_text((x0 + x1) / 2, y0 + h / 2, text=txt, font=f,
                        fill=self._shade(col, 0.15), tags="dyn")
-        lk = int(sg.get("lk") or 0)
-        # 하트 수는 노래 주인이 세서 되알려 주는 값이라, 주인이 옛 버전이면
-        # 내가 눌러도 영영 안 온다 — 내가 누른 좋아요는 내 화면에서 바로
-        # 하트로 보여 준다 (최소 1). 주인이 세면 그 값이 자연히 덮는다.
-        if (slot, str(sg.get("u"))) in self._song_liked:
-            lk = max(lk, 1)
+        # 하트 수는 주인이 센 값과 '좋아요 표식을 실은 자리 수' 중 큰 쪽
+        # (_song_like_n). 내가 누른 것은 내 화면에서 바로 찍힌다 (최소 1).
+        lk = self._song_like_n(slot, sg)
         if lk > 0:                       # 좋아요 하트 — 말풍선 오른쪽 위
             # 글꼴의 ♥ 글자는 기계마다 높낮이가 달라 배지 안에서 떠 보인다.
             # 하트를 도형으로 그리고, 하트+숫자 묶음을 재서 정중앙에 놓는다.
@@ -49220,7 +49386,8 @@ class Mascot:
                 return
             if self.room_net is not None:
                 self.room_net.send(slot, "songlike")
-                self._song_liked[key] = time.time()
+                # 기억 + 설정 저장 + 자리 신호(lk9)에 바로 싣기
+                self._safe("song_like_mark", self._song_like_mark, slot, url)
                 self._room_toast = ("노래에 좋아요를 보냈어요 ♥",
                                     time.time())
                 self._safe("room_draw", self._room_draw)
