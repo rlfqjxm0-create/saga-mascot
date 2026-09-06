@@ -12043,6 +12043,17 @@ class Mascot:
             return 0
         return YT_BAR if self._yt_on() else 0
 
+    def _yt_music_btns(self):
+        """카드 위 재생 단추(이전·재생·다음)가 서는가.
+
+        `_yt_bar_music` 은 **줄의 높이**다 — 환경음이 켜져 있으면 음악과
+        무관하게 줄이 선다. 그래서 그 값으로 단추까지 정하면 정지(■)를
+        눌러도 환경음 알약 옆에 재생 단추가 그대로 남는다 (제보). 단추는
+        이 함수가 정한다 — 그리기·자리·셋인지 하나인지가 다 여기서 나온다
+        (지뢰 159).
+        """
+        return bool(self._yt_bar_music()) and not self._pl_off()
+
     def _pl_off(self):
         """정지(■)로 꺼 둔 상태인가 — 다시 틀 때까지 카드 위 재생 줄이 없다.
 
@@ -12539,7 +12550,7 @@ class Mascot:
         곡이 하나라 지금처럼 재생/멈춤 하나만.
         """
         self._pl_ctl = []
-        if not self._yt_bar_music():   # 뽀모만 도는 줄에는 음악 단추 없음
+        if not self._yt_music_btns():  # 뽀모·환경음만 도는 줄에는 음악 단추 없음
             return
         c, cd = self.canvas, self.card
         g = self._card_geom()
@@ -17527,7 +17538,7 @@ class Mascot:
         줄에 서는지가 다 이 값에서 나온다** — 표가 둘이면 어긋난다
         (지뢰 159).
         """
-        return bool(self._yt_bar_music())
+        return self._yt_music_btns()
 
     def _top_row_y(self, _name=None):
         """카드 위 아이콘이 서는 세로 자리 — **한 줄이다** (요청).
@@ -17558,7 +17569,7 @@ class Mascot:
         for it9 in others:
             (right if len(right) < len(left) else left).append(it9)
         out = {}
-        if not self._yt_bar_music():
+        if not self._yt_music_btns():
             items = left + right
             if items:
                 total = (sum(w for _n, w in items)
@@ -26604,9 +26615,7 @@ class Mascot:
                     else:
                         self._gl_play(cv, bx, cy, u(13), "#ffffff")
                 elif act == "stop":
-                    s9 = u(4.5)
-                    self._rr_soft(cv, bx - s9, cy - s9, bx + s9, cy + s9,
-                                  u(1.5), fill=cd["fill"], outline="", width=0)
+                    self._gl_stop(cv, bx, cy, u(8), cd["fill"])
                 else:
                     self._gl_skip(cv, bx, cy, u(9), cd["fill"],
                                   1 if act == "next" else -1)
@@ -27581,6 +27590,11 @@ class Mascot:
                                  fill=col)
             dr.rounded_rectangle(box(0.57, 0.13, 0.75, 0.87), radius=r9,
                                  fill=col)
+        elif kind == "stop":
+            # 정지 — 한가운데 둥근 네모 (제보: 손으로 그린 네모가 한쪽으로
+            # 치우쳤다 — 글리프는 판 중심에 그려 _gl_icon 이 정중앙에 놓는다)
+            dr.rounded_rectangle(box(0.22, 0.22, 0.78, 0.78), radius=0.10 * n,
+                                 fill=col)
         elif kind in ("next", "prev"):
             pts = [(0.18, 0.18, 0.18, 0.82, 0.54, 0.50),
                    (0.58, 0.18, 0.58, 0.82, 0.94, 0.50)]
@@ -27698,7 +27712,8 @@ class Mascot:
                         anchor="center", tags=tags)
 
     # 아이콘 그림에서 실제 그려지는 세로 폭 (0~1) — 겉보기 크기를 맞춘다
-    GL_SPAN = {"play": 0.74, "pause": 0.74, "next": 0.64, "prev": 0.64,
+    GL_SPAN = {"play": 0.74, "pause": 0.74, "stop": 0.56,
+               "next": 0.64, "prev": 0.64,
                "note": 0.80, "speaker": 0.76, "up": 0.40, "down": 0.40,
                "video": 0.40, "person": 0.64, "clip": 0.80,
                "tri_r": 0.68, "tri_d": 0.42}
@@ -27707,6 +27722,10 @@ class Mascot:
         """멈춤 — 같은 길이의 둥근 막대 둘 (제보: 길이가 달랐다)."""
         self._gl_icon(cv, cx, cy, "pause", h / self.GL_SPAN["pause"], col,
                       tags)
+
+    def _gl_stop(self, cv, cx, cy, h, col, tags="dyn"):
+        """정지 네모 — 한가운데."""
+        self._gl_icon(cv, cx, cy, "stop", h / self.GL_SPAN["stop"], col, tags)
 
     def _gl_play(self, cv, cx, cy, h, col, tags="dyn"):
         """재생 세모 — 무게중심이 (cx, cy) 에 온다."""
