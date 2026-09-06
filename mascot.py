@@ -1003,7 +1003,11 @@ def _mac_yt_player_main():
     # 화면에는 '까맣다'로만 보인다 (사가 후속 진단서: 창 자체는 정상).
     # 한 층 위에 두면 순서 싸움이 없다. 우리 앱이 맨 앞일 때만 보이므로
     # 남의 창 위에 뜨는 일도 없다.
-    VID_LEVEL = 4
+    # **Tk 판마다 '항상 위'의 층이 다르다** — Tk 8.6 은 3(Floating),
+    # Tk 9 는 19(Utility)로 올린다. 4 로 두었더니 퀸시(Tk 9 앱)에서는
+    # 여전히 플레이리스트 창 뒤에 숨었다(제보: 까만 칸 뒤에 영상). 둘 다
+    # 위에 오도록 20 — 메뉴 막대(24)·상태 창(25)보다는 아래다.
+    VID_LEVEL = 20
 
     def vid_apply():
         """지금 상태대로 창을 보이거나 숨긴다."""
@@ -26217,7 +26221,9 @@ class Mascot:
         """
         if not IS_MAC or getattr(self, "_vid_at", None) is None:
             return
-        if now - getattr(self, "_vid_tick_at", 0.0) < 1.0:
+        # 0.12초 — 창을 끌 때 영상이 한참 뒤에 따라오던 것(퀸시 제보). 자리
+        # 비교는 Tk 좌표 두 개 읽기라 싸고, 같으면 _vid_sync 가 바로 돌아온다.
+        if now - getattr(self, "_vid_tick_at", 0.0) < 0.12:
             return
         self._vid_tick_at = now
         win9 = getattr(self, "_yt_win", None)
