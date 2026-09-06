@@ -12018,6 +12018,8 @@ class Mascot:
         # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
         if not (self._pl_list() or getattr(self, "_pl_on", False)):
             return False
+        if self._pl_off():
+            return False
         return bool(self._yt_on())
 
     def _yt_bar_music(self):
@@ -12037,7 +12039,18 @@ class Mascot:
         # (__init__ 보다 먼저 불리는 길이 있어 getattr 로 받는다 — 지뢰 13)
         if not (self._pl_list() or getattr(self, "_pl_on", False)):
             return 0
+        if self._pl_off():
+            return 0
         return YT_BAR if self._yt_on() else 0
+
+    def _pl_off(self):
+        """정지(■)로 꺼 둔 상태인가 — 다시 틀 때까지 카드 위 재생 줄이 없다.
+
+        목록에 곡이 있으면 늘 줄이 서 있었는데, '끈 상태'를 만들 길이
+        없었다 (요청). 설정에 남아 다시 켜도 꺼진 채다.
+        """
+        return (bool(self.us.get("pl_off"))
+                and not getattr(self, "_pl_on", False))
 
     VOW_BAR = 36                 # 카드 위 내 각오 말풍선 몫 (같이하기 중)
 
@@ -26572,8 +26585,13 @@ class Mascot:
                     "vidtoggle")
             cy = sy + u(56)
             playing = bool(self._yt.get("playing"))
-            for dx, act in ((-u(52), "prev"), (0, "toggle"), (u(52), "next")):
-                r9 = u(18) if act == "toggle" else u(13)
+            # ■ 정지는 다음 단추 오른쪽 — 보통 재생기들이 두는 자리 (요청).
+            # 재생기가 살아 있을 때만 그린다 (꺼져 있으면 누를 일이 없다).
+            btns9 = [(-u(52), "prev"), (0, "toggle"), (u(52), "next")]
+            if self._yt_alive():
+                btns9.append((u(96), "stop"))
+            for dx, act in btns9:
+                r9 = u(18) if act == "toggle" else u(11) if act == "stop" else u(13)
                 bx = W / 2.0 + dx
                 self._soft_dot(cv, bx, cy, r9,
                                cd["fill"] if act == "toggle" else "#ffffff",
@@ -26585,6 +26603,10 @@ class Mascot:
                         self._gl_pause(cv, bx, cy, u(14), "#ffffff")
                     else:
                         self._gl_play(cv, bx, cy, u(13), "#ffffff")
+                elif act == "stop":
+                    s9 = u(4.5)
+                    self._rr_soft(cv, bx - s9, cy - s9, bx + s9, cy + s9,
+                                  u(1.5), fill=cd["fill"], outline="", width=0)
                 else:
                     self._gl_skip(cv, bx, cy, u(9), cd["fill"],
                                   1 if act == "next" else -1)
@@ -27156,6 +27178,10 @@ class Mascot:
                         self._pl_src = "mine"
                     i9 = self._pl_i if self._pl_i >= 0 else 0
                     self._safe("pl_play", self._pl_play, i9)
+                draw()
+                return
+            if act == "stop":
+                self._safe("pl_stop_full", self._pl_stop_full)
                 draw()
                 return
             if act in ("prev", "next"):
@@ -37290,6 +37316,11 @@ class Mascot:
                                 time.time())
             return
         i %= len(songs)
+        if self.us.get("pl_off"):
+            # 정지로 꺼 둔 것을 다시 튼다 — 카드 위 재생 줄이 돌아온다
+            self.us["pl_off"] = False
+            self._safe("settings", self._save_settings)
+            self._safe("card", self._relayout_card)
         if not self._yt_alive():
             if not self._yt_spawn():
                 # 재생기를 못 띄웠으면 트는 중이 아니다 — 목록을 끄고
@@ -37360,6 +37391,20 @@ class Mascot:
         self._safe("card", self._relayout_card)
         self._yt_want = False
         self._yt_send(c="pause")
+
+    def _pl_stop_full(self):
+        """정지(■) — 재생기를 통째로 거두고 플레이리스트를 '끈 상태'로.
+
+        멈춤(‖)은 곡을 잠깐 세우는 것이라 카드 위 재생 줄이 남는다. 이쪽은
+        프로세스까지 끝내 메모리를 돌려주고, 줄도 접는다 (요청). 곡 번호는
+        남겨 두어 다시 틀면 그 곡부터다.
+        """
+        self.us["pl_off"] = True
+        self._yt_want_vid = ""
+        self._yt_want = False
+        self._safe("settings", self._save_settings)
+        self._safe("yt_stop", self._yt_stop)
+        self._safe("card", self._relayout_card)
 
     def _room_pl_src(self):
         """홈 패널에서 고르면 모두의 목록으로 갈아탄다 (내 창은 mine)."""
