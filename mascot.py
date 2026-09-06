@@ -9932,6 +9932,15 @@ class Mascot:
                 self._char_lay.place_above(self._main_hwnd)
             except Exception:
                 pass
+        # 단추 달린 말풍선의 단추·몸통을 눌렀으면 **그 아래는 안 건드린다**
+        # (제보: '보여 줘'를 누르니 머리 위 옹이가 같이 눌렸다). 누르는
+        # 순간 반응하는 것(고양이·소품·쓰담)이 먼저 채 가기 때문이다.
+        # 처리는 뗄 때(_on_release)가 한다 — _press 는 그대로 둔다.
+        if getattr(self, "_bubble_act", None) and self.bubble:
+            for bx9 in (getattr(self, "_bubble_btn", None),
+                        getattr(self, "_bubble_box", None)):
+                if bx9 and bx9[0] <= e.x <= bx9[2] and bx9[1] <= e.y <= bx9[3]:
+                    return
         # 같이하기 초대 — 책상 위 토마토. 수락·거절이 열려 있으면 그
         # 단추가 먼저다 (아래 편지 블록보다 앞에 둔다).
         if self._tm_inv and self._team_gate():
@@ -18555,6 +18564,7 @@ class Mascot:
             self.next_blink = now + random.uniform(2.5, 5.5)
         # 또 실행했는가 / 새 소식이 올라왔는가 / 전체화면 프로그램이 떴는가
         self._safe("hello", self._hello_tick, now)
+        self._safe("feat_hint", self._feat_hint_tick, now)
         self._safe("update_poll", self._update_poll, now)
         # 전체화면 비켜 주기는 _safe에 맡기지 않는다. 세 번 터져 그 구역이
         # 꺼지면 '숨은 채로 굳어' 캐릭터가 영영 안 보인다 (지뢰 14).
@@ -23757,6 +23767,179 @@ class Mascot:
                           cx - fw * 0.2, cy + fh * 0.18,
                           fill=core, outline="", smooth=True, tags=tags)
 
+    # ── 새 기능 안내 (config "feature_hints" · 지금은 내 도로롱만) ──────
+    # 표 하나에서 점·말풍선·열기가 다 나온다. 새 기능을 넣으면 여기 한 줄.
+    #   id: 설정에 남는 열쇠 · say: 캐릭터가 하는 말 · open: 보여 줄 자리
+    #   gate: 그 기능이 이 캐릭터에 있는가를 보는 메서드 이름
+    FEATS = (
+        {"id": "team_join", "label": "같이하기 참여",
+         "say": "홈에서 친구 카드에 '같작업' 배지가 보이면 눌러 보세요 — 그 뽀모도로에 같이 낄 수 있어요",
+         "open": "home_team", "gate": "_team_gate"},
+        {"id": "pl_friends", "label": "친구들의 플레이리스트",
+         "say": "플레이리스트 창 위쪽 사람 아이콘을 누르면 친구들의 목록을 듣거나 볼 수 있어요",
+         "open": "bgm_friends", "gate": "_pl_friends_ok"},
+        {"id": "pl_video", "label": "영상 보기",
+         "say": "플레이리스트에서 곡 제목 옆 캠코더를 누르면 영상도 같이 볼 수 있어요",
+         "open": "bgm_video", "gate": "_vid_ok"},
+        {"id": "pomo_vol", "label": "뽀모도로 소리 조절",
+         "say": "뽀모도로 창 ✿ 메뉴에 '소리 조절'이 생겼어요 — 알림음마다 크기를 맞춰요",
+         "open": "pomo_vol", "gate": "_team_gate"},
+        {"id": "pl_stop", "label": "플레이리스트 정지",
+         "say": "플레이리스트에 정지(■) 단추가 생겼어요 — 재생기를 끄고 위 재생 줄도 접어요",
+         "open": "bgm_stop", "gate": "_yt_on"},
+        {"id": "team_bye", "label": "같이하기 퇴장 인사",
+         "say": "같이하기 중에 앱을 끄면 이제 친구들에게 퇴장 인사가 나가요",
+         "open": None, "gate": "_team_gate"},
+    )
+    FEAT_FIRST = 12.0            # 켜고 이만큼 지나면 첫 안내
+    FEAT_GAP = 10 * 60.0         # 앞 안내를 그냥 흘려보냈으면 다음까지 이만큼
+    FEAT_GAP_NEXT = 2.0          # '보여 줘'를 눌렀으면 다음은 바로 (요청)
+    FEAT_SPOT = 7.0              # '보여 줘' 뒤 테두리를 밝히는 시간(초)
+    FEAT_DOT = "#ff5f7a"         # 새로움 점 색 (업데이트 점과 같은 결)
+
+    def _feat_on(self):
+        return bool(self.cfg.get("feature_hints"))
+
+    def _feat_seen_ids(self):
+        v = self.us.get("feat_seen")
+        return set(str(x) for x in v) if isinstance(v, list) else set()
+
+    def _feat_unseen(self):
+        """아직 안 눌러 본 새 기능들 — 이 캐릭터에 있는 것만."""
+        if not self._feat_on():
+            return []
+        seen = self._feat_seen_ids()
+        out = []
+        for f in self.FEATS:
+            if f["id"] in seen:
+                continue
+            g = getattr(self, f.get("gate") or "", None)
+            try:
+                if g is not None and not g():
+                    continue
+            except Exception:
+                continue
+            out.append(f)
+        return out
+
+    def _feat_new(self, fid):
+        """그 자리에 새로움 점을 찍어야 하는가."""
+        return any(f["id"] == fid for f in self._feat_unseen())
+
+    def _feat_seen(self, fid):
+        """눌러 봤다 — 점을 끈다 (저장하는 것은 '본 것' 목록뿐 · 지뢰 30)."""
+        if not self._feat_on():
+            return
+        seen = self._feat_seen_ids()
+        if fid in seen:
+            return
+        seen.add(str(fid))
+        self.us["feat_seen"] = sorted(seen)
+        self._safe("settings", self._save_settings)
+
+    def _feat_dot(self, cv, x, y, r=None):
+        """새로움 점 하나 (매끈한 원 · 흰 테)."""
+        r = r if r is not None else self._ui(4)
+        self._safe("soft_btn", self._soft_dot, cv, x, y, r, self.FEAT_DOT,
+                   outline="#ffffff", width=1.2)
+
+    def _feat_hint_tick(self, now):
+        """캐릭터가 새 기능을 말해 준다 — 켜고 잠시 뒤 하나, 그 뒤 30분마다 하나.
+        말풍선이 비어 있을 때만, 기능마다 하루 한 번."""
+        if not self._feat_on() or self.bubble:
+            return
+        born = getattr(self, "_feat_born", None)
+        if born is None:
+            self._feat_born = now
+            # config 의 feature_hints_reset 번호가 바뀌었으면 본 것·말한 것을
+            # 되돌린다 — 이미 다 눌러 본 사람이 처음부터 다시 보게 (요청).
+            # 켜져 있는 프로그램이 설정을 덮어쓰므로 파일을 고쳐서는 안 된다.
+            n9 = str(self.cfg.get("feature_hints_reset") or "")
+            if n9 and str(self.us.get("feat_reset") or "") != n9:
+                self.us.pop("feat_seen", None)
+                self.us.pop("feat_said", None)
+                self.us["feat_reset"] = n9
+                self._safe("settings", self._save_settings)
+            return
+        if now - born < self.FEAT_FIRST:
+            return
+        # 앞 안내를 눌러 봤으면 다음을 바로 잇고, 그냥 흘려보냈으면 한참 쉰다
+        # (요청: 클릭하면 바로바로 넘어가게). 소개는 기능마다 한 번뿐이라
+        # 많아야 여섯 번이다.
+        gap9 = (self.FEAT_GAP_NEXT if getattr(self, "_feat_acted", False)
+                else self.FEAT_GAP)
+        if now - getattr(self, "_feat_said_at", 0.0) < gap9:
+            return
+        day = self._my_workday()
+        said = self.us.get("feat_said")
+        said = said if isinstance(said, dict) else {}
+        for f in self._feat_unseen():
+            if said.get(f["id"]):          # 소개는 기능마다 **한 번만** (요청)
+                continue
+            said[f["id"]] = day
+            self.us["feat_said"] = said
+            self._feat_said_at = now
+            self._feat_acted = False
+            self._safe("settings", self._save_settings)
+            if f.get("open"):
+                self._say(f["say"], 14.0, btn="보여 줘",
+                          act=lambda f9=f: self._feat_show(f9))
+            else:
+                self._say(f["say"], 10.0)
+                self._feat_seen(f["id"])     # 보여 줄 자리가 없는 것은 말로 끝
+            return
+
+    def _feat_show(self, f):
+        """'보여 줘' — 그 자리를 열고 잠깐 테두리를 밝힌다."""
+        op = f.get("open")
+        self._feat_spot = (str(op or ""), time.time() + self.FEAT_SPOT)
+        self._feat_acted = True              # 다음 안내는 곧바로
+        self._feat_said_at = time.time()
+        if op == "pomo_vol":
+            self._safe("pomo_win", self._pomo_win)
+            self._pomo_menu = True
+            self._pomo_redraw()
+        elif op in ("bgm_stop", "bgm_friends", "bgm_video"):
+            self._safe("bgm_win", self._bgm_win, "pl")
+            self._bgm_redraw()
+        elif op == "home_team":
+            w9 = self.room_win
+            if w9 is not None:
+                # 이미 열려 있으면 _room_open 은 아무것도 안 한다 — 다른 창
+                # 뒤에 있거나 접혀 있으면 사람에게는 '안 켜진다'로 보인다
+                # (제보). 앞으로 가져온다.
+                try:
+                    w9.deiconify()
+                    w9.lift()
+                    w9.focus_force()
+                except Exception:
+                    pass
+            else:
+                self._safe("room_open", self._room_open)
+            self._room_key_last = None
+            self._safe("room_draw", self._room_draw)
+
+    def _feat_spot_on(self, op):
+        sp = getattr(self, "_feat_spot", None)
+        return bool(sp and sp[0] == op and time.time() < sp[1])
+
+    def _feat_ring(self, cv, x0, y0, x1, y1, r, tags="dyn"):
+        """밝힌 테두리 — 분홍."""
+        self._rr_soft(cv, x0 - 3, y0 - 3, x1 + 3, y1 + 3, r + 3,
+                      fill="", outline=self.FEAT_DOT, width=3, tags=tags)
+
+    def _feat_spot_clear_later(self, win):
+        """그 창을 테두리가 꺼질 때쯤 한 번 다시 그린다 (창마다 한 번만)."""
+        try:
+            if getattr(win, "_feat_job", None):
+                return
+            win._feat_job = win.after(
+                int(self.FEAT_SPOT * 1000) + 200,
+                lambda: (setattr(win, "_feat_job", None),
+                         self._safe("feat_spot_off", self._bgm_redraw)))
+        except Exception:
+            pass
+
     def _pomo_win(self):
         """뽀모도로 창 — 환경음 창과 같은 결로 캔버스에 둥근 카드."""
         got = getattr(self, "_pomo_winref", None)
@@ -24212,6 +24395,10 @@ class Mascot:
                            fill="#ffffff" if on_stk else cd["sub"])
             self._pomo_stk_btn = (sx8 - br - u(3), u(26) - br - u(3),
                                   sx8 + br + u(3), u(26) + br + u(3))
+            # 새로움 점 — 메뉴 안에 안 눌러 본 새 기능이 있으면 ✿ 에 (닫혀 있을 때)
+            if (self._feat_new("pomo_vol") and self._team_gate()
+                    and not getattr(self, "_pomo_menu", False)):
+                self._feat_dot(cv, sx8 + br - u(1), u(26) - br + u(1))
             tx8 = W - u(24)
             self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
                        cd["fill"] if edit9 else "#ffffff",
@@ -24260,6 +24447,12 @@ class Mascot:
                                    fill=cd["text"])
                     self._pomo_menu_hits.append(
                         (mx9, y9, mx9 + mw9, y9 + mh9, act9))
+                    if act9 == "vol":
+                        if self._feat_new("pomo_vol"):      # 새로움 점
+                            self._feat_dot(cv, mx9 + mw9 - u(9), y9 + u(8))
+                        if self._feat_spot_on("pomo_vol"):  # '보여 줘' 테두리
+                            self._feat_ring(cv, mx9, y9, mx9 + mw9, y9 + mh9,
+                                            u(12))
             # 하드모드 켜고 끄기 — 시간 조절 아이콘 **바로 왼쪽**에 같은
             # 크기로 (요청 — 1~2px 여유만 두고 붙인다)
             self._pomo_hard_btn = None
@@ -24305,6 +24498,7 @@ class Mascot:
                     if act == "stk":
                         self._safe("stk_win", self._stk_win, "pomo")
                     elif act == "vol":
+                        self._feat_seen("pomo_vol")
                         self._safe("pomo_vol_win", self._pomo_vol_win)
                     else:
                         self.us["pomo_edit"] = not bool(
@@ -26159,6 +26353,12 @@ class Mascot:
                 self._gl_person(cv, fx9, u(28), u(8),
                                 "#ffffff" if fon9 else cd["text"])
                 hit(fx9 - u(11), u(17), fx9 + u(11), u(39), "friends")
+                if self._feat_new("pl_friends"):            # 새로움 점
+                    self._feat_dot(cv, fx9 + u(8), u(20))
+                if self._feat_spot_on("bgm_friends"):       # '보여 줘' 테두리
+                    self._feat_ring(cv, fx9 - u(11), u(17), fx9 + u(11),
+                                    u(39), u(11))
+                    self._feat_spot_clear_later(win)
             # ── 탭 둘
             ty = g["tabs"]
             self._rr_soft(cv, u(18), ty, W - u(18), ty + u(30), u(15),
@@ -26634,12 +26834,19 @@ class Mascot:
                                "#ffffff" if on9 else cd["fill"])
                 hit(bx9 - u(12), ny9 - u(12), bx9 + u(12), ny9 + u(12),
                     "vidtoggle")
+                if self._feat_new("pl_video"):              # 새로움 점
+                    self._feat_dot(cv, bx9 + u(9), ny9 - u(9))
+                if self._feat_spot_on("bgm_video"):         # '보여 줘' 테두리
+                    self._feat_ring(cv, bx9 - u(11), ny9 - u(11), bx9 + u(11),
+                                    ny9 + u(11), u(11))
+                    self._feat_spot_clear_later(win)
             cy = sy + u(56)
             playing = bool(self._yt.get("playing"))
             # ■ 정지는 다음 단추 오른쪽 — 보통 재생기들이 두는 자리 (요청).
             # 재생기가 살아 있을 때만 그린다 (꺼져 있으면 누를 일이 없다).
             btns9 = [(-u(52), "prev"), (0, "toggle"), (u(52), "next")]
-            if self._yt_alive():
+            spot9 = self._feat_spot_on("bgm_stop")
+            if self._yt_alive() or spot9:
                 btns9.append((u(96), "stop"))
             for dx, act in btns9:
                 r9 = u(18) if act == "toggle" else u(11) if act == "stop" else u(13)
@@ -26655,11 +26862,20 @@ class Mascot:
                     else:
                         self._gl_play(cv, bx, cy, u(13), "#ffffff")
                 elif act == "stop":
-                    self._gl_stop(cv, bx, cy, u(8), cd["fill"])
+                    self._gl_stop(cv, bx, cy, u(8),
+                                  cd["fill"] if self._yt_alive()
+                                  else self._tint(cd["fill"], 0.5))
+                    if self._feat_new("pl_stop"):            # 새로움 점
+                        self._feat_dot(cv, bx + r9 - u(2), cy - r9 + u(2))
+                    if spot9:                                # '보여 줘' 테두리
+                        self._feat_ring(cv, bx - r9, cy - r9, bx + r9,
+                                        cy + r9, r9)
+                        self._feat_spot_clear_later(win)
                 else:
                     self._gl_skip(cv, bx, cy, u(9), cd["fill"],
                                   1 if act == "next" else -1)
-                hit(bx - r9, cy - r9, bx + r9, cy + r9, act)
+                if act != "stop" or self._yt_alive():
+                    hit(bx - r9, cy - r9, bx + r9, cy + r9, act)
             if (st.get("eq") or st.get("nowmq")) and st.get("eqjob") is None:
                 st["eqjob"] = win.after(
                     self.BGM_TICK_EQ,
@@ -27084,9 +27300,12 @@ class Mascot:
                               e.y_root - win.winfo_y())
                 return
             if act == "vidtoggle":
+                self._feat_seen("pl_video")
                 vid_toggle()
                 return
             if act in ("friends", "fback"):
+                if act == "friends":
+                    self._feat_seen("pl_friends")
                 fon9 = (act == "friends" and st.get("view") != "friends")
                 st["view"] = "friends" if fon9 else "mine"
                 st["off"]["fr"] = 0.0
@@ -27230,6 +27449,7 @@ class Mascot:
                 draw()
                 return
             if act == "stop":
+                self._feat_seen("pl_stop")
                 self._safe("pl_stop_full", self._pl_stop_full)
                 draw()
                 return
@@ -39053,6 +39273,10 @@ class Mascot:
             self._room_team_hit.append(
                 (x0 - 4 * k, cy - h9 / 2 - 4 * k, x1 + 4 * k,
                  cy + h9 / 2 + 4 * k, slot))
+            if self._feat_new("team_join"):             # 새로움 점
+                self._feat_dot(cv, x1 - 1 * k, cy - h9 / 2 + 1 * k, 3.5 * k)
+            if self._feat_spot_on("home_team"):         # '보여 줘' 테두리
+                self._feat_ring(cv, x0, cy - h9 / 2, x1, cy + h9 / 2, h9 / 2)
 
     def _room_chip_tag(self, cv, p, px0, py0, k, col, kx0, slot=""):
         """홈 카드의 상태 칩 — 이름 알약 왼쪽에 그림 + 짧은 낱말.
@@ -49768,6 +49992,7 @@ class Mascot:
         for x0, y0, x1, y1, sl9 in list(getattr(self, "_room_team_hit", [])):
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 # '같작업' 배지 — 중간에 낄지 물어본다 (요청)
+                self._feat_seen("team_join")
                 self._room_team_ask = (None if self._room_team_ask == sl9
                                        else sl9)
                 self._room_key_last = None
