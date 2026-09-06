@@ -1306,6 +1306,15 @@ if "--yt-player" in sys.argv:
     sys.exit(0)
 
 TRANSPARENT = "#010203"          # 투명 키 색
+# 유리 테마의 창 바탕 키 색 — 근백색. 창 바탕을 이 색으로 칠하고 색상키로
+# 뚫은 뒤 DWM 아크릴을 걸면 그 자리에 뒤 화면이 흐려져 비친다 (_glass_apply).
+# 캐릭터 창의 키(#010203)와 다른 이유: 판 도우미가 가장자리를 키 색과 섞는데
+# (지뢰 65) 밝은 유리 위에서는 근백색과 섞여야 테가 안 진다.
+GLASS_KEY = "#fdfcfe"
+# 유리 창에서 도형 가장자리를 섞는 색 — 색상키 창은 반투명을 못 담으므로
+# (지뢰 65) 유리 빛깔(틴트 40% 회백 + 흐린 뒤 화면)에 가까운 값을 미리 섞는다.
+GLASS_MIX = (214, 210, 218)
+_GLASS_HOST = None               # 유리 테마로 도는 Mascot (캔버스 도우미가 본다)
 
 # 맥 전용 투명 키 색. 윈도우는 창 관리자가 색상키를 처리해 주지만 맥에는 그게 없어서
 # CoreImage 로 직접 뺀다(_MacChromaKey). 파츠 이미지와 UI 팔레트 어디에도 없는 색을
@@ -1410,6 +1419,7 @@ DEFAULT_SETTINGS = {
     "slime_kind": "",     # 슬라임 종류 (sounds/slime/ 아래 폴더 이름)
     "sound_pack": "banana split lubed",
     "skin": "기본",        # 패션 슬롯 이름
+    "theme": "기본",       # 창 테마 — 기본 / 유리 (config 의 themes 를 켠 캐릭터만)
     "stickers_show": True,   # 바탕화면 스티커 보이기 (config의 stickers를 켠 캐릭터만)
     "stickers_lock": False,  # 스티커 잠금 — 클릭이 스티커를 통과한다
     "settings_h": 0,         # 환경설정 창 높이(px). 0이면 화면에 맞춰 자동
@@ -1704,6 +1714,230 @@ class ShadowLayer:
         u.SetWindowPos(self.hwnd, owner_hwnd,
                        x + self.offset[0], y + self.offset[1],
                        0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
+
+
+def _glass_accent(hwnd, tint=0x66E8E4EC):
+    """창 하나에 DWM 아크릴(윈도우 10 은 옛 흐림) + 둥근 모서리 (유리 테마).
+
+    ACCENT_POLICY {state, flags, color(ABGR), anim} 을 WCA 19 로 건다.
+    공용 windll 을 안 건드리고 따로 연다 (지뢰 21).
+    """
+    u32 = ctypes.WinDLL("user32")
+    u32.SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    u32.SetWindowCompositionAttribute.restype = ctypes.c_int
+    try:
+        build = sys.getwindowsversion().build
+    except Exception:
+        build = 0
+    state = 4 if build >= 22000 else 3
+    ap = (ctypes.c_int * 4)(state, 0, 0, 0)
+    ctypes.cast(ap, ctypes.POINTER(ctypes.c_uint))[2] = int(tint)
+    data = (ctypes.c_void_p * 3)(19, ctypes.cast(ap, ctypes.c_void_p),
+                                 ctypes.sizeof(ap))
+    u32.SetWindowCompositionAttribute(hwnd, ctypes.cast(data, ctypes.c_void_p))
+    if build >= 22000:
+        try:      # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+            dwm = ctypes.WinDLL("dwmapi")
+            dwm.DwmSetWindowAttribute.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+            pref = ctypes.c_int(2)
+            dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+            # DWM 이 둥근 창 가장자리에 그리는 1~2px 테를 뺀다 — 안 빼면
+            # 판 가장자리 2px 이 유리가 아니라 **검은 띠**로 남는다 (실측 ·
+            # 타이머 카드 안쪽 검은 여백 제보). DWMWA_BORDER_COLOR = 34.
+            col = ctypes.c_uint(0xFFFFFFFE)            # DWMWA_COLOR_NONE
+            dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(col), 4)
+        except Exception:
+            pass
+
+
+class GlassPane:
+    """유리 판 — 창 **뒤**에 깔리는 흐림 창 (유리 테마 · 윈도우 전용).
+
+    per-pixel 알파 레이어 창에 알파 1/255 짜리 그림을 올리고 DWM 아크릴을
+    건다. 실측(scratchpad/glass/proto_pane.py): 안쪽은 뒤 화면이 흐려져
+    비치고, DWM 이 모서리를 둥글리고, **클릭은 판이 받는다** (색상키 구멍은
+    클릭이 뒤로 빠지는데, 알파가 0 이 아닌 이 판이 그 클릭을 받아 앞 창의
+    캔버스로 되돌려 준다 — '창 영역 안에서는 창만 눌리게' 요청).
+
+    앞 창(색상키 Tk 창)은 바탕을 키 색으로 두어 구멍을 내고, 이 판을 그
+    창 바로 아래 z순서에 같은 자리·같은 크기로 둔다.
+    """
+
+    def __init__(self, root, forward):
+        self.forward = forward
+        self.top = tk.Toplevel(root)
+        self.top.overrideredirect(True)
+        self.top.geometry("8x8+0+0")
+        self.top.update_idletasks()
+        self.hwnd = int(self.top.wm_frame(), 16)
+        u, _g = layer_api()
+        if u is None:
+            raise RuntimeError("layer_api")
+        ex = u.GetWindowLongW(self.hwnd, -20)
+        # LAYERED | TOOLWINDOW | NOACTIVATE — TRANSPARENT(0x20)는 걸지 않는다
+        # (클릭을 받아야 한다 · 지뢰 118)
+        u.SetWindowLongW(self.hwnd, -20, ex | 0x80000 | 0x80 | 0x8000000)
+        self.u = u
+        self.size = None
+        self.rect = None
+        self.shown = True
+        _glass_accent(self.hwnd)
+        for ev in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>",
+                   "<Button-3>", "<Motion>", "<MouseWheel>",
+                   "<Double-Button-1>"):
+            self.top.bind(ev, lambda e, k=ev: self.forward(k, e))
+
+    shadows = ()          # 판에 같이 올릴 그림자 — [(x0, y0, x1, y1, r)] (창 좌표)
+    texts = None          # 판에 그리는 글자 — {열쇠: (x, y, PIL RGBA)} (판 좌표)
+    _base = None          # (w, h, shadows) → 바탕(알파 1 + 그림자)
+    _flush_job = None
+
+    @staticmethod
+    def _blit(im, lay, x, y):
+        """alpha_composite 는 밖으로 나가면 터진다 — 잘라서 얹는다."""
+        x, y = int(x), int(y)
+        W, H = im.size
+        w, h = lay.size
+        sx0, sy0 = max(0, -x), max(0, -y)
+        sx1, sy1 = min(w, W - x), min(h, H - y)
+        if sx1 <= sx0 or sy1 <= sy0:
+            return
+        if (sx0, sy0, sx1, sy1) != (0, 0, w, h):
+            lay = lay.crop((sx0, sy0, sx1, sy1))
+        im.alpha_composite(lay, (x + sx0, y + sy0))
+
+    def _base_im(self, w, h):
+        """알파 1 짜리 판 + (있으면) 진짜 반투명 그림자 (크기·그림자별 캐시).
+
+        색상키 창은 반투명을 못 담아 카드 그림자가 딱딱한 회색 띠가 된다.
+        판은 per-pixel 알파라 여기서 그리면 유리에 자연스럽게 섞인다 (요청).
+        """
+        got = self._base
+        if got is not None and got[0] == (w, h, self.shadows):
+            return got[1]
+        im = Image.new("RGBA", (w, h), (255, 255, 255, 1))
+        for (x0, y0, x1, y1, r) in self.shadows:
+            sw, sh = int(x1 - x0), int(y1 - y0)
+            if sw <= 0 or sh <= 0:
+                continue
+            pad, S = 12, 2
+            lay = Image.new("RGBA", ((sw + pad * 2) * S, (sh + pad * 2) * S),
+                            (0, 0, 0, 0))
+            ImageDraw.Draw(lay).rounded_rectangle(
+                [pad * S, pad * S, (pad + sw) * S, (pad + sh) * S],
+                radius=int(r * S), fill=(70, 50, 80, 64))
+            lay = lay.filter(ImageFilter.GaussianBlur(4 * S))
+            lay = lay.resize((sw + pad * 2, sh + pad * 2), Image.LANCZOS)
+            self._blit(im, lay, int(x0) - pad, int(y0) - pad + 6)
+        self._base = ((w, h, self.shadows), im)
+        return im
+
+    def _push(self, w, h):
+        """바탕 + 글자를 합쳐 올린다. 글자는 진짜 알파라 가장자리가 매끈하다
+        (색상키 캔버스의 구운 글자는 픽셀이 깨져 보였다 — 요청)."""
+        w, h = max(1, int(w)), max(1, int(h))
+        im = self._base_im(w, h)
+        if self.texts:
+            im = im.copy()
+            for (x, y, tim) in self.texts.values():
+                self._blit(im, tim, x, y)
+        # premultiplied 로 (지뢰 117) — (255,255,255,1) 은 (1,1,1,1) 이 된다
+        pm = Image.frombytes("RGBA", im.size, im.convert("RGBa").tobytes())
+        ShadowLayer._push(self, pm)
+
+    def set_shadows(self, boxes):
+        """그림자 목록이 바뀌면 판을 다시 올린다."""
+        boxes = tuple(tuple(int(round(v)) for v in b) for b in boxes)
+        if boxes == self.shadows:
+            return
+        self.shadows = boxes
+        self.dirty()
+
+    # ── 글자 ──────────────────────────────────────────────────────────
+    def set_text(self, key, x, y, tim):
+        if self.texts is None:
+            self.texts = {}
+        old = self.texts.get(key)
+        if old is not None and old[0] == int(x) and old[1] == int(y) \
+                and old[2] is tim:
+            return
+        self.texts[key] = (int(x), int(y), tim)
+        self.dirty()
+
+    def del_text(self, key):
+        if self.texts and self.texts.pop(key, None) is not None:
+            self.dirty()
+
+    def set_texts(self, d):
+        """통째로 갈아 끼운다 — 같으면 아무 일도 안 한다 (타이머 카드가 매
+        프레임 부른다)."""
+        cur = self.texts or {}
+        if (len(cur) == len(d) and all(
+                k in cur and cur[k][0] == int(v[0]) and cur[k][1] == int(v[1])
+                and cur[k][2] is v[2] for k, v in d.items())):
+            return
+        self.texts = {k: (int(v[0]), int(v[1]), v[2]) for k, v in d.items()}
+        self.dirty()
+
+    def clear_texts(self):
+        if self.texts:
+            self.texts = {}
+            self.dirty()
+
+    def dirty(self):
+        """한 프레임에 여러 글자가 바뀌어도 한 번만 올린다."""
+        if self._flush_job is not None:
+            return
+        try:
+            self._flush_job = self.top.after(25, self.flush)
+        except Exception:
+            self._flush_job = None
+
+    def flush(self):
+        self._flush_job = None
+        if self.size and self.shown:
+            try:
+                self._push(*self.size)
+            except Exception:
+                pass
+
+    def place(self, x, y, w, h, after_hwnd):
+        """앞 창 바로 아래에, 그 자리·그 크기로."""
+        if not self.shown:
+            self.show(True)                 # 숨긴 창에는 올릴 수 없다 (지뢰 23)
+        if (w, h) != self.size:
+            self.size = (w, h)
+            self._push(w, h)
+        self.u.SetWindowPos(self.hwnd, after_hwnd, int(x), int(y), int(w),
+                            int(h), 0x10 | 0x40)      # NOACTIVATE | SHOWWINDOW
+        self.rect = (int(x), int(y), int(w), int(h))
+
+    def below(self, hwnd):
+        """앞 창 바로 아래에 있는가 (GW_HWNDNEXT)."""
+        try:
+            return int(self.u.GetWindow(hwnd, 2) or 0) == self.hwnd
+        except Exception:
+            return False
+
+    def show(self, on):
+        try:
+            self.u.ShowWindow(self.hwnd, 4 if on else 0)   # SW_SHOWNOACTIVATE / HIDE
+        except Exception:
+            pass
+        self.shown = bool(on)
+
+    def destroy(self):
+        if self._flush_job is not None:
+            try:
+                self.top.after_cancel(self._flush_job)   # 지뢰 20
+            except Exception:
+                pass
+            self._flush_job = None
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
 
 
 class FxLayer:
@@ -5313,8 +5547,17 @@ class TodoPanel:
         """칸을 알아보는 열쇠 — 글자로 잡는다.
 
         번호로 잡으면 위 칸을 지웠을 때 자리가 통째로 밀린다.
+        마감 말풍선은 첫 줄이 'D-3' 처럼 **날마다 바뀌는** 글자라, 그대로
+        열쇠로 쓰면 자정마다 꼬리 방향·크기·자리가 초기화된다 (제보 —
+        "시간이 지나면 원래대로"). 마감 이름(둘째 줄)으로 잡는다.
         """
-        return todo_text(item)[:60]
+        t = todo_text(item)
+        if "\n" in t:
+            head, rest = t.split("\n", 1)
+            h = head.strip()
+            if h == "D-DAY" or (h[:2] in ("D-", "D+") and h[2:].isdigit()):
+                return (rest.strip() or "D")[:60]
+        return t[:60]
 
     def _press(self, e):
         # 칸 위를 눌렀을 때만 (빈 곳을 눌러 닫는 것에는 안 낸다)
@@ -6738,13 +6981,50 @@ class Mascot:
         sc9 = getattr(self, "_skin_ent", None) or {}
         if isinstance(sc9.get("card"), dict):
             cc.update(sc9["card"])
+        # 유리 테마 (요청 — 아이폰 유리 느낌). 윈도우만: 창 바탕을 GLASS_KEY 로
+        # 칠하고 _glass_tick 이 창마다 색상키 + DWM 아크릴을 건다. 카드·알약은
+        # 색상키 창이라 반투명이 안 되므로 '유리 그림'(그라데이션)으로 그린다.
+        # 맥은 아무것도 안 바뀐다 (색상키 필터 비용 · 지뢰 126).
+        self._glass = bool(IS_WIN and self.cfg.get("themes")
+                           and str(self.us.get("theme") or "") == "유리")
+        self._glass_at = 0.0
+        self._glass_u32 = None
+        self._gtext_cache = {}
+        self._pane = None            # 타이머 카드 뒤 유리 판 (GlassPane)
+        self._card_texts = {}        # 카드 글자 — 유리 판에 그린다
+        self._room_shadow_boxes = [] # 홈 카드 그림자 — 유리 판에 그린다
+        self._pane_rect = None
+        self._pane_at = 0.0
+        self._pane_z = 0.0
+        if self._glass:
+            # 유리 창의 캔버스마다 글자 도우미를 끼운다 — 캔버스가 만들어지는
+            # 순간 바탕이 키 색이면 그 캔버스다. 창을 여는 자리마다 손대지
+            # 않아도 되는 이유가 이것이다.
+            global _GLASS_HOST
+            _GLASS_HOST = self
+            if not getattr(tk.Canvas, "_ena_glass", False):
+                _orig_cv_init = tk.Canvas.__init__
+
+                def _cv_init2(cv, *a, **kw):
+                    _orig_cv_init(cv, *a, **kw)
+                    try:
+                        host = _GLASS_HOST
+                        if (host is not None and host._glass
+                                and str(cv.cget("bg")).lower() == GLASS_KEY):
+                            host._glass_canvas_shim(cv)
+                    except Exception:
+                        pass
+                _cv_init2.__doc__ = _orig_cv_init.__doc__
+                tk.Canvas.__init__ = _cv_init2
+                tk.Canvas._ena_glass = True
         self.card = {
             "bg": cc.get("bg", "#ffffff"), "border": cc.get("border", CARD_BORDER),
             "text": cc.get("text", CARD_NAVY), "sub": cc.get("sub", CARD_GRAY),
             "track": cc.get("track", CARD_TRACK), "fill": cc.get("fill", CARD_FILL),
             "deco": cc.get("deco", "panda"),
             # 설정·브리핑 창 배경 (캐릭터 테마에 맞춰 바꿀 수 있게)
-            "panel": cc.get("panel", "#fffdfe"),
+            # 유리 테마면 키 색 — 이 값으로 칠한 자리가 전부 유리가 된다
+            "panel": GLASS_KEY if self._glass else cc.get("panel", "#fffdfe"),
             "soft": cc.get("soft", "#fbf3f7"),
             "line": cc.get("line", "#f0e6ec"),
         }
@@ -6911,7 +7191,11 @@ class Mascot:
                 self.due_flip, self._due_flipped, self.ui_k, self.due_zoom,
                 self._due_zoomed,
                 on_delete=self._due_delete, on_tick=self._ui_click,
-                on_menu=self._menu_snd)
+                on_menu=self._menu_snd,
+                # 칸마다 정한 꼬리·크기·자리를 기억한다 — 할 일 패널은
+                # 진작 그랬는데 마감 패널만 안 넘겨서 다시 켜면 사라졌다 (제보)
+                spots=self._due_spots(), on_spot=self._due_spot_moved,
+                looks=self.us.get("due_looks"), on_look=self._due_look_saved)
             self.due_panel._moved_by_user = bool(self.due_pos)
             self.root.after(280, self._due_refresh)
 
@@ -10762,6 +11046,8 @@ class Mascot:
                 self._safe("team_quit", self._team_quit_notify)
             # 영상 창을 먼저 떼어 낸다 — 자식 창은 부모와 함께 죽는다
             self._safe("vid_park", self._vid_park)
+            if getattr(self, "_pane", None):
+                self._safe("pane_gone", self._pane.destroy)
             # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
             # 그 프레임이 없어진 창을 불러 'invalid command name' 이 뜬다.
             if self._tick_after is not None:
@@ -11307,6 +11593,36 @@ class Mascot:
         self.due_flip = bool(flip)
         self._due_save()
         self._due_refresh()
+
+    def _due_spots(self):
+        """마감 칸마다 따로 옮겨 둔 자리 {마감 이름: (dx, dy)}."""
+        d = self.us.get("due_spots")
+        out = {}
+        if isinstance(d, dict):
+            for k, v in d.items():
+                try:
+                    out[str(k)] = (int(v[0]), int(v[1]))
+                except Exception:
+                    pass
+        return out
+
+    def _due_spot_moved(self, key, xy):
+        d = self._due_spots()
+        if xy is None:
+            d.pop(str(key), None)
+        else:
+            d[str(key)] = [int(xy[0]), int(xy[1])]
+        live = set(TodoPanel._spot_key(t) for t in self._due_lines()[0])
+        self.us["due_spots"] = dict((k, v) for k, v in d.items() if k in live)
+        self._safe("due_spot_save", self._save_settings)
+
+    def _due_look_saved(self, flips, zooms):
+        """마감 칸마다 정한 꼬리 방향·크기를 기억한다 (할 일 패널과 같은 꼴)."""
+        self.us["due_looks"] = {"flips": {str(k): bool(v)
+                                          for k, v in (flips or {}).items()},
+                                "zooms": {str(k): int(v)
+                                          for k, v in (zooms or {}).items()}}
+        self._safe("due_look_save", self._save_settings)
 
     def _due_zoomed(self, pct):
         self.due_zoom = int(pct)
@@ -17747,8 +18063,8 @@ class Mascot:
         w2 = self._mw(title, f2) if title else 0
         total = w1 + (gap + w2 + pad * 2 if title else 0)
         sx = (x0 + x1) / 2 - total / 2
-        c.create_text(sx, cy + INK_DY, anchor="w", text=lv, font=f1,
-                      fill=cd["text"])
+        self._gtext(c, sx, cy + INK_DY, anchor="w", text=lv, font=f1,
+                    fill=cd["text"], on_glass=getattr(self, "_card_hole", False))
         if title:
             # 칭호는 다른 글자와 같은 모양이라 그냥 두면 묻힌다. 뒤에 옅은
             # 알약을 깔아 '이건 이름표'라고 읽히게 한다. 테마색을 흰색에
@@ -17760,11 +18076,21 @@ class Mascot:
             # 값이다) 알약도 그 중심에 맞춘다 — 안 그러면 칭호가 알약 안에서
             # INK_DY 만큼 위로 쏠린다 (실측 1.5px, 제보).
             pcy = cy + INK_DY
-            self._rrect(bx, pcy - h / 2, bx + w2 + pad * 2, pcy + h / 2,
-                        h / 2, fill=self._mix("#ffffff", cd["fill"], 0.20),
-                        outline="")
-            c.create_text(bx + pad, cy + INK_DY, anchor="w", text=title,
-                          font=f2, fill=self._shade(cd["fill"], 0.35))
+            pill_col = self._mix("#ffffff", cd["fill"], 0.20)
+            put9 = None
+            if getattr(self, "_card_hole", False):
+                # 유리 카드 — 알약도 판에 진짜 알파로 (Tk 다각형은 계단진다)
+                pw9, ph9 = int(round(w2 + pad * 2)), int(round(h))
+                pil9 = self._pill_pil(pw9, ph9, pill_col)
+                if pil9 is not None:
+                    put9 = self._pane_put(c, int(round(bx)),
+                                          int(round(pcy - h / 2)), pil9, "nw", "")
+            if put9 is None:
+                self._rrect(bx, pcy - h / 2, bx + w2 + pad * 2, pcy + h / 2,
+                            h / 2, fill=pill_col, outline="")
+            self._gtext(c, bx + pad, cy + INK_DY, anchor="w", text=title,
+                        font=f2, fill=self._shade(cd["fill"], 0.35),
+                        on_glass=False)          # 알약 위
 
     def _goal_bar(self, bx0, right, row):
         """목표 시간 진행바 + 퍼센트. 카드 종류와 상관없이 같은 모양으로."""
@@ -17780,8 +18106,9 @@ class Mascot:
             c.create_line(bx0, row, bx0 + (bx1 - bx0) * frac, row, width=6,
                           capstyle="round",
                           fill="#7ccf8f" if frac >= 1.0 else cd["fill"])
-        c.create_text(right, row + INK_DY, anchor="e", text=txt, font=f,
-                      fill="#5aa86e" if frac >= 1.0 else cd["sub"])
+        self._gtext(c, right, row + INK_DY, anchor="e", text=txt, font=f,
+                    fill="#5aa86e" if frac >= 1.0 else cd["sub"],
+                    on_glass=getattr(self, "_card_hole", False))
 
     def _draw_timer(self, state, sleeping, now):
         c = self.canvas
@@ -17806,7 +18133,20 @@ class Mascot:
         # 옅은 그림자는 안 그린다 — 색상키 창이라 반투명이 못 남아, 어두운
         # 바탕화면에서 밝은 회색 덩어리가 **바깥쪽 흰 테두리**로 보인다
         # (제보). 대신 테두리를 굵게 한다.
-        card = self._soft_shape(x1 - x0, y1 - y0, 16, cd["bg"], cd["border"])
+        # 유리 테마 — 카드 뒤에 유리 판(GlassPane)이 깔리면 카드 속을 키 색으로
+        # 뚫어 그 판이 비치게 한다. 판이 없으면(만들기 실패) 유리 그림.
+        hole = bool(self._glass and self._pane_ok())
+        self._card_hole = hole           # 카드 글자를 흰색으로 (맨 유리 위)
+        self._card_texts = {}            # 이번 프레임에 판에 올릴 글자
+        # 뚫린 카드는 모서리를 DWM 둥근 모서리(약 8px)에 맞춘다 — 16 이면
+        # 판 모서리가 테두리 밖으로 삐져나오거나(여백 0) 안쪽에 검은 띠가
+        # 남는다(여백 2 · 제보).
+        card = self._soft_shape(x1 - x0, y1 - y0, 9 if hole else 16,
+                                self.canvas_bg if hole else cd["bg"],
+                                cd["border"], glass=not hole)
+        if self._glass:
+            self._pane_rect = (x0, y0, x1, y1)
+            self._pane_at = now
         if card is not None:
             c.create_image(x0 - 1, y0 - 1, image=card, anchor="nw")
         else:                                  # PIL 이 실패하면 Tk 도형으로
@@ -17838,14 +18178,14 @@ class Mascot:
             tw = self._mw(status, f_stat)
             gx = cxm - (16 + tw) / 2            # 점+간격+텍스트 그룹 중앙
             status_dot(gx + 5, y0 + 16)
-            c.create_text(gx + 16, y0 + 16 + INK_DY, anchor="w", text=status,
-                          font=f_stat, fill=cd["sub"])
+            self._gtext(c, gx + 16, y0 + 16 + INK_DY, anchor="w", text=status,
+                        font=f_stat, fill=cd["sub"], on_glass=hole)
             R = 38
             clock_cy = y0 + 30 + R
             self._draw_clock(cxm, clock_cy, R, now)
-            c.create_text(cxm, clock_cy + R + 18 + INK_DY, text=label,
-                          font=self._fit(label, 14, (x1 - x0) - 20, True),
-                          fill=cd["text"])
+            self._gtext(c, cxm, clock_cy + R + 18 + INK_DY, text=label,
+                        font=self._fit(label, 14, (x1 - x0) - 20, True),
+                        fill=cd["text"], on_glass=hole)
             self._goal_bar(x0 + 14, x1 - 12, clock_cy + R + 42)
         elif self.has_clock:
             # 접힘: 상태 + 시간 한 줄 (게이지 없음)
@@ -17855,10 +18195,10 @@ class Mascot:
             f_time = self._fit(label, 13, avail * 0.62, True)
             f_stat = self._fit(status, 8,
                                avail - self._mw(label, f_time) - 8)
-            c.create_text(x0 + pad + 16, row + INK_DY, anchor="w", text=status,
-                          font=f_stat, fill=cd["sub"])
-            c.create_text(x1 - pad, row + INK_DY, anchor="e", text=label,
-                          font=f_time, fill=cd["text"])
+            self._gtext(c, x0 + pad + 16, row + INK_DY, anchor="w", text=status,
+                        font=f_stat, fill=cd["sub"], on_glass=hole)
+            self._gtext(c, x1 - pad, row + INK_DY, anchor="e", text=label,
+                        font=f_time, fill=cd["text"], on_glass=hole)
             self._goal_bar(x0 + pad + 2, x1 - pad, row + 25)
         else:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
@@ -17870,10 +18210,10 @@ class Mascot:
             f_time = self._fit(label, 13, avail * 0.62, True)
             f_stat = self._fit(status, 8,
                                avail - self._mw(label, f_time) - 8)
-            c.create_text(x0 + pad + 16, row1 + INK_DY, anchor="w", text=status,
-                          font=f_stat, fill=cd["sub"])
-            c.create_text(x1 - pad, row1 + INK_DY, anchor="e", text=label,
-                          font=f_time, fill=cd["text"])
+            self._gtext(c, x0 + pad + 16, row1 + INK_DY, anchor="w", text=status,
+                        font=f_stat, fill=cd["sub"], on_glass=hole)
+            self._gtext(c, x1 - pad, row1 + INK_DY, anchor="e", text=label,
+                        font=f_time, fill=cd["text"], on_glass=hole)
             self._goal_bar(x0 + pad + 2, x1 - pad, y0 + 45)
             # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
@@ -18309,27 +18649,45 @@ class Mascot:
 
     SOFT_MAX = 60                # 매끈한 둥근 도형 그림 캐시 상한 (지뢰 42)
 
-    def _soft_shape(self, w, h, r, fill, outline, lw=None, tail=None, pad=1):
+    def _soft_shape(self, w, h, r, fill, outline, lw=None, tail=None, pad=1,
+                    glass=False, key=None):
         """색상키 창에 얹을 **매끈한** 둥근 도형 (캐시). 실패하면 None.
 
         캔버스의 Tk 도형은 안티에일리어싱이 없어 모서리가 계단진다. 4배로
         그려 줄인 뒤 가장자리를 키 색과 미리 섞는다 — 할 일 말풍선이 이미
         쓰던 방법이고(지뢰 65), 카드·캐릭터 말풍선·동그란 단추도 같이 쓴다.
         레이어 창과 무관하므로 맥에서도 그대로 매끈해진다.
+        glass=True 면 유리 테마일 때 채움을 유리 그림(그라데이션)으로 (타이머 카드).
         """
         lw = BORDER_W if lw is None else lw
+        glass = bool(glass and self._glass)
+        key = key or self.canvas_bg          # 유리 창이면 GLASS_KEY 를 준다
         ck = (int(round(w)), int(round(h)), round(float(r), 1), fill, outline,
               lw, None if tail is None else
-              tuple(round(float(v), 1) for v in tail), pad, self.canvas_bg)
+              tuple(round(float(v), 1) for v in tail), pad, key,
+              glass)
         got = self._soft_cache.get(ck)
         if got is not None:
             return got
         try:
-            key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16)
-                         for i in (1, 3, 5))
+            key2 = tuple(int(str(key)[i:i + 2], 16) for i in (1, 3, 5))
             im = bubble_img(int(round(w)), int(round(h)), r, tail,
                             fill, outline, lw, pad=pad)
-            got = ImageTk.PhotoImage(flat_on_key(im, key2))
+            if glass:
+                im = self._glass_grad(im, fill)
+            if key == GLASS_KEY:
+                # 유리 창 — 가장자리를 유리 빛깔과 섞어 매끈하게 (요청).
+                # 근백색 키와 섞으면 흰 테가 진다.
+                got = ImageTk.PhotoImage(flat_on_key(im, GLASS_MIX,
+                                                     floor=40, cut=24))
+            elif str(fill).lower() == str(key).lower():
+                # 속을 뚫은 카드(타이머 유리) — 안쪽 가장자리를 키(검정)와
+                # 섞으면 테두리 안에 검은 띠가 생긴다 (제보). 테두리색과 섞는다.
+                mix9 = tuple(int(str(outline or fill)[i:i + 2], 16)
+                             for i in (1, 3, 5))
+                got = ImageTk.PhotoImage(flat_on_key(im, mix9))
+            else:
+                got = ImageTk.PhotoImage(flat_on_key(im, key2))
             # 매끈 경로의 시트가 이 그림을 못 알아보면 진짜 캔버스로 넘어가
             # 캐릭터 뒤에 그려진다 (말풍선 몸통만 뒤로 빠졌다). **키 색과
             # 섞기 전의** 원본을 달아 둔다 — 레이어 창은 알파를 그대로 쓴다.
@@ -18385,13 +18743,867 @@ class Mascot:
     def _soft_circle(self, cv, cx, cy, r, fill, outline, lw=None):
         """매끈한 동그라미 (카드 위 노래·환경음 단추). 실패하면 Tk 원으로."""
         d = int(round(r * 2))
-        got = self._soft_shape(d, d, r, fill, outline, lw=lw)
+        got = self._soft_shape(d, d, r, fill, outline, lw=lw,
+                               key=self._cv_key(cv))
         if got is None:
             self._oval(cv, cx - r, cy - r, cx + r, cy + r,
                        fill=fill, outline=outline,
                        width=BORDER_W if lw is None else lw)
             return
         cv.create_image(cx - r - 1, cy - r - 1, image=got, anchor="nw")
+
+    # ── 유리 테마 ─────────────────────────────────────────────────────
+    # 창 바탕을 GLASS_KEY 로 칠해 두면(card["panel"]·홈 벽·게임 판 바탕),
+    # 그리기 루프의 _glass_tick 이 새로 뜬 창마다 색상키를 걸고 DWM 아크릴을
+    # 넣는다. 창을 여는 자리마다 손대지 않아도 되는 이유가 이것이다.
+    # 실측(scratchpad/glass/proto*.py): 키 자리에 뒤 화면이 흐려져 비친다 ·
+    # DWM 모서리 속성(33)으로 둥글어진다 · 키 자리는 클릭이 통과한다 ·
+    # **Tk 글자를 키 위에 바로 그리면 ClearType 가장자리만 남아 속이 빈다**
+    # → 유리 위 글자는 _gtext 로 굽는다 (카드·알약 위 글자는 그대로 된다).
+    GLASS_TINT = 0x66E8E4EC        # ABGR — 옅은 회백 40% (흰 글자가 읽히게)
+    GLASS_TICK = 0.3
+    _glass = False                 # __new__ 로만 만든 검사 객체도 안전하게
+
+    def _glass_bg(self, color):
+        """창·캔버스 바탕색 — 유리 테마면 키 색."""
+        return GLASS_KEY if self._glass else color
+
+    def _glass_tick(self, now):
+        if now - self._glass_at < self.GLASS_TICK:
+            return
+        self._glass_at = now
+        for w in self.root.winfo_children():
+            if not isinstance(w, tk.Toplevel):
+                continue
+            try:
+                if not w.winfo_exists():
+                    continue
+                if getattr(w, "_glass_done", 0):
+                    self._glass_win_sync(w)         # 자리·z순서 재확인
+                    continue
+                if not w.winfo_ismapped():
+                    continue
+                if str(w.cget("bg")).lower() != GLASS_KEY:
+                    continue
+                w._glass_done = 1
+                self._glass_apply(w)
+            except Exception:
+                self._log_error("glass_apply")
+
+    def _glass_apply(self, w):
+        """창 하나를 유리로 — 색상키로 구멍을 내고 뒤에 유리 판을 깐다.
+
+        실패하면 판 없이 색상키만 남는다 (그러면 구멍으로 뒤가 그대로 보인다
+        — 창은 살아 있다).
+        """
+        w.attributes("-transparentcolor", GLASS_KEY)
+        cv9 = None
+        for c9 in w.winfo_children():
+            if isinstance(c9, tk.Canvas) and getattr(c9, "_glass_cv", False):
+                cv9 = c9
+                break
+        if cv9 is None:
+            for c9 in w.winfo_children():
+                if isinstance(c9, tk.Canvas):
+                    cv9 = c9
+                    break
+
+        def forward(kind, e, cv=cv9):
+            # 판이 받은 클릭을 앞 창의 캔버스로 — 같은 자리·같은 크기라
+            # x/y 가 그대로 통한다 (지뢰 118 의 이야기)
+            if cv is None or not cv.winfo_exists():
+                return
+            kw = {"x": e.x, "y": e.y, "rootx": e.x_root, "rooty": e.y_root}
+            if kind == "<MouseWheel>":
+                kw["delta"] = int(getattr(e, "delta", 0) or 0)
+            cv.event_generate(kind, **kw)
+
+        try:
+            pane = GlassPane(self.root, forward)
+        except Exception:
+            self._log_error("glass_pane")
+            w._glass_pane = None
+            return
+        w._glass_pane = pane
+        w._glass_size_at = 0.0
+        # 판이 생기기 전에 그린 그림자(홈 카드)·글자가 있으면 첫 판부터 싣는다
+        sh9 = getattr(w, "_glass_shadows", None)
+        if sh9:
+            pane.shadows = tuple(tuple(int(round(v)) for v in b) for b in sh9)
+        for c9 in w.winfo_children():
+            pt9 = getattr(c9, "_gt_pane", None)
+            if pt9:
+                pane.texts = pane.texts or {}
+                for it9, (px9, py9, tim9) in pt9.items():
+                    pane.texts[("cv", id(c9), it9)] = (int(px9), int(py9), tim9)
+        # 자식 위젯의 사건도 여기로 오므로(bindtags) 창 자신의 것만 본다
+        w.bind("<Configure>", lambda e, w9=w: (
+            self._glass_win_sync(w9) if e.widget is w9 else None), add="+")
+        w.bind("<Map>", lambda e, w9=w: (
+            self._glass_win_sync(w9) if e.widget is w9 else None), add="+")
+        w.bind("<Unmap>", lambda e, w9=w: (
+            self._glass_win_hide(w9) if e.widget is w9 else None), add="+")
+        w.bind("<Destroy>", lambda e, w9=w: (
+            self._glass_win_gone(w9) if e.widget is w9 else None), add="+")
+        self._glass_win_sync(w)
+
+    # ── 타이머 카드 뒤 유리 판 ─────────────────────────────────────────
+    def _pane_ok(self):
+        return self._pane is not None and self._pane is not False
+
+    def _pane_forward(self, kind, e):
+        """카드 판이 받은 클릭을 캐릭터 캔버스로 — 자리를 카드만큼 옮겨서."""
+        p = self._pane
+        if not p or p.rect is None:
+            return
+        cv = getattr(self, "_real_canvas", None) or self.canvas
+        dx = p.rect[0] - self.root.winfo_rootx()
+        dy = p.rect[1] - self.root.winfo_rooty()
+        kw = {"x": int(e.x + dx), "y": int(e.y + dy),
+              "rootx": e.x_root, "rooty": e.y_root}
+        if kind == "<MouseWheel>":
+            kw["delta"] = int(getattr(e, "delta", 0) or 0)
+        cv.event_generate(kind, **kw)
+
+    def _pane_tick(self, now):
+        """카드 자리에 판을 맞춘다. 카드가 안 그려지면(전체화면·타이머 끔) 숨긴다."""
+        if not IS_WIN or self._pane is False:
+            return
+        want = (self._pane_rect is not None and now - self._pane_at < 1.0
+                and self.timer_on and not self._fs_hidden)
+        try:
+            want = want and bool(self.root.winfo_viewable())
+        except Exception:
+            pass
+        if self._pane is None:
+            if not want:
+                return
+            try:
+                self._pane = GlassPane(self.root, self._pane_forward)
+            except Exception:
+                self._pane = False                # 다시 안 해 본다 (지뢰 119)
+                self._log_error("pane")
+                return
+        p = self._pane
+        if not want:
+            if p.shown:
+                p.show(False)
+            return
+        x0, y0, x1, y1 = self._pane_rect
+        ins = 0          # 테두리까지 꽉 채운다 (카드 모서리를 판에 맞췄다)
+        x = self.root.winfo_rootx() + int(x0) + ins
+        y = self.root.winfo_rooty() + int(y0) + ins
+        w, h = int(x1 - x0) - ins * 2, int(y1 - y0) - ins * 2
+        rect = (x, y, w, h)
+        stale = (now - self._pane_z > 1.0) and not p.below(self._main_hwnd)
+        if rect != p.rect or not p.shown or stale:
+            p.place(x, y, w, h, self._main_hwnd)
+            self._pane_z = now
+        p.set_texts(getattr(self, "_card_texts", None) or {})
+
+    # ── 표시줄 없는 창 (유리 테마 — 뽀모도로·홈, 요청) ─────────────────
+    CHROME_EDGE = 7
+
+    def _chrome_setup(self, win, cv, band, on_close):
+        """OS 표시줄을 떼고, 위 띠를 잡아 옮기고 가장자리를 잡아 늘이게.
+
+        band 는 잡아 옮길 수 있는 위 띠의 높이(값 또는 함수). 옮기기는 누른
+        자리에서 4px 넘게 끌었을 때 시작한다 — 그래야 그 띠 안의 단추 클릭이
+        먼저 제 일을 한다 (차례를 따지지 않아도 된다).
+        """
+        if not (self._glass and IS_WIN):
+            return
+        try:
+            win.overrideredirect(True)
+        except Exception:
+            return
+        try:
+            mn = win.minsize()
+            mn = (int(mn[0]), int(mn[1])) if mn and mn[0] > 1 else (200, 150)
+        except Exception:
+            mn = (200, 150)
+        win._chrome = {"band": band, "on_close": on_close, "hits": [],
+                       "rz": None, "move": None, "press": None,
+                       "min": mn, "cur": ""}
+
+    def _chrome_draw(self, win, cv, x, y, dir=-1, tags="dyn", r=None):
+        """– × 단추 (dir=-1 이면 x 에서 왼쪽으로, 1 이면 오른쪽으로)."""
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return
+        u, cd = self._ui, self.card
+        r = u(9) if r is None else r
+        hits = []
+        col = cd["fill"]
+        lw = max(1, int(u(2)))
+        for i, act in enumerate(("close", "min")):
+            bx = x + dir * i * (r * 2 + u(8))
+            self._soft_dot(cv, bx, y, r, cd["track"], tags=tags)
+            if act == "close":
+                d = r * 0.36
+                cv.create_line(bx - d, y - d, bx + d, y + d, fill=col, width=lw,
+                               capstyle="round", tags=tags)
+                cv.create_line(bx - d, y + d, bx + d, y - d, fill=col, width=lw,
+                               capstyle="round", tags=tags)
+            else:
+                cv.create_line(bx - r * 0.4, y, bx + r * 0.4, y, fill=col,
+                               width=lw, capstyle="round", tags=tags)
+            hits.append((bx - r, y - r, bx + r, y + r, act))
+        ch["hits"] = hits
+
+    def _chrome_edge(self, win, x, y):
+        W, H = win.winfo_width(), win.winfo_height()
+        E = self.CHROME_EDGE
+        out = "l" if x <= E else ("r" if x >= W - E else "")
+        out += "t" if y <= E else ("b" if y >= H - E else "")
+        return out
+
+    def _chrome_press(self, win, e):
+        """가장자리·단추면 여기서 처리하고 True. 띠면 누른 자리만 적어 둔다."""
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return False
+        try:
+            ed = self._chrome_edge(win, e.x, e.y)
+        except Exception:
+            return False
+        if ed:
+            ch["rz"] = (ed, e.x_root, e.y_root, win.winfo_width(),
+                        win.winfo_height(), win.winfo_x(), win.winfo_y())
+            return True
+        for x0, y0, x1, y1, act in ch.get("hits", []):
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                self._safe("ui_click", self._ui_click)
+                if act == "close":
+                    ch["on_close"]()
+                else:
+                    win.withdraw()
+                return True
+        band = ch["band"]() if callable(ch["band"]) else ch["band"]
+        if e.y <= band:
+            self._chrome_press_band(win, e)
+        return False
+
+    def _chrome_press_band(self, win, e):
+        """잡아 옮길 띠를 눌렀다 — 4px 넘게 끌면 옮기기가 시작된다."""
+        ch = getattr(win, "_chrome", None)
+        if ch:
+            ch["press"] = (e.x_root, e.y_root, win.winfo_x(), win.winfo_y())
+        return True
+
+    def _chrome_drag(self, win, e):
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return False
+        rz = ch.get("rz")
+        if rz:
+            ed, sx, sy, w0, h0, x0, y0 = rz
+            dx, dy = e.x_root - sx, e.y_root - sy
+            mw, mh = ch.get("min", (200, 150))
+            x, y, w, h = x0, y0, w0, h0
+            if "r" in ed:
+                w = max(mw, w0 + dx)
+            if "l" in ed:
+                w = max(mw, w0 - dx)
+                x = x0 + (w0 - w)
+            if "b" in ed:
+                h = max(mh, h0 + dy)
+            if "t" in ed:
+                h = max(mh, h0 - dy)
+                y = y0 + (h0 - h)
+            win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            return True
+        mv = ch.get("move")
+        pr = ch.get("press")
+        if mv is None and pr is not None and (abs(e.x_root - pr[0]) > 4
+                                              or abs(e.y_root - pr[1]) > 4):
+            ch["move"] = mv = (pr[0] - pr[2], pr[1] - pr[3])
+        if mv:
+            win.geometry("+%d+%d" % (e.x_root - mv[0], e.y_root - mv[1]))
+            return True
+        return False
+
+    def _chrome_release(self, win):
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return False
+        was = bool(ch.get("rz") or ch.get("move"))
+        ch["rz"] = ch["move"] = ch["press"] = None
+        return was
+
+    def _chrome_motion(self, win, e):
+        """가장자리 위에서는 크기 조절 커서."""
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return
+        try:
+            ed = self._chrome_edge(win, e.x, e.y)
+        except Exception:
+            return
+        cur = {"": "", "l": "size_we", "r": "size_we", "t": "size_ns",
+               "b": "size_ns", "lt": "size_nw_se", "rb": "size_nw_se",
+               "rt": "size_ne_sw", "lb": "size_ne_sw"}.get(ed, "")
+        if cur != ch.get("cur"):
+            ch["cur"] = cur
+            try:
+                win.configure(cursor=cur)
+            except Exception:
+                pass
+
+    def _room_shadows_push(self):
+        """홈 카드 그림자 목록을 창에 적어 두고, 판이 있으면 바로 올린다."""
+        w = self.room_win
+        if w is None or not self._glass:
+            return
+        boxes = tuple(self._room_shadow_boxes)
+        w._glass_shadows = boxes
+        pane = getattr(w, "_glass_pane", None)
+        if pane is not None:
+            pane.set_shadows(boxes)
+
+    def _glass_win_hide(self, w):
+        pane = getattr(w, "_glass_pane", None)
+        if pane is not None and pane.shown:
+            pane.show(False)
+
+    def _glass_win_gone(self, w):
+        pane = getattr(w, "_glass_pane", None)
+        w._glass_pane = None
+        if pane is not None:
+            pane.destroy()
+
+    def _glass_win_sync(self, w):
+        """앞 창의 자리·크기·보임을 판에 맞춘다. 바뀐 것이 없으면 아무 일도
+        안 한다 (매번 밀어 넣으면 깜빡인다 — 지뢰 15)."""
+        pane = getattr(w, "_glass_pane", None)
+        if pane is None:
+            return
+        try:
+            if not w.winfo_exists():
+                return
+            if not w.winfo_viewable() or w.state() in ("withdrawn", "iconic"):
+                self._glass_win_hide(w)
+                return
+            x, y = w.winfo_rootx(), w.winfo_rooty()
+            wd, ht = w.winfo_width(), w.winfo_height()
+            if wd < 2 or ht < 2:
+                return
+            frame = int(w.wm_frame(), 16)
+            rect = (x, y, wd, ht)
+            if rect != pane.rect or not pane.shown or not pane.below(frame):
+                pane.place(x, y, wd, ht, frame)
+        except Exception:
+            self._log_error("glass_sync")
+
+    def _glass_grad(self, im, fill="#ffffff"):
+        """유리 그림 — 흰 판을 왼쪽 위 흰색 → 오른쪽 아래 테마 파스텔로.
+
+        색상키 창은 반투명을 못 담으므로(지뢰 65) 유리는 '그림'이다.
+        채움색과 같은 픽셀만 갈아 끼워 테두리는 그대로 둔다.
+        """
+        try:
+            from PIL import ImageChops          # 그림자 층이 이미 쓴다 (지뢰 21)
+            w, h = im.size
+            base = self.card.get("fill") or "#f2a7c5"
+            c0 = (255, 255, 255)
+            c1 = tuple(int(self._tint(base, 0.86)[i:i + 2], 16)
+                       for i in (1, 3, 5))
+            c2 = tuple(int(self._tint(base, 0.94)[i:i + 2], 16)
+                       for i in (1, 3, 5))
+            g = Image.new("RGB", (2, 2))
+            g.putdata([c0, c2, c2, c1])
+            g = g.resize((w, h), Image.BILINEAR)
+            rgb = im.convert("RGB")
+            f = tuple(int(str(fill)[i:i + 2], 16) for i in (1, 3, 5))
+            mask = ImageChops.difference(rgb, Image.new("RGB", (w, h), f))
+            mask = mask.convert("L").point(lambda v: 255 if v < 6 else 0)
+            out = Image.composite(g, rgb, mask)
+            return Image.merge("RGBA", (*out.split(), im.split()[3]))
+        except Exception:
+            return im
+
+    def _glass_ring(self, im, px=1):
+        """실루엣 둘레에 흰 테 (요청 — 유리 위에서 글자·아이콘·판이 뜨게).
+
+        알파를 px 만큼 부풀린 흰 층 위에 원본을 얹는다. 모양이 무엇이든
+        (글자·동그라미·말풍선) 같은 방법이 통한다. 그림 가장자리에 여백이
+        px 이상 있어야 잘리지 않는다.
+        """
+        try:
+            a = im.split()[3]
+            big = a.filter(ImageFilter.MaxFilter(int(px) * 2 + 1))
+            ring = Image.new("RGBA", im.size, (255, 255, 255, 0))
+            ring.putalpha(big)
+            ring.alpha_composite(im)
+            return ring
+        except Exception:
+            return im
+
+    def _ring_px(self):
+        return 2 if getattr(self, "ui_k", 1.0) >= 1.4 else 1
+
+    def _cv_key(self, cv):
+        """이 캔버스의 키 색 — 유리 창이면 근백색, 캐릭터 창(시트 포함)은 #010203."""
+        if getattr(cv, "_glass_cv", False):
+            return GLASS_KEY
+        return self.canvas_bg
+
+    def _glass_ink(self, fill):
+        """유리 바로 위에 놓이는 글자의 색 — 전부 흰색 (요청, 포인트 색 없이)."""
+        return "#ffffff"
+
+    def _gtext_white(self, text, font=None, justify="center", fill="#ffffff"):
+        """유리 판에 올릴 글자 한 장 (PIL RGBA, 진짜 알파 · 캐시).
+
+        2배로 그려 줄여 가장자리를 더 부드럽게 한다. 실패하면 None.
+        fill 이 흰색이 아니면 그 색 그대로 (카드·알약 위 글자도 판에 올려
+        굵게 깨지지 않게 — 제보).
+        """
+        try:
+            size = font[1] if font else 9
+            bold = len(font) > 2 and "bold" in str(font[2:]) if font else False
+            px = max(6, int(round(float(size) * self._tk_ppp())))
+        except Exception:
+            return None
+        text = str(text)
+        if not self._gtext_bakeable(text):
+            return None
+        try:
+            col = tuple(int(str(fill)[i:i + 2], 16) for i in (1, 3, 5))
+        except Exception:
+            col = (255, 255, 255)
+        ck = ("W", text, px, bold, justify, col)
+        cache = self._gtext_cache
+        got = cache.get(ck)
+        if got is not None:
+            cache[ck] = cache.pop(ck)
+            return got
+        try:
+            S = 2
+            fnt = self._pil_font(px * S, bold)
+            d0 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            bb = d0.multiline_textbbox((0, 0), text, font=fnt, align=justify)
+            pad = 2 * S
+            im = Image.new("RGBA", (bb[2] - bb[0] + pad * 2,
+                                    bb[3] - bb[1] + pad * 2), col + (0,))
+            ImageDraw.Draw(im).multiline_text(
+                (pad - bb[0], pad - bb[1]), text, font=fnt,
+                fill=col + (255,), align=justify)
+            im = im.resize((max(1, im.width // S), max(1, im.height // S)),
+                           Image.LANCZOS)
+        except Exception:
+            return None
+        if len(cache) > 1500:
+            for old in list(cache)[:500]:
+                cache.pop(old, None)
+        cache[ck] = im
+        return im
+
+    def _blank_img(self, w, h):
+        """투명한 자리표 그림 — 판의 글자가 비쳐 보이게 구멍만 낸다 (캐시)."""
+        c = getattr(self, "_blank_cache", None)
+        if c is None:
+            c = self._blank_cache = {}
+        ph = c.get((w, h))
+        if ph is None:
+            ph = ImageTk.PhotoImage(Image.new("RGBA", (max(1, w), max(1, h)),
+                                              (0, 0, 0, 0)))
+            if len(c) > 300:
+                for k in list(c)[:150]:
+                    c.pop(k, None)
+            c[(w, h)] = ph
+        return ph
+
+    @staticmethod
+    def _anchor_tl(x, y, w, h, anchor):
+        """앵커 기준점 → 왼쪽 위. 'center' 는 글자 안에 e·n 이 들어 있어
+        나침반 글자로 훑으면 오른쪽 위 정렬이 된다 (지뢰 127 과 같은 함정)."""
+        a = str(anchor or "center")
+        if a == "center":
+            return x - w / 2.0, y - h / 2.0
+        fx = 0.0 if "w" in a else (1.0 if "e" in a else 0.5)
+        fy = 0.0 if "n" in a else (1.0 if "s" in a else 0.5)
+        return x - w * fx, y - h * fy
+
+    @staticmethod
+    def _gtext_bakeable(text):
+        """프리텐다드에 없는 기호(◔ ✓ ✿ ▾ ★ 화살표·이모지)가 있으면 False —
+        구우면 줄무늬 상자(.notdef)가 된다 (실측). 한글·라틴·문장부호만."""
+        for ch in str(text):
+            o = ord(ch)
+            if not (0x20 <= o <= 0x7E or 0xA0 <= o <= 0xFF or o in (0x0A, 0x09)
+                    or 0x2010 <= o <= 0x2027 or 0x2039 <= o <= 0x203A
+                    or 0x3000 <= o <= 0x303F or 0x3131 <= o <= 0x318E
+                    or 0xAC00 <= o <= 0xD7A3 or 0xFF00 <= o <= 0xFFEF):
+                return False
+        return True
+
+    def _pane_of(self, cv):
+        """이 캔버스의 글자를 받을 유리 판과 그 판 좌표계의 원점(캔버스 기준)."""
+        real = getattr(self, "_real_canvas", None) or self.canvas
+        if cv is real or cv is getattr(self, "_sheet", None):
+            r = self._pane_rect
+            if self._pane_ok() and r is not None:
+                return self._pane, (r[0], r[1])
+            return None, None
+        if not getattr(cv, "_glass_cv", False):
+            return None, None
+        try:
+            if str(cv.cget("scrollregion") or ""):
+                return None, None       # 굴러가는 캔버스(환경설정)는 자리가 밀린다
+            top = cv.winfo_toplevel()
+            if getattr(top, "_no_pane_draw", None) is None:
+                # 미니게임은 매 프레임 통째로 다시 그린다 — 판에 올리면
+                # 프레임마다 판을 다시 굽게 되어 느려진다. 캔버스에 둔다.
+                try:
+                    top._no_pane_draw = top.title() in self.GAME_TITLES
+                except Exception:
+                    top._no_pane_draw = False
+            if top._no_pane_draw:
+                return None, None
+            return getattr(top, "_glass_pane", None), (-cv.winfo_x(), -cv.winfo_y())
+        except Exception:
+            return None, None
+
+    GAME_TITLES = ("2048", "수박게임", "컬러타일", "꼬들")
+
+    def _hole_img(self, pil, key=GLASS_KEY):
+        """판에 올린 그림의 자리표 — 실루엣만 키 색(구멍), 나머지는 투명.
+
+        투명 자리표를 두면 먼저 그린 캔버스 항목(캐릭터 그림)이 그 자리에
+        남아 판의 그림을 가린다. 실루엣을 키 색으로 뚫으면 판이 비치고,
+        가장자리 바깥은 캔버스 그대로다. **키 색은 캔버스마다 다르다** —
+        캐릭터 창은 #010203 이라 근백색으로 뚫으면 구멍이 아니라 흰 글자가
+        된다 (칭호가 알약에 묻혀 안 보이던 원인).
+        """
+        c = getattr(self, "_hole_cache", None)
+        if c is None:
+            c = self._hole_cache = {}
+        ck = (id(pil), str(key))
+        got = c.get(ck)
+        if got is not None and got[0] is pil:
+            c[ck] = c.pop(ck)
+            return got[1]
+        try:
+            kr = tuple(int(str(key)[i:i + 2], 16) for i in (1, 3, 5))
+            a = pil.split()[3].point(lambda v: 255 if v >= 100 else 0)
+            hole = Image.new("RGBA", pil.size, kr + (255,))
+            hole.putalpha(a)
+            ph = ImageTk.PhotoImage(hole)
+        except Exception:
+            return None
+        if len(c) > 600:
+            for k in list(c)[:300]:
+                c.pop(k, None)
+        c[ck] = (pil, ph)
+        return ph
+
+    def _pill_pil(self, w, h, fill):
+        """알약 한 장 (PIL RGBA · 캐시) — 유리 카드의 칭호 알약."""
+        c = getattr(self, "_pill_cache", None)
+        if c is None:
+            c = self._pill_cache = {}
+        key = (w, h, fill)
+        got = c.get(key)
+        if got is not None:
+            return got
+        try:
+            S = 4
+            im = Image.new("RGBA", (max(1, w) * S, max(1, h) * S), (0, 0, 0, 0))
+            ImageDraw.Draw(im).rounded_rectangle(
+                [0, 0, w * S - 1, h * S - 1], radius=h * S // 2, fill=fill)
+            got = im.resize((max(1, w), max(1, h)), Image.LANCZOS)
+        except Exception:
+            return None
+        if len(c) > 60:
+            for k in list(c)[:30]:
+                c.pop(k, None)
+        c[key] = got
+        return got
+
+    def _img_put(self, cv, x, y, ph, anchor="nw", tags="dyn"):
+        """PhotoImage 를 캔버스에 — 유리 창이고 원본(PIL)이 달려 있으면 판에
+        진짜 알파로 올린다 (둥근 모서리의 흰 테를 없앤다 · 제보)."""
+        pil9 = getattr(ph, "_pil_src", None)
+        if (pil9 is not None and self._glass and getattr(cv, "_glass_cv", False)
+                and self._pane_put(cv, x, y, pil9, anchor, tags) is not None):
+            return
+        cv.create_image(x, y, image=ph, anchor=anchor, tags=tags)
+
+    def _pane_put(self, cv, x, y, pil, anchor="nw", tags="dyn"):
+        """RGBA 그림을 유리 판에 진짜 알파로 올리고 캔버스에는 구멍만 낸다.
+
+        판을 못 쓰는 캔버스(캐릭터 창인데 판이 없음 · 굴러가는 창 · 게임)면
+        None — 부르는 쪽이 캔버스에 그린다. 판이 아직 없으면(창을 연 직후)
+        캔버스에 적어 두었다가 판이 생길 때 싣는다(_glass_apply).
+        """
+        pane, org = self._pane_of(cv)
+        if org is None:
+            return None
+        hole = self._hole_img(pil, self._cv_key(cv))
+        if hole is None:
+            return None
+        try:
+            it = cv.create_image(x, y, image=hole, anchor=anchor, tags=tags)
+        except Exception:
+            return None
+        w, h = pil.size
+        tx, ty = self._anchor_tl(x, y, w, h, anchor)
+        px, py = tx - org[0], ty - org[1]
+        real = getattr(self, "_real_canvas", None) or self.canvas
+        if cv is real or cv is getattr(self, "_sheet", None):
+            self._card_texts[it] = (px, py, pil)
+            return it
+        keep = getattr(cv, "_gt_keep", None)
+        if keep is not None:
+            keep[it] = hole
+        pt = getattr(cv, "_gt_pane", None)
+        if pt is None:
+            pt = cv._gt_pane = {}
+        pt[it] = (px, py, pil)
+        if pane is not None:
+            pane.set_text(("cv", id(cv), it), px, py, pil)
+        return it
+
+    def _on_glass(self, cv, x, y):
+        """그 자리 아래에 아무것도 안 그려져 있으면(맨 유리) True."""
+        try:
+            for it in cv.find_overlapping(x - 1, y - 1, x + 1, y + 1):
+                if it in getattr(cv, "_gt", ()):
+                    continue                 # 구운 글자는 바탕이 아니다
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _gtext_img(self, text, font=None, fill="#000000", justify="center",
+                   white=False):
+        """구운 글자 한 장 (캐시 · LRU). 실패하면 None.
+
+        white=True 는 맨 유리 위의 글자 — 흰색(또는 밝은 원색)으로 바꾸고
+        옅은 어두운 테를 둘러 밝은 바탕에서도 읽히게 한다 (요청).
+        """
+        try:
+            fam, size = (font[0], font[1]) if font else (UI_FONT, 9)
+            bold = len(font) > 2 and "bold" in str(font[2:]) if font else False
+            px = max(6, int(round(float(size) * self._tk_ppp())))
+        except Exception:
+            return None
+        if white:
+            fill = self._glass_ink(fill)
+        text = str(text)
+        if not self._gtext_bakeable(text):
+            return None
+        ck = (text, px, bold, str(fill), justify, bool(white))
+        cache = self._gtext_cache
+        ph = cache.get(ck)
+        if ph is not None:
+            # 적중한 것은 맨 뒤로 — 화면에 걸린 그림부터 버려지지 않게 (지뢰 185)
+            cache[ck] = cache.pop(ck)
+            return ph
+        try:
+            fnt = self._pil_font(px, bold)
+            d0 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            bb = d0.multiline_textbbox((0, 0), str(text), font=fnt,
+                                       align=justify)
+            pad = 3
+            im = Image.new("RGBA", (bb[2] - bb[0] + pad * 2,
+                                    bb[3] - bb[1] + pad * 2), (0, 0, 0, 0))
+            ImageDraw.Draw(im).multiline_text(
+                (pad - bb[0], pad - bb[1]), str(text), font=fnt,
+                fill=fill, align=justify)
+            # 가장자리의 반투명 픽셀을 Tk 가 근백색 키와 섞으면 획마다 흰
+            # 테가 두르므로(실측) 지뢰 65 의 방법으로 가장자리를 글자색 쪽으로
+            # 눌러 두고(하한 75%) 옅은 픽셀은 버린다.
+            try:
+                r9, g9, b9 = (int(str(fill)[i:i + 2], 16) for i in (1, 3, 5))
+            except Exception:
+                r9, g9, b9 = 0, 0, 0
+            if white:
+                # 맨 유리 위 — 테 없이 글자 그대로 (요청). 가장자리만 유리
+                # 빛깔과 섞는다.
+                im = flat_on_key(im, GLASS_MIX, floor=90, cut=40)
+            else:
+                mix9 = tuple(int(v * 0.6 + c * 0.4) for v, c in
+                             zip((r9, g9, b9), (236, 232, 236)))
+                im = flat_on_key(im, mix9, floor=190, cut=60)
+            ph = self._tkimg(im)                # 시트가 알아보게 (지뢰 128)
+        except Exception:
+            return None
+        if len(cache) > 1500:                   # 지뢰 18 — 오래된 것부터
+            for old in list(cache)[:500]:
+                cache.pop(old, None)
+        cache[ck] = ph
+        return ph
+
+    def _gtext(self, cv, x, y, text="", font=None, fill="#000000",
+               anchor="center", tags="", justify="center", on_glass=None,
+               **kw):
+        """유리 위의 글자 — PIL 로 구워 그림으로 얹는다.
+
+        Tk 글자를 키 색 위에 바로 그리면 가장자리가 지저분하다 (실측 —
+        카드·알약 위 글자는 멀쩡하다). 유리 테마가 아니면 그냥 create_text
+        다. width(줄바꿈) 같은 것이 오면 굽지 않는다. 유리 창의 캔버스는
+        `_glass_canvas_shim` 이 create_text 를 통째로 이리로 보낸다.
+        """
+        # 유리 캔버스는 create_text 자체가 이리로 오므로 원래 것을 써야 한다
+        ct = getattr(cv, "_orig_create_text", None) or cv.create_text
+        if not self._glass or kw:
+            return ct(x, y, text=text, font=font, fill=fill,
+                      anchor=anchor, tags=tags, justify=justify, **kw)
+        # 아래에 카드·알약이 없는 맨 유리 위면 흰 글자로 (요청)
+        if on_glass is None:
+            on_glass = (getattr(cv, "_glass_cv", False)
+                        and self._on_glass(cv, x, y))
+        # 판을 쓸 수 있는 캔버스면 글자를 전부 판에 (진짜 알파 — 굵게
+        # 깨지지 않는다). 맨 유리 위면 흰색, 카드·알약 위면 원래 색.
+        it = self._gtext_pane(cv, x, y, text, font, anchor, tags, justify,
+                              "#ffffff" if on_glass else fill)
+        if it is not None:
+            return it
+        if on_glass and not self._gtext_bakeable(text):
+            fill = "#ffffff"        # 기호가 든 글자는 Tk 글자로 — 그래도 흰색
+        ph = self._gtext_img(text, font, fill, justify, white=bool(on_glass))
+        if ph is None:
+            return ct(x, y, text=text, font=font, fill=fill,
+                      anchor=anchor, tags=tags, justify=justify)
+        try:
+            it = cv.create_image(x, y, image=ph, anchor=anchor, tags=tags)
+        except Exception:
+            return ct(x, y, text=text, font=font, fill=fill,
+                      anchor=anchor, tags=tags, justify=justify)
+        if getattr(cv, "_glass_cv", False):
+            # 캐시에서 밀려나도 캔버스에 걸린 동안은 살아 있게 (지뢰 185)
+            cv._gt_keep[it] = ph
+        return it
+
+    def _gtext_pane(self, cv, x, y, text, font, anchor, tags, justify,
+                    fill="#ffffff"):
+        """맨 유리 위 글자를 **유리 판에** 진짜 알파로 그린다 (요청 — 매끈하게).
+
+        캔버스에는 같은 크기의 투명 자리표만 둔다(구멍) — bbox·hit 는 그대로
+        통하고, 판의 흰 글자가 그 구멍으로 비친다. 판이 아직 없으면(창을
+        연 직후) 캔버스에 적어 두었다가 판이 생길 때 싣는다(_glass_apply).
+        """
+        if self._pane_of(cv)[1] is None:
+            return None
+        tim = self._gtext_white(text, font, justify, fill)
+        if tim is None:
+            return None
+        return self._pane_put(cv, x, y, tim, anchor, tags)
+
+    def _glass_canvas_shim(self, cv):
+        """유리 창의 캔버스 — create_text 가 구운 글자를 만든다.
+
+        itemconfigure(text=·fill=·font=)·itemcget·type 도 글자처럼 굴게 한다
+        (그림 항목이지만 부르는 쪽은 모른다). width(줄바꿈)·state 처럼
+        못 굽는 것은 Tk 글자 그대로다.
+        """
+        cv._glass_cv = True
+        gt = cv._gt = {}
+        cv._gt_keep = {}
+        host = self
+        o_ct, o_cfg, o_cget, o_type, o_del = (cv.create_text, cv.itemconfigure,
+                                              cv.itemcget, cv.type, cv.delete)
+        cv._orig_create_text = o_ct
+        KEYS = ("text", "font", "fill", "justify", "anchor")
+
+        def create_text(x, y, **kw):
+            it = host._gtext(cv, x, y, **kw)
+            try:
+                if o_type(it) == "image":
+                    gt[it] = dict(kw, x=x, y=y)
+                    gt[it]["_white"] = bool(host._on_glass(cv, x, y))
+            except Exception:
+                pass
+            return it
+
+        def itemconfigure(tag=None, cnf=None, **kw):
+            d = gt.get(tag) if isinstance(tag, int) else None
+            if d is not None and kw and any(k in kw for k in KEYS):
+                for k in KEYS:
+                    if k in kw:
+                        d[k] = kw.pop(k) if k != "anchor" else kw["anchor"]
+                pt = getattr(cv, "_gt_pane", None) or {}
+                if tag in pt:
+                    # 판에 그린 글자 — 다시 굽고 자리표 크기를 맞춘다
+                    tim = host._gtext_white(
+                        d.get("text", ""), d.get("font"),
+                        d.get("justify", "center"),
+                        "#ffffff" if d.get("_white") else d.get("fill", "#000000"))
+                    ph = (host._hole_img(tim, host._cv_key(cv))
+                          if tim is not None else None)
+                    if ph is not None:
+                        w9, h9 = tim.size
+                        kw["image"] = ph
+                        cv._gt_keep[tag] = ph
+                        tx, ty = host._anchor_tl(d["x"], d["y"], w9, h9,
+                                                 d.get("anchor", "center"))
+                        pane, org = host._pane_of(cv)
+                        if org is not None:
+                            px, py = tx - org[0], ty - org[1]
+                            pt[tag] = (px, py, tim)
+                            if pane is not None:
+                                pane.set_text(("cv", id(cv), tag), px, py, tim)
+                else:
+                    ph = host._gtext_img(d.get("text", ""), d.get("font"),
+                                         d.get("fill", "#000000"),
+                                         d.get("justify", "center"),
+                                         white=bool(d.get("_white")))
+                    if ph is not None:
+                        kw["image"] = ph
+                        cv._gt_keep[tag] = ph
+            if cnf is not None:
+                return o_cfg(tag, cnf, **kw)
+            return o_cfg(tag, **kw)
+
+        def itemcget(tag, opt):
+            d = gt.get(tag) if isinstance(tag, int) else None
+            if d is not None and opt in ("text", "font", "fill", "justify"):
+                return d.get(opt, "")
+            return o_cget(tag, opt)
+
+        def type_(tag):
+            if isinstance(tag, int) and tag in gt:
+                return "text"
+            return o_type(tag)
+
+        def _drop(it):
+            gt.pop(it, None)
+            cv._gt_keep.pop(it, None)
+            pt = getattr(cv, "_gt_pane", None)
+            if pt and pt.pop(it, None) is not None:
+                pane, _o = host._pane_of(cv)
+                if pane is not None:
+                    pane.del_text(("cv", id(cv), it))
+
+        def delete(*args):
+            for a in args:
+                if a == "all":
+                    gt.clear()
+                    cv._gt_keep.clear()
+                    pt = getattr(cv, "_gt_pane", None)
+                    if pt:
+                        pt.clear()
+                        pane, _o = host._pane_of(cv)
+                        if pane is not None:
+                            pane.clear_texts()
+                elif isinstance(a, int):
+                    _drop(a)
+                else:
+                    try:
+                        for it in cv.find_withtag(a):
+                            _drop(it)
+                    except Exception:
+                        pass
+            return o_del(*args)
+
+        cv.create_text = create_text
+        cv.itemconfigure = itemconfigure
+        cv.itemconfig = itemconfigure
+        cv.itemcget = itemcget
+        cv.type = type_
+        cv.delete = delete
 
     def _tkimg(self, im, soft=None):
         """ImageTk 로 바꾸면서 **매끈 경로가 쓸 원본을 달아 둔다.**
@@ -18596,6 +19808,9 @@ class Mascot:
             except Exception:
                 pass
         self._safe("z_pin", self._z_pin, now)
+        if self._glass:
+            self._safe("glass", self._glass_tick, now)
+            self._safe("pane", self._pane_tick, now)
         # 진단은 방 처리 밖에서 돈다. 안에 두면 방이 멈출 때 진단도 같이
         # 멈춰서, 정작 알아야 할 '멈췄다'는 사실이 안 남는다 (실제로 겪음).
         self._frames = getattr(self, "_frames", 0) + 1
@@ -19598,7 +20813,7 @@ class Mascot:
         self._pomo_tf_page = page
         shown = who[page * per:(page + 1) * per]
         y0 = gy1 + u(10)
-        cv.create_text((x_l + x_r) / 2, y0, text="이번 주 같이한 친구"
+        self._gtext(cv, (x_l + x_r) / 2, y0, text="이번 주 같이한 친구"
                        if off == 0 else "그 주에 같이한 친구",
                        font=uf(8, True), fill=cd["sub"])
         total = cw * len(shown)
@@ -19640,7 +20855,7 @@ class Mascot:
                 if on:
                     self._pomo_hits.append((tx - u(11), ay - u(14), tx + u(11),
                                             ay + u(14), ("tfpg", d9)))
-            cv.create_text((x_l + x_r) / 2, gy1 + u(self.TF_ROW) - u(6),
+            self._gtext(cv, (x_l + x_r) / 2, gy1 + u(self.TF_ROW) - u(6),
                            text="%d / %d" % (page + 1, pages), font=uf(7),
                            fill=cd["sub"])
         return gy1 + u(self.TF_ROW)
@@ -19837,7 +21052,7 @@ class Mascot:
                            "#ffffff", outline=cd["border"], width=1,
                            shadow=True)
                 st["hits"].append((nm, gx0, gx1, gy - u(16), gy + u(16)))
-            cv.create_text(W / 2, H - u(30), font=uf(8), fill=cd["sub"],
+            self._gtext(cv, W / 2, H - u(30), font=uf(8), fill=cd["sub"],
                            text="게이지를 끌면 그 소리가 바로 들려요")
 
         def at(e):
@@ -20483,6 +21698,8 @@ class Mascot:
         st = self._strip
         if st is None or self._strip_im is None:
             return
+        if self.us.get("pomo_strip_lock"):
+            return                     # '현재 위치 고정' — 끌어도 안 움직인다 (요청)
         try:
             rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
         except Exception:
@@ -20820,6 +22037,10 @@ class Mascot:
             items.append((lab, lambda k9=kind, s9=slot: self._safe(
                 "strip_react", self._strip_react, s9, k9)))
         items.append(("-", None))
+        # 자리 고정 — 스티커 잠금처럼 끌어도 안 움직인다 (요청)
+        items.append(("현재 위치 고정" + (" ✓" if self.us.get("pomo_strip_lock")
+                                        else ""),
+                      lambda: self._safe("strip_lock", self._strip_lock_toggle)))
         items.append(("크기·여백 조절",
                       lambda: self._safe("strip_menu", self._strip_menu)))
         items.append(("뽀모도로 창 열기",
@@ -21037,6 +22258,14 @@ class Mascot:
         self._place_near(win, u(60), u(40))
         return win
 
+    def _strip_lock_toggle(self):
+        """'현재 위치 고정' 켜고 끄기 — 켜면 띠를 끌어도 안 움직인다."""
+        self.us["pomo_strip_lock"] = not bool(self.us.get("pomo_strip_lock"))
+        self._safe("strip_save", self._save_settings)
+        self._say("바탕화면 친구들 자리를 %s" % (
+            "고정했어요" if self.us["pomo_strip_lock"] else "다시 옮길 수 있어요"),
+            2.5)
+
     def _strip_menu(self):
         """띠 우클릭 — 캐릭터 크기·가로 여백을 게이지바로 (요청).
 
@@ -21051,7 +22280,7 @@ class Mascot:
             pass
         u, cd = self._ui, self.card
         line = self._tint(cd["fill"], 0.55)
-        W, H = int(u(230)), int(u(222))     # '자리 초기화' 한 줄만큼 더
+        W, H = int(u(230)), int(u(242))     # '자리 초기화'·'위치 고정' 줄만큼 더
         win = tk.Toplevel(self.root)
         self._strip_menu_ref = win
         win.title("친구들 띠")
@@ -21098,7 +22327,10 @@ class Mascot:
                                    key, lo, hi))
             y2 = u(146)
             cv.create_line(u(12), y2, W - u(12), y2, fill=line)
+            lock9 = bool(self.us.get("pomo_strip_lock"))
             for j, (lab, act) in enumerate((("자리 초기화", "home"),
+                                            ("현재 위치 고정 " + ("✓" if lock9
+                                                            else "(꺼짐)"), "lock"),
                                             ("뽀모도로 창 열기", "open"),
                                             ("바탕화면에서 숨기기", "hide"))):
                 yy = y2 + u(14) + j * u(20)
@@ -21126,6 +22358,9 @@ class Mascot:
                         self._strip_key = None
                         self._strip_at = 0.0
                         self._safe("strip_follow", self._strip_follow)
+                    elif hit[4] == "lock":
+                        self._safe("strip_lock", self._strip_lock_toggle)
+                        draw()
                     elif hit[4] == "open":
                         win.destroy()
                         self._safe("pomo_win", self._pomo_win)
@@ -22379,7 +23614,8 @@ class Mascot:
         soft9 = self._soft_shape(bw9, bh9, min(bh9 / 2, u(16)), "#ffffff",
                                  line9,
                                  tail=(bw9 / 2 - u(9), bw9 / 2 + u(9),
-                                       bw9 / 2 - u(2), tl9))
+                                       bw9 / 2 - u(2), tl9),
+                                 key=self._cv_key(cv9))
         if soft9 is not None:
             keep9["bub"] = soft9
             cv9.create_image(bx09 - 1, ybt9 - 1, image=soft9, anchor="nw")
@@ -22955,7 +24191,7 @@ class Mascot:
                 self._tm_hits.append((cx - u(26), cy - u(28), cx + u(26),
                                       cy + u(42), ("pick", slot)))
             if pages > 1:
-                cv.create_text(W / 2, u(272), text="%d / %d"
+                self._gtext(cv, W / 2, u(272), text="%d / %d"
                                % (tw["page"] + 1, pages),
                                font=self._uf(8, True), fill=cd["sub"])
                 for tx, ch, on9, d9 in ((u(25), "‹", tw["page"] > 0, -1),
@@ -23968,6 +25204,10 @@ class Mascot:
         """뽀모도로 창 — 환경음 창과 같은 결로 캔버스에 둥근 카드."""
         got = getattr(self, "_pomo_winref", None)
         if got is not None and got.winfo_exists():
+            try:
+                got.deiconify()           # 표시줄 없는 창의 '–' 는 withdraw 다
+            except Exception:
+                pass
             got.lift()
             return
         self._pomo_wk_off = 0             # 새로 열면 '이번 주'부터
@@ -24015,9 +25255,31 @@ class Mascot:
         win.resizable(True, True)       # 모서리를 끌어 크기 조절 (요청)
         win.minsize(int(self._ui(BASE_W) * 0.7), int(self._ui(base_h()) * 0.7))
         self._keep_front(win, focus=False)
+        # 유리 테마 — 표시줄 없이 (요청). 내용 위에 얇은 띠를 따로 두고 그
+        # 맨 오른쪽에 – × 를 놓는다. 띠가 잡아 옮기는 자리다.
+        BARH = int(self._ui(22)) if (self._glass and IS_WIN) else 0
+        bar = None
+        if BARH:
+            bar = tk.Canvas(win, width=W, height=BARH, bg=cd["panel"],
+                            highlightthickness=0, bd=0)
+            bar.pack(side="top", fill="x")
         cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
                        highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
+        self._chrome_setup(win, cv, band=lambda: 0, on_close=win.destroy)
+        if bar is not None:
+            def bar_draw(_e=None):
+                bar.delete("all")
+                self._chrome_draw(win, bar, bar.winfo_width() - self._ui(20),
+                                  BARH / 2.0 + self._ui(2), dir=-1,
+                                  r=self._ui(6.5))
+            bar.bind("<Configure>", bar_draw)
+            bar.bind("<Button-1>", lambda e: self._safe(
+                "pomo_bar", lambda: (self._chrome_press(win, e)
+                                     or self._chrome_press_band(win, e))))
+            bar.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+            bar.bind("<ButtonRelease-1>", lambda _e: self._chrome_release(win))
+            bar.bind("<Motion>", lambda e: self._chrome_motion(win, e))
         line = self._tint(cd["fill"], 0.55)
         pad = None                      # draw 안에서 배율에 맞춰 다시 잡는다
 
@@ -24120,7 +25382,7 @@ class Mascot:
                     ("long", "긴 휴식"))
             if not edit9:
                 # 접혀 있을 때는 지금 길이를 한 줄로만 알려 준다
-                cv.create_text(W / 2, ty0 + u(10),
+                self._gtext(cv, W / 2, ty0 + u(10),
                                text="%d분 집중 · %d분 휴식 · 네 번째엔 %d분"
                                % (self._pomo_mins("focus"),
                                   self._pomo_mins("short"),
@@ -24225,7 +25487,7 @@ class Mascot:
             # 배지 셋만 — 감싸는 바깥 카드는 직선 변이 배지 사이로
             # 삐져나와 '이어진 줄'로 보였다 (피드백). 글자는 굵고 크게,
             # 안쪽 여백은 어느 배율에서도 같은 눈금으로 잰다.
-            cv.create_text(W / 2, sy0 - u(11), text="오늘",
+            self._gtext(cv, W / 2, sy0 - u(11), text="오늘",
                            font=uf(9, True), fill=cd["sub"])
             rows8 = [("◔", "집중", runs, "#ffe9ef", "#b3556e"),
                      ("✔", "세트", sets, "#eaf6df", "#5f8352")]
@@ -24277,10 +25539,10 @@ class Mascot:
                 ttl9 = ("이번 주" if off9 == 0 else
                         ("지난주" if off9 == 1 else "%d주 전" % off9))
                 f_h9 = uf(9, True)
-                cv.create_text(W / 2, hy, text=ttl9, font=f_h9,
-                               fill=cd["sub"])
+                self._gtext(cv, W / 2, hy, text=ttl9, font=f_h9,
+                            fill=cd["sub"])
                 tw9 = self._mw(ttl9, f_h9)
-                cv.create_text(W / 2 + tw9 / 2 + u(9), hy,
+                cv.create_text(W / 2 + tw9 / 2 + u(9), hy,   # 기호는 PIL 글꼴에 없다
                                text="▴" if open9 else "▾",
                                font=f_h9, fill=cd["sub"])
                 self._pomo_hits.append((W / 2 - tw9 / 2 - u(8),
@@ -24351,11 +25613,11 @@ class Mascot:
                                            base_y - u(2.2),
                                            cx7 + u(2.2), base_y + u(2.2),
                                            fill="#e8e2ec", outline="")
-                            cv.create_text(cx7, gy1 - u(8), text=wd7,
-                                           font=uf(8, True if is_t
-                                                   else False),
-                                           fill=cd["fill"] if is_t
-                                           else cd["sub"])
+                            self._gtext(cv, cx7, gy1 - u(8), text=wd7,
+                                        font=uf(8, True if is_t
+                                                else False),
+                                        fill=cd["fill"] if is_t
+                                        else cd["sub"])
                     wy1 = gy1
                     self._tf_boxes = []
                     if self._safe_str(self._pomo_team_line, off9):
@@ -24395,7 +25657,7 @@ class Mascot:
                 foot9 = "한 번 더 누르면 모두 마무리해요"
             else:
                 foot9 = "창을 닫아도 계속 돌아가요"
-            cv.create_text(W / 2, wy1 + u(16), text=foot9,
+            self._gtext(cv, W / 2, wy1 + u(16), text=foot9,
                            font=uf(8), fill=cd["sub"])
             # 잘린 각오 위에 커서가 있으면 통째로 보여 준다 (요청).
             # **맨 나중에** 그려야 옆 칸에 안 가린다.
@@ -24495,6 +25757,9 @@ class Mascot:
                 cv.move("all", self._pomo_ox, 0)
 
         def on_click(e):
+            # 표시줄 없는 창의 가장자리·– × 단추가 먼저다 (원래 좌표로)
+            if self._chrome_press(win, e):
+                return
             # **창 안 어디를 눌러도 '똑'** (요청 — 타이머를 만지는 모든
             # 자리에서 나야 한다). 예전에는 단추마다 따로 불러서 시간 조절
             # 화살표·게이지·빈 자리에서는 소리가 없었다. 연타·드래그는
@@ -24712,7 +25977,7 @@ class Mascot:
                     # 끌어 정한 폭(on_resize 가 적어 둔 것)을 쓴다.
                     w9 = max(int(u(BASE_W)), int(zst.get("user_w") or 0))
                     zst["w_set"] = w9
-                    win.geometry("%dx%d" % (w9, int(u(base_h()))))
+                    win.geometry("%dx%d" % (w9, int(u(base_h())) + BARH))
             except Exception:
                 pass
 
@@ -24745,16 +26010,24 @@ class Mascot:
         win.bind("<Configure>", on_resize, add="+")
         def on_move9(e):
             """커서 자리 — 잘린 각오를 호버로 펴는 데 쓴다 (그리기 눈금)."""
+            self._chrome_motion(win, e)
             self._pomo_mouse = (e.x - getattr(self, "_pomo_ox", 0.0), e.y)
+
+        def on_drag9(e):
+            if self._chrome_drag(win, e):
+                return
+            self._safe("stk_move", self._stk_move, "pomo",
+                       e.x - getattr(self, "_pomo_ox", 0.0), e.y)
+
+        def on_up9(_e):
+            self._chrome_release(win)
+            self._safe("stk_drop", self._stk_drop, "pomo")
 
         cv.bind("<Motion>", lambda e: self._safe("pomo_move", on_move9, e))
         cv.bind("<Leave>", lambda _e: setattr(self, "_pomo_mouse", None))
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
-        cv.bind("<B1-Motion>", lambda e: self._safe(
-            "stk_move", self._stk_move, "pomo",
-            e.x - getattr(self, "_pomo_ox", 0.0), e.y))
-        cv.bind("<ButtonRelease-1>", lambda _e: self._safe(
-            "stk_drop", self._stk_drop, "pomo"))
+        cv.bind("<B1-Motion>", lambda e: self._safe("pomo_drag", on_drag9, e))
+        cv.bind("<ButtonRelease-1>", lambda e: self._safe("pomo_up", on_up9, e))
         cv.bind("<MouseWheel>", lambda e: self._safe(
             "stk_wheel", self._stk_wheel, "pomo", e.delta))
         win.bind("<Escape>", lambda _e: win.destroy())
@@ -26327,7 +27600,9 @@ class Mascot:
         win = tk.Toplevel(self.root)
         self._bgm_winref = win
         win.title("플레이리스트")
-        key = TRANSPARENT
+        # 유리 테마면 창 전체가 유리 — 바탕 카드를 안 그리고 DWM 이 모서리를
+        # 둥글린다 (_glass_apply). 키 색도 유리용 근백색이다.
+        key = GLASS_KEY if self._glass else TRANSPARENT
         bare = IS_WIN                # 맥 Tk 는 표시줄 없는 창이 글자를 못 받는다
         # 크기 조절 — 표시줄이 없는 윈도우는 가장자리를 직접 잡고(edge_at),
         # 표시줄이 있는 맥은 **OS 창틀**에 맡긴다 (지뢰 168).
@@ -26497,13 +27772,13 @@ class Mascot:
             # **끄는 동안에는 안 굽는다** — 한 장이 창 전체라 매 픽셀마다
             # 4배로 그려 줄이면 끌기가 뚝뚝 끊긴다 (놓으면 다시 매끈해진다).
             card = None
-            if not st.get("rz"):
+            if not st.get("rz") and not self._glass:
                 card = self._soft_shape(W - 2, H - 2, u(14), cd["panel"],
                                         self._tint(cd["border"], 0.35), lw=2)
             if card is not None:
                 cv.create_image(0, 0, image=card, anchor="nw")
                 self._bgm_card = card
-            else:
+            elif not self._glass:
                 cv.create_rectangle(0, 0, W, H, fill=cd["panel"], outline="")
             # ── 제목 줄 (잡고 끌면 창이 움직인다)
             # 제목은 아이콘과 **세로 가운데를 맞춘다** (요청 — 안내 글을
@@ -26983,8 +28258,8 @@ class Mascot:
                 # 곡이 보이는 칸보다 적으면 안내를 **마지막 줄 바로 아래**로
                 # 올린다 (창을 키웠을 때 가운데가 휑해 보이지 않게)
                 hy9 = g["list"] + g["rowh"] * min(g["vis"], len(rows9)) + u(8)
-                cv.create_text(W / 2.0, hy9,
-                               text="%d곡 · 휠로 내려 더 봐요 · ▲▼로 순서를 바꿔요"
+                self._gtext(cv, W / 2.0, hy9,
+                               text="%d곡 · 휠로 내려 더 봐요 · 화살표로 순서를 바꿔요"
                                     % len(songs),
                                font=self._uf(8, True), fill=cd["sub"])
             draw_ctrl(g, line)
@@ -27014,9 +28289,9 @@ class Mascot:
                     while t9n and self._mw(t9n + "…", f9n) > lim9:
                         t9n = t9n[:-1]
                     t9n = (t9n + "…") if t9n else "…"
-                cv.create_text(W / 2.0, ny9,
-                               text=t9n or "틀 곡을 골라 주세요", font=f9n,
-                               fill=cd["text"] if now9 else cd["sub"])
+                self._gtext(cv, W / 2.0, ny9,
+                            text=t9n or "틀 곡을 골라 주세요", font=f9n,
+                            fill=cd["text"] if now9 else cd["sub"])
             if self._vid_ok():
                 # 제목 **앞**에 여닫기 단추 (요청). 제목은 가운데 정렬이라
                 # 글자 폭을 재서 그 왼쪽에 둔다.
@@ -27126,11 +28401,11 @@ class Mascot:
                                text="로그인 없이 바로 들을 수 있어요",
                                font=self._uf(8, True), fill=cd["sub"])
             else:
-                cv.create_text(u(40), ay, anchor="w",
-                               text="유튜브 계정 · " + ("로그인됨" if signed
-                                                    else "로그인 안 됨"),
-                               font=self._uf(8, True),
-                               fill=cd["text"] if signed else cd["sub"])
+                self._gtext(cv, u(40), ay, anchor="w",
+                            text="유튜브 계정 · " + ("로그인됨" if signed
+                                                 else "로그인 안 됨"),
+                            font=self._uf(8, True),
+                            fill=cd["text"] if signed else cd["sub"])
                 self._rr_soft(cv, W - u(96), ay - u(11), W - u(18),
                               ay + u(11), u(11), fill=cd["track"],
                               outline="", width=0)
@@ -27326,7 +28601,7 @@ class Mascot:
             draw_vid(g, g["frvid"])
             draw_fr_head()
             noff9 = sum(1 for p9 in people if p9.get("off"))
-            cv.create_text(W / 2.0, g["sep"] - u(12),
+            self._gtext(cv, W / 2.0, g["sep"] - u(12),
                            text="친구 %d명%s%s" % (
                                len(people),
                                " · 오프라인 %d명" % noff9 if noff9 else "",
@@ -27342,7 +28617,7 @@ class Mascot:
                 return
             names = list(self._amb.names)
             mixv = self._amb_mix()
-            cv.create_text(u(20), u(104), anchor="w",
+            self._gtext(cv, u(20), u(104), anchor="w",
                            text="여러 개를 겹쳐 틀 수 있어요 · 각자 볼륨을 줘요",
                            font=self._uf(8, True), fill=cd["sub"])
             for i9, name in enumerate(names):
@@ -27399,7 +28674,7 @@ class Mascot:
             clip(g)
             scrollbar(g)
             hy9 = g["list"] + g["rowh"] * min(g["vis"], len(names)) + u(8)
-            cv.create_text(W / 2.0, hy9,
+            self._gtext(cv, W / 2.0, hy9,
                            text="%d가지 · 휠로 내려 더 봐요" % len(names),
                            font=self._uf(8, True), fill=cd["sub"])
             sy = g["sep"]
@@ -27410,7 +28685,7 @@ class Mascot:
                            cd["fill"] if n_on else cd["sub"])
             txt = ("켜진 소리 %d개 · %s" % (n_on, " + ".join(list(mixv)[:2]))
                    if n_on else "켜진 소리가 없어요")
-            cv.create_text(u(40), ay, anchor="w", text=txt[:32],
+            self._gtext(cv, u(40), ay, anchor="w", text=txt[:32],
                            font=self._uf(8, True),
                            fill=cd["text"] if n_on else cd["sub"])
             self._rr_soft(cv, W - u(90), ay - u(11), W - u(18), ay + u(11),
@@ -30671,7 +31946,7 @@ class Mascot:
             """제목 + 흰 카드 안에 행들을 균등 배치."""
             self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
-            cv.create_text(PAD + 18, y, anchor="w", text=title,
+            self._gtext(cv, PAD + 18, y, anchor="w", text=title,
                            font=(FONT, FS(9), "bold"), fill=cd["fill"])
             y += 16
             # 행을 먼저 그리고 흰 카드를 뒤로 내린다. 펼친 목록이 있으면 높이가
@@ -31056,6 +32331,9 @@ class Mascot:
             if len(self.skins) > 1:
                 disp.append(lambda ry: open_picker(ry, "패션", "skin",
                                                   self.skin_names))
+            if self.cfg.get("themes") and IS_WIN:
+                disp.append(lambda ry: open_picker(ry, "테마", "theme",
+                                                  ["기본", "유리"]))
             disp += [
                 lambda ry: stepper(ry, "캐릭터 크기", "scale_pct", 50, 200, 10, "%"),
                 lambda ry: slider(ry, "타이머와 머리 사이 여백", "card_gap",
@@ -31091,7 +32369,7 @@ class Mascot:
                            fill=cd["fill"], outline="")
             cv.create_text(PAD + 18, y, anchor="w", text="작업 프로그램",
                            font=(FONT, FS(9), "bold"), fill=cd["fill"])
-            cv.create_text(W - PAD - 4, y, anchor="e", text="쉼표로 구분",
+            self._gtext(cv, W - PAD - 4, y, anchor="e", text="쉼표로 구분",
                            font=(FONT, FS(8)), fill=cd["sub"])
             y += 16
             rrect(PAD, y, W - PAD, y + 50, 16, fill="#ffffff",
@@ -31191,7 +32469,7 @@ class Mascot:
             tw = W + (vbar.winfo_reqwidth() if scrolling else 0)
             bar.config(width=tw, height=self._ui(78))
             bar.create_line(0, 1, tw, 1, fill=LINE)
-            bar.create_text(tw / 2, self._ui(17),
+            self._gtext(bar, tw / 2, self._ui(17),
                             text="패션 · 크기 · 타이머는 저장 시 재시작",
                             font=(FONT, FS(8)), fill=cd["sub"])
             by = self._ui(30)
@@ -31268,6 +32546,9 @@ class Mascot:
             need_restart = (new["scale_pct"] != self.us["scale_pct"]
                             or new["font_pct"] != self.us.get("font_pct", 100)
                             or skin_changed
+                            # 테마는 창 바탕색이 켤 때 정해진다 — 다시 켠다
+                            or str(new.get("theme") or "기본")
+                            != str(self.us.get("theme") or "기본")
                             or bool(new["show_timer"]) != self.timer_on
                             or bool(new["shadow"]) != bool(self.us.get("shadow", True))
                             # 가장자리 방식은 파츠 캐시가 통째로 달라진다
@@ -33358,7 +34639,7 @@ class Mascot:
                                      sealed=False)
                 if im9:
                     cv.create_image(W / 2, u(200), image=keep(im9))
-                cv.create_text(W / 2, u(244),
+                self._gtext(cv, W / 2, u(244),
                                text="아직 주고받은 쪽지가 없어요"
                                if nw["tab"] == "in"
                                else "아직 보낸 쪽지가 없어요",
@@ -33401,7 +34682,7 @@ class Mascot:
                     if im9:
                         cv.create_image(ex1 - ew / 2, ry + rh / 2,
                                         image=keep(im9))
-                    cv.create_text(u(16), ry + rh / 2 - u(9), anchor="w",
+                    self._gtext(cv, u(16), ry + rh / 2 - u(9), anchor="w",
                                    text="From. %s" % self._note_name(slot9),
                                    font=self._uf(10, True),
                                    fill=self._shade(col9, 0.15))
@@ -33452,7 +34733,7 @@ class Mascot:
                 ry += rh + u(10)
             if pages > 1:
                 py9 = H - u(84)
-                cv.create_text(W / 2, py9, text="%d / %d"
+                self._gtext(cv, W / 2, py9, text="%d / %d"
                                % (nw["page"] + 1, pages),
                                font=self._uf(8), fill=cd["sub"])
                 for tx9, ch9, on9, d9 in ((W / 2 - u(52), "‹",
@@ -33471,7 +34752,7 @@ class Mascot:
             hm9 = self._note_heart(u(11), "#ffffff")
             if hm9:
                 cv.create_image(u(74), by0 + u(19), image=keep(hm9))
-            cv.create_text(W / 2, H - u(11),
+            self._gtext(cv, W / 2, H - u(11),
                            text="쪽지는 30일 뒤에 살짝 사라져요",
                            font=self._uf(8, True), fill=cd["sub"])
 
@@ -33707,7 +34988,7 @@ class Mascot:
                 if on9:
                     hit(tx9 - u(12), u(40), tx9 + u(12), u(76),
                         ("fpage", d9))
-            cv.create_text(W / 2, u(100), text="%d / %d"
+            self._gtext(cv, W / 2, u(100), text="%d / %d"
                            % (nw["fpage"] + 1, pages),
                            font=self._uf(8, True), fill=cd["sub"])
             pw3, ph3 = u(298), u(300)
@@ -35562,6 +36843,7 @@ class Mascot:
         band = full.crop((0, (h - band_h) * S, w * S, h * S))
         band = band.resize((w, band_h), Image.LANCZOS)
         ph = ImageTk.PhotoImage(band)
+        ph._pil_src = band               # 유리 창은 판에 진짜 알파로 올린다
         if len(self._soft_cache) > 300:          # 상한 (지뢰 18)
             for k2 in list(self._soft_cache)[:150]:
                 self._soft_cache.pop(k2, None)
@@ -35980,11 +37262,15 @@ class Mascot:
         p = self._room_pastel
         # 배경은 칸보다 색기를 낮춘다 — 안 그러면 진한 테마색(멸종 #ba2028)
         # 에서 벽이 눈에 띄게 붉어져 캐릭터가 묻힌다.
-        out = {"wall": p(self.char, 0.970 - d * 0.6, 0.35, 0.50),
-               "dot": p(self.char, 0.930 - d * 0.6, 0.35, 0.55),
+        out = {"wall": GLASS_KEY if self._glass       # 유리 — 벽이 곧 유리
+               else p(self.char, 0.970 - d * 0.6, 0.35, 0.50),
+               "dot": None if self._glass             # 점 벽지는 안 찍는다
+               else p(self.char, 0.930 - d * 0.6, 0.35, 0.55),
                "card": "#ffffff",   # 방(칸)은 흰색 — 테마색은 바닥 띠가 맡는다
                "line": p(self.char, 0.920 - d, 0.35, 0.55),
-               "bar": p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
+               # 하늘 뒤 띠 — 유리면 키 색 (모서리를 둥글게 잘라야 한다)
+               "bar": GLASS_KEY if self._glass
+               else p(self.char, 0.982 - d * 0.6, 0.30, 0.45),
                "lamp": p(self.char, 0.870 - d, 0.45, 0.70),
                "ink": ink, "sub": sub}
         if len(self._room_pal_cache) > 12:
@@ -36002,6 +37288,13 @@ class Mascot:
     def _room_toggle(self):
         """우클릭 > 홈. 처음이면 무엇이 나가는지 알려 주고 물어본다."""
         if self.room_win is not None:
+            try:      # 표시줄 없는 창의 '–' 로 숨겨 둔 것이면 되살린다
+                if self.room_win.state() == "withdrawn":
+                    self.room_win.deiconify()
+                    self.room_win.lift()
+                    return
+            except Exception:
+                pass
             self._room_close()
         elif self.us.get("room_seen") and self.us.get("room_on"):
             self._safe("room_open", self._room_open)
@@ -36151,6 +37444,10 @@ class Mascot:
         cv = tk.Canvas(win, width=W, height=H, highlightthickness=0,
                        bd=0, bg=self._room_palette()["wall"])
         cv.pack(fill="both", expand=True)
+        # 유리 테마 — 표시줄 없이 (요청). 하늘 띠가 잡아 옮기는 띠다.
+        self._chrome_setup(win, cv,
+                           band=lambda: getattr(self, "_room_top_px", 90),
+                           on_close=self._room_close)
         cv.bind("<Button-1>", lambda e: self._safe("room_click",
                                                    self._room_click, e))
         cv.bind("<Button-3>", lambda e: self._safe("room_rclick",
@@ -36339,7 +37636,7 @@ class Mascot:
                 st2 = lums.resize((16, 8)).convert("L")
                 self._sky_lum = sum(st2.getdata()) / 128.0
                 self._sky_key = key
-                self._sky_img = ImageTk.PhotoImage(im0)
+                self._sky_img = ImageTk.PhotoImage(self._glass_topround(im0))
                 return self._sky_img
             except Exception:
                 pass                       # 못 읽으면 그리는 하늘로 물러난다
@@ -36447,9 +37744,25 @@ class Mascot:
         lums = im.crop((0, 0, max(1, im.width * 45 // 100), im.height))
         st2 = lums.resize((16, 8)).convert("L")
         self._sky_lum = sum(st2.getdata()) / 128.0
-        self._sky_img = ImageTk.PhotoImage(im)
+        self._sky_img = ImageTk.PhotoImage(self._glass_topround(im))
         self._sky_key = key
         return self._sky_img
+
+    def _glass_topround(self, im, r=8):
+        """유리 창의 하늘 띠 — 위 두 모서리를 둥글게 잘라 뒤 유리 판(DWM 둥근
+        모서리)과 맞춘다 (요청). 유리가 아니면 그대로."""
+        if not self._glass:
+            return im
+        try:
+            w, h = im.size
+            mask = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1 + r * 2],
+                                                   radius=r, fill=255)
+            out = im.convert("RGBA")
+            out.putalpha(mask)
+            return flat_on_key(out, GLASS_MIX, floor=40, cut=24)
+        except Exception:
+            return im
 
     def _room_sky_draw(self, cv, W, top, k, period):
         """홈 타이틀 띠의 하늘 — 시간대 5종 (그림 한 장으로)."""
@@ -36676,11 +37989,14 @@ class Mascot:
         shadow=True 면 아래로 살짝 처진 그림자까지 한 장에 넣는다.
         """
         d = int(r * 2 + 0.5)
-        key = ("dot", d, fill, outline, int(width * 10), shadow)
+        gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+        # 유리 창 — 판에 진짜 알파로 (가장자리가 매끈하다). 캐시에는 PIL 을 담는다.
+        route = bool(gl and self._pane_of(cv)[1] is not None)
+        key = ("dot", d, fill, outline, int(width * 10), shadow, gl, route)
         ph = self._soft_cache.get(key)
         if ph is None:
             S = 4
-            pad = S * (3 if shadow else 1)
+            pad = S * (3 if shadow else 2)
             side = d * S + pad * 2
             im = Image.new("RGBA", (side, side + (2 * S if shadow else 0)),
                            (0, 0, 0, 0))
@@ -36694,11 +38010,21 @@ class Mascot:
                        outline=(outline or None),
                        width=(max(1, int(width * S)) if outline else 0))
             im = im.resize((im.width // S, im.height // S), Image.LANCZOS)
-            ph = ImageTk.PhotoImage(im)
+            if route:
+                ph = im                 # PIL 그대로 — 판에 올린다
+            else:
+                if gl:  # 판을 못 쓰는 유리 창 — 가장자리를 유리 빛깔과 섞는다
+                    im = flat_on_key(im, GLASS_MIX, floor=40, cut=24)
+                ph = ImageTk.PhotoImage(im)
             if len(self._soft_cache) > 200:
                 for k2 in list(self._soft_cache)[:100]:
                     self._soft_cache.pop(k2, None)
             self._soft_cache[key] = ph
+        if route:
+            if self._pane_put(cv, cx, cy + (1 if shadow else 0), ph,
+                              "center", tags) is not None:
+                return
+            ph = ImageTk.PhotoImage(flat_on_key(ph, GLASS_MIX, floor=40, cut=24))
         cv.create_image(cx, cy + (1 if shadow else 0), image=ph, tags=tags)
 
     def _halo_text(self, cv, x, y, text, font, fill, halo, anchor="w",
@@ -36766,6 +38092,11 @@ class Mascot:
         w, h = int(x1 - x0), int(y1 - y0)
         if w <= 0 or h <= 0:
             return                       # 창이 잡히기 전 첫 프레임 (크기 0/음수)
+        if self._glass and getattr(cv, "_glass_cv", False):
+            # 유리 창 — 색상키 캔버스에서는 반투명이 안 되어 딱딱한 띠가
+            # 된다. 뒤 유리 판(진짜 알파)에 모아 그린다 (요청).
+            self._room_shadow_boxes.append((x0, y0, x1, y1, r))
+            return
         key = ("cshadow", w, h, int(r))
         ph = self._soft_cache.get(key)
         if ph is None:
@@ -36803,7 +38134,12 @@ class Mascot:
         th = int(round(tail[1])) if tail else 0
         tx = int(round(tail[0] - x0)) if tail else 0
         td = 1 if tail_dir > 0 else -1
-        key = (w, h, int(r), fill, outline, int(width), tx, th, td)
+        # 유리 창 — 판에 진짜 알파로 올린다 (가장자리가 매끈하다 · 요청).
+        # 판을 못 쓰는 창(게임·환경설정)은 가장자리를 유리 빛깔과 섞어 둔다.
+        gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+        route = bool(gl and self._pane_of(cv)[1] is not None)
+        m9 = 0
+        key = (w, h, int(r), fill, outline, int(width), tx, th, td, gl, route)
         cache = self._bubble_cache
         img = cache.get(key)
         if img is None:
@@ -36811,29 +38147,38 @@ class Mascot:
                 from PIL import ImageDraw
                 S = 4
                 lw = max(1, int(width)) * S
-                im = Image.new("RGBA", (w * S, (h + th) * S), (0, 0, 0, 0))
+                o9 = m9 * S
+                im = Image.new("RGBA", ((w + m9 * 2) * S, (h + th + m9 * 2) * S),
+                               (0, 0, 0, 0))
                 d2 = ImageDraw.Draw(im)
                 d2.rounded_rectangle(
-                    [lw // 2, lw // 2, w * S - 1 - lw // 2,
-                     h * S - 1 - lw // 2],
+                    [o9 + lw // 2, o9 + lw // 2, o9 + w * S - 1 - lw // 2,
+                     o9 + h * S - 1 - lw // 2],
                     radius=int(r) * S, fill=fill or None,
                     outline=outline or None, width=lw)
                 if th:
                     # 꼬리 — 속을 몸통 테두리 '위'까지 파고들게 칠해 아랫선을
                     # 지우고(한 덩어리), 빗변 두 줄만 테두리색으로 긋는다.
-                    lx, rx = (tx - 8) * S, (tx + 8) * S
-                    tipx, tipy = (tx + 3 * td) * S, (h + th) * S - lw
-                    topy = h * S - lw * 2 - S
+                    lx, rx = o9 + (tx - 8) * S, o9 + (tx + 8) * S
+                    tipx, tipy = o9 + (tx + 3 * td) * S, o9 + (h + th) * S - lw
+                    topy = o9 + h * S - lw * 2 - S
                     d2.polygon([(lx, topy), (rx, topy), (tipx, tipy)],
                                fill=fill)
                     if outline:
-                        ey = h * S - lw // 2 - 1
+                        ey = o9 + h * S - lw // 2 - 1
                         d2.line([(lx, ey), (tipx, tipy)],
                                 fill=outline, width=lw)
                         d2.line([(rx, ey), (tipx, tipy)],
                                 fill=outline, width=lw)
-                im = im.resize((w, h + th), Image.LANCZOS)
-                img = ImageTk.PhotoImage(im)
+                im = im.resize((w + m9 * 2, h + th + m9 * 2), Image.LANCZOS)
+                if self._glass and str(fill).lower() == "#ffffff":
+                    im = self._glass_grad(im, fill)     # 유리 그림 (카드)
+                if route:
+                    img = im                            # PIL 그대로 — 판에
+                else:
+                    if gl:
+                        im = flat_on_key(im, GLASS_MIX, floor=40, cut=24)
+                    img = ImageTk.PhotoImage(im)
             except Exception:
                 return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
                                 outline=outline, width=width, tags=tags,
@@ -36842,8 +38187,14 @@ class Mascot:
                 for old in list(cache)[:80]:   # 들어가고도 남는 크기로
                     cache.pop(old, None)
             cache[key] = img
-        return cv.create_image(int(x0), int(y0), image=img, anchor="nw",
-                               tags=tags)
+        if route:
+            it9 = self._pane_put(cv, int(x0), int(y0), img, "nw", tags)
+            if it9 is not None:
+                return it9
+            img = ImageTk.PhotoImage(flat_on_key(img, GLASS_MIX, floor=40,
+                                                 cut=24))
+        return cv.create_image(int(x0) - m9, int(y0) - m9, image=img,
+                               anchor="nw", tags=tags)
 
     # 글자 테두리 — 캔버스 글자에는 외곽선이 없다. 여덟 방향으로 한 번씩
     # 더 그려 두르면 스티커처럼 도톰해 보인다. **항목이 아홉 배가 되므로**
@@ -36891,7 +38242,10 @@ class Mascot:
         여기서는 위임하지 않는다. raw=True 는 물러날 때 재귀를 끊는 표식.
         """
         raw = kw.pop("raw", False)
-        if (not raw and cv is getattr(self, "room_cv", None)
+        # 유리 창의 캔버스도 위임한다 — 계단진 Tk 도형이 유리 위에서는
+        # 더 거칠어 보이고, 위임하면 흰 테까지 같이 두른다 (요청).
+        if (not raw and (cv is getattr(self, "room_cv", None)
+                         or getattr(cv, "_glass_cv", False))
                 and set(kw) <= {"fill", "outline", "width", "tags"}):
             try:
                 return self._rr_soft(cv, x0, y0, x1, y1, r, **kw)
@@ -36933,6 +38287,8 @@ class Mascot:
         줄이면 되울림이 생겨 점이 '::' 처럼 네 조각으로 갈라진다
         (찍어서 확인했다). 봉우리가 없는 도형은 넓이 평균이 정답이다.
         """
+        if color is None or self._glass:   # 유리 테마 — 점 벽지 없음
+            return None
         w, h, step = max(1, int(w)), max(1, int(h)), max(4, int(step))
         S = 8
         # 예전 Tk 원(create_oval(x, y, x+3, y+3))과 같은 4px 자리를 채운다.
@@ -36997,6 +38353,7 @@ class Mascot:
         cv = self.room_cv
         if cv is None or self.room_win is None:
             return
+        self._room_shadow_boxes = []      # 이번 프레임의 카드 그림자 (유리 판용)
         P = self._room_palette()
         k = self._room_k()
         # 창을 늘릴 수 있으므로 실제로 그려진 크기를 본다 (cv["width"] 는
@@ -37029,6 +38386,8 @@ class Mascot:
         bgc2 = str(self.us.get("room_bgc2") or "")
         ang = int(float(self.us.get("room_bg_ang", 180) or 0))
         wash = int(float(self.us.get("room_bg_wash", 0) or 0))
+        if self._glass:            # 유리 테마 — 배경 그림·색을 안 깐다 (유리가 배경)
+            mode, wash = "none", 0
         key = (W, H, P["wall"], self._room_deco_ver, top,
                mode, bgc1, bgc2, ang, wash)
         if self._room_bg != key:
@@ -37109,6 +38468,9 @@ class Mascot:
         sub = "총 %d명  ·  %s" % (len(people), self._room_state_text(on, live))
         cv.create_text(28 * k, mid + 11 * k, anchor="w", text=sub,
                        font=self._uf(9), fill=sub2, tags="dyn")
+        # 표시줄 없는 창(유리) — 오른쪽 위, 조금 안쪽에 작게 (요청)
+        self._chrome_draw(self.room_win, cv, W - 24 * k, 15 * k, dir=-1,
+                          r=7 * k)
         # 방 번호표는 평소엔 안 띄운다 (하늘을 가리고, 평소엔 쓸 일이
         # 없다). 통신이 이상할 때는 숫자 줄에 방 번호가 이미 들어 있어서
         # 그때만 자연히 보인다 (지뢰 51의 진단 경로는 그대로 산다).
@@ -37283,8 +38645,9 @@ class Mascot:
             cv.create_rectangle(ex0, floor_e, ex1, floor_e + 14 * kc,
                                 fill=self._tint(mut, 0.78), width=0,
                                 tags="dyn")
-            self._rr(cv, ex0, ey0, ex1, ey1, 18 * kc, fill="",
-                     outline=P["line"], width=2)
+            if not self._glass:          # 유리 — 칸 테두리 없이 (요청)
+                self._rr(cv, ex0, ey0, ex1, ey1, 18 * kc, fill="",
+                         outline=P["line"], width=2)
             ecx = (ex0 + ex1) / 2
             self._rr_soft(cv, ecx - 26 * kc, floor_e - 12 * kc,
                           ecx + 26 * kc, floor_e + 12 * kc, 12 * kc,
@@ -37293,6 +38656,8 @@ class Mascot:
             cv.create_text(ecx, floor_e, text="···",
                            font=self._uf(9, True),
                            fill=self._tint(mut, 0.15), tags="dyn")
+        # 유리 — 카드 그림자를 뒤 유리 판에 진짜 반투명으로 (요청)
+        self._safe("glass_shadow", self._room_shadows_push)
         # 스티커는 카드·타이틀바 위, **아이콘 아래**. 칸이나 하늘은 가려도
         # 되지만 누를 것을 가리면 안 된다 (제보). 아래 단추 줄은 뒤에
         # 그려서 자연히 위에 오고, 먼저 그려진 아이콘('ui' 표)은 여기서
@@ -37319,7 +38684,7 @@ class Mascot:
                                tags="dyn")
                 self._room_page_btn.append(
                     ((ax, ay - bw2 / 2, ax + bw2, ay + bw2 / 2), dxn))
-            cv.create_text(W / 2, H - 16 * k,
+            self._gtext(cv, W / 2, H - 16 * k,
                            text="%d / %d" % (self._room_page + 1, pages),
                            font=self._uf(8), fill=P["sub"], tags="dyn")
         # 목록은 맨 나중에 — 카드·단추 위에 덮여야 한다
@@ -38060,7 +39425,7 @@ class Mascot:
         self._rr(cv, kx0, ky0, kx1, ky1, 18 * k, fill=P["card"], width=0)
         if cimg is not None:
             # 골라 둔 방 그림 — 바탕 위에 깐다 (테두리는 맨 나중에)
-            cv.create_image(kx0, ky0, image=cimg, anchor="nw", tags="dyn")
+            self._img_put(cv, kx0, ky0, cimg, "nw", "dyn")
         # 바닥 띠는 **칸 모양으로 오려 낸 한 장**이라 좌우에 흰 테가 없다
         band9 = self._room_band(slot)
         flimg = self._safe_str(self._room_floor_img, kx1 - kx0, ky1 - ky0,
@@ -38070,8 +39435,7 @@ class Mascot:
             # 놓으면 int 잘림 때문에 띠가 1~2px 떠서, 그 틈으로 뒤에 깔린
             # 방 꾸미기 그림이 삐져 보인다 (사가 제보 — 맥은 배율이 달라
             # 어긋남이 더 티가 난다). 아래를 붙이면 어긋날 수가 없다.
-            cv.create_image(int(kx0), int(math.ceil(ky1)), image=flimg,
-                            anchor="sw", tags="dyn")
+            self._img_put(cv, int(kx0), int(math.ceil(ky1)), flimg, "sw", "dyn")
         else:                     # 만들기 실패 — 예전 방식으로 물러난다
             self._rr(cv, kx0, floor, kx1, ky1, 18 * k,
                      fill=band9, width=0)
@@ -39663,8 +41027,9 @@ class Mascot:
             if not hasattr(self, "_deco_dims"):
                 self._deco_dims = {}
             self._deco_dims[what] = (im.width * kk, im.height * kk, w, h)
-            got = ImageTk.PhotoImage(
-                self._deco_fit(im, w, h, r, zoom, ox, oy, al))
+            pil9 = self._deco_fit(im, w, h, r, zoom, ox, oy, al)
+            got = ImageTk.PhotoImage(pil9)
+            got._pil_src = pil9          # 유리 창은 판에 진짜 알파로 올린다
         except Exception:
             got = None
         if len(cache) > 12:              # 지뢰 18·42 — 오래된 절반만
@@ -39924,7 +41289,9 @@ class Mascot:
             p = os.path.join(self.state_dir,
                              ".deco_%s.png" % self._slot_sane(slot))
             im = Image.open(p).convert("RGBA")
-            got = ImageTk.PhotoImage(self._deco_fit(im, w, h, r))
+            pil9 = self._deco_fit(im, w, h, r)
+            got = ImageTk.PhotoImage(pil9)
+            got._pil_src = pil9          # 유리 창은 판에 진짜 알파로 올린다
         except Exception:
             got = None
         if len(cache) > 48:
@@ -40068,6 +41435,8 @@ class Mascot:
         내 칸 위에서 시작한 드래그는 방 칸 그림, 그 밖은 배경 그림.
         옮길 수 있는 폭(그림과 칸의 크기 차)의 절반을 끝까지로 본다.
         """
+        if self._chrome_drag(self.room_win, e):
+            return                     # 창을 옮기거나 늘이는 중
         if self._safe("stk_move", self._stk_move, "room", e.x, e.y):
             return                     # 스티커를 끌고 있다
         act = getattr(self, "_pl_drag", None)
@@ -40113,6 +41482,8 @@ class Mascot:
 
     def _deco_drop(self, _e):
         """드래그 끝 — 저장하고 친구들에게도 알린다 (방 칸)."""
+        if self._chrome_release(self.room_win):
+            return                     # 창을 옮기거나 늘이던 것을 놓았다
         if self._safe("stk_drop", self._stk_drop, "room"):
             return                     # 스티커를 놓았다
         self._pl_drag = None           # 볼륨 막대를 놓았다
@@ -40230,6 +41601,7 @@ class Mascot:
                 # expand=True — 돌리면 모서리가 잘리지 않게 판이 커진다
                 im = im.rotate(-ang, expand=True, resample=Image.BICUBIC)
             got = ImageTk.PhotoImage(im)
+            got._pil_src = im            # 유리 창은 판에 진짜 알파로 올린다
         except Exception:
             return None
         if len(cache) > self.STK_CACHE:        # 오래된 절반만 (지뢰 18·42)
@@ -40268,8 +41640,14 @@ class Mascot:
                 cy = float(meta.get("y", 0.5)) * H
             except Exception:
                 cx, cy = W / 2.0, H / 2.0
-            cv.create_image(int(cx), int(cy), image=ph, anchor="center",
-                            tags=tags)
+            pil9 = getattr(ph, "_pil_src", None)
+            # 유리 창 — 스티커 가장자리가 색상키에서 깨진다 (제보). 판에 올린다.
+            if not (pil9 is not None and self._glass
+                    and getattr(cv, "_glass_cv", False)
+                    and self._pane_put(cv, int(cx), int(cy), pil9, "center",
+                                       tags) is not None):
+                cv.create_image(int(cx), int(cy), image=ph, anchor="center",
+                                tags=tags)
             hw, hh = ph.width() / 2.0, ph.height() / 2.0
             hits.append((cx - hw, cy - hh, cx + hw, cy + hh,
                          str(meta.get("id") or "")))
@@ -42508,7 +43886,7 @@ class Mascot:
         cv.create_line(BX + 6 * k, ly, bx1 - 6 * k, ly,
                        fill=self._tint(cd["fill"], 0.30), dash=(4, 5))
         # 안내는 선 **아래**에 — 위에 두면 조준 공이 덮는다
-        cv.create_text(BX + 10 * k, ly + 10 * k, anchor="w",
+        self._gtext(cv, BX + 10 * k, ly + 10 * k, anchor="w",
                        text="여기 넘치면 끝", font=uf(7, True),
                        fill=self._tint(cd["fill"], 0.12))
 
@@ -42531,7 +43909,7 @@ class Mascot:
         # 다음 — 판 오른쪽 위 (동그란 접시 위에)
         npx = int(40 * k)
         ncx, ncy = bx1 - 30 * k, 34 * k
-        cv.create_text(ncx - 34 * k, ncy, anchor="e", text="다음",
+        self._gtext(cv, ncx - 34 * k, ncy, anchor="e", text="다음",
                        font=uf(8, True), fill=sub2)
         self._safe("soft_btn", self._soft_dot, cv, ncx, ncy, 27 * k,
                    "#ffffff", outline=line, width=2, shadow=True)
@@ -43674,7 +45052,7 @@ class Mascot:
         win.configure(bg=cd["panel"])
         win.resizable(False, False)
         self._keep_front(win, focus=False)
-        cv = tk.Canvas(win, width=W, height=10, bg=self._tint(cd["fill"], 0.90),
+        cv = tk.Canvas(win, width=W, height=10, bg=self._glass_bg(self._tint(cd["fill"], 0.90)),
                        highlightthickness=0, bd=0)
         cv.pack()
         y = 18 * k
@@ -43756,7 +45134,7 @@ class Mascot:
         CW = BX * 2 + int(self.CT_COLS * cell) + int(self.CT_SIDE * k)
         CH = BY + int(self.CT_ROWS * cell) + int(16 * k)
         cv = tk.Canvas(win, width=CW, height=CH,
-                       bg=self._tint(cd["fill"], 0.90),
+                       bg=self._glass_bg(self._tint(cd["fill"], 0.90)),
                        highlightthickness=0, bd=0)
         cv.pack()
         line = self._tint(cd["fill"], 0.55)
@@ -43833,7 +45211,7 @@ class Mascot:
         # 길이가 달라 보인다 (제보). 둘 다 글자 오른쪽에서 시작한다.
         tb0 = BX + 196 * k
         tb1 = bx1 - (200 if self._ct_bgm is not None else 146) * k
-        cv.create_text((tb0 + tb1) / 2, 20 * k, text="남은 시간",
+        self._gtext(cv, (tb0 + tb1) / 2, 20 * k, text="남은 시간",
                        font=uf(8, True), fill=sub2)
         self._rr(cv, tb0, 32 * k, tb1, 46 * k, 7 * k,
                  fill="#ffffff", outline=line, width=4)
@@ -45216,7 +46594,7 @@ class Mascot:
         CW = BX * 2 + int(bwid * k) + int(self.G2_SIDE * k)
         CH = BY + int(bwid * k) + int(16 * k)
         cv = tk.Canvas(win, width=CW, height=CH,
-                       bg=self._tint(cd["fill"], 0.90),
+                       bg=self._glass_bg(self._tint(cd["fill"], 0.90)),
                        highlightthickness=0, bd=0)
         cv.pack()
         line = self._tint(cd["fill"], 0.55)
@@ -45268,7 +46646,7 @@ class Mascot:
                                       str(g["best"]), uf(10, True), sub2,
                                       edge=edge, w=1.4 * k, anchor="e")
         # 안내 — 둘째 줄 (단추와 안 겹치게)
-        cv.create_text(BX + 4 * k, 82 * k, anchor="w",
+        self._gtext(cv, BX + 4 * k, 82 * k, anchor="w",
                        text="방향키·WASD·마우스로 밀기",
                        font=uf(8, True), fill=sub2)
         _tt, tt_ids = self._cute_text(cv, bx1, 82 * k, "",
@@ -45929,7 +47307,7 @@ class Mascot:
         win.resizable(False, False)
         self._keep_front(win, focus=False)
         cv = tk.Canvas(win, width=W, height=10,
-                       bg=self._tint(cd["fill"], 0.90),
+                       bg=self._glass_bg(self._tint(cd["fill"], 0.90)),
                        highlightthickness=0, bd=0)
         cv.pack()
         y = 18 * k
@@ -46643,7 +48021,7 @@ class Mascot:
         win.resizable(False, False)
         self._keep_front(win, focus=True)
         cv = tk.Canvas(win, width=CW, height=CH,
-                       bg=self._tint(cd["fill"], 0.90),
+                       bg=self._glass_bg(self._tint(cd["fill"], 0.90)),
                        highlightthickness=0, bd=0)
         cv.pack()
         line = self._tint(cd["fill"], 0.55)
@@ -46675,9 +48053,9 @@ class Mascot:
         def draw_head():
             cv.delete("kkhead")
             g2 = self._kk
-            cv.create_text(BX, int(20 * k), anchor="w", text="꼬들",
+            self._gtext(cv, BX, int(20 * k), anchor="w", text="꼬들",
                            font=uf(15, True), fill=ink, tags="kkhead")
-            cv.create_text(BX + int(46 * k), int(22 * k), anchor="w",
+            self._gtext(cv, BX + int(46 * k), int(22 * k), anchor="w",
                            text="%d일차" % self._kk_day_no(g2.get("day")),
                            font=uf(9, True), fill=sub2, tags="kkhead")
             sk = int(g2.get("streak") or 0)
@@ -46685,7 +48063,7 @@ class Mascot:
             tipw = bwid
             if sk > 0:
                 sw9 = "연속 %d일째" % sk
-                cv.create_text(BX + bwid, int(45 * k), anchor="e",
+                self._gtext(cv, BX + bwid, int(45 * k), anchor="e",
                                text=sw9, font=uf(8, True),
                                fill=self._shade(cd["fill"], 0.3),
                                tags="kkhead")
@@ -46695,7 +48073,7 @@ class Mascot:
                 tip = "오늘 건 %d번 만에 맞혔어요!" % len(g2.get("rows") or [])
             elif g2.get("done") == 2:
                 tip = "오늘 답은 '%s' 였어요." % self._kk_answer(g2.get("day"))
-            cv.create_text(BX, int(44 * k), anchor="w",
+            self._gtext(cv, BX, int(44 * k), anchor="w",
                            text=self._fit_text(cv, tip, uf(8, True), tipw),
                            font=uf(8, True), fill=sub2, tags="kkhead")
 
@@ -46978,7 +48356,7 @@ class Mascot:
             st["pgbtn"] = {}
             if pgs9 > 1:
                 py9 = PGY
-                cv.create_text(RX + RW / 2, py9, text="%d / %d"
+                self._gtext(cv, RX + RW / 2, py9, text="%d / %d"
                                % (pg9 + 1, pgs9), font=uf(8, True),
                                fill=sub2, tags="kkrank")
                 for lab9, act9, dx9 in (("‹", "prev", -int(34 * k)),
@@ -47896,7 +49274,7 @@ class Mascot:
             bw9 = int(sb9[2] - sb9[0] + u(16))
             bh9 = int(sb9[3] - sb9[1] + u(10))
             soft9 = self._soft_shape(bw9, bh9, int(u(11)), "#ffffff",
-                                     line9)
+                                     line9, key=self._cv_key(cv9))
             if soft9 is not None:
                 keep9["bub"] = soft9
                 cv9.create_image(sb9[0] - u(8) - 1, sb9[1] - u(5) - 1,
@@ -49996,6 +51374,7 @@ class Mascot:
         cv = self.room_cv
         if cv is None:
             return
+        self._chrome_motion(self.room_win, e)
         # 클릭과 **같은 차례**로 본다. 여기만 노래를 먼저 보면 커서는
         # 노래인 것처럼 굴어 사람이 계속 헷갈린다.
         hit0 = self._room_inbox_hit
@@ -50177,6 +51556,9 @@ class Mascot:
             return
 
     def _room_click(self, e):
+        # 표시줄 없는 창의 가장자리·– × 단추가 먼저다
+        if self._chrome_press(self.room_win, e):
+            return
         # 스티커를 정리하는 중이면 그쪽이 먼저다 (아니면 카드가 골라진다)
         if self._safe("stk_press", self._stk_press, "room", e.x, e.y):
             return
