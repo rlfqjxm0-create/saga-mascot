@@ -6676,6 +6676,13 @@ class Mascot:
         if not os.path.exists(os.path.join(self.parts_dir, "layout.json")):
             self.parts_dir, self.skin_name = self.dir, self.skin_names[0]
         self.us["skin"] = self.skin_name
+        # 지금 입은 폼의 항목 — 폼 배율(scale)·폼별 소품 손보정(prop_tune)
+        self._skin_ent = self.skins[self.skin_names.index(self.skin_name)]
+        pt9 = self._skin_ent.get("prop_tune")
+        if isinstance(pt9, dict):
+            # 폼마다 머리 크기가 달라 소품 자리가 다르다 — 배치 도구가
+            # skins 항목에 저장한 손보정이 있으면 그것을 쓴다 (사해).
+            self.cfg["prop_tune"] = pt9
         with open(os.path.join(self.parts_dir, "layout.json"), encoding="utf-8") as fp:
             self.layout = json.load(fp)
         # 파츠 자리 미세 보정 (캔버스 px). layout.json은 PSD에서 다시 뽑을 때마다
@@ -6701,14 +6708,26 @@ class Mascot:
                           if self.skin_name == self.skin_names[idx] else None) \
             or self.cfg["screen_quad"]
 
-        s = self.s = float(self.cfg.get("scale", 1.0)) * self.us["scale_pct"] / 100.0
+        # 폼 배율 — 그림이 큰 폼(사해 1144x1311 대 도로롱 1024x1145)을
+        # 기본 폼과 비슷한 크기로 맞춘다 (요청). 사람의 크기 설정에 곱한다.
+        try:
+            skin_k9 = max(0.3, min(2.0, float(self._skin_ent.get("scale") or 1.0)))
+        except (TypeError, ValueError):
+            skin_k9 = 1.0
+        s = self.s = (float(self.cfg.get("scale", 1.0)) * self.us["scale_pct"] / 100.0
+                      * skin_k9)
         self.timer_on = bool(tcfg.get("enabled")) \
             if self.us["show_timer"] is None else bool(self.us["show_timer"])
         self.idle_thr = float(self.us["idle_sec"])
         self._settings_win = None
 
-        # 타이머 카드 테마 (캐릭터별 config의 card 섹션)
-        cc = self.cfg.get("card") or {}
+        # 타이머 카드 테마 (캐릭터별 config의 card 섹션).
+        # 폼(skins 항목)에 card 가 있으면 그 색이 덮는다 — 사해는 하늘색,
+        # 귀(deco)는 안 적으면 도로롱 것 그대로 (요청).
+        cc = dict(self.cfg.get("card") or {})
+        sc9 = getattr(self, "_skin_ent", None) or {}
+        if isinstance(sc9.get("card"), dict):
+            cc.update(sc9["card"])
         self.card = {
             "bg": cc.get("bg", "#ffffff"), "border": cc.get("border", CARD_BORDER),
             "text": cc.get("text", CARD_NAVY), "sub": cc.get("sub", CARD_GRAY),
@@ -8064,6 +8083,49 @@ class Mascot:
             return g + p
         return self._tune3(got) + (0.0, 0.0, 1.0)
 
+    @staticmethod
+    def _tune_rot(got):
+        """[dx, dy, 배율, 회전°] 의 넷째 — 없으면 0. 양수 = 시계 방향."""
+        try:
+            r = float(got[3]) if len(got) > 3 else 0.0
+        except Exception:
+            return 0.0
+        return max(-180.0, min(180.0, r))
+
+    def _prop_rot2(self, name):
+        """(묶음 회전°, 조각 회전°) — _prop_tune2 와 같은 열쇠로 읽는다."""
+        tab = self.cfg.get("prop_tune") or {}
+        if not tab:
+            return 0.0, 0.0
+        base = self._prop_base(name)
+        ent = self._prop_layout.get(base) or {}
+        got = (tab.get(str(ent.get("gname") or "")) or tab.get(base))
+        if isinstance(got, dict):
+            return (self._tune_rot(got.get("all")),
+                    self._tune_rot(got.get(self._prop_piece(name))))
+        return self._tune_rot(got), 0.0
+
+    def _prop_rot(self, name):
+        """그 조각의 그림에 실제로 걸리는 회전° (묶음 + 조각)."""
+        g9, p9 = self._prop_rot2(name)
+        return max(-180.0, min(180.0, g9 + p9))
+
+    def _prop_img_tune(self, im, name, s):
+        """소품 그림에 배율·회전을 건다 (세 로더가 같이 쓴다 — 지뢰 55).
+
+        회전은 **제 중심**을 축으로, 판을 키워서(expand) 잘리지 않게.
+        커진 만큼의 자리 옮김은 _prop_at 이 같은 셈으로 맞춘다.
+        """
+        s9 = s * self._prop_tune(name)[2]      # prop_tune 배율 (배치 도구)
+        if s9 != 1.0:
+            im = im.resize((max(1, round(im.width * s9)),
+                            max(1, round(im.height * s9))), Image.LANCZOS)
+        r9 = self._prop_rot(name)
+        if r9:
+            # PIL 은 반시계가 양수 — 사람 기준(시계 방향 양수)으로 뒤집는다
+            im = im.rotate(-r9, resample=Image.BICUBIC, expand=True)
+        return im
+
     def _prop_tune(self, name):
         """그 조각에 실제로 걸리는 손보정 (dx, dy, 배율) — 그림 로드가 쓴다.
 
@@ -8119,8 +8181,27 @@ class Mascot:
                 # 조각 배율 — **그 조각의 중심**을 축으로 (뿔만 커진다)
                 px += w9 * gf * (1 - pf) / 2.0
                 py += h9 * gf * (1 - pf) / 2.0
+            sw9, sh9 = w9 * gf * pf, h9 * gf * pf
+            grot9, _prot9 = self._prop_rot2(name)
+            rot9 = self._prop_rot(name)
+            if grot9 or rot9:
+                # 회전 (배치 도구) — 묶음 회전은 조각의 중심이 묶음 중심
+                # 둘레를 돌고, 그림은 제 중심을 축으로 돈다 (배율과 같은
+                # 짜임). 돌린 그림은 판이 커지므로 상자도 돌린 크기로.
+                ccx, ccy = px + sw9 / 2.0, py + sh9 / 2.0
+                if grot9:
+                    gcx, gcy = self._prop_group_center(self._prop_base(name))
+                    a9 = math.radians(grot9)
+                    vx9, vy9 = ccx - gcx, ccy - gcy
+                    ccx = gcx + vx9 * math.cos(a9) - vy9 * math.sin(a9)
+                    ccy = gcy + vx9 * math.sin(a9) + vy9 * math.cos(a9)
+                if rot9:
+                    a9 = math.radians(rot9)
+                    sw9, sh9 = (abs(sw9 * math.cos(a9)) + abs(sh9 * math.sin(a9)),
+                                abs(sw9 * math.sin(a9)) + abs(sh9 * math.cos(a9)))
+                px, py = ccx - sw9 / 2.0, ccy - sh9 / 2.0
             if isinstance(got.get("size"), list):
-                got["size"] = [w9 * gf * pf, h9 * gf * pf]
+                got["size"] = [sw9, sh9]
             dx9, dy9 = self._prop_delta()
             got["pos"] = [px + dx9 + gdx + pdx, py + dy9 + gdy + pdy]
         return got
@@ -8212,12 +8293,8 @@ class Mascot:
             p9 = os.path.join(self.prop_dir, "%s.png" % key9)
             if key9 not in self._prop_layout or not os.path.exists(p9):
                 continue
-            im9 = Image.open(p9).convert("RGBA")
-            s9 = s * self._prop_tune(key9)[2]   # prop_tune 배율 (배치 도구)
-            if s9 != 1.0:
-                im9 = im9.resize((max(1, round(im9.width * s9)),
-                                  max(1, round(im9.height * s9))),
-                                 Image.LANCZOS)
+            im9 = self._prop_img_tune(Image.open(p9).convert("RGBA"),
+                                      key9, s)         # 배율·회전 (배치 도구)
             self.layout[nm9] = self._prop_at(key9)
             pil_cache[nm9] = im9
             self.im[nm9] = self._tkimg(self._hard(im9), im9)
@@ -8251,11 +8328,8 @@ class Mascot:
         path = os.path.join(self.prop_dir, f"{name}.png")
         if name not in self._prop_layout or not os.path.exists(path):
             return
-        im = Image.open(path).convert("RGBA")
-        s9 = s * self._prop_tune(name)[2]       # prop_tune 배율 (배치 도구)
-        if s9 != 1.0:
-            im = im.resize((max(1, round(im.width * s9)),
-                            max(1, round(im.height * s9))), Image.LANCZOS)
+        im = self._prop_img_tune(Image.open(path).convert("RGBA"),
+                                 name, s)              # 배율·회전 (배치 도구)
         self.layout["prop_back"] = self._prop_at(name)
         pil_cache["prop_back"] = im
         self.im["prop_back"] = self._tkimg(self._hard(im), im)
@@ -8312,6 +8386,14 @@ class Mascot:
                 with open(os.path.join(self.dir, "layout.json"),
                           encoding="utf-8") as fp:
                     base = json.load(fp)
+                # 도구로 넣은 소품(config 의 prop_extra)도 기본 폴더 것이다.
+                # 안 합치면 **폼에서만** 옹이·덤보·곰돌이가 사라진다 —
+                # 도구 목록에는 있는데 캐릭터에는 안 그려졌다 (제보).
+                for nm9, ent9 in (self.cfg.get("prop_extra") or {}).items():
+                    if (isinstance(ent9, dict) and ent9.get("pos")
+                            and os.path.exists(os.path.join(
+                                self.dir, "%s.png" % nm9))):
+                        base.setdefault(nm9, dict(ent9))
                 hit = self._props_in(base, self.dir)
             except Exception:
                 hit = []
@@ -8436,11 +8518,8 @@ class Mascot:
         if pick and pick in self._prop_layout and os.path.exists(front):
             # 다른 옷의 layout 에서 가져온 좌표는 지금 옷에 맞게 옮긴다
             self.layout["prop"] = self._prop_at(pick)
-            im = Image.open(front).convert("RGBA")
-            s9 = s * self._prop_tune(pick)[2]   # prop_tune 배율 (배치 도구)
-            if s9 != 1.0:
-                im = im.resize((max(1, round(im.width * s9)),
-                                max(1, round(im.height * s9))), Image.LANCZOS)
+            im = self._prop_img_tune(Image.open(front).convert("RGBA"),
+                                     pick, s)          # 배율·회전 (배치 도구)
             # 소품도 머리 안에만 있으면 이분화하지 않는다 (안경테 계단 방지)
             covered = self._covered_by_base(
                 self.layout["prop"],
@@ -9564,14 +9643,16 @@ class Mascot:
         # 날 수 있다. 폴더가 없으면 None (그때는 홈 소리로 물러난다).
         pomo_dir = os.path.join(self.dir, "sounds", "pomo")
         if os.path.isdir(pomo_dir):
-            vol = float(self.us.get("poke_volume", 40))
             got = {}
             for nm in ("start", "end", "hard", "hard2"):
                 one = os.path.join(pomo_dir, nm + ".wav")
                 if not os.path.isfile(one):
                     continue
                 try:
-                    got[nm] = PokeSound(pomo_dir, volume=vol, only=nm + ".wav")
+                    # 소리마다 따로 조절한다 (뽀모도로 창 ✿ → 소리 조절).
+                    # 기본은 홈 반응 소리보다 크게 — '작다'는 의견.
+                    got[nm] = PokeSound(pomo_dir, volume=self._pomo_vol_of(nm),
+                                        only=nm + ".wav")
                 except Exception:
                     pass
             self.pomosnd = got or None
@@ -19593,6 +19674,162 @@ class Mascot:
             return False
         return bool(st.get("hard") and st["on"] and st["phase"] == "focus")
 
+    # 뽀모도로 소리 — (파일 이름, 사람이 읽는 이름). 있는 것만 창에 뜬다.
+    POMO_SND_NAMES = (("start", "집중 시작"), ("end", "한 사이클 끝"),
+                      ("hard", "하드모드 알림"), ("hard2", "하드모드 경고"))
+    POMO_VOL_DEF = 80          # 기본 음량 — 홈 반응 소리(40)보다 크게 (의견)
+
+    def _pomo_vol_of(self, nm):
+        """그 소리의 음량 (0~100). 설정에 없으면 기본값."""
+        d = self.us.get("pomo_vol")
+        try:
+            if isinstance(d, dict) and nm in d:
+                return max(0, min(100, int(round(float(d[nm])))))
+        except (TypeError, ValueError):
+            pass
+        return self.POMO_VOL_DEF
+
+    def _pomo_vol_set(self, nm, v, save=True):
+        """음량을 바꾼다 — 설정과 들고 있는 소리에 같이. 정수 0~100 을 돌려준다."""
+        try:
+            v = max(0, min(100, int(round(float(v)))))
+        except (TypeError, ValueError):
+            v = self.POMO_VOL_DEF
+        d = self.us.get("pomo_vol")
+        if not isinstance(d, dict):
+            d = {}
+        d[str(nm)] = v
+        self.us["pomo_vol"] = d
+        got = self.pomosnd if isinstance(self.pomosnd, dict) else {}
+        snd = got.get(nm)
+        if snd is not None:
+            try:
+                snd.set_volume(v)
+            except Exception:
+                try:
+                    snd.volume = float(v)
+                except Exception:
+                    pass
+        if save:
+            self._safe("settings", self._save_settings)
+        return v
+
+    def _pomo_vol_win(self):
+        """뽀모도로 소리 조절 창 (요청 — 알림음이 작다는 의견).
+
+        소리마다 게이지 하나. 게이지를 누르거나 끌면 그 소리가 **그 음량으로
+        바로** 들린다 (미리듣기). 다른 창들과 같은 짜임 — 둥근 판 위에
+        매끈한 게이지·손잡이 (지뢰 124·169).
+        """
+        old = getattr(self, "_pomo_vol_w", None)
+        if old is not None:
+            try:
+                if old.winfo_exists():
+                    old.lift()
+                    return
+            except Exception:
+                pass
+        got0 = self.pomosnd if isinstance(self.pomosnd, dict) else {}
+        rows = [(nm, lab) for nm, lab in self.POMO_SND_NAMES
+                if got0.get(nm) is not None]
+        cd = self.card
+        u = self._ui
+        line = cd.get("line", "#f0e6ec")
+        W, ROW, TOP, BOT = u(300), u(60), u(58), u(48)
+        H = TOP + ROW * max(1, len(rows)) + BOT
+        win = tk.Toplevel(self.root)
+        self._pomo_vol_w = win
+        win.title("뽀모도로 소리")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0)
+        cv.pack()
+        st = {"drag": None, "last": 0.0, "hits": []}
+
+        def uf(size, bold=False):
+            return self._uf(size, bold)
+
+        def draw():
+            cv.delete("all")
+            st["hits"] = []
+            self._rr_soft(cv, u(10), u(10), W - u(10), H - u(10), u(18),
+                          fill=cd["bg"], outline=line, width=1)
+            cv.create_text(W / 2, u(34), text="뽀모도로 소리",
+                           font=uf(12, True), fill=cd["text"])
+            if not rows:
+                cv.create_text(W / 2, TOP + ROW / 2,
+                               text="이 캐릭터에는 뽀모도로 소리가 없어요",
+                               font=uf(9), fill=cd["sub"])
+            for i9, (nm, lab) in enumerate(rows):
+                y0 = TOP + i9 * ROW
+                v = self._pomo_vol_of(nm)
+                cv.create_text(u(30), y0 + u(12), anchor="w", text=lab,
+                               font=uf(9, True), fill=cd["text"])
+                cv.create_text(W - u(30), y0 + u(12), anchor="e",
+                               text="%d%%" % v, font=uf(9), fill=cd["sub"])
+                gx0, gx1, gy = u(30), W - u(30), y0 + u(38)
+                self._safe("soft_btn", self._soft_gauge, cv,
+                           gx0, gy - u(6), gx1, gy + u(6), u(6),
+                           cd["fill"], v / 100.0, line)
+                kx = gx0 + (gx1 - gx0) * v / 100.0
+                self._safe("soft_btn", self._soft_dot, cv, kx, gy, u(9),
+                           "#ffffff", outline=cd["border"], width=1,
+                           shadow=True)
+                st["hits"].append((nm, gx0, gx1, gy - u(16), gy + u(16)))
+            cv.create_text(W / 2, H - u(30), font=uf(8), fill=cd["sub"],
+                           text="게이지를 끌면 그 소리가 바로 들려요")
+
+        def at(e):
+            for nm, gx0, gx1, y0, y1 in st["hits"]:
+                if y0 <= e.y <= y1:
+                    return nm, gx0, gx1
+            return None
+
+        def preview(nm, force=False):
+            now = time.time()
+            if not (force or now - st["last"] > 0.35):
+                return
+            st["last"] = now
+            got = self.pomosnd if isinstance(self.pomosnd, dict) else {}
+            snd = got.get(nm)
+            if snd is not None:
+                self._safe("pomo_snd", snd.play)
+
+        def press(e):
+            hit = at(e)
+            if not hit:
+                return
+            self._safe("ui_click", self._ui_click)
+            st["drag"] = hit
+            move(e)
+
+        def move(e):
+            if not st["drag"]:
+                return
+            nm, gx0, gx1 = st["drag"]
+            v = (e.x - gx0) / float(max(1, gx1 - gx0)) * 100.0
+            self._pomo_vol_set(nm, v, save=False)
+            draw()
+            preview(nm)
+
+        def release(_e):
+            if not st["drag"]:
+                return
+            nm = st["drag"][0]
+            st["drag"] = None
+            self._safe("settings", self._save_settings)
+            preview(nm, force=True)
+
+        cv.bind("<Button-1>", lambda e: self._safe("pvol_press", press, e))
+        cv.bind("<B1-Motion>", lambda e: self._safe("pvol_move", move, e))
+        cv.bind("<ButtonRelease-1>",
+                lambda e: self._safe("pvol_rel", release, e))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        draw()
+        return win
+
     def _pomo_hard_snd(self, warn=False):
         """하드모드 알림음.
 
@@ -23949,7 +24186,8 @@ class Mascot:
                 mw9, mh9 = u(104), u(30)
                 mx9, my9 = sx8 - u(8), u(46)
                 for i9, (lab9, act9) in enumerate((("스티커 꾸미기", "stk"),
-                                                   ("시간 조절", "len"))):
+                                                   ("시간 조절", "len"),
+                                                   ("소리 조절", "vol"))):
                     y9 = my9 + i9 * (mh9 + u(4))
                     self._rr_soft(cv, mx9, y9, mx9 + mw9, y9 + mh9, u(12),
                                   fill="#ffffff", outline=line, width=1)
@@ -24002,6 +24240,8 @@ class Mascot:
                     self._pomo_menu = False
                     if act == "stk":
                         self._safe("stk_win", self._stk_win, "pomo")
+                    elif act == "vol":
+                        self._safe("pomo_vol_win", self._pomo_vol_win)
                     else:
                         self.us["pomo_edit"] = not bool(
                             self.us.get("pomo_edit"))
@@ -30811,7 +31051,7 @@ class Mascot:
         """내 오늘 목표를 해냈는가. 목표가 없으면 체크도 없다.
 
         이름에 room 을 안 붙인 것은 `_room_goal_done` 이 이미 **다 같이
-        채우는 하루 목표(50시간)**를 뜻하는 깃발이기 때문이다.
+        채우는 하루 목표(40시간)**를 뜻하는 깃발이기 때문이다.
         """
         return bool(self._my_goal()) and bool(self.us.get("room_goal_done"))
 
@@ -35143,7 +35383,8 @@ class Mascot:
     # 캐릭터. 개구리는 눈이 정수리에 있고, 도로롱은 옆머리 장미 뭉치 때문에
     # 머리 중심이 오른쪽으로 잡힌다.
     # 다 같이 채우는 하루 목표 (분). 사람이 늘면 여기를 올린다.
-    ROOM_GOAL_MIN = 50 * 60
+    # 50 → 40 시간 (요청 · 2026-09).
+    ROOM_GOAL_MIN = 40 * 60
 
     CROWN_FIT = {"parts_peugo": (0.0, -0.25),
                  "parts_dororong": (-0.22, -0.10),

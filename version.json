@@ -1,7 +1,7 @@
 {
- "version": 1788617150,
+ "version": 1788718441,
  "files": {
-  "mascot.py": "02923098062b9ed864df4af0a5f583b02abac81bd3106cd039250e6c88e87287",
+  "mascot.py": "a27b052d5e57050d9a7271f33f11c87693d0d5d1b26a578c7de63c6bcc9b99dd",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,8 +14,8 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "09f320a1e2cee2af76aabed21000de25d1b96e0de985a44f00cb848418ecb009",
-  "parts_saga/config.json.bak": "09f320a1e2cee2af76aabed21000de25d1b96e0de985a44f00cb848418ecb009",
+  "parts_saga/config.json": "5e9aa3efda582170ad9660042a9e4710c673d3dc9ab91cc50ca0d3ae9c65a9eb",
+  "parts_saga/config.json.bak": "5e9aa3efda582170ad9660042a9e4710c673d3dc9ab91cc50ca0d3ae9c65a9eb",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
   "parts_saga/eyes_closed.png": "343347beac62927c83329ce20575518c1cfe258a05b8d5b22afef133944b91f6",
@@ -594,11 +594,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "오노추 하트 — 목록에도 보이고, 껐다 켜도 남아요 (노래 주인이 꺼져 있어도 세요)",
-  "재생 중에 복사한 주소(watch?v=…&list=…)도 재생목록으로 펼쳐요",
-  "브리핑 '하루의 구성'이 24시간을 넘던 것을 고쳤어요",
-  "(맥) 플레이리스트 영상이 까맣게 보이던 것 — 이제 창 위로 올라와요",
-  "(맥) 유튜브 로그인 뒤에도 '로그인 안 됨'이 남던 것을 고쳤어요"
- ]
+ "notes": [],
+ "silent": true
 }
