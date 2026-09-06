@@ -6678,6 +6678,12 @@ class Mascot:
         self.us["skin"] = self.skin_name
         # 지금 입은 폼의 항목 — 폼 배율(scale)·폼별 소품 손보정(prop_tune)
         self._skin_ent = self.skins[self.skin_names.index(self.skin_name)]
+        # 폼별 설정 덮기 — skins 항목의 `cfg` 에 적은 열쇠는 config 의 것을
+        # 통째로 대신한다 (사해의 말투·표정 · 요청). 폼을 벗으면 원래대로.
+        ov9 = self._skin_ent.get("cfg")
+        if isinstance(ov9, dict):
+            for k9, v9 in ov9.items():
+                self.cfg[str(k9)] = v9
         pt9 = self._skin_ent.get("prop_tune")
         if isinstance(pt9, dict):
             # 폼마다 머리 크기가 달라 소품 자리가 다르다 — 배치 도구가
@@ -14668,7 +14674,11 @@ class Mascot:
             for w in (tab.get(key) or ()):
                 if str(w) and str(w) in t:
                     return key
-        # 안 걸리면 최근에 안 지은 것 중에서 (같은 얼굴이 이어지면 심심하다)
+        # 안 걸리면 최근에 안 지은 것 중에서 (같은 얼굴이 이어지면 심심하다).
+        # config `face_random: false` 면 안 고른다 — 곁표정이 졸음 하나뿐인
+        # 폼(사해)은 아무 말에나 졸린 얼굴이 나왔다 (요청).
+        if not self.cfg.get("face_random", True):
+            return None
         pool = [f for f in got if f != self._face_now] or got
         return random.choice(pool)
 
@@ -14691,6 +14701,10 @@ class Mascot:
             return self._face_now
         pick = self._face_for(text)
         if not pick:
+            # config `talk_smile` — 말할 때 웃는 얼굴 (사해 · 요청)
+            if self.cfg.get("talk_smile") and str(text or ""):
+                self.smile_until = max(self.smile_until,
+                                       now + float(secs or self.FACE_SECS))
             return None
         self._face_now = pick
         self._face_text = str(text or "")
@@ -23781,6 +23795,9 @@ class Mascot:
         {"id": "pl_video", "label": "영상 보기",
          "say": "플레이리스트에서 곡 제목 옆 캠코더를 누르면 영상도 같이 볼 수 있어요",
          "open": "bgm_video", "gate": "_vid_ok"},
+        {"id": "pl_set", "label": "플레이리스트 목록 설정",
+         "say": "플레이리스트의 목록 단추를 우클릭하면 이름을 바꾸고 친구들이 들을 대표 목록을 정할 수 있어요",
+         "open": "bgm_set", "gate": "_yt_on"},
         {"id": "pomo_vol", "label": "뽀모도로 소리 조절",
          "say": "뽀모도로 창 ✿ 메뉴에 '소리 조절'이 생겼어요 — 알림음마다 크기를 맞춰요",
          "open": "pomo_vol", "gate": "_team_gate"},
@@ -23899,8 +23916,11 @@ class Mascot:
             self._safe("pomo_win", self._pomo_win)
             self._pomo_menu = True
             self._pomo_redraw()
-        elif op in ("bgm_stop", "bgm_friends", "bgm_video"):
+        elif op in ("bgm_stop", "bgm_friends", "bgm_video", "bgm_set"):
             self._safe("bgm_win", self._bgm_win, "pl")
+            st9 = getattr(self, "_bgm_st", None)
+            if isinstance(st9, dict) and op in ("bgm_set", "bgm_stop"):
+                st9["view"] = "mine"         # 목록 단추·■ 는 내 목록 보기에만 있다
             self._bgm_redraw()
         elif op == "home_team":
             w9 = self.room_win
@@ -25081,18 +25101,175 @@ class Mascot:
         return [k9 for k9 in v9
                 if isinstance(k9, dict) and str(k9.get("u") or "").strip()]
 
-    def _pl_flat(self):
+    def _pl_flat(self, i9=None):
         """재생목록을 펼친 '실제로 트는 곡들' — 원본 dict 그대로.
 
         **펼침 토글(open)과 무관하게 늘 펼쳐진다** — 접어 두어도 전곡이
         재생돼야 한다. 길이·채널이 살아 있어야 하므로 화면용
         (_pl_songs_mine)이 아니라 이것을 공유·제목 적기의 바탕으로 쓴다.
+        `i9` 를 주면 그 프리셋 (대표 목록 공유용), 없으면 지금 고른 것.
         """
         out = []
-        for it in self._pl_list():
+        if i9 is None:
+            src9 = self._pl_list()
+        else:
+            v = self._pl_sets()[max(0, min(self.PL_SETS - 1, int(i9)))]
+            src9 = [it for it in v
+                    if isinstance(it, dict) and str(it.get("u") or "").strip()]
+        for it in src9:
             kids9 = self._pl_kids(it)
             out.extend(kids9 if kids9 else [it])
         return out
+
+    PL_NAME_N = 12               # 프리셋 이름 글자 수
+
+    def _pl_set_names(self):
+        """프리셋 이름 세 벌 (빈 칸은 '목록 N')."""
+        v = self.us.get("yt_set_names")
+        if not (isinstance(v, list) and len(v) == self.PL_SETS):
+            v = [""] * self.PL_SETS
+        return [str(x or "")[:self.PL_NAME_N] for x in v]
+
+    def _pl_set_name(self, i9):
+        nm = self._pl_set_names()[max(0, min(self.PL_SETS - 1, int(i9)))]
+        return nm.strip() or ("목록 %d" % (int(i9) + 1))
+
+    def _pl_share_i(self):
+        """친구들이 듣는 '대표' 프리셋 번호 — 안 정했으면 지금 고른 것."""
+        v = self.us.get("yt_share_i")
+        try:
+            if v is not None and 0 <= int(v) < self.PL_SETS:
+                return int(v)
+        except (TypeError, ValueError):
+            pass
+        return self._pl_set_i()
+
+    def _pl_share_set(self, i9):
+        """대표 프리셋을 정한다 (None 이면 '지금 고른 것을 따라감')."""
+        self.us["yt_share_i"] = (None if i9 is None
+                                 else max(0, min(self.PL_SETS - 1, int(i9))))
+        self._safe("pl_save", self._save_settings)
+        self._pl_push = True             # 바뀐 목록을 곧바로 싣는다
+        self._safe("room_push", self._room_push_now)
+
+    def _pl_set_win(self, i9):
+        """목록 단추 우클릭 → 프리셋 설정 창 (요청): 이름 · 대표 목록.
+
+        다른 설정 창과 같은 결 — 둥근 판, 매끈한 알약 단추. 이름 칸은
+        캔버스의 자식으로 얹는다 (지뢰 22).
+        """
+        i9 = max(0, min(self.PL_SETS - 1, int(i9)))
+        old = getattr(self, "_pl_set_w", None)
+        if old is not None:
+            try:
+                if old.winfo_exists():
+                    old.destroy()
+            except Exception:
+                pass
+        cd = self.card
+        u = self._ui
+        line = cd.get("line", "#f0e6ec")
+        W, H = u(300), u(236)
+        win = tk.Toplevel(self.root)
+        self._pl_set_w = win
+        win.title("목록 %d 설정" % (i9 + 1))
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=True)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0)
+        cv.pack()
+        st = {"share": self._pl_share_i() == i9, "hits": []}
+        var = tk.StringVar(value=self._pl_set_names()[i9])
+        ent = tk.Entry(cv, textvariable=var, font=self._uf(10), bd=0,
+                       relief="flat", justify="center", bg="#ffffff",
+                       fg=cd["text"], insertbackground=cd["text"],
+                       highlightthickness=0)
+
+        def uf(size, bold=False):
+            return self._uf(size, bold)
+
+        def draw():
+            cv.delete("all")
+            st["hits"] = []
+            self._rr_soft(cv, u(10), u(10), W - u(10), H - u(10), u(18),
+                          fill=cd["bg"], outline=line, width=1)
+            cv.create_text(W / 2, u(34), text="목록 %d" % (i9 + 1),
+                           font=uf(12, True), fill=cd["text"])
+            cv.create_text(u(30), u(62), anchor="w", text="이름",
+                           font=uf(9, True), fill=cd["text"])
+            # 이름 칸 — 흰 알약 위에 Entry
+            self._rr_soft(cv, u(30), u(74), W - u(30), u(104), u(15),
+                          fill="#ffffff", outline=self._tint(cd["border"], 0.35),
+                          width=1)
+            cv.create_window(W / 2, u(89), window=ent, width=W - u(84),
+                             height=u(22))
+            # 대표 목록 토글
+            on9 = st["share"]
+            cv.create_text(u(30), u(128), anchor="w", text="대표 플레이리스트",
+                           font=uf(9, True), fill=cd["text"])
+            cv.create_text(u(30), u(146), anchor="w",
+                           text="친구들이 듣고 보는 목록이에요",
+                           font=uf(7), fill=cd["sub"])
+            tx0, ty0 = W - u(86), u(124)
+            self._rr_soft(cv, tx0, ty0, W - u(30), ty0 + u(26), u(13),
+                          fill=cd["fill"] if on9 else "#ffffff",
+                          outline="" if on9 else self._tint(cd["border"], 0.35),
+                          width=0 if on9 else 1)
+            cv.create_text((tx0 + W - u(30)) / 2, ty0 + u(13),
+                           text="대표예요" if on9 else "대표로",
+                           font=uf(8, True),
+                           fill="#ffffff" if on9 else cd["text"])
+            st["hits"].append((tx0, ty0, W - u(30), ty0 + u(26), "share"))
+            # 저장 · 닫기
+            by = H - u(56)
+            bw = (W - u(60) - u(10)) / 2.0
+            self._rr_soft(cv, u(30), by, u(30) + bw, by + u(32), u(16),
+                          fill=cd["fill"], outline="", width=0)
+            cv.create_text(u(30) + bw / 2, by + u(16), text="저장",
+                           font=uf(9, True), fill="#ffffff")
+            st["hits"].append((u(30), by, u(30) + bw, by + u(32), "save"))
+            self._rr_soft(cv, W - u(30) - bw, by, W - u(30), by + u(32), u(16),
+                          fill=cd["soft"], outline="", width=0)
+            cv.create_text(W - u(30) - bw / 2, by + u(16), text="닫기",
+                           font=uf(9, True), fill=cd["sub"])
+            st["hits"].append((W - u(30) - bw, by, W - u(30), by + u(32), "close"))
+
+        def save():
+            names = self._pl_set_names()
+            names[i9] = str(var.get() or "").strip()[:self.PL_NAME_N]
+            self.us["yt_set_names"] = names
+            self._safe("pl_save", self._save_settings)
+            if st["share"] and self._pl_share_i() != i9:
+                self._pl_share_set(i9)
+            elif not st["share"] and (self.us.get("yt_share_i") == i9):
+                self._pl_share_set(None)
+            self._bgm_redraw()
+            win.destroy()
+
+        def click(e):
+            for x0, y0, x1, y1, act in st["hits"]:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    if act == "share":
+                        st["share"] = not st["share"]
+                        draw()
+                    elif act == "save":
+                        save()
+                    else:
+                        win.destroy()
+                    return
+
+        cv.bind("<Button-1>", lambda e: self._safe("plset_click", click, e))
+        win.bind("<Return>", lambda _e: self._safe("plset_save", save))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        draw()
+        try:
+            ent.focus_set()
+            ent.icursor("end")
+        except Exception:
+            pass
+        return win
 
     def _pl_rows(self):
         """창에 그릴 줄들 — ("item"|"kid", 항목번호, 자식번호, 곡 dict).
@@ -25629,7 +25806,7 @@ class Mascot:
         # 화면용(_pl_songs_mine)은 길이를 떨어뜨린다 — 원본에서 싣는다.
         # **펼친 곡**을 보낸다 (_pl_flat) — 안 그러면 친구에게는 재생목록
         # 주소 한 줄만 가서 그쪽에서도 첫 곡만 나온다.
-        for it in self._pl_flat()[:self.PL_SHARE_MAX]:
+        for it in self._pl_flat(self._pl_share_i())[:self.PL_SHARE_MAX]:
             u9 = str(it.get("u") or "")
             vid, lst = self._yt_ids(u9)
             if vid:
@@ -26608,14 +26785,30 @@ class Mascot:
                               width=0 if on9 else 1)
                 n9 = self._pl_count(i9)
                 cv.create_text(x0p + pw9 / 2.0, py9 + u(11),
-                               text="목록 %d" % (i9 + 1),
+                               text=self._pl_set_name(i9),
                                font=self._uf(9, True),
                                fill="#ffffff" if on9 else cd["text"])
+                if (self.us.get("yt_share_i") is not None
+                        and self._pl_share_i() == i9):
+                    # 대표 목록 — 친구들이 듣는 것. 오른쪽 위 작은 표식
+                    self._rr_soft(cv, x0p + pw9 - u(30), py9 - u(6),
+                                  x0p + pw9 - u(4), py9 + u(7), u(6),
+                                  fill="#ffffff" if on9 else cd["fill"],
+                                  outline=cd["fill"] if on9 else "",
+                                  width=1 if on9 else 0)
+                    cv.create_text(x0p + pw9 - u(17), py9 + u(0.5),
+                                   text="대표", font=self._uf(6, True),
+                                   fill=cd["fill"] if on9 else "#ffffff")
                 cv.create_text(x0p + pw9 / 2.0, py9 + u(23),
                                text=("%d곡" % n9) if n9 else "비어 있어요",
                                font=self._uf(7, True),
                                fill="#ffffff" if on9 else cd["sub"])
                 hit(x0p, py9, x0p + pw9, py9 + u(32), "set", i9)
+            if self._feat_new("pl_set"):                 # 새로움 점 (우클릭 설정)
+                self._feat_dot(cv, u(18) + u(2), py9 + u(2))
+            if self._feat_spot_on("bgm_set"):            # '보여 줘' 테두리
+                self._feat_ring(cv, u(18), py9, W - u(18), py9 + u(32), u(15))
+                self._feat_spot_clear_later(win)
             draw_vid(g, g["vid"])
             if not songs:
                 by = g["list"]
@@ -27732,6 +27925,16 @@ class Mascot:
         self._yt_win = win
         self._amb_draw = draw
         cv.bind("<Button-1>", lambda e: self._safe("bgm_click", on_press, e))
+
+        def on_rclick(e):
+            # 목록 단추 우클릭 → 프리셋 설정 창 (이름·대표 목록 · 요청)
+            act, dat = find(e.x, e.y)
+            if act == "set":
+                self._safe("ui_click", self._ui_click)
+                self._feat_seen("pl_set")
+                self._safe("pl_set_win", self._pl_set_win, int(dat or 0))
+
+        cv.bind("<Button-3>", lambda e: self._safe("bgm_rclick", on_rclick, e))
         cv.bind("<B1-Motion>", lambda e: self._safe("bgm_drag", on_drag, e))
         cv.bind("<ButtonRelease-1>", on_up)
         cv.bind("<Motion>", lambda e: self._safe("bgm_hover", on_hover, e))
@@ -27803,14 +28006,15 @@ class Mascot:
             pass
         return win
 
-    def _pl_songs_mine(self):
+    def _pl_songs_mine(self, i9=None):
         """내 목록을 '트는 곡' 단위로 (출처와 무관하게 늘 내 것).
 
         재생목록 항목은 **펼친 곡들로 갈아** 넣는다 — 그래야 이전/다음·
         ended·번호(_pl_i)가 곡 단위로 맞물린다 (지뢰 98).
+        `i9` 를 주면 그 프리셋 (친구에게 광고하는 대표 목록).
         """
         out = []
-        for it in self._pl_flat():
+        for it in self._pl_flat(i9):
             u9 = str(it.get("u") or "")
             out.append({"slot": self.char, "n": "", "u": u9,
                         "t": str(it.get("t") or "") or self._pl_short(u9),
@@ -32139,7 +32343,7 @@ class Mascot:
             # cd·rly 를 뺀다 — 셋이 겹치면 봉인 후 상한(32000)을 넘긴다
             # (지뢰 56·92). 옛 판 받는 쪽은 모르는 열쇠라 그냥 버린다.
             try:
-                mine9 = self._pl_songs_mine()
+                mine9 = self._pl_songs_mine(self._pl_share_i())   # 대표 목록
                 if mine9:
                     # **광고는 실제로 보낼 수 있는 만큼만.** 해시를 200곡
                     # 전량으로 만들면 121번째 뒤만 바꿔도 해시가 바뀌어
