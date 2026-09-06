@@ -11523,7 +11523,7 @@ class Mascot:
                 try:
                     with urllib.request.urlopen(
                             "%s/work-timer/today?date=%s" % (base, key),
-                            timeout=3) as fp:
+                            timeout=3, context=_ssl_ctx()) as fp:
                         d9 = json.loads(fp.read().decode("utf-8")) or {}
                     n9 = int(d9.get("total_seconds") or 0)
                 except Exception:
@@ -48850,9 +48850,12 @@ class Mascot:
                 self._hand_cache.pop(k2, None)
         self._hand_cache[key] = got
         return got
-    @staticmethod
-    def _draw_hand(c, x, y, r):
-        """토닥이는 손 — 손바닥과 손가락 넷. 글꼴을 안 써서 맥에서도 같다."""
+    def _draw_hand(self, c, x, y, r):
+        """토닥이는 손 — 손바닥과 손가락 넷. 글꼴을 안 써서 맥에서도 같다.
+
+        hand.png 가 없을 때만 탄다. (@staticmethod 인 채 self 를 써서 타면
+        NameError 였다 — pyflakes 가 잡았다.)
+        """
         skin, line = "#ffe7d2", "#d9a882"
         self._oval(c, x - r, y - r * 0.72, x + r, y + r * 0.86,
                       fill=skin, outline=line, width=2)
