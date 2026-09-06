@@ -10734,6 +10734,13 @@ class Mascot:
 
     def close(self):
         try:
+            # 같이하기 중에 앱을 끄면 '나감'을 먼저 알린다 (제보: 다른 사람이
+            # 종료해도 퇴장 연출이 없다). 나감 신호는 '오늘은 여기까지'
+            # 단추에서만 나갔고, 그냥 끄면 남에게는 8분 뒤 '안 보여서
+            # 뺐어요'로만 보였다. 다시 켜는 길(_restart)은 뺀다 — 방에
+            # 그대로 있는 것이 맞다.
+            if not getattr(self, "_restarting", False):
+                self._safe("team_quit", self._team_quit_notify)
             # 영상 창을 먼저 떼어 낸다 — 자식 창은 부모와 함께 죽는다
             self._safe("vid_park", self._vid_park)
             # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
@@ -21231,6 +21238,39 @@ class Mascot:
         except Exception:
             return False
 
+    TEAM_QUIT_WAIT = 2.5         # 끌 때 나감 신호가 서버에 닿기를 기다리는 최대 초
+
+    def _team_quit_notify(self):
+        """앱을 끌 때 — 같이하기 참가자면 나감(tmo)을 알리고 닿을 때까지
+        잠깐 기다린다. 통신 스레드는 데몬이라 그냥 끄면 신호를 싣기 전에
+        프로세스가 사라진다. 방장은 안 보낸다 — 방장의 나감은 방을
+        통째로 접는 신호라, 잠깐 끈 것으로 남의 방이 닫히면 안 된다
+        (방장이 오래 안 보이면 TEAM_HOST_GONE 이 접는다).
+        """
+        tm = self._tm
+        net = self.room_net
+        if not tm or net is None or self._team_host():
+            return False
+        others = [sl for sl in (tm.get("members") or {}) if sl != self.char]
+        if not others:
+            return False
+        self._team_bcast("tmo", {"i": tm["sid"]})
+        t0 = time.time()
+        while time.time() - t0 < self.TEAM_QUIT_WAIT:
+            try:
+                got = net.take_sent()
+            except Exception:
+                got = []
+            if any(str(k9) == "tmo" for _to, k9 in (got or [])):
+                return True
+            if not getattr(net, "_out", None) and not getattr(net, "_kick", False) \
+                    and time.time() - t0 > 0.6:
+                # 보낼 칸이 비었고 깨울 것도 없다 — 이미 나갔거나 못 보내는
+                # 상태다. 더 기다려도 소용없다.
+                break
+            time.sleep(0.05)
+        return False
+
     def _team_bcast(self, kind, extra=None, skip=None):
         """세션에 있는 모두에게 (나와 skip 은 빼고)."""
         tm = self._tm
@@ -31035,6 +31075,7 @@ class Mascot:
         except Exception:
             self._log_error("restart")
             return                       # 못 띄웠으면 이쪽이라도 살려 둔다
+        self._restarting = True          # 같이하기 방에는 그대로 남는다
         self.close()
 
     # ── 같이 작업하는 방 ─────────────────────────────────────────────────
