@@ -2131,14 +2131,39 @@ class GlassPane:
                     dx, dy, clip = self.resolve(cv)
                     coords = cv.coords
                     hid = getattr(cv, "_gt_hidden", None) or ()
+                    # 덮개("clipr" — 목록 밖으로 넘친 줄을 판 색으로 덮는 네모)는
+                    # 유리 창에서 키 색(투명)이라 아무것도 못 덮는다. 판 쪽에서
+                    # 그 자리를 **지운다** — 캔버스 항목을 따로 한 장에 모아
+                    # 덮개 자리를 비우고 얹는다 (플레이리스트 친구 목록 제보).
+                    try:
+                        covers = set(cv.find_withtag("clipr"))
+                    except Exception:
+                        covers = set()
+                    dst = im
+                    if covers:
+                        dst = Image.new("RGBA", im.size, (0, 0, 0, 0))
                     # **캔버스의 쌓임 차례**로 올린다 — 환경설정은 글자를
                     # 먼저 그리고 카드를 tag_lower 로 밑에 깐다. 넣은 차례로
-                    # 올리면 카드가 글자를 덮는다.
+                    # 올리면 카드가 글자를 덮는다. 덮개는 그 차례에 만나는
+                    # 순간 그 자리를 비운다 — 덮개 **뒤에** 그린 머리말·영상
+                    # 칸은 그대로 남는다 (Tk 의 z순서와 같은 뜻).
                     try:
-                        order = [i for i in cv.find_all() if i in pt]
+                        order = [i for i in cv.find_all() if i in pt or i in covers]
                     except Exception:
                         order = list(pt)
                     for it in order:
+                        if it in covers:
+                            try:
+                                b9 = cv.bbox(it)
+                                if b9:
+                                    cx0, cy0 = max(0, int(b9[0] + dx)), max(0, int(b9[1] + dy))
+                                    cx1 = min(dst.width, int(b9[2] + dx))
+                                    cy1 = min(dst.height, int(b9[3] + dy))
+                                    if cx1 > cx0 and cy1 > cy0:
+                                        dst.paste((0, 0, 0, 0), (cx0, cy0, cx1, cy1))
+                            except Exception:
+                                pass
+                            continue
                         if it in hid:
                             continue
                         pil, spec, anchor = pt[it]
@@ -2152,8 +2177,10 @@ class GlassPane:
                             pil = self.render(cv, it, spec) or pil
                         x, y = Mascot._anchor_tl(c[0], c[1], pil.width,
                                                  pil.height, anchor)
-                        self._blit_clip(im, pil, int(round(x + dx)),
+                        self._blit_clip(dst, pil, int(round(x + dx)),
                                         int(round(y + dy)), clip)
+                    if covers:
+                        im.alpha_composite(dst)
                 except Exception:
                     continue
         # premultiplied 로 (지뢰 117) — (255,255,255,1) 은 (1,1,1,1) 이 된다
@@ -10755,6 +10782,14 @@ class Mascot:
         px, py, prx, pry = self._press
         if not self._dragged and abs(e.x_root - prx) + abs(e.y_root - pry) < 6:
             return
+        # 말풍선 단추(사이클 끝 '다시 시작' 등)를 누른 채 펜이 조금 미끄러져도
+        # 창을 옮기지 않는다 — 옮기면 _dragged 가 서서 뗄 때 단추가 안 눌린다
+        # (제보 '단추가 안 눌려' — 타블렛 펜 탭은 6px 쯤은 쉽게 흐른다)
+        if getattr(self, "_bubble_act", None) and self.bubble:
+            for bx9 in (getattr(self, "_bubble_btn", None),
+                        getattr(self, "_bubble_box", None)):
+                if bx9 and bx9[0] <= px <= bx9[2] and bx9[1] <= py <= bx9[3]:
+                    return
         if not self._dragged:
             # 옮기기 시작하는 순간에 한 번만 (끄는 내내 내면 웅웅거린다)
             self._safe("ui_click", self._ui_click)
@@ -22361,18 +22396,20 @@ class Mascot:
                             width=max(1, int(W * 0.025)))
         return im.resize((int(size), int(size)), Image.LANCZOS)
 
-    def _tomgauge_pic(self, size, ratio):
-        """토마토 게이지 그림 (PhotoImage) — 5% 단위로 굽고 캐시한다."""
+    def _tomgauge_pic(self, size, ratio, rest=False):
+        """토마토 게이지 그림 (PhotoImage) — 5% 단위로 굽고 캐시한다.
+        rest 면 '쉬는 중' — 파랗다 (친구 머리 위 토마토도 · 요청)."""
         size = max(12, int(size))
         step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
-        key = (size, step)
+        key = (size, step, bool(rest))
         got = self._tomgauge_cache.get(key)
         if got is not None:
             return got
         if len(self._tomgauge_cache) > 80:          # 지뢰 18 — 오래된 절반만
             for k in list(self._tomgauge_cache)[:40]:
                 self._tomgauge_cache.pop(k, None)
-        ph = ImageTk.PhotoImage(self._tomgauge_pil(size, step / 20.0))
+        ph = ImageTk.PhotoImage(self._tomgauge_pil(size, step / 20.0,
+                                                   rest=bool(rest)))
         self._tomgauge_cache[key] = ph
         return ph
 
@@ -22888,12 +22925,12 @@ class Mascot:
         self._strip_seat_cache[key] = top
         return top
 
-    def _strip_tomato(self, size, ratio):
+    def _strip_tomato(self, size, ratio, rest=False):
         step = int(round(max(0.0, min(1.0, float(ratio or 0.0))) * 20))
-        key = (int(size), step)
+        key = (int(size), step, bool(rest))
         got = self._strip_tom_cache.get(key)
         if got is None:
-            got = self._tomgauge_pil(int(size), step / 20.0)
+            got = self._tomgauge_pil(int(size), step / 20.0, rest=bool(rest))
             if len(self._strip_tom_cache) > 80:
                 for k in list(self._strip_tom_cache)[:40]:
                     self._strip_tom_cache.pop(k, None)
@@ -23051,7 +23088,8 @@ class Mascot:
                        anchor="mm")
             # 토마토 — **머리 꼭대기에 딱 붙여** 얹는다 (요청). 그림 위 투명
             # 여백만큼 내려간다. 캐릭터보다 나중에 그려 위로.
-            tom = self._strip_tomato(tsz, fr)
+            # 쉬는 중이면 파란 토마토 — 창 안과 같은 규칙 (요청)
+            tom = self._strip_tomato(tsz, fr, rest=(stt == "쉬는 중"))
             ht9 = self._seat_head_top(slot, H)
             # 토마토는 머리에 얹혀 있으니 숨쉬기만큼 같이 내려간다. 누르는
             # 구역의 아래끝(책상선)에서 멀수록 많이 움직인다.
@@ -25712,9 +25750,10 @@ class Mascot:
                 ht9 = self._seat_head_top(slot, h9)
                 tcx = cx
                 tcy = cy0 + u(92) - h9 + ht9 - tsz * 0.55 + tsz / 2 + dy
-                tim = (self._safe_str(self._tomgauge_pic, tsz, fr)
+                rest9 = (stt == "쉬는 중")      # 쉬는 중이면 파란 토마토 (요청)
+                tim = (self._safe_str(self._tomgauge_pic, tsz, fr, rest9)
                        if a9 >= 1.0 else
-                       self._safe_str(self._tomgauge_pic_a, tsz, fr, a9))
+                       self._safe_str(self._tomgauge_pic_a, tsz, fr, a9, rest9))
                 if tim:
                     cv.create_image(tcx, tcy, image=tim)
                     self._pomo_keep.append(tim)
@@ -25800,8 +25839,9 @@ class Mascot:
             return None
         return self._tkimg(self._bye_alpha_im(im, a))
 
-    def _tomgauge_pic_a(self, size, fr, a):
-        return self._tkimg(self._bye_alpha_im(self._strip_tomato(size, fr), a))
+    def _tomgauge_pic_a(self, size, fr, a, rest=False):
+        return self._tkimg(self._bye_alpha_im(
+            self._strip_tomato(size, fr, rest=rest), a))
 
     def _bye_cache_put(self, key, im):
         if len(self._bye_cache) > 60:
