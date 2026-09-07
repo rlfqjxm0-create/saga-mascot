@@ -1,7 +1,7 @@
 {
- "version": 1788756641,
+ "version": 1788758057,
  "files": {
-  "mascot.py": "2138b00f2dd3bdebc0d64ddabd23854c7ac9c4ab4dd7c395c3460e0a2362a0c4",
+  "mascot.py": "c5eff52b38fe9dcd8245cd98ef2ac3f7221b69fc0a7b462f9985470731adbba6",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -594,8 +594,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "환경설정 › 표시 › 테마 '유리' — 타이머 카드·홈·뽀모도로·플레이리스트·쪽지함·환경설정 창이 유리처럼 비쳐요 (윈도우 · 저장하면 다시 켜져요)",
-  "테마가 유리일 때 그 아래 '유리 불투명도' 슬라이더로 유리를 얼마나 비치게 할지 바로 조절할 수 있어요"
- ]
+ "notes": [],
+ "silent": true
 }

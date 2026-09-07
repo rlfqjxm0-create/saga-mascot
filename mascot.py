@@ -2227,6 +2227,89 @@ class GlassPane:
         self.u.SetWindowPos(self.hwnd, after_hwnd, int(x), int(y), int(w),
                             int(h), 0x10 | 0x40)      # NOACTIVATE | SHOWWINDOW
         self.rect = (int(x), int(y), int(w), int(h))
+        r = self.probe()
+        if r is not None and r != self.radius:
+            self.radius = r
+            self.dirty()
+
+    _dwm_r = {}           # DPI → DWM 둥근 모서리의 실제 반지름(px) — 켤 때 한 번 잰다
+
+    def dpi(self):
+        try:
+            u9 = ctypes.WinDLL("user32")               # 지뢰 21 — 따로 연다
+            u9.GetDpiForWindow.argtypes = [ctypes.c_void_p]
+            u9.GetDpiForWindow.restype = ctypes.c_uint
+            return int(u9.GetDpiForWindow(self.hwnd) or 96)
+        except Exception:
+            return 96
+
+    @classmethod
+    def dwm_radius_guess(cls, dpi=96):
+        """못 쟀을 때 — 윈도우 11 은 100% 에서 12px(실측), 10 은 둥글림 없음."""
+        try:
+            build = sys.getwindowsversion().build
+        except Exception:
+            build = 0
+        if build < 22000:
+            return 0
+        return int(round(12.0 * dpi / 96.0))
+
+    def probe(self):
+        """DWM 이 판 모서리를 얼마나 둥글리는지 **실제 화면에서** 잰다 (DPI 마다
+        한 번). 문서의 8 DIP 와 달리 실측은 100% 에서 12px 이었고, 윈도우 10 은
+        0 이다 — 짐작으로 잡으면 카드 테두리가 모서리에서 잘려 안쪽이 뾰족해
+        보인다 (제보). 불투명한 회백 판을 한 프레임 올려 모서리에서 그 색이
+        시작되는 자리로 원을 맞춘다. 못 재면 None (짐작값으로 물러난다)."""
+        dpi = self.dpi()
+        got = GlassPane._dwm_r.get(dpi)
+        if got is not None:
+            return got
+        if self.rect is None or self.size is None:
+            return None
+        w, h = self.size
+        if w < 40 or h < 40:
+            return None
+        GlassPane._dwm_r[dpi] = self.dwm_radius_guess(dpi)   # 재는 동안·실패 시
+        try:
+            from PIL import ImageGrab                        # 도장판이 이미 쓴다
+            col = (232, 228, 236)
+            im = Image.new("RGBA", (w, h), col + (255,))
+            ShadowLayer._push(self, Image.frombytes(
+                "RGBA", im.size, im.convert("RGBa").tobytes()))
+            time.sleep(0.05)                                 # 합성기가 그릴 시간
+            x, y = self.rect[0], self.rect[1]
+            N = 36
+            shot = ImageGrab.grab((x, y, x + N, y + N), all_screens=True).convert("RGB")
+            mid = shot.getpixel((N - 2, N - 2))
+            if max(abs(mid[i] - col[i]) for i in range(3)) > 14:
+                raise RuntimeError("probe miss")            # 판이 안 찍혔다
+            xs = []
+            for yy in range(N):
+                fx = None
+                for xx in range(N):
+                    p9 = shot.getpixel((xx, yy))
+                    if max(abs(p9[i] - col[i]) for i in range(3)) <= 14:
+                        fx = xx
+                        break
+                xs.append(N if fx is None else fx)
+            best = None
+            for R in range(0, N):
+                err = 0.0
+                for yy in range(1, max(2, R)):
+                    pred = R - math.sqrt(max(0.0, R * R - (R - yy - 0.5) ** 2))
+                    err += (pred - xs[yy]) ** 2
+                err += sum(xs[yy] ** 2 for yy in range(max(2, R), N))
+                if best is None or err < best[0]:
+                    best = (err, R)
+            GlassPane._dwm_r[dpi] = int(best[1])
+        except Exception:
+            pass
+        finally:
+            try:
+                self._push(w, h)                             # 원래 그림으로
+            except Exception:
+                pass
+        return GlassPane._dwm_r.get(dpi)
 
     def below(self, hwnd):
         """앞 창 바로 아래에 있는가 (GW_HWNDNEXT)."""
@@ -18502,8 +18585,11 @@ class Mascot:
             # 캔버스에 테두리를 그리면 테두리와 키 색이 만나는 안쪽 가장자리가
             # 검정과 섞여 **검은 띠**가 됐다 (제보 두 번 · 실측 x+4~6 픽셀).
             # 모서리는 DWM 이 판을 둥글리는 반지름(_glass_r)에 맞춘다.
+            # 테두리의 바깥 반지름은 DWM 실측값보다 1 크게 — 조금 크면 모서리
+            # 바깥에 유리가 0.3px 비칠 뿐이고, 작으면 테두리가 잘려 안쪽이
+            # 뾰족해 보인다. 안쪽은 그만큼 뺀 동심원이라 '창 테두리'처럼 보인다.
             ring = self._card_ring(int(round(x1 - x0)), int(round(y1 - y0)),
-                                   self._glass_r(), cd["border"])
+                                   self._glass_r() + 1, cd["border"])
             if ring is not None:
                 self._card_texts["ring"] = (0, 0, ring)
             # 장식(귀·눈·초밥…)의 카드 안쪽 부분을 가린다 — 예전엔 카드
@@ -19626,16 +19712,18 @@ class Mascot:
             return None
 
     def _glass_r(self):
-        """DWM 이 둥글리는 모서리 반지름(px) — 8 DIP 를 화면 배율로 (실측:
-        150% 에서 12px). 유리 판의 가장자리 빛·카드 테두리가 이것을 따른다."""
-        got = getattr(self, "_glass_r_v", None)
+        """DWM 이 둥글리는 모서리 반지름(px). 켤 때 판이 실제 화면에서 잰 값
+        (`GlassPane.probe`)을 쓰고, 아직 못 쟀으면 짐작값(윈도우 11 은 100% 에서
+        12px · 10 은 0). 유리 판의 가장자리 빛·카드 테두리·하늘 띠가 이것을
+        따른다 — 문서의 8 DIP 로 잡았더니 테두리가 모서리에서 잘렸다 (제보)."""
+        try:
+            dpi = int(round(float(self.root.winfo_fpixels("1i"))))
+        except Exception:
+            dpi = 96
+        got = GlassPane._dwm_r.get(dpi)
         if got is None:
-            try:
-                dpi = float(self.root.winfo_fpixels("1i"))
-            except Exception:
-                dpi = 96.0
-            got = self._glass_r_v = max(6, int(round(8.0 * dpi / 96.0)))
-        return got
+            got = GlassPane.dwm_radius_guess(dpi)
+        return int(got)
 
     def _glass_grad(self, im, fill="#ffffff"):
         """유리 그림 — 흰 판을 왼쪽 위 흰색 → 오른쪽 아래 테마 파스텔로.
