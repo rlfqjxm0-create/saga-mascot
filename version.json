@@ -1,7 +1,7 @@
 {
- "version": 1788763176,
+ "version": 1788772393,
  "files": {
-  "mascot.py": "a81fd207fc3bc847ee8da1dae8fba816fac95e57d19bcbecd12017053c658aa3",
+  "mascot.py": "b4be24372d6ecead497fdff95b5f89797ec4a53eea524858cce5694b111ea560",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -594,10 +594,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "사이클이 끝났을 때 '뽀모도로 한 사이클 다시 시작' 단추가 펜이 조금 흘러도 눌려요",
-  "친구 플레이리스트에서 곡이 많아도 뒷줄이 아래 조작줄 위로 안 새요",
-  "같이하기에서 잠깐 쉬는 중인 친구는 머리 위 토마토가 파래져요 (다시 집중하면 원래 색)"
- ],
+ "notes": [],
  "silent": true
 }

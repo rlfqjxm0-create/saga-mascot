@@ -5160,6 +5160,8 @@ CHARS = [
      "tint": "#8ed3f9"},
     {"slot": "parts_hadok", "repo": "hadok-mascot", "name": "하독",
      "tint": "#3b57d4"},
+    {"slot": "parts_bing", "repo": "bing-mascot", "name": "빙",
+     "tint": "#f5c96a"},
     # 소스로 도는 내 도로롱 — 자리는 선물본 쪽 그림을 빌려 쓴다
     {"slot": "parts_dororong", "repo": "dororong-mascot", "name": "도로롱",
      "tint": "#f2a7c5", "gift": False},
@@ -9830,6 +9832,11 @@ class Mascot:
                                     radius=4, fill=(0, 0, 0, 255))
             elif deco == "sushi":                  # 연어: 초밥 실루엣
                 d.ellipse([mx - 23, cy0 - 17, mx + 23, cy0 + 12],
+                          fill=(0, 0, 0, 255))
+            elif deco == "cone":                   # 빙: 콘 아이스크림 실루엣
+                d.ellipse([mx - 15, cy0 - 25, mx + 15, cy0 - 1],
+                          fill=(0, 0, 0, 255))
+                d.polygon([(mx - 13, cy0 - 6), (mx + 13, cy0 - 6), (mx, cy0 + 14)],
                           fill=(0, 0, 0, 255))
             elif deco == "ice":                    # 깅규: 각얼음 실루엣
                 d.polygon([(mx - 14, cy0 - 13), (mx - 4, cy0 - 23),
@@ -15202,6 +15209,19 @@ class Mascot:
                 sx2, cy2 = mx + dx2, y0 - 8
                 c.create_line(sx2 - 4, cy2 + half, sx2 + 4, cy2 - half,
                               fill="#f8cfb6", width=2, capstyle="round")
+        elif deco == "cone":
+            # 빙: 콘 아이스크림 — 콘(삼각형)은 카드 속으로 들어가고, 그 위에
+            # 크림 한 스쿱이 카드 위로 빼꼼. 색은 캐릭터(바닐라·과자색)에서.
+            mx = (x0 + x1) / 2
+            cone, cream, line = "#e9c48f", "#fff4c8", "#6b5236"
+            c.create_polygon(mx - 13, y0 - 6, mx + 13, y0 - 6, mx, y0 + 14,
+                             fill=cone, outline=line, width=2)
+            c.create_line(mx - 7, y0 + 1, mx + 4, y0 - 1, fill="#c9a06a", width=1)
+            c.create_line(mx - 3, y0 + 7, mx + 5, y0 + 5, fill="#c9a06a", width=1)
+            self._oval(c, mx - 15, y0 - 25, mx + 15, y0 - 1,
+                       fill=cream, outline=line, width=2)
+            self._oval(c, mx - 6, y0 - 20, mx - 1, y0 - 15,
+                       fill="#ffffff", outline="")
         elif deco == "ice":
             # 깅규: 각얼음 한 덩이 (윗면·앞면·옆면으로 각을 낸다)
             mx = (x0 + x1) / 2
@@ -33027,6 +33047,13 @@ class Mascot:
                     cv.create_line(sx2 - 4, y + half, sx2 + 4, y - half,
                                    fill="#f8cfb6", width=2,
                                    capstyle="round")
+            elif deco == "cone":               # 빙: 콘 아이스크림
+                cv.create_polygon(mx - 14, y + 2, mx + 14, y + 2, mx, y + 24,
+                                  fill="#e9c48f", outline="#6b5236", width=2)
+                self._oval(cv, mx - 16, y - 18, mx + 16, y + 6,
+                           fill="#fff4c8", outline="#6b5236", width=2)
+                self._oval(cv, mx - 7, y - 13, mx - 2, y - 8,
+                           fill="#ffffff", outline="")
             elif deco == "ice":                # 깅규: 각얼음
                 cv.create_polygon(mx - 16, y + 2, mx - 5, y - 9,
                                   mx + 18, y - 9, mx + 7, y + 2,
@@ -38606,21 +38633,24 @@ class Mascot:
         x = max(0, (sw - W) // 2)
         y = max(0, (sh - H) // 2)
         win.geometry("%dx%d+%d+%d" % (W, H, x, y))
-        # geometry 의 y 는 제목 표시줄 위가 아니라 안쪽 기준이라, 그대로 두면
-        # 제목 표시줄 높이만큼 아래로 치우친다. 실제로 놓인 자리를 재서 보정한다.
-        win.update_idletasks()
-        try:
-            win.geometry("+%d+%d" % (x + (x - win.winfo_rootx()),
-                                     y + (y - win.winfo_rooty())))
-        except Exception:
-            pass
+        # 표시줄은 창을 화면에 올리기 **전에** 뗀다. 올린 뒤에 떼면 Tk 가 OS
+        # 창을 부수고 다시 만들어 홈이 한 번 꺼졌다 켜진다 (제보 — 뽀모도로·
+        # 쪽지함은 순서가 맞아 안 그랬다). 하늘 띠가 잡아 옮기는 띠다.
+        self._chrome_setup(win, None,
+                           band=lambda: getattr(self, "_room_top_px", 90),
+                           on_close=self._room_close)
+        if not getattr(win, "_chrome", None):
+            # OS 표시줄이 있는 창(맥) — geometry 의 y 는 제목 표시줄 위가 아니라
+            # 안쪽 기준이라 표시줄 높이만큼 아래로 치우친다. 재서 보정한다.
+            win.update_idletasks()
+            try:
+                win.geometry("+%d+%d" % (x + (x - win.winfo_rootx()),
+                                         y + (y - win.winfo_rooty())))
+            except Exception:
+                pass
         cv = tk.Canvas(win, width=W, height=H, highlightthickness=0,
                        bd=0, bg=self._room_palette()["wall"])
         cv.pack(fill="both", expand=True)
-        # 유리 테마 — 표시줄 없이 (요청). 하늘 띠가 잡아 옮기는 띠다.
-        self._chrome_setup(win, cv,
-                           band=lambda: getattr(self, "_room_top_px", 90),
-                           on_close=self._room_close)
         cv.bind("<Button-1>", lambda e: self._safe("room_click",
                                                    self._room_click, e))
         cv.bind("<Button-3>", lambda e: self._safe("room_rclick",
