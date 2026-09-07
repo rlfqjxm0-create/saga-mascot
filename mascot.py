@@ -14580,6 +14580,30 @@ class Mascot:
 
     AUTO_BRIEF_MIN = 600     # 이만큼(초)은 일한 날만 스스로 브리핑을 띄운다
 
+    def _timer_restart_card(self):
+        """브리핑의 '새로 시작' — 카드를 0부터 다시 세되 오늘 누적은 지킨다.
+
+        예전에는 누적(work_secs)·기준점을 통째로 0으로 돌렸다. 그런데 오늘
+        바닥값(.history 오늘 칸·오늘 최고치)은 그대로라, 카드가 '오늘치는
+        뒤로 가지 않는다' 규칙에 걸려 **바닥값에 못 박혔다** — 빙이 14분에서
+        영영 안 움직인 사건 (새 누적이 바닥을 넘을 때까지 9분 반을 더
+        그려야 풀렸다). 지뢰 78 에서 '타이머 초기화'만 고치고 이 단추는
+        빠뜨린 것이다.
+
+        이제는 reset_on_end 와 같은 방식이다 — 누적은 두고 기준점(zero_at)만
+        '오늘' 눈금으로 옮긴다. 카드는 곧바로 0 부터 세고, 홈·기록·브리핑의
+        오늘 합계는 그대로다. 세션 몫(획·클릭·거리)만 비운다 — 작업/딴짓/
+        휴식 시간과 시계 칠은 하루치라 남긴다 (지뢰 189).
+        """
+        self.zero_at = self.day_base + self._today_secs()
+        self._dfloor = None
+        for kk in ("best", "_run", "first", "last", "px"):
+            self.stat[kk] = 0.0
+        for kk in ("keys", "strokes", "clicks", "undo", "runs"):
+            self.stat[kk] = 0
+        self._reset_records()
+        self._timer_save()
+
     def _reset_records(self):
         """새 세션 — 기록 갱신 축하를 처음부터 다시 센다."""
         self.rec = {"strokes": [], "focus": 0.0}
@@ -17337,17 +17361,7 @@ class Mascot:
 
         # ── 버튼 ───────────────────────────────────────────────────────
         def reset_and_close():
-            self.work_secs = 0.0
-            self.zero_at = 0.0
-            self.day_base = 0.0
-            for kk in ("work", "other", "idle", "best", "_run", "first", "last",
-                       "px"):
-                self.stat[kk] = 0.0
-            for kk in ("keys", "strokes", "clicks", "undo", "runs"):
-                self.stat[kk] = 0
-            self._act.clear()
-            self._reset_records()
-            self._timer_save()
+            self._timer_restart_card()
             win.destroy()
 
         gap = u(12)
