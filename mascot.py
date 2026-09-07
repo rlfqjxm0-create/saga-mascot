@@ -19479,7 +19479,9 @@ class Mascot:
         자리에서 4px 넘게 끌었을 때 시작한다 — 그래야 그 띠 안의 단추 클릭이
         먼저 제 일을 한다 (차례를 따지지 않아도 된다).
         """
-        if not (self._glass and IS_WIN):
+        # 기본 테마도 OS 표시줄 대신 – □ × (요청). 맥은 표시줄 없는 창에
+        # 키보드 포커스가 안 와서(지뢰 168) 그대로 둔다.
+        if not IS_WIN:
             return
         try:
             win.overrideredirect(True)
@@ -19492,10 +19494,78 @@ class Mascot:
             mn = (200, 150)
         win._chrome = {"band": band, "on_close": on_close, "hits": [],
                        "rz": None, "move": None, "press": None,
-                       "min": mn, "cur": ""}
+                       "min": mn, "cur": "", "maxed": None}
+        # 표시줄을 떼면 모서리가 각진다 (제보) — 창이 뜨면 둥글린다
+        win.bind("<Map>", lambda e, w9=win: (
+            self._chrome_round(w9) if e.widget is w9 else None), add="+")
+        try:
+            win.after(30, lambda w9=win: self._chrome_round(w9))
+        except Exception:
+            pass
+
+    def _chrome_round(self, win):
+        """표시줄 없는 창의 네 모서리를 둥글린다. 윈도우 11 은 DWM 에 맡기고
+        (유리 판과 같은 반지름이 된다), 10 은 둥근 영역(SetWindowRgn)으로 —
+        계단은 지지만 각진 것보다 낫다. 유리 창은 앞 창이 색상키라 판이
+        둥근 것으로 충분하지만 같이 걸어 둔다 (해가 없다)."""
+        if not IS_WIN:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+            hwnd = int(win.wm_frame(), 16)
+        except Exception:
+            return
+        try:
+            build = sys.getwindowsversion().build
+        except Exception:
+            build = 0
+        if build >= 22000:
+            if getattr(win, "_chrome_rounded", None) == hwnd:
+                return
+            try:
+                dwm = ctypes.WinDLL("dwmapi")                # 지뢰 21·23
+                dwm.DwmSetWindowAttribute.argtypes = [
+                    ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+                pref = ctypes.c_int(2)                        # DWMWCP_ROUND
+                dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+                col = ctypes.c_uint(0xFFFFFFFE)               # 테 없음
+                dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(col), 4)
+                win._chrome_rounded = hwnd
+            except Exception:
+                pass
+            return
+        if self._glass:
+            return                    # 색상키 창에 영역까지 얹지 않는다
+        try:
+            w, h = win.winfo_width(), win.winfo_height()
+            if w < 8 or h < 8:
+                return
+            key = (hwnd, w, h)
+            if getattr(win, "_chrome_rounded", None) == key:
+                return
+            u9 = ctypes.WinDLL("user32")
+            g9 = ctypes.WinDLL("gdi32")
+            g9.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+            g9.CreateRoundRectRgn.restype = ctypes.c_void_p
+            u9.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+            try:
+                dpi = float(win.winfo_fpixels("1i"))
+            except Exception:
+                dpi = 96.0
+            d = int(round(24.0 * dpi / 96.0))
+            u9.SetWindowRgn(hwnd, g9.CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d), 1)
+            win._chrome_rounded = key
+            if not getattr(win, "_chrome_rgn_bound", False):
+                win._chrome_rgn_bound = True
+                win.bind("<Configure>", lambda e, w9=win: (
+                    self._chrome_round(w9) if e.widget is w9 else None), add="+")
+        except Exception:
+            pass
 
     def _chrome_draw(self, win, cv, x, y, dir=-1, tags="dyn", r=None):
-        """– × 단추 (dir=-1 이면 x 에서 왼쪽으로, 1 이면 오른쪽으로)."""
+        """– □ × 단추 (dir=-1 이면 x 에서 왼쪽으로, 1 이면 오른쪽으로).
+        크기 고정 창(fixed)은 □ 가 없다."""
         ch = getattr(win, "_chrome", None)
         if not ch:
             return
@@ -19504,7 +19574,8 @@ class Mascot:
         hits = []
         col = cd["fill"]
         lw = max(1, int(u(2)))
-        for i, act in enumerate(("close", "min")):
+        acts = ("close", "min") if ch.get("fixed") else ("close", "max", "min")
+        for i, act in enumerate(acts):
             bx = x + dir * i * (r * 2 + u(8))
             self._soft_dot(cv, bx, y, r, cd["track"], tags=tags)
             if act == "close":
@@ -19513,11 +19584,54 @@ class Mascot:
                                capstyle="round", tags=tags)
                 cv.create_line(bx - d, y + d, bx + d, y - d, fill=col, width=lw,
                                capstyle="round", tags=tags)
+            elif act == "max":
+                d = r * 0.34
+                if ch.get("maxed"):
+                    # 되돌리기 — 겹친 네모 둘
+                    cv.create_rectangle(bx - d, y - d * 0.4, bx + d * 0.4, y + d,
+                                        outline=col, width=lw, tags=tags)
+                    cv.create_line(bx - d * 0.4, y - d * 0.4, bx - d * 0.4, y - d,
+                                   bx + d, y - d, bx + d, y + d * 0.4,
+                                   fill=col, width=lw, tags=tags)
+                else:
+                    cv.create_rectangle(bx - d, y - d, bx + d, y + d,
+                                        outline=col, width=lw, tags=tags)
             else:
                 cv.create_line(bx - r * 0.4, y, bx + r * 0.4, y, fill=col,
                                width=lw, capstyle="round", tags=tags)
             hits.append((bx - r, y - r, bx + r, y + r, act))
         ch["hits"] = hits
+
+    def _chrome_max_toggle(self, win):
+        """□ — 그 창이 놓인 모니터의 작업 영역에 꽉 채우고, 다시 누르면 원래
+        자리·크기로. 표시줄 없는 창은 OS 최대화가 없어 직접 한다."""
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return
+        if ch.get("maxed"):
+            try:
+                win.geometry(ch["maxed"])
+            except Exception:
+                pass
+            ch["maxed"] = None
+            return
+        try:
+            u9 = ctypes.WinDLL("user32")                    # 지뢰 21·23
+            u9.MonitorFromWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            u9.MonitorFromWindow.restype = ctypes.c_void_p
+            u9.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            u9.GetMonitorInfoW.restype = ctypes.c_int
+            hmon = u9.MonitorFromWindow(int(win.wm_frame(), 16), 2)
+            mi = _MONITORINFO()
+            mi.cbSize = ctypes.sizeof(mi)
+            if not u9.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                return
+            wa = mi.rcWork
+            ch["maxed"] = win.geometry()
+            win.geometry("%dx%d+%d+%d" % (wa.right - wa.left, wa.bottom - wa.top,
+                                          wa.left, wa.top))
+        except Exception:
+            ch["maxed"] = None
 
     def _chrome_edge(self, win, x, y):
         ch = getattr(win, "_chrome", None)
@@ -19547,6 +19661,8 @@ class Mascot:
                 self._safe("ui_click", self._ui_click)
                 if act == "close":
                     ch["on_close"]()
+                elif act == "max":
+                    self._chrome_max_toggle(win)
                 else:
                     win.withdraw()
                 return True
@@ -19589,6 +19705,7 @@ class Mascot:
         if mv is None and pr is not None and (abs(e.x_root - pr[0]) > 4
                                               or abs(e.y_root - pr[1]) > 4):
             ch["move"] = mv = (pr[0] - pr[2], pr[1] - pr[3])
+            ch["maxed"] = None            # 끌기 시작하면 '꽉 채움'은 풀린 것
         if mv:
             # 타블렛은 움직임 사건이 초당 이백 번 넘게 온다 — 사건마다
             # 옮기면 창(과 유리 판)을 그만큼 옮겨 드르륵거린다. 마지막
@@ -26239,7 +26356,7 @@ class Mascot:
         self._keep_front(win, focus=False)
         # 유리 테마 — 표시줄 없이 (요청). 내용 위에 얇은 띠를 따로 두고 그
         # 맨 오른쪽에 – × 를 놓는다. 띠가 잡아 옮기는 자리다.
-        BARH = int(self._ui(22)) if (self._glass and IS_WIN) else 0
+        BARH = int(self._ui(22)) if IS_WIN else 0      # 기본 테마도 표시줄 없이
         bar = None
         if BARH:
             bar = tk.Canvas(win, width=W, height=BARH, bg=cd["panel"],
