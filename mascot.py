@@ -7756,6 +7756,19 @@ class Mascot:
         self._pen_draw = None        # 펜 손을 머리 뒤에 그릴 때 쓰는 임시 보관
         self._pet_drawn = []         # 이번 프레임에 그린 반려동물 (그림자용)
         self._tick_after = None      # 예약해 둔 다음 프레임 (종료할 때 취소)
+        # 프레임 간격의 진짜 병목은 윈도우 타이머 해상도(15.6ms)였다 — Tk 의
+        # after(33) 이 46.8ms, after(16) 이 31.2ms 로 올림돼 '30fps' 가
+        # 실측 21, '60fps' 가 32 였다 (본체는 4ms). 1ms 로 낮춘다. 자기
+        # 손잡이로 연다 (지뢰 21 — 공용 windll 에 걸면 소리 코드까지 묶인다).
+        self._tres_on = False
+        self._winmm_tres = None
+        if IS_WIN:
+            try:
+                self._winmm_tres = ctypes.WinDLL("winmm")
+                if self._winmm_tres.timeBeginPeriod(1) == 0:
+                    self._tres_on = True
+            except Exception:
+                pass
         self._pet_sh_cache = {}
         self._pet_sh_on = False
         self._pet_sh_t = 0.0
@@ -11491,6 +11504,12 @@ class Mascot:
         self._relayout_card()
 
     def close(self):
+        if getattr(self, "_tres_on", False):
+            try:
+                self._winmm_tres.timeEndPeriod(1)
+            except Exception:
+                pass
+            self._tres_on = False
         try:
             # 같이하기 중에 앱을 끄면 '나감'을 먼저 알린다 (제보: 다른 사람이
             # 종료해도 퇴장 연출이 없다). 나감 신호는 '오늘은 여기까지'
@@ -20917,7 +20936,7 @@ class Mascot:
         # 사라진다 — 맥은 그 틈에서 창 열기·클릭을 처리하므로 '렉이 걸려
         # 환경설정이 안 열린다'가 됐다 (사가 제보 — 크기를 키우자 발생).
         # 예외가 나도 루프가 죽지 않는 것은 try/finally 가 보장한다.
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
             self._tick_body()
         except Exception:
@@ -20927,10 +20946,15 @@ class Mascot:
             except Exception:
                 self._log_error("redraw")
         finally:
-            spent = int((time.time() - t0) * 1000)
+            spent = int((time.perf_counter() - t0) * 1000)
             if spent > gap:
                 # 오래 걸렸다 — 남는 틈을 살짝 더 주어 입력이 먼저 돈다
                 gap = min(spent + self.GAME_SLACK, self.GAP_SLEEP * 3)
+            else:
+                # 쓴 만큼 빼고 예약한다. 안 빼면 간격이 gap + 본체가 되어
+                # 60 목표에서 48fps 에 머문다 (실측). 1ms 는 남겨 idle 틈
+                # (맥의 입력 처리)을 지킨다 — 지뢰 129 와 어긋나지 않는다.
+                gap = max(1, gap - spent)
             try:
                 self._tick_after = self.root.after(gap, self.tick)
             except Exception:
