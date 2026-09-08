@@ -33146,8 +33146,6 @@ class Mascot:
                               bg="#ffffff", fg=cd["text"], wrap="word",
                               highlightthickness=0, borderwidth=0)
         hits, sliders, bar_hits = [], [], []
-        sections = []                # (제목, y) — 위 항목 줄에서 뛰어간다
-        total9 = [1]
         RX = W - PAD - IN            # 오른쪽 컨트롤 기준선
         LX = PAD + IN                # 왼쪽 라벨 기준선
 
@@ -33320,13 +33318,15 @@ class Mascot:
             return y + 78
 
         def group(y, title, rows):
-            """제목 + 흰 카드 안에 행들을 균등 배치."""
-            sections.append((title, y))
-            self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
+            """제목 + 흰 카드 안에 행들을 균등 배치.
+
+            제목은 한눈에 어느 묶음인지 보이게 크게 (요청 — 위 항목 줄 대신).
+            """
+            self._oval(cv, PAD + 3, y - 5, PAD + 13, y + 5,
                            fill=cd["fill"], outline="")
-            self._gtext(cv, PAD + 18, y, anchor="w", text=title,
-                           font=(FONT, FS(9), "bold"), fill=cd["fill"])
-            y += 16
+            self._gtext(cv, PAD + 21, y, anchor="w", text=title,
+                           font=(FONT, FS(12), "bold"), fill=cd["fill"])
+            y += 22
             # 행을 먼저 그리고 흰 카드를 뒤로 내린다. 펼친 목록이 있으면 높이가
             # 달라지는데, 카드를 먼저 그리려면 높이를 미리 알아야 해서다.
             ry = y + 7 + ROW / 2
@@ -33665,10 +33665,7 @@ class Mascot:
             cv.delete("all")
             hits.clear()
             sliders.clear()
-            sections.clear()
-            y = header(24)
-            chips_y = y + 4              # 항목 줄 자리 — 마지막에 그린다
-            y += 56
+            y = header(24) + 10          # 첫 묶음 제목이 헤더에 붙지 않게
             timer_rows = [
                 lambda ry: stepper(ry, "목표 작업시간", "goal_hours", 0.5, 16, 0.5, "h"),
                 lambda ry: stepper(ry, "휴식 전환", "idle_sec", 5, 600, 5, "초"),
@@ -33827,22 +33824,6 @@ class Mascot:
 
             # 화면에 들어가는 만큼만 보여 주고 나머지는 스크롤로 넘긴다.
             # 창 높이를 내용에 맞춰 늘리기만 하면 아래가 잘려 저장을 못 누른다.
-            # 항목 줄 — 2,300px 짜리 한 줄을 헤매지 않게 (누르면 그 자리로)
-            cx9, cy9 = PAD, chips_y
-            for title9, sy9 in sections:
-                tw9 = text_w(title9, (FONT, FS(8))) + self._ui(18)
-                if cx9 + tw9 > W - PAD:
-                    cx9, cy9 = PAD, cy9 + 27
-                rrect(cx9, cy9 - 11, cx9 + tw9, cy9 + 11, 11, fill=SOFT,
-                      outline=cd["border"], width=1)
-                cv.create_text(cx9 + tw9 / 2, cy9, text=title9,
-                               font=(FONT, FS(8)), fill=cd["text"])
-
-                def jump(sy=sy9):
-                    cv.yview_moveto(max(0, sy - 10) / float(max(total9[0], 1)))
-                hits.append((cx9, cy9 - 11, cx9 + tw9, cy9 + 11, jump))
-                cx9 += tw9 + 6
-            total9[0] = y
             room = self._screen_h() - self._ui(190)
             view_h = int(min(y, max(self._ui(240), room)))
             if self._set_h:            # 사용자가 창 끝을 끌어 정한 높이가 우선
