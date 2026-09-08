@@ -18708,7 +18708,7 @@ class Mascot:
 
         def status_dot(px, py):
             pulse = 1.5 + math.sin(now * 4) * 1.5 if active else 0
-            r = 5 + pulse * 0.5
+            r = 4 + pulse * 0.5
             self._oval(c, px - r, py - r, px + r, py + r, fill=dot, outline="")
 
         # 뽀모도로 시계는 카드 **위** 줄로 옮겼다 (_draw_pomo_top — 요청).
@@ -18716,7 +18716,7 @@ class Mascot:
         if self.has_clock and self.clock_open:
             # 세로 카드: 상태(위) → 시계(가운데) → 시간(아래) — 모두 정중앙 정렬
             cxm = (x0 + x1) / 2
-            f_stat = self._fit(status, 8, (x1 - x0) - 34)
+            f_stat = self._fit(status, 7, (x1 - x0) - 34)
             tw = self._mw(status, f_stat)
             gx = cxm - (16 + tw) / 2            # 점+간격+텍스트 그룹 중앙
             status_dot(gx + 5, y0 + 16)
@@ -18735,7 +18735,7 @@ class Mascot:
             status_dot(x0 + pad + 5, row)
             avail = (x1 - pad) - (x0 + pad + 16)
             f_time = self._fit(label, 13, avail * 0.62, True)
-            f_stat = self._fit(status, 8,
+            f_stat = self._fit(status, 7,
                                avail - self._mw(label, f_time) - 8)
             self._gtext(c, x0 + pad + 16, row + INK_DY, anchor="w", text=status,
                         font=f_stat, fill=cd["sub"], on_glass=hole)
@@ -18750,7 +18750,7 @@ class Mascot:
             # 넣었더니 그 폭만큼 상태·시간 글자가 줄어 읽기 힘들어졌다.
             avail = (x1 - pad) - (x0 + pad + 16)
             f_time = self._fit(label, 13, avail * 0.62, True)
-            f_stat = self._fit(status, 8,
+            f_stat = self._fit(status, 7,
                                avail - self._mw(label, f_time) - 8)
             self._gtext(c, x0 + pad + 16, row1 + INK_DY, anchor="w", text=status,
                         font=f_stat, fill=cd["sub"], on_glass=hole)
@@ -19560,6 +19560,81 @@ class Mascot:
     # ── 표시줄 없는 창 (유리 테마 — 뽀모도로·홈, 요청) ─────────────────
     CHROME_EDGE = 7
 
+    TIP_DELAY = 0.45             # 아이콘 위에 이만큼 머물면 이름표
+
+    def _tip_track(self, win, e, boxes, dx=0.0):
+        """아이콘만 있는 단추 위에 머물면 작은 이름표를 띄운다.
+
+        boxes 는 (x0, y0, x1, y1, 글) 목록 — 창마다 그릴 때 만들어 둔다.
+        이름표는 표시줄 없는 작은 창이라 어느 창 위에서든 같은 모양이다.
+        """
+        text = None
+        ex = e.x - dx
+        for b in boxes or ():
+            if b and b[0] <= ex <= b[2] and b[1] <= e.y <= b[3]:
+                text = b[4]
+                break
+        tip = getattr(self, "_tip", None)
+        if tip is None:
+            tip = self._tip = {"win": None, "text": None, "job": None, "top": None}
+        if text is None or tip["win"] is not win:
+            self._tip_hide()
+            if text is None:
+                return
+        if tip["text"] == text and (tip["top"] is not None
+                                    or tip["job"] is not None):
+            return
+        self._tip_hide()
+        tip["win"], tip["text"] = win, text
+        # 검사 스크립트가 만드는 가짜 이벤트에는 x_root 가 없다 — 창 자리로 잰다
+        try:
+            xr, yr = e.x_root, e.y_root
+        except AttributeError:
+            xr, yr = win.winfo_rootx() + e.x, win.winfo_rooty() + e.y
+        try:
+            tip["job"] = win.after(int(self.TIP_DELAY * 1000),
+                                   lambda: self._tip_show(win, text, xr, yr))
+        except Exception:
+            tip["job"] = None
+
+    def _tip_show(self, win, text, xr, yr):
+        tip = self._tip
+        tip["job"] = None
+        try:
+            if not win.winfo_exists():
+                return
+            top = tk.Toplevel(win)
+            top.overrideredirect(True)
+            top.attributes("-topmost", True)
+            cd = self.card
+            lab = tk.Label(top, text=text,
+                           font=(UI_FONT, max(7, round(8 * self.ui_k))),
+                           bg=cd["text"], fg="#ffffff",
+                           padx=self._ui(8), pady=self._ui(4), bd=0)
+            lab.pack()
+            top.geometry("+%d+%d" % (xr + self._ui(12), yr + self._ui(16)))
+            tip["top"] = top
+        except Exception:
+            tip["top"] = None
+
+    def _tip_hide(self):
+        tip = getattr(self, "_tip", None)
+        if not tip:
+            return
+        if tip["job"] is not None and tip["win"] is not None:
+            try:
+                tip["win"].after_cancel(tip["job"])
+            except Exception:
+                pass
+        tip["job"] = None
+        if tip["top"] is not None:
+            try:
+                tip["top"].destroy()
+            except Exception:
+                pass
+        tip["top"] = None
+        tip["text"] = None
+
     def _chrome_setup(self, win, cv, band, on_close):
         """OS 표시줄을 떼고, 위 띠를 잡아 옮기고 가장자리를 잡아 늘이게.
 
@@ -19662,7 +19737,8 @@ class Mascot:
         hits = []
         col = cd["fill"]
         lw = max(1, int(u(2)))
-        acts = ("close", "min") if ch.get("fixed") else ("close", "max", "min")
+        acts = (("close", "min") if (ch.get("fixed") or ch.get("vonly"))
+                else ("close", "max", "min"))
         for i, act in enumerate(acts):
             bx = x + dir * i * (r * 2 + u(8))
             self._soft_dot(cv, bx, y, r, cd["track"], tags=tags)
@@ -19728,6 +19804,8 @@ class Mascot:
         W, H = win.winfo_width(), win.winfo_height()
         E = self.CHROME_EDGE
         out = "l" if x <= E else ("r" if x >= W - E else "")
+        if ch and ch.get("vonly"):
+            out = ""                  # 세로만 늘이는 창(환경설정) — 좌우 없음
         out += "t" if y <= E else ("b" if y >= H - E else "")
         return out
 
@@ -19763,7 +19841,11 @@ class Mascot:
         """잡아 옮길 띠를 눌렀다 — 4px 넘게 끌면 옮기기가 시작된다."""
         ch = getattr(win, "_chrome", None)
         if ch:
-            ch["press"] = (e.x_root, e.y_root, win.winfo_x(), win.winfo_y())
+            try:
+                xr, yr = e.x_root, e.y_root
+            except AttributeError:      # 검사의 가짜 이벤트 — 창 자리로 잰다
+                xr, yr = win.winfo_rootx() + e.x, win.winfo_rooty() + e.y
+            ch["press"] = (xr, yr, win.winfo_x(), win.winfo_y())
         return True
 
     def _chrome_drag(self, win, e):
@@ -26277,8 +26359,19 @@ class Mascot:
         return out
 
     def _feat_new(self, fid):
-        """그 자리에 새로움 점을 찍어야 하는가."""
-        return any(f["id"] == fid for f in self._feat_unseen())
+        """그 자리에 새로움 점을 찍어야 하는가 — **한 번에 하나만.**
+
+        플레이리스트 창 하나에 점이 셋 떠 있었다(계정·목록·영상). 점이
+        여럿이면 아무것도 새롭지 않다. 안 본 것 중 첫 번째에만 찍고, 그걸
+        눌러 보면 다음 것이 켜진다 (표 순서 = 안내 순서).
+        """
+        un = self._feat_unseen()
+        if not un:
+            return False
+        cur = getattr(self, "_feat_cur", None)
+        if cur and any(f["id"] == cur for f in un):
+            return fid == cur          # 캐릭터가 지금 소개하는 기능이 우선
+        return un[0]["id"] == fid
 
     def _feat_seen(self, fid):
         """눌러 봤다 — 점을 끈다 (저장하는 것은 '본 것' 목록뿐 · 지뢰 30)."""
@@ -26333,6 +26426,7 @@ class Mascot:
             said[f["id"]] = day
             self.us["feat_said"] = said
             self._feat_said_at = now
+            self._feat_cur = f["id"]         # 지금 소개하는 것 — 점은 여기에
             self._feat_acted = False
             self._safe("settings", self._save_settings)
             if f.get("open"):
@@ -26349,6 +26443,7 @@ class Mascot:
         self._feat_spot = (str(op or ""), time.time() + self.FEAT_SPOT)
         self._feat_acted = True              # 다음 안내는 곧바로
         self._feat_said_at = time.time()
+        self._feat_cur = f.get("id")
         if op == "pomo_vol":
             self._safe("pomo_win", self._pomo_win)
             self._pomo_menu = True
@@ -26773,6 +26868,14 @@ class Mascot:
                         # 같이한 날은 막대 위에 토마토가 앉으므로 그만큼 더
                         # 여유를 둔다 — 별이 칸을 뚫지 않게 (피드백)
                         top_y = gy0 + (u(36) if tdays else u(22))
+                        if not any(n7 for _w, n7, _t in wk9):
+                            # 빈 상자만 있으면 고장처럼 보인다 — 플레이리스트의
+                            # '아직 곡이 없어요'와 같은 톤으로 한 줄
+                            self._gtext(cv, W / 2, (top_y + base_y) / 2 - u(2),
+                                        text=("아직 집중 기록이 없어요"
+                                              if off9 == 0 else
+                                              "이 주에는 기록이 없어요"),
+                                        font=uf(8), fill=cd["sub"])
                         for i7, (wd7, n7, is_t) in enumerate(wk9):
                             cx7 = pad + u(10) + gw * (i7 + 0.5)
                             if n7 > 0:
@@ -26915,6 +27018,13 @@ class Mascot:
                                       tx8 + br + u(3), u(26) + br + u(3))
                 self._pomo_time_btn = None
             # ✿ 안의 작은 메뉴 — 꾸미기 / 시간 조절 (요청)
+            self._pomo_tips = [b for b in (
+                (self._pomo_stk_btn + ("스티커 · 시간 · 소리",))
+                if getattr(self, "_pomo_stk_btn", None) else None,
+                (self._pomo_time_btn + ("시간 조절",))
+                if getattr(self, "_pomo_time_btn", None) else None,
+                (self._pomo_inv_btn + ("같이하기",))
+                if getattr(self, "_pomo_inv_btn", None) else None) if b]
             self._pomo_menu_hits = []
             if self._team_gate() and getattr(self, "_pomo_menu", False):
                 mw9, mh9 = u(104), u(30)
@@ -26949,6 +27059,7 @@ class Mascot:
                 self._flame_icon(cv, hx8, u(26), u(18), lit=hard_on)
                 self._pomo_hard_btn = (hx8 - br - u(3), u(26) - br - u(3),
                                        hx8 + br + u(3), u(26) + br + u(3))
+                self._pomo_tips.append(self._pomo_hard_btn + ("하드 모드",))
             # 다 그렸다 — 창 정중앙으로 통째로 옮긴다 (요청)
             if self._pomo_ox > 0.5:
                 cv.move("all", self._pomo_ox, 0)
@@ -27209,6 +27320,9 @@ class Mascot:
             """커서 자리 — 잘린 각오를 호버로 펴는 데 쓴다 (그리기 눈금)."""
             self._chrome_motion(win, e)
             self._pomo_mouse = (e.x - getattr(self, "_pomo_ox", 0.0), e.y)
+            self._safe("tip", self._tip_track, win, e,
+                       getattr(self, "_pomo_tips", None),
+                       getattr(self, "_pomo_ox", 0.0))
 
         def on_drag9(e):
             if self._chrome_drag(win, e):
@@ -27221,6 +27335,7 @@ class Mascot:
             self._safe("stk_drop", self._stk_drop, "pomo")
 
         cv.bind("<Motion>", lambda e: self._safe("pomo_move", on_move9, e))
+        cv.bind("<Leave>", lambda _e: self._tip_hide(), add="+")
         cv.bind("<Leave>", lambda _e: setattr(self, "_pomo_mouse", None))
         cv.bind("<Button-1>", lambda e: self._safe("pomo_click", on_click, e))
         cv.bind("<B1-Motion>", lambda e: self._safe("pomo_drag", on_drag9, e))
@@ -32959,6 +33074,12 @@ class Mascot:
 
         # 내용이 길어지면 화면 밖으로 나가므로, 위쪽은 스크롤되는 칸으로 두고
         # 저장 버튼은 아래 띠에 따로 붙여 늘 보이게 한다.
+        # 위 띠 — 다른 창과 같은 – □ × 창틀 (OS 표시줄 대신). 잡아 옮기는
+        # 띠이자 위 가장자리를 잡아 늘이는 자리다.
+        STRIP = self._ui(30)
+        strip = tk.Canvas(win, width=W, height=STRIP, bg=PANEL,
+                          highlightthickness=0, bd=0)
+        strip.pack(side="top", fill="x")
         top = tk.Frame(win, bg=PANEL)
         top.pack()
         cv = tk.Canvas(top, width=W, height=640, bg=PANEL, highlightthickness=0)
@@ -32967,6 +33088,38 @@ class Mascot:
         cv.config(yscrollcommand=vbar.set, yscrollincrement=self._ui(6))
         bar = tk.Canvas(win, width=W, height=1, bg=PANEL, highlightthickness=0)
         bar.pack()
+        # 창틀은 창을 화면에 올리기 전에 뗀다 (지뢰 193). 세로만 늘인다 —
+        # 안쪽 그림이 이 폭에 맞춰 그려져 있다.
+        self._chrome_setup(win, cv, band=lambda: 0, on_close=win.destroy)
+        if getattr(win, "_chrome", None):
+            win._chrome["vonly"] = True
+
+            def strip_draw(_e=None):
+                strip.delete("all")
+                self._chrome_draw(win, strip, strip.winfo_width() - self._ui(20),
+                                  STRIP / 2.0 + self._ui(1), dir=-1,
+                                  r=self._ui(6.5))
+            strip.bind("<Configure>", strip_draw)
+            strip.bind("<Button-1>", lambda e: self._safe(
+                "set_strip", lambda: (self._chrome_press(win, e)
+                                      or self._chrome_press_band(win, e))))
+            strip.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+            strip.bind("<ButtonRelease-1>", lambda _e: self._chrome_release(win))
+            strip.bind("<Motion>", lambda e: self._chrome_motion(win, e))
+            # 아래 띠의 아래 가장자리 — 좌표가 띠 기준이라 직접 잰다
+            E9 = self.CHROME_EDGE
+
+            def bar_edge(e):
+                return e.y >= bar.winfo_height() - E9
+
+            def bar_motion(e):
+                try:
+                    bar.configure(cursor="sb_v_double_arrow" if bar_edge(e) else "")
+                except Exception:
+                    pass
+            bar.bind("<Motion>", bar_motion)
+            bar.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+            bar.bind("<ButtonRelease-1>", lambda _e: self._chrome_release(win))
         # 이 입력칸들의 부모는 반드시 캔버스여야 한다. 창의 자식으로 두면
         # 캔버스가 잘라내지 못해, 스크롤하거나 창을 줄였을 때 칸이 캔버스
         # 밖으로 삐져나와 아래 저장 버튼을 덮어 버린다.
@@ -32993,6 +33146,8 @@ class Mascot:
                               bg="#ffffff", fg=cd["text"], wrap="word",
                               highlightthickness=0, borderwidth=0)
         hits, sliders, bar_hits = [], [], []
+        sections = []                # (제목, y) — 위 항목 줄에서 뛰어간다
+        total9 = [1]
         RX = W - PAD - IN            # 오른쪽 컨트롤 기준선
         LX = PAD + IN                # 왼쪽 라벨 기준선
 
@@ -33166,6 +33321,7 @@ class Mascot:
 
         def group(y, title, rows):
             """제목 + 흰 카드 안에 행들을 균등 배치."""
+            sections.append((title, y))
             self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
                            fill=cd["fill"], outline="")
             self._gtext(cv, PAD + 18, y, anchor="w", text=title,
@@ -33238,7 +33394,7 @@ class Mascot:
         def stepper(y, text, key, lo, hi, step, suffix=""):
             label(y, text)
             val = float(st.get(key, lo))
-            for sign, cx in ((1, RX - 13), (-1, RX - 99)):
+            for sign, cx in ((1, RX - 13), (-1, RX - 163)):
                 self._oval(cv, cx - 13, y - 13, cx + 13, y + 13,
                                fill=SOFT, outline=cd["border"], width=1)
                 cv.create_line(cx - 5, y, cx + 5, y, width=2,
@@ -33251,13 +33407,13 @@ class Mascot:
                     v = float(st.get(k, lo)) + s * stp
                     st[k] = max(lo, min(hi, round(v, 2)))
                 hits.append((cx - 15, y - 15, cx + 15, y + 15, bump))
-            cv.create_text(RX - 56, y, text=f"{val:g}{suffix}",
+            cv.create_text(RX - 88, y, text=f"{val:g}{suffix}",
                            font=(FONT, FS(9), "bold"), fill=cd["text"])
 
         def slider(y, text, key, lo, hi):
             label(y, text)
             val = float(st.get(key, lo))
-            sx0, sx1 = RX - 148, RX - 46
+            sx0, sx1 = RX - 176, RX - 46
             cv.create_line(sx0, y, sx1, y, width=6, capstyle="round", fill="#efedf1")
             frac = (val - lo) / max(hi - lo, 1)
             if frac > 0.01:
@@ -33509,7 +33665,10 @@ class Mascot:
             cv.delete("all")
             hits.clear()
             sliders.clear()
+            sections.clear()
             y = header(24)
+            chips_y = y + 4              # 항목 줄 자리 — 마지막에 그린다
+            y += 56
             timer_rows = [
                 lambda ry: stepper(ry, "목표 작업시간", "goal_hours", 0.5, 16, 0.5, "h"),
                 lambda ry: stepper(ry, "휴식 전환", "idle_sec", 5, 600, 5, "초"),
@@ -33668,6 +33827,22 @@ class Mascot:
 
             # 화면에 들어가는 만큼만 보여 주고 나머지는 스크롤로 넘긴다.
             # 창 높이를 내용에 맞춰 늘리기만 하면 아래가 잘려 저장을 못 누른다.
+            # 항목 줄 — 2,300px 짜리 한 줄을 헤매지 않게 (누르면 그 자리로)
+            cx9, cy9 = PAD, chips_y
+            for title9, sy9 in sections:
+                tw9 = text_w(title9, (FONT, FS(8))) + self._ui(18)
+                if cx9 + tw9 > W - PAD:
+                    cx9, cy9 = PAD, cy9 + 27
+                rrect(cx9, cy9 - 11, cx9 + tw9, cy9 + 11, 11, fill=SOFT,
+                      outline=cd["border"], width=1)
+                cv.create_text(cx9 + tw9 / 2, cy9, text=title9,
+                               font=(FONT, FS(8)), fill=cd["text"])
+
+                def jump(sy=sy9):
+                    cv.yview_moveto(max(0, sy - 10) / float(max(total9[0], 1)))
+                hits.append((cx9, cy9 - 11, cx9 + tw9, cy9 + 11, jump))
+                cx9 += tw9 + 6
+            total9[0] = y
             room = self._screen_h() - self._ui(190)
             view_h = int(min(y, max(self._ui(240), room)))
             if self._set_h:            # 사용자가 창 끝을 끌어 정한 높이가 우선
@@ -33840,7 +34015,7 @@ class Mascot:
                 self.us["settings_pos"] = list(self._set_pos)
             except Exception:
                 pass
-            want = int(e.height) - bar.winfo_height()
+            want = int(e.height) - bar.winfo_height() - strip.winfo_height()
             if want < self._ui(160) or abs(want - cv.winfo_height()) <= 2:
                 return
             self._set_h = want
@@ -33854,7 +34029,14 @@ class Mascot:
 
         cv.bind("<Button-1>", on_click)
         cv.bind("<B1-Motion>", on_drag)
-        bar.bind("<Button-1>", on_bar_click)
+        def on_bar_press(e):
+            ch9 = getattr(win, "_chrome", None)
+            if ch9 and e.y >= bar.winfo_height() - self.CHROME_EDGE:
+                ch9["rz"] = ("b", e.x_root, e.y_root, win.winfo_width(),
+                             win.winfo_height(), win.winfo_x(), win.winfo_y())
+                return
+            on_bar_click(e)
+        bar.bind("<Button-1>", on_bar_press)
         for _w in (win, cv, bar):
             _w.bind("<MouseWheel>", on_wheel)
         draw()
