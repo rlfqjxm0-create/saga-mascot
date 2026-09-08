@@ -7733,6 +7733,7 @@ class Mascot:
         # 큐는 **부르기 전에** 만든다 — 스레드가 곧바로 넣고, 뒤에서
         # 다시 만들면 담긴 것이 통째로 사라진다 (지뢰 13).
         self._ahist_q = []           # 받아 온 지난 날 작업 시간
+        self._ahist_pushed = set()   # 이번 실행에 백엔드로 채운 날 (한 번씩)
         self._safe("agent_hist", self._agent_hist_sync)
         # 펜 추적 진단 (config의 pen_diag를 켠 캐릭터만). 어느 화면으로
         # 판단하는지 파일에 남긴다 — 맥 다중 모니터 문제를 보려는 것.
@@ -12333,6 +12334,8 @@ class Mascot:
             key = time.strftime("%Y-%m-%d", time.localtime(t0 - i * 86400))
             want.append((key, int((days.get(key) or {}).get("work") or 0)))
 
+        pushed = self._ahist_pushed          # 이번 실행에 이미 채운 날
+
         def pull():
             got = {}
             for key, have in want:
@@ -12346,11 +12349,39 @@ class Mascot:
                     return          # 백엔드가 꺼져 있다 — 조용히 물러난다
                 if n9 > have:
                     got[key] = n9
+                elif have - n9 >= 60 and have <= 86400 and key not in pushed:
+                    # **반대 방향** — 에이전트가 꺼져 있던 동안 마스코트가
+                    # 혼자 잰 시간은 백엔드에 없다 (2026-09-09 실측: 이레에
+                    # 6시간 44분이 빠져 있었다). 차이만큼 세션 한 줄을 넣는다.
+                    # 지난 날만, 하루 상한 안에서, 한 실행에 한 번씩 —
+                    # 넣고 나면 두 값이 같아져 다음 바퀴에는 아무 일도 없다.
+                    pushed.add(key)
+                    self._agent_hist_push(base, key, have - n9)
             if got:
                 # 앞에서 꺼내 비우는 큐 (지뢰 26 — 목록을 갈아 끼우지 말 것)
                 self._ahist_q.append(got)
 
         threading.Thread(target=pull, daemon=True).start()
+
+    def _agent_hist_push(self, base, key, delta):
+        """지난 날 하나의 빠진 시간을 백엔드에 세션 한 줄로 넣는다 (스레드).
+
+        획·클릭·거리는 0 — 시간만 채운다. 실패는 조용히 넘기되 흔적은
+        `.error.log` 에 남긴다 (성공도 남긴다 — 나중에 '왜 늘었나'가 갈린다).
+        """
+        row = {"date": key, "duration_seconds": int(delta), "clicks": 0,
+               "strokes": 0, "undo": 0, "distance_m": 0.0}
+        try:
+            req = urllib.request.Request(
+                "%s/work-timer/save" % base,
+                data=json.dumps(row).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=5, context=_ssl_ctx()) as fp:
+                fp.read()
+            self._log_error("agent_hist_push %s +%ds" % (key, int(delta)))
+        except Exception as e:
+            self._log_error("agent_hist_push_fail %s +%ds %s"
+                            % (key, int(delta), str(e)[:80]))
 
     def _agent_hist_tick(self):
         """받아 온 것을 그리기 루프에서 기록에 넣는다 (스레드 분리)."""
