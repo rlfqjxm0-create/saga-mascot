@@ -1,7 +1,7 @@
 {
- "version": 1789053173,
+ "version": 1789064641,
  "files": {
-  "mascot.py": "7916b569cb18687ec9e0047a700d8e0175b49bb78dfce2182d028f98237f91c4",
+  "mascot.py": "90cdc51b6f808413ff35ee014599ba2ee5acd1a45b0bcd7fa852478b07bc5a4f",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -635,10 +635,6 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [
-  "캐릭터 움직임이 더 부드러워졌어요 — 프레임 간격을 윈도우 타이머 해상도까지 맞춤 (30·60fps)",
-  "창 속 도형 가장자리가 매끈해졌어요 — 브리핑 시계·환경설정 장식·홈 별·게임 색종이·음표 이펙트",
-  "플레이리스트 영상 보기 고침 — 막힌 곡에서 유튜브 창이 통째로 보이거나 까맣게 나오던 것, 영상 아래 재생 위치 바(끌어서 이동), 자막은 기본 끄기",
-  "타자 소리에 무접점 키보드 'hanseoung TICO' 추가 — 스페이스·엔터·쉬프트·백스페이스도 소리가 여럿"
- ]
+ "notes": [],
+ "silent": true
 }
