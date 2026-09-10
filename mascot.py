@@ -3599,9 +3599,13 @@ class SoundPack:
         if cfg.get("key_define_type", "multi") != "multi":
             raise ValueError("single 타입 팩 미지원 — wav 분할형 팩을 사용하세요")
         names = []
+        # 값이 **목록**이면 그중 하나를 무작위로 낸다 (우리 팩 확장 —
+        # Mechvibes 원본은 늘 문자열 하나다). 스페이스·엔터처럼 코드가
+        # 하나뿐인 키도 소리를 여럿 두려고 (2026-09-11 요청).
         for v in cfg.get("defines", {}).values():
-            if isinstance(v, str) and v and v not in names:
-                names.append(v)
+            for v2 in (v if isinstance(v, list) else [v]):
+                if isinstance(v2, str) and v2 and v2 not in names:
+                    names.append(v2)
         self.raw = []             # (WAVEFORMATEX, 원본PCM, 샘플폭)
         slot = {}                 # 파일 이름 -> raw 안에서의 번호
         for name in names:
@@ -3619,11 +3623,12 @@ class SoundPack:
         # 팩은 스캔코드마다 쓸 음원을 config.json에 적어 둔다. 스페이스·백스페이스
         # 처럼 소리가 다른 키를 위한 것인데, 지금까지는 이 표를 버리고 아무 음원이나
         # 골라 썼다 (스페이스 소리가 엉뚱한 글자 키에서 났다).
-        self.by_code = {}
+        self.by_code = {}         # 코드 → 음원 번호 목록 (하나여도 목록)
         for code, fname in (cfg.get("defines") or {}).items():
-            i = slot.get(fname)
-            if i is not None:
-                self.by_code[str(code)] = i
+            got = [slot[f] for f in (fname if isinstance(fname, list) else [fname])
+                   if f in slot]
+            if got:
+                self.by_code[str(code)] = got
         self._active = []         # (핸들, WAVEHDR) — 재생 끝나면 정리
         self._lock = threading.Lock()
         self.set_volume(volume)
@@ -3641,7 +3646,8 @@ class SoundPack:
     def play(self, key, code=None):
         if not self.sounds:
             return
-        i = self.by_code.get(str(code)) if code is not None else None
+        got = self.by_code.get(str(code)) if code is not None else None
+        i = random.choice(got) if got else None
         if i is None or i >= len(self.sounds):
             i = hash(str(key)) % len(self.sounds)   # 표에 없는 키는 아무거나
         wfx, buf, ln = self.sounds[i]
@@ -4232,8 +4238,9 @@ class MacSoundPack(_MacSoundPool):
             raise ValueError("single 타입 팩 미지원")
         names, paths = [], []
         for v in cfg.get("defines", {}).values():
-            if isinstance(v, str) and v and v not in names:
-                names.append(v)
+            for v2 in (v if isinstance(v, list) else [v]):   # 목록도 받는다
+                if isinstance(v2, str) and v2 and v2 not in names:
+                    names.append(v2)
         for name in names:
             p = os.path.join(folder, name)
             if name.lower().endswith(".wav") and os.path.exists(p):
@@ -8116,6 +8123,7 @@ class Mascot:
         self._yt_proc = None
         self._yt_q = []              # 재생기 스레드가 넣고 그리기 루프가 뺀다
         self._yt = {}                # 마지막 상태 (재생 중인지·제목)
+        self._yt_at = 0.0            # 그 상태를 받은 시각 (위치 바가 이어 센다)
         self._yt_want = False        # 사람이 재생을 원하는가
         self._yt_err = 0             # 마지막으로 알린 오류 (같은 말 반복 방지)
         self._yt_fatal = ""          # 재생기가 못 뜬 이유 (자식이 보내 준다)
@@ -13318,6 +13326,7 @@ class Mascot:
                 self._safe("yt_lg", self._yt_log, "로그인 화면: " + str(s["lg"]))
             was = self._yt.get("title", "")
             self._yt = s
+            self._yt_at = now
             if s.get("signed") and not self.us.get("yt_signed"):
                 self.us["yt_signed"] = True
                 self.us["yt_asked"] = True
@@ -27601,6 +27610,7 @@ class Mascot:
     PL_PUSH_GAP = 20.0           # 청에 응하고 다음 청까지 (cdq 와 같다)
     PL_BURST = 20.0              # 목록을 신호에 계속 싣는 시간 (cd 와 같다)
     VID_GAP = 12                 # 영상 칸과 목록 사이 여백
+    VID_BAR = 18                 # 영상 아래 재생 위치 바 (요청)
     VID_R = 14                   # 영상 칸 모서리 (창에 직접 오려 붙인다)
     BGM_W = 380                  # 창 폭 (100% 기준)
     BGM_PLROW = 46               # 곡 한 줄 높이
@@ -28825,6 +28835,34 @@ class Mascot:
         except (ValueError, IndexError):
             return (251, 243, 247)
 
+    def _yt_pos(self):
+        """지금 재생 위치와 길이(초). 재생기 상태는 2초에 한 번 오므로
+        그 사이는 받은 시각부터 시계로 이어 센다 (멈춤이면 그대로)."""
+        s9 = self._yt or {}
+        try:
+            pos9 = float(s9.get("pos") or 0.0)
+            dur9 = float(s9.get("dur") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0, 0.0
+        if s9.get("playing"):
+            pos9 += max(0.0, time.time() - float(getattr(self, "_yt_at", 0.0)))
+        if dur9 > 0:
+            pos9 = min(pos9, dur9)
+        return pos9, dur9
+
+    def _yt_seek(self, frac):
+        """재생 위치를 비율(0~1)로 옮긴다 — 위치 바가 부른다."""
+        _p, dur9 = self._yt_pos()
+        if dur9 <= 0 or not self._yt_alive():
+            return False
+        t9 = max(0.0, min(dur9, float(frac) * dur9))
+        if not self._yt_send(c="seek", t=round(t9, 2)):
+            return False
+        # 상태가 올 때까지 바가 되돌아가지 않게 미리 적어 둔다
+        self._yt["pos"] = t9
+        self._yt_at = time.time()
+        return True
+
     def _vid_ok(self):
         """영상 보기를 쓸 수 있는가.
 
@@ -29095,11 +29133,12 @@ class Mascot:
                     # 1 로 바닥을 쳐서 그 한 줄이 가름선을 넘어 조작줄
                     # 위에 그려진다 (적대 검토가 계산으로 잡았다).
                     room9 = int(H - u(196) - u(22) - g["vid"]
-                                - u(self.VID_GAP) - u(self.BGM_PLROW))
+                                - u(self.VID_GAP) - u(self.VID_BAR)
+                                - u(self.BGM_PLROW))
                     vh9 = 0 if room9 < u(80) else min(int(vh9), room9)
                 g["vidh"] = vh9
                 g["list"] = u(188) + (g["vidh"] + u(self.VID_GAP)
-                                      if g["vidh"] else 0)
+                                      + u(self.VID_BAR) if g["vidh"] else 0)
                 # 친구 화면 — 머리말 아래부터 가름선 위까지.
                 # 설명 줄을 뺐다 (요청) — 머리말이 그만큼 짧다.
                 # 영상 칸은 내 목록 화면과 **같은 높이**(g["vidh"])를 쓰고
@@ -29107,7 +29146,7 @@ class Mascot:
                 # 오갈 때 칸 크기가 튀고 자리 표가 둘로 갈린다 (지뢰 55).
                 g["frvid"] = u(98) + u(36)
                 g["fr"] = g["frvid"] + (g["vidh"] + u(self.VID_GAP)
-                                        if g["vidh"] else 0)
+                                        + u(self.VID_BAR) if g["vidh"] else 0)
                 g["frlist"] = max(u(40), H - u(196) - u(22) - g["fr"])
                 g["rowh"] = u(self.BGM_PLROW)
                 g["sep"] = H - u(196)     # 재생 조작·방식·볼륨·계정 몫
@@ -29201,6 +29240,7 @@ class Mascot:
                 return
             cv.delete("all")
             st["hits"] = []
+            st["seek"] = None            # 영상 칸이 그려지면 다시 적는다
             g = geo()
             line = self._tint(cd["fill"], 0.55)
             # 바탕 카드 — 색상키와 섞어 모서리를 매끈하게 (지뢰 124).
@@ -29371,11 +29411,18 @@ class Mascot:
             st["eqjob"] = None
             if not win.winfo_exists():
                 return
-            if (st.get("eq") or st.get("nowmq")) and self._bgm_tab == "pl":
+            if ((st.get("eq") or st.get("nowmq") or st.get("seek"))
+                    and self._bgm_tab == "pl"):
                 if st.get("eq"):
                     self._safe("bgm_eq", eq_draw)
                 if st.get("nowmq"):
                     self._safe("bgm_now", now_draw)
+                if st.get("seek"):
+                    # 위치 바는 반 초마다 — 재생기 상태는 2초에 한 번
+                    # 오고 그 사이는 시계로 이어 센다 (_yt_pos)
+                    if time.time() - st.get("seek_at", 0.0) >= 0.5:
+                        st["seek_at"] = time.time()
+                        self._safe("bgm_seek", seek_draw)
                 st["eqjob"] = win.after(
                     self.BGM_TICK_EQ,
                     lambda: self._safe("bgm_eqtick", eq_tick))
@@ -29423,6 +29470,38 @@ class Mascot:
                 self.BGM_TICK_FR,
                 lambda: self._safe("bgm_frtick", fr_tick))
 
+        def seek_draw():
+            """영상 아래 재생 위치 바 — 바탕 띠·지난 만큼·손잡이·시간."""
+            cv.delete("seek")
+            sk = st.get("seek")
+            if not sk:
+                return
+            x0s, x1s, ys, tx9 = sk
+            pos9, dur9 = self._yt_pos()
+            fr9 = (pos9 / dur9) if dur9 > 0 else 0.0
+            fr9 = max(0.0, min(1.0, fr9))
+            drag9 = st.get("seekdrag")
+            if drag9 is not None:
+                fr9 = drag9                 # 끄는 동안은 손 자리를 따른다
+            hh9 = max(2.0, u(3))
+            self._rr_soft(cv, x0s, ys - hh9, x1s, ys + hh9, hh9,
+                          fill=cd["track"], outline="", width=0, tags="seek")
+            kx9 = x0s + (x1s - x0s) * fr9
+            if kx9 - x0s > hh9 * 2:
+                self._rr_soft(cv, x0s, ys - hh9, kx9, ys + hh9, hh9,
+                              fill=cd["fill"], outline="", width=0, tags="seek")
+            self._soft_dot(cv, kx9, ys, u(6), cd["fill"], outline="#ffffff",
+                           width=1.5, tags="seek")
+
+            def mmss(v):
+                v = int(max(0, v))
+                return "%d:%02d" % (v // 60, v % 60)
+
+            cv.create_text(tx9, ys, anchor="e",
+                           text="%s / %s" % (mmss(fr9 * dur9 if dur9 else pos9),
+                                             mmss(dur9)) if dur9 else "-:-- / -:--",
+                           font=self._uf(7, True), fill=cd["sub"], tags="seek")
+
         def draw_vid(g, vy9):
             """영상 칸 바탕 — 내 목록 화면과 친구 화면이 같이 쓴다.
 
@@ -29452,6 +29531,16 @@ class Mascot:
                                font=self._uf(9, True),
                                fill="#9a91a8" if dark9 else cd["sub"])
             st["vidbox"] = (u(18), vy9, W - u(36), g["vidh"])
+            # 재생 위치 바 — 영상 바로 아래 (요청: 원하는 자리부터 듣기).
+            # 그리기는 seek_draw 가 하고, 자리만 적어 둔다 (eq_tick 이 돈다).
+            ys9 = vy9 + g["vidh"] + u(self.VID_GAP) / 2.0 + u(self.VID_BAR) / 2.0
+            st["seek"] = (u(18) + u(6), W - u(18) - u(78), ys9, W - u(18))
+            seek_draw()
+            hit(u(18), ys9 - u(9), W - u(18) - u(74), ys9 + u(9), "seek")
+            if st.get("eqjob") is None:
+                st["eqjob"] = win.after(
+                    self.BGM_TICK_EQ,
+                    lambda: self._safe("bgm_eqtick", eq_tick))
 
         def draw_pl(g, line):
             songs = self._pl_songs_mine()     # 펼친 '트는 곡들' (접힘 무관)
@@ -30171,7 +30260,8 @@ class Mascot:
             self._safe("bgm_save", self._save_settings)
             # 열며 더해 준 만큼 닫으며 돌려준다 — 그 사이 창 폭이 바뀌면
             # 다시 계산한 값과 어긋나 창이 조금씩 줄어든다 (검사가 잡았다).
-            dh9 = self._vid_h(W) + u(self.VID_GAP)
+            # 영상 칸 + 여백 + 재생 위치 바 — geo() 와 같은 셈이어야 한다
+            dh9 = self._vid_h(W) + u(self.VID_GAP) + u(self.VID_BAR)
             if not on9:
                 dh9 = getattr(self, "_vid_add", None) or dh9
                 self._vid_add = None
@@ -30211,6 +30301,13 @@ class Mascot:
             if act == "vidtoggle":
                 self._feat_seen("pl_video")
                 vid_toggle()
+                return
+            if act == "seek":
+                sk = st.get("seek")
+                if sk:
+                    fr9 = (e.x - sk[0]) / max(1.0, float(sk[1] - sk[0]))
+                    st["seekdrag"] = max(0.0, min(1.0, fr9))
+                    seek_draw()
                 return
             if act in ("friends", "fback"):
                 if act == "friends":
@@ -30498,6 +30595,13 @@ class Mascot:
                 win.geometry("+%d+%d" % (e.x_root - st["move"][0],
                                          e.y_root - st["move"][1]))
                 return
+            if st.get("seekdrag") is not None:
+                sk = st.get("seek")
+                if sk:
+                    fr9 = (e.x - sk[0]) / max(1.0, float(sk[1] - sk[0]))
+                    st["seekdrag"] = max(0.0, min(1.0, fr9))
+                    seek_draw()
+                return
             if st["bar"]:
                 bar_set(e.y, geo())
                 return
@@ -30508,6 +30612,12 @@ class Mascot:
                 set_amb_vol(st["drag"], e.x)
 
         def on_up(_e):
+            if st.get("seekdrag") is not None:
+                # 놓는 자리로 옮긴다 — 끄는 동안 매번 보내면 재생기가 버벅인다
+                fr9 = st["seekdrag"]
+                st["seekdrag"] = None
+                self._safe("yt_seek", self._yt_seek, fr9)
+                seek_draw()
             if st.get("rz"):
                 st["rz"] = None
                 self.us["bgm_wh"] = [int(W), int(H)]

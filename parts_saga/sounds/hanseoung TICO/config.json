@@ -1,0 +1,608 @@
+{
+ "id": "custom-sound-pack-mykb",
+ "name": "내 키보드",
+ "key_define_type": "multi",
+ "includes_numpad": false,
+ "sound": "hanseoungTICO-key1.wav",
+ "description": "직접 녹음한 키보드 소리",
+ "tags": [
+  "keyboard"
+ ],
+ "defines": {
+  "1": [
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav"
+  ],
+  "2": [
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav"
+  ],
+  "3": [
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav"
+  ],
+  "4": [
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav"
+  ],
+  "5": [
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav"
+  ],
+  "6": [
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav"
+  ],
+  "7": [
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav"
+  ],
+  "8": [
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav"
+  ],
+  "9": [
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav"
+  ],
+  "10": [
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav"
+  ],
+  "11": [
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav"
+  ],
+  "12": [
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav"
+  ],
+  "13": [
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav"
+  ],
+  "14": [
+   "hanseoungTICO-back1.wav",
+   "hanseoungTICO-back2.wav",
+   "hanseoungTICO-back3.wav",
+   "hanseoungTICO-back4.wav"
+  ],
+  "15": [
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav"
+  ],
+  "16": [
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav"
+  ],
+  "17": [
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav"
+  ],
+  "18": [
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav"
+  ],
+  "19": [
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav"
+  ],
+  "20": [
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav"
+  ],
+  "21": [
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav"
+  ],
+  "22": [
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav"
+  ],
+  "23": [
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav"
+  ],
+  "24": [
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav"
+  ],
+  "25": [
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav"
+  ],
+  "26": [
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav"
+  ],
+  "27": [
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav"
+  ],
+  "28": [
+   "hanseoungTICO-enter1.wav",
+   "hanseoungTICO-enter2.wav",
+   "hanseoungTICO-enter3.wav",
+   "hanseoungTICO-enter4.wav"
+  ],
+  "29": [
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav"
+  ],
+  "30": [
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav"
+  ],
+  "31": [
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav"
+  ],
+  "32": [
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav"
+  ],
+  "33": [
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav"
+  ],
+  "34": [
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav"
+  ],
+  "35": [
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav"
+  ],
+  "36": [
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav"
+  ],
+  "37": [
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav"
+  ],
+  "38": [
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav"
+  ],
+  "39": [
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav"
+  ],
+  "40": [
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav"
+  ],
+  "41": [
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav"
+  ],
+  "42": [
+   "hanseoungTICO-shift1.wav",
+   "hanseoungTICO-shift2.wav",
+   "hanseoungTICO-shift3.wav",
+   "hanseoungTICO-shift4.wav"
+  ],
+  "43": [
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav"
+  ],
+  "44": [
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav"
+  ],
+  "45": [
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav"
+  ],
+  "46": [
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav"
+  ],
+  "47": [
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav"
+  ],
+  "48": [
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav"
+  ],
+  "49": [
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav"
+  ],
+  "50": [
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav"
+  ],
+  "51": [
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav"
+  ],
+  "52": [
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav"
+  ],
+  "53": [
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav"
+  ],
+  "54": [
+   "hanseoungTICO-shift1.wav",
+   "hanseoungTICO-shift2.wav",
+   "hanseoungTICO-shift3.wav",
+   "hanseoungTICO-shift4.wav"
+  ],
+  "55": [
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav"
+  ],
+  "56": [
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav"
+  ],
+  "57": [
+   "hanseoungTICO-space1.wav",
+   "hanseoungTICO-space2.wav",
+   "hanseoungTICO-space3.wav",
+   "hanseoungTICO-space4.wav"
+  ],
+  "58": [
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav"
+  ],
+  "59": [
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav"
+  ],
+  "60": [
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav"
+  ],
+  "61": [
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav"
+  ],
+  "62": [
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav"
+  ],
+  "63": [
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav"
+  ],
+  "64": [
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav"
+  ],
+  "65": [
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav"
+  ],
+  "66": [
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav"
+  ],
+  "67": [
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav"
+  ],
+  "68": [
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav"
+  ],
+  "69": [
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav"
+  ],
+  "70": [
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav"
+  ],
+  "71": [
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav"
+  ],
+  "72": [
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav"
+  ],
+  "73": [
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav"
+  ],
+  "74": [
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav"
+  ],
+  "75": [
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav"
+  ],
+  "76": [
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav"
+  ],
+  "77": [
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav"
+  ],
+  "78": [
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav"
+  ],
+  "79": [
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav"
+  ],
+  "80": [
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav"
+  ],
+  "81": [
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav"
+  ],
+  "82": [
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav"
+  ],
+  "83": [
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav"
+  ],
+  "87": [
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav"
+  ],
+  "88": [
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav"
+  ],
+  "91": [
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav"
+  ],
+  "92": [
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav"
+  ],
+  "93": [
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav"
+  ],
+  "3597": [
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav"
+  ],
+  "3612": [
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav"
+  ],
+  "3613": [
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav"
+  ],
+  "3637": [
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav"
+  ],
+  "3639": [
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav"
+  ],
+  "3640": [
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav"
+  ],
+  "3653": [
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav"
+  ],
+  "3655": [
+   "hanseoungTICO-key24.wav",
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav"
+  ],
+  "3657": [
+   "hanseoungTICO-key1.wav",
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav"
+  ],
+  "3663": [
+   "hanseoungTICO-key2.wav",
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav"
+  ],
+  "3665": [
+   "hanseoungTICO-key3.wav",
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav"
+  ],
+  "3666": [
+   "hanseoungTICO-key4.wav",
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav"
+  ],
+  "3667": [
+   "hanseoungTICO-key5.wav",
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav"
+  ],
+  "3675": [
+   "hanseoungTICO-key6.wav",
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav"
+  ],
+  "3676": [
+   "hanseoungTICO-key7.wav",
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav"
+  ],
+  "3677": [
+   "hanseoungTICO-key8.wav",
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav"
+  ],
+  "57416": [
+   "hanseoungTICO-key9.wav",
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav"
+  ],
+  "57419": [
+   "hanseoungTICO-key10.wav",
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav"
+  ],
+  "57421": [
+   "hanseoungTICO-key11.wav",
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav"
+  ],
+  "57424": [
+   "hanseoungTICO-key12.wav",
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav"
+  ],
+  "60999": [
+   "hanseoungTICO-key13.wav",
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav"
+  ],
+  "61000": [
+   "hanseoungTICO-key14.wav",
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav"
+  ],
+  "61001": [
+   "hanseoungTICO-key15.wav",
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav"
+  ],
+  "61003": [
+   "hanseoungTICO-key16.wav",
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav"
+  ],
+  "61005": [
+   "hanseoungTICO-key17.wav",
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav"
+  ],
+  "61007": [
+   "hanseoungTICO-key18.wav",
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav"
+  ],
+  "61008": [
+   "hanseoungTICO-key19.wav",
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav"
+  ],
+  "61009": [
+   "hanseoungTICO-key20.wav",
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav"
+  ],
+  "61010": [
+   "hanseoungTICO-key21.wav",
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav"
+  ],
+  "61011": [
+   "hanseoungTICO-key22.wav",
+   "hanseoungTICO-key23.wav",
+   "hanseoungTICO-key24.wav"
+  ]
+ }
+}
