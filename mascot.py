@@ -2366,6 +2366,37 @@ class GlassPane:
             pass
 
 
+class _ScaledDraw:
+    """ImageDraw 를 S배 좌표로 감싼다.
+
+    1배 좌표로 적어 둔 그리기 함수(음표·하트·땀…)를 고치지 않고 큰 판에
+    그리게 한다 — 그려서 줄이면 가장자리가 매끈해진다. 굵기(width)도 같이
+    늘린다. PIL 의 도형은 안티에일리어싱이 없어 1배로 그리면 계단진다.
+    """
+
+    def __init__(self, d, s):
+        self.d, self.s = d, s
+
+    def _xy(self, xy):
+        s = self.s
+        out = []
+        for p in xy:
+            if isinstance(p, (tuple, list)):
+                out.append((p[0] * s, p[1] * s))
+            else:
+                out.append(p * s)
+        return out
+
+    def __getattr__(self, name):
+        fn = getattr(self.d, name)
+
+        def call(xy, *a, **kw):
+            if "width" in kw:
+                kw["width"] = max(1, int(round(kw["width"] * self.s)))
+            return fn(self._xy(xy), *a, **kw)
+        return call
+
+
 class FxLayer:
     """파티클(음표·하트·땀…)을 진짜 반투명으로 그리는 레이어 창.
 
@@ -11179,8 +11210,9 @@ class Mascot:
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
 
-        rr(u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
-           outline=cd["border"], width=2)
+        # 머리 판은 매끈하게 (색을 나중에 바꾸는 칩들은 Tk 다각형 그대로)
+        self._rr(cv, u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
+                 outline=cd["border"], width=2)
         cv.create_text(W / 2, u(28),
                        text="이렇게 바꿀까요?" if edit is not None else "무엇을 할까요?",
                        font=self._uf(10, True), fill=cd["text"])
@@ -12164,8 +12196,9 @@ class Mascot:
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
 
-        rr(u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
-           outline=cd["border"], width=2)
+        # 머리 판은 매끈하게 (색을 나중에 바꾸는 칩들은 Tk 다각형 그대로)
+        self._rr(cv, u(14), u(12), W - u(14), u(44), u(12), fill=cd["soft"],
+                 outline=cd["border"], width=2)
         cv.create_text(W / 2, u(28), text="언제까지 끝낼까요?",
                        font=self._uf(10, True), fill=cd["text"])
         cur = self.dues[edit] if (edit is not None
@@ -16174,8 +16207,10 @@ class Mascot:
         만나는 오목한 자리에 작은 구멍을 뚫어 손그림 같은 틈을 낸다.
         """
         from PIL import ImageChops, ImageDraw, ImageFilter
-        n = int(size) + 4
-        lw = max(2, round(size * 0.062))
+        n1 = int(size) + 4
+        S = 4                        # 4배로 그려 줄인다 — 가장자리가 매끈하다
+        n = n1 * S
+        lw = max(2, round(size * 0.062)) * S
         c = n * 0.5
         rr = n * 0.26
         dd = rr * 0.95
@@ -16199,7 +16234,7 @@ class Mascot:
                 gd.ellipse([gx - g, gy - g, gx + g, gy + g], fill=0)
         out = Image.new("RGBA", (n, n), (0, 0, 0, 0))
         out.paste(Image.new("RGBA", (n, n), color), (0, 0), ring)
-        return out
+        return out.resize((n1, n1), Image.LANCZOS)
 
     def _build_notes(self):
         """머리 위로 떠오르는 작은 그림들 — 음표·하트·땀·물음표·반짝임·느낌표.
@@ -16331,17 +16366,25 @@ class Mascot:
                 for spec in group:
                     w, fn = spec[0], spec[1]
                     kh = spec[2] if len(spec) > 2 else h   # 종류마다 높이가 다를 수 있다
-                    base = Image.new("RGBA", (int(w) + 4, int(kh) + 4),
-                                     (0, 0, 0, 0))
+                    # **4배로 그려 줄인다** — PIL 도형은 안티에일리어싱이 없어
+                    # 1배로 그리면 음표 가장자리가 계단진다 (제보). 흰 테두리도
+                    # 큰 판에서 두르고 같이 줄여야 매끈하다.
+                    S = 4
+                    sz1 = (int(w) + 4, int(kh) + 4)
                     if isinstance(fn, Image.Image):   # 미리 만들어 둔 그림
+                        base = Image.new("RGBA", sz1, (0, 0, 0, 0))
                         base.alpha_composite(fn)
+                        base = base.resize((sz1[0] * S, sz1[1] * S), Image.LANCZOS)
                     else:
-                        fn(ImageDraw.Draw(base))
+                        base = Image.new("RGBA", (sz1[0] * S, sz1[1] * S),
+                                         (0, 0, 0, 0))
+                        fn(_ScaledDraw(ImageDraw.Draw(base), S))
                     # 어떤 배경에서도 보이게 흰 테두리를 한 겹 두른다
-                    rim = base.split()[3].filter(ImageFilter.MaxFilter(3))
+                    rim = base.split()[3].filter(ImageFilter.MaxFilter(2 * S + 1))
                     out = Image.new("RGBA", base.size, (255, 255, 255, 0))
                     out.putalpha(rim)
                     out.alpha_composite(base)
+                    out = out.resize(sz1, Image.LANCZOS)
                     lv = []
                     for k in range(self.NOTE_STEPS):
                         keep = 1.0 - k / float(self.NOTE_STEPS)
@@ -17155,6 +17198,11 @@ class Mascot:
         cv.pack()
 
         def rr(x0, y0, x1, y1, r, **kw):
+            # 매끈한 둥근 판 (Tk 다각형은 계단진다 — 제보). 실패하면 Tk 로.
+            try:
+                return self._rr_soft(cv, x0, y0, x1, y1, r, **kw)
+            except Exception:
+                pass
             pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1,
                    x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
             return cv.create_polygon(pts, smooth=True, **kw)
@@ -17177,11 +17225,11 @@ class Mascot:
 
         # ── 머리글 ─────────────────────────────────────────────────────
         ex, ey = PAD + u(3), y + u(6)
-        cv.create_polygon(ex, ey + u(15), ex + u(5), ey, ex + u(13), ey + u(13),
-                          fill=W_FIL, outline=W_INK, width=max(1, u(2)))
-        cv.create_polygon(ex + u(28), ey + u(15), ex + u(23), ey,
-                          ex + u(15), ey + u(13),
-                          fill=W_FIL, outline=W_INK, width=max(1, u(2)))
+        self._poly_soft(cv, ex, ey + u(15), ex + u(5), ey, ex + u(13), ey + u(13),
+                        fill=W_FIL, outline=W_INK, width=max(1, u(2)))
+        self._poly_soft(cv, ex + u(28), ey + u(15), ex + u(23), ey,
+                        ex + u(15), ey + u(13),
+                        fill=W_FIL, outline=W_INK, width=max(1, u(2)))
         rr(ex - u(1), ey + u(10), ex + u(29), ey + u(23), u(6),
            fill=cd["bg"], outline=W_INK, width=max(1, u(2)))
         for dx in (u(8), u(20)):
@@ -17192,7 +17240,7 @@ class Mascot:
                        font=f(12, True), fill=TXT)
         cv.create_text(tx, y + u(28), anchor="w",
                        text="%s · %s 작업일" % (self.cfg.get("name", self.char), d["day"]),
-                       font=f(8), fill=SUB)
+                       font=f(9, True), fill=SUB)
         # 오른쪽 알약(목표·연속)은 아래에서 오른쪽 끝을 알고 나서 그린다
         head_y = y + u(6)
         y += u(48)
@@ -17204,65 +17252,105 @@ class Mascot:
         # 부채꼴로 칠한다. 오전은 옅게, 오후는 진하게 — 색으로만 가른다.
         R = u(62)
         ccx, ccy = PAD + u(16) + R, y + u(89)
-        self._oval(cv, ccx - R, ccy - R, ccx + R, ccy + R,
-                       fill=cd["bg"], outline=LINE, width=max(1, u(2)))
         r_face = R - u(5)
+        ts = d["last"] or time.time()          # 바늘은 일을 끝낸 시각에
+        lt = time.localtime(ts)
+        # 시계는 **한 장으로 굽는다** — 조각·눈금·바늘을 Tk 도형으로 따로
+        # 그리면 부채꼴 가장자리가 계단지고(제보 '픽셀이 깨진 것처럼 울퉁불퉁')
+        # 이웃한 조각 사이에 실금이 남는다. 4배로 그려 줄이면 둘 다 없다.
+        # PIL 각도는 3시에서 시계 방향 — Tk(반시계)와 부호가 반대다.
+        clock = None
+        try:
+            S = 4
+            pad9 = max(1, u(2)) + 1
+            side = 2 * R + 2 * pad9
+            im = Image.new("RGBA", (side * S, side * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            c9 = (R + pad9) * S
 
-        def draw_runs(mins, wash):
-            for a, b in self._runs_of(mins):
-                d1 = (a % 720) / 720.0 * 360.0
-                d2 = ((b + 1) % 720 or 720) / 720.0 * 360.0
-                ext = -(d2 - d1)
-                if abs(ext) < 1.2:            # 아주 짧아도 조각으로는 보이게
-                    ext = -1.2
-                cv.create_arc(ccx - r_face, ccy - r_face, ccx + r_face,
-                              ccy + r_face, start=90 - d1, extent=ext,
-                              style="pieslice", fill=wash, outline="")
+            def rline(x1, y1, x2, y2, col, wd):
+                """둥근 끝 선."""
+                dr.line([(x1, y1), (x2, y2)], fill=col, width=int(round(wd)))
+                r9 = wd / 2.0
+                for px, py in ((x1, y1), (x2, y2)):
+                    dr.ellipse([px - r9, py - r9, px + r9, py + r9], fill=col)
 
-        # 오전을 먼저, 오후를 그 위에 — 같은 시각을 둘 다 일했으면 진한 쪽이 남는다
-        draw_runs([m for m in d["mins"] if m < 720], AM_INK)
-        draw_runs([m for m in d["mins"] if m >= 720], PM_INK)
-
-        for i in range(60):                    # 눈금 — 15분마다 굵게
-            major, mid = i % 15 == 0, i % 5 == 0
-            r0 = R - (u(14) if major else u(11) if mid else u(8))
-            a = math.radians(90 - i * 6)
-            cv.create_line(ccx + math.cos(a) * r0, ccy - math.sin(a) * r0,
-                           ccx + math.cos(a) * (R - u(5)),
-                           ccy - math.sin(a) * (R - u(5)),
-                           fill=TXT if major else SUB,
-                           width=max(1, u(2)) if major else 1,
-                           capstyle="round")
+            dr.ellipse([c9 - R * S, c9 - R * S, c9 + R * S, c9 + R * S],
+                       fill=cd["bg"], outline=LINE, width=max(1, u(2)) * S)
+            rf = r_face * S
+            # 오전을 먼저, 오후를 그 위에 — 같은 시각을 둘 다 일했으면 진한 쪽
+            for mins9, wash in (([m for m in d["mins"] if m < 720], AM_INK),
+                                ([m for m in d["mins"] if m >= 720], PM_INK)):
+                for a, b in self._runs_of(mins9):
+                    d1 = (a % 720) / 720.0 * 360.0
+                    d2 = ((b + 1) % 720 or 720) / 720.0 * 360.0
+                    if d2 - d1 < 1.2:         # 아주 짧아도 조각으로는 보이게
+                        d2 = d1 + 1.2
+                    dr.pieslice([c9 - rf, c9 - rf, c9 + rf, c9 + rf],
+                                start=d1 - 90, end=d2 - 90, fill=wash)
+            for i in range(60):                # 눈금 — 15분마다 굵게
+                major, mid = i % 15 == 0, i % 5 == 0
+                r0 = R - (u(14) if major else u(11) if mid else u(8))
+                a = math.radians(90 - i * 6)
+                rline(c9 + math.cos(a) * r0 * S, c9 - math.sin(a) * r0 * S,
+                      c9 + math.cos(a) * (R - u(5)) * S,
+                      c9 - math.sin(a) * (R - u(5)) * S,
+                      TXT if major else SUB,
+                      (max(1, u(2)) if major else 1) * S)
+            for frac, ln, col, wd in (((lt.tm_hour % 12 + lt.tm_min / 60) / 12,
+                                       0.42, TXT, u(5)),
+                                      (lt.tm_min / 60.0, 0.62, PM_INK, u(3))):
+                a = math.radians(90 - frac * 360)
+                rline(c9, c9, c9 + math.cos(a) * R * ln * S,
+                      c9 - math.sin(a) * R * ln * S, col, max(2, wd) * S)
+            dr.ellipse([c9 - u(4) * S, c9 - u(4) * S, c9 + u(4) * S, c9 + u(4) * S],
+                       fill=TXT)
+            dr.ellipse([c9 - u(1) * S, c9 - u(1) * S, c9 + u(1) * S, c9 + u(1) * S],
+                       fill=cd["bg"])
+            clock = im.resize((side, side), Image.LANCZOS)
+        except Exception:
+            clock = None
+        if clock is not None:
+            self._soft_put(cv, clock, ccx - R - pad9, ccy - R - pad9, "",
+                           cache_key=("brief_clock", id(win)))
+        else:                                  # PIL 이 안 되면 Tk 도형으로
+            self._oval(cv, ccx - R, ccy - R, ccx + R, ccy + R,
+                           fill=cd["bg"], outline=LINE, width=max(1, u(2)))
+            for mins9, wash in (([m for m in d["mins"] if m < 720], AM_INK),
+                                ([m for m in d["mins"] if m >= 720], PM_INK)):
+                for a, b in self._runs_of(mins9):
+                    d1 = (a % 720) / 720.0 * 360.0
+                    d2 = ((b + 1) % 720 or 720) / 720.0 * 360.0
+                    ext = -(d2 - d1)
+                    if abs(ext) < 1.2:
+                        ext = -1.2
+                    cv.create_arc(ccx - r_face, ccy - r_face, ccx + r_face,
+                                  ccy + r_face, start=90 - d1, extent=ext,
+                                  style="pieslice", fill=wash, outline="")
+            for frac, ln, col, wd in (((lt.tm_hour % 12 + lt.tm_min / 60) / 12,
+                                       0.42, TXT, u(5)),
+                                      (lt.tm_min / 60.0, 0.62, PM_INK, u(3))):
+                a = math.radians(90 - frac * 360)
+                cv.create_line(ccx, ccy, ccx + math.cos(a) * R * ln,
+                               ccy - math.sin(a) * R * ln,
+                               fill=col, width=max(2, wd), capstyle="round")
         for lab, ang in (("12", 90), ("3", 0), ("6", 270), ("9", 180)):
             a = math.radians(ang)
             cv.create_text(ccx + math.cos(a) * (R - u(25)),
                            ccy - math.sin(a) * (R - u(25)),
                            text=lab, font=f(10, True), fill=TXT)
-        ts = d["last"] or time.time()          # 바늘은 일을 끝낸 시각에
-        lt = time.localtime(ts)
-        for frac, ln, col, wd in (((lt.tm_hour % 12 + lt.tm_min / 60) / 12,
-                                   0.42, TXT, u(5)),
-                                  (lt.tm_min / 60.0, 0.62, PM_INK, u(3))):
-            a = math.radians(90 - frac * 360)
-            cv.create_line(ccx, ccy, ccx + math.cos(a) * R * ln,
-                           ccy - math.sin(a) * R * ln,
-                           fill=col, width=max(2, wd), capstyle="round")
-        self._oval(cv, ccx - u(4), ccy - u(4), ccx + u(4), ccy + u(4),
-                       fill=TXT, outline="")
-        self._oval(cv, ccx - u(1), ccy - u(1), ccx + u(1), ccy + u(1),
-                       fill=cd["bg"], outline="")
         lx = ccx - u(30)
         self._oval(cv, lx, y + u(160), lx + u(7), y + u(167), fill=AM_INK, outline="")
         cv.create_text(lx + u(11), y + u(163), anchor="w", text="오전",
-                       font=f(7), fill=SUB)
+                       font=f(8, True), fill=SUB)
         self._oval(cv, lx + u(36), y + u(160), lx + u(43), y + u(167),
                        fill=PM_INK, outline="")
         cv.create_text(lx + u(47), y + u(163), anchor="w", text="오후",
-                       font=f(7), fill=SUB)
+                       font=f(8, True), fill=SUB)
 
         rx = PAD + u(150)
         cv.create_text(rx, y + u(22), anchor="w", text="작업 시간",
-                       font=f(8), fill=SUB)
+                       font=f(9, True), fill=SUB)
         cv.create_text(rx, y + u(48), anchor="w", text=hm(d["total"]),
                        font=f(20, True), fill=W_INK)
         rows = [("시작 · 마지막", "%s – %s" % (clock_t(d["first"]), clock_t(d["last"])), TXT),
@@ -17274,7 +17362,7 @@ class Mascot:
                          R_INK if gap >= 0 else SUB))
         ry = y + u(84)
         for lab, val, col in rows:
-            cv.create_text(rx, ry, anchor="w", text=lab, font=f(8), fill=SUB)
+            cv.create_text(rx, ry, anchor="w", text=lab, font=f(9, True), fill=SUB)
             cv.create_text(W - PAD - u(14), ry, anchor="e", text=val,
                            font=f(9, True), fill=col)
             ry += u(23)
@@ -17292,7 +17380,7 @@ class Mascot:
         # ── 하루의 구성 ────────────────────────────────────────────────
         card(y, u(92))
         cv.create_text(PAD + u(14), y + u(18), anchor="w", text="하루의 구성",
-                       font=f(8, True), fill=SUB)
+                       font=f(9, True), fill=SUB)
         segs = [("작업", d["total"], W_FIL, W_INK), ("딴짓", d["other"], A_FIL, A_INK),
                 ("휴식", d["idle"], R_FIL, R_INK)]
         tot = max(sum(v for _, v, _, _ in segs), 1)
@@ -17315,8 +17403,8 @@ class Mascot:
             self._oval(cv, lgx, y + u(72), lgx + u(7), y + u(79), fill=ink, outline="")
             txt = "%s %s" % (name, hm(v))
             cv.create_text(lgx + u(11), y + u(75), anchor="w", text=txt,
-                           font=f(8), fill=TXT)
-            lgx += self._mw(txt, f(8)) + u(26)
+                           font=f(9), fill=TXT)
+            lgx += self._mw(txt, f(9)) + u(24)
         y += u(92) + u(10)
 
         # ── 오늘의 흔적 (타일 4개) ─────────────────────────────────────
@@ -17335,7 +17423,7 @@ class Mascot:
             tx0 = PAD + i * (tw + u(9))
             rr(tx0, y, tx0 + tw, y + u(64), u(12), fill=cd["soft"], outline="")
             cv.create_text(tx0 + u(11), y + u(18), anchor="w", text=lab,
-                           font=f(7), fill=SUB)
+                           font=f(8, True), fill=SUB)
             cv.create_text(tx0 + u(11), y + u(43), anchor="w", text=val, fill=col,
                            font=self._fit(val, int(14 * k), tw - u(20), True))
         y += u(64) + u(10)
@@ -17345,12 +17433,12 @@ class Mascot:
             card(y, u(74))
             prev, nxt, nxt_m, prog = self._milestone(d["cum"])
             cv.create_text(PAD + u(14), y + u(18), anchor="w",
-                           text="누적 그린 거리", font=f(8, True), fill=SUB)
+                           text="누적 그린 거리", font=f(9, True), fill=SUB)
             right = dist_s(d["cum"])
             if nxt:
                 right += "  /  %s %s" % (nxt, dist_s(nxt_m))
             cv.create_text(W - PAD - u(14), y + u(18), anchor="e", text=right,
-                           font=f(8, True), fill=TXT)
+                           font=f(9, True), fill=TXT)
             tx0, tx1, ty = PAD + u(14), W - PAD - u(14), y + u(38)
             rr(tx0, ty, tx1, ty + u(10), u(5), fill=cd["track"], outline="")
             fw = (tx1 - tx0) * max(0.0, min(prog, 1.0))
@@ -17359,19 +17447,19 @@ class Mascot:
                    width=max(1, u(1)))
             cv.create_text(tx0, y + u(60), anchor="w",
                            text=("%s 통과" % prev) if prev else "첫 목표를 향해",
-                           font=f(7), fill=SUB)
+                           font=f(8, True), fill=SUB)
             if nxt:
                 cv.create_text(tx1, y + u(60), anchor="e",
                                text="%s까지 %s" % (nxt, dist_s(max(nxt_m - d["cum"], 0))),
-                               font=f(7), fill=SUB)
+                               font=f(8, True), fill=SUB)
             y += u(74) + u(10)
 
         # ── 최근 7일 ───────────────────────────────────────────────────
         card(y, u(132))
         cv.create_text(PAD + u(14), y + u(18), anchor="w", text="최근 7일",
-                       font=f(8, True), fill=SUB)
+                       font=f(9, True), fill=SUB)
         cv.create_text(W - PAD - u(14), y + u(18), anchor="e",
-                       text="합계 %s" % hm(d["week"]), font=f(8, True), fill=SUB)
+                       text="합계 %s" % hm(d["week"]), font=f(9, True), fill=SUB)
         gx0, gx1 = PAD + u(16), W - PAD - u(16)
         base_y, plot = y + u(112), u(62)
         top_v = max(max(v for _, v in d["last7"]), int(d["goal"]), 1) * 1.12
@@ -17379,7 +17467,7 @@ class Mascot:
         gy = base_y - plot * (d["goal"] / top_v)
         cv.create_line(gx0, gy, gx1, gy, fill=LINE, width=1, dash=(3, 3))
         cv.create_text(gx0, gy - u(8), anchor="w", text="목표 %s" % hm(d["goal"]),
-                       font=f(6), fill=SUB)
+                       font=f(7, True), fill=SUB)
         for i, (key, v) in enumerate(d["last7"]):
             cxx = gx0 + slot * i + slot / 2
             today = i == 6
@@ -17393,10 +17481,10 @@ class Mascot:
                    fill=W_FIL if today else cd["soft"],
                    outline=W_INK if today else LINE, width=max(1, u(2)) if today else 1)
                 cv.create_text(cxx, base_y - bh - u(9),
-                               text="%.1fh" % (v / 3600.0), font=f(6, today),
+                               text="%.1fh" % (v / 3600.0), font=f(8, True),
                                fill=W_INK if today else SUB)
             lab = "오늘" if today else "월화수목금토일"[time.strptime(key, "%Y-%m-%d").tm_wday]
-            cv.create_text(cxx, base_y + u(11), text=lab, font=f(7, today),
+            cv.create_text(cxx, base_y + u(11), text=lab, font=f(8, True),
                            fill=W_INK if today else SUB)
         y += u(132) + u(10)
 
@@ -17406,7 +17494,7 @@ class Mascot:
             cv.create_text(PAD + u(4), y + u(8), anchor="w",
                            text="분당 %d획 · 집중 구간 %d번으로 나눠 그렸어요"
                                 % (round(per), max(d["runs"], 1)),
-                           font=f(8), fill=SUB)
+                           font=f(9, True), fill=SUB)
         y += u(24)
 
         # ── 버튼 ───────────────────────────────────────────────────────
@@ -17967,6 +18055,10 @@ class Mascot:
         GAP_TB, GAP_ITEM = u(10), u(16)   # 제목→본문, 항목→항목
 
         def rr(c, x0, y0, x1, y1, r, **kw):
+            try:                       # 매끈하게 (Tk 다각형은 계단진다)
+                return self._rr_soft(c, x0, y0, x1, y1, r, **kw)
+            except Exception:
+                pass
             pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r,
                    x1, y1, x1 - r, y1, x0 + r, y1, x0, y1, x0, y1 - r,
                    x0, y0 + r, x0, y0]
@@ -26216,7 +26308,7 @@ class Mascot:
             for dx, dy in ((-w9 / 2, -h9 / 2), (w9 / 2, -h9 / 2),
                            (w9 / 2, h9 / 2), (-w9 / 2, h9 / 2)):
                 pts += [x + dx * ca - dy * sa, y + dx * sa + dy * ca]
-            cv.create_polygon(pts, fill=rnd.choice(cols), outline="")
+            self._poly_soft(cv, pts, fill=rnd.choice(cols), outline="", fx=True)
         for fx, fy, col, t0 in ((u(58), u(66), "#ffd75e", 0.0),
                                 (W - u(60), u(92), "#ff9ec4", 0.35)):
             p = t - t0
@@ -33181,7 +33273,7 @@ class Mascot:
         LX = PAD + IN                # 왼쪽 라벨 기준선
 
         def rrect(x0, y0, x1, y1, r, on=None, **kw):
-            if self._glass and (x1 - x0) >= 4 and (y1 - y0) >= 4:
+            if (x1 - x0) >= 4 and (y1 - y0) >= 4:
                 # 유리 — 판에 진짜 알파로 (카드가 Tk 도형이면 그 위 글자의
                 # 반투명 가장자리가 구멍 밖에서 잘려 굵게 깨져 보인다 · 제보)
                 try:
@@ -33206,11 +33298,11 @@ class Mascot:
                 line2 = self._shade(base, 0.15)
                 inner = self._tint(base, 0.10)
                 for sign, ex in ((-1, hx0 + 30), (1, hx1 - 30)):
-                    cv.create_polygon(
+                    self._poly_soft(cv, 
                         ex - 15 * sign, y + 6, ex + 2 * sign, y - 24,
                         ex + 15 * sign, y + 3,
                         fill=outer, outline=line2, width=2)
-                    cv.create_polygon(
+                    self._poly_soft(cv, 
                         ex - 7 * sign, y + 2, ex + 2 * sign, y - 15,
                         ex + 9 * sign, y + 1, fill=inner, outline="")
             elif deco == "mouse":               # 성실이: 생쥐 귀
@@ -33226,7 +33318,7 @@ class Mascot:
                 span = (hx1 - hx0 - 96) / 4
                 for i in range(5):
                     sx = hx0 + 56 + i * span
-                    cv.create_line(sx, y - 3, sx - 9, y + 20,
+                    self._line_soft(cv, sx, y - 3, sx - 9, y + 20,
                                    fill="#dfe5f0", width=4)
                 rrect(hx0, y + 10, hx1, y + 62, 18, fill=SOFT,
                       outline=cd["border"], width=2)
@@ -33243,7 +33335,7 @@ class Mascot:
             if deco in ("fox", "mouse", "scarf"):
                 pass                           # 위에서 그렸다
             elif deco == "burger":             # 햄북이: 미니 햄버거
-                cv.create_arc(mx - 26, y - 12, mx + 26, y + 26, start=0,
+                self._arc_soft(cv, mx - 26, y - 12, mx + 26, y + 26, start=0,
                               extent=180, style="pieslice",
                               fill="#ecbf6b", outline="#a8763e", width=2)
                 for dx2 in (-11, 0, 11):
@@ -33266,24 +33358,24 @@ class Mascot:
                 # 타원 밖으로 삐져나가지 않게 한다.
                 for dx2, half in ((-17, 4), (-6, 7), (5, 7), (16, 4)):
                     sx2 = mx + dx2
-                    cv.create_line(sx2 - 4, y + half, sx2 + 4, y - half,
+                    self._line_soft(cv, sx2 - 4, y + half, sx2 + 4, y - half,
                                    fill="#f8cfb6", width=2,
                                    capstyle="round")
             elif deco == "cone":               # 빙: 콘 아이스크림
-                cv.create_polygon(mx - 14, y + 2, mx + 14, y + 2, mx, y + 24,
+                self._poly_soft(cv, mx - 14, y + 2, mx + 14, y + 2, mx, y + 24,
                                   fill="#e9c48f", outline="#6b5236", width=2)
                 self._oval(cv, mx - 16, y - 18, mx + 16, y + 6,
                            fill="#fff4c8", outline="#6b5236", width=2)
                 self._oval(cv, mx - 7, y - 13, mx - 2, y - 8,
                            fill="#ffffff", outline="")
             elif deco == "ice":                # 깅규: 각얼음
-                cv.create_polygon(mx - 16, y + 2, mx - 5, y - 9,
+                self._poly_soft(cv, mx - 16, y + 2, mx - 5, y - 9,
                                   mx + 18, y - 9, mx + 7, y + 2,
                                   fill="#dcf2fd", outline="#3f5560", width=2)
-                cv.create_polygon(mx - 16, y + 2, mx + 7, y + 2,
+                self._poly_soft(cv, mx - 16, y + 2, mx + 7, y + 2,
                                   mx + 7, y + 24, mx - 16, y + 24,
                                   fill="#a9ddf8", outline="#3f5560", width=2)
-                cv.create_polygon(mx + 7, y + 2, mx + 18, y - 9,
+                self._poly_soft(cv, mx + 7, y + 2, mx + 18, y - 9,
                                   mx + 18, y + 13, mx + 7, y + 24,
                                   fill="#86c8ee", outline="#3f5560", width=2)
             elif deco == "heart":              # 하독: 파란 하트
@@ -33296,7 +33388,7 @@ class Mascot:
                                fill="#f5a623", outline="#c97c12", width=2)
                 self._oval(cv, mx - 11, y - 2, mx - 2, y + 5,
                                fill="#fbc96d", width=0)
-                cv.create_polygon(mx, y - 6, mx + 12, y - 15, mx + 19, y - 7,
+                self._poly_soft(cv, mx, y - 6, mx + 12, y - 15, mx + 19, y - 7,
                                   mx + 7, y - 1, smooth=True,
                                   fill="#7cb14e", outline="#5b8a35",
                                   width=1)
@@ -33309,16 +33401,16 @@ class Mascot:
                     self._oval(cv, ex2 - 3, y + 1, ex2 + 3, y + 8,
                                    fill="#20261c", outline="")
             elif deco == "sprout":             # 기뽀: 새싹
-                cv.create_line(mx, y + 18, mx, y - 2, fill="#4c8a3f", width=3)
+                self._line_soft(cv, mx, y + 18, mx, y - 2, fill="#4c8a3f", width=3)
                 for sign in (-1, 1):
-                    cv.create_polygon(mx, y - 1, mx + 9 * sign, y - 12,
+                    self._poly_soft(cv, mx, y - 1, mx + 9 * sign, y - 12,
                                       mx + 16 * sign, y - 3,
                                       mx + 7 * sign, y + 4, smooth=True,
                                       fill="#6db54e", outline="#4c8a3f",
                                       width=1)
             elif deco == "ribbon":             # 사가: 리본
                 for sign in (-1, 1):
-                    cv.create_polygon(mx, y + 5, mx + 18 * sign, y - 9,
+                    self._poly_soft(cv, mx, y + 5, mx + 18 * sign, y - 9,
                                       mx + 20 * sign, y + 6,
                                       mx + 15 * sign, y + 11, smooth=True,
                                       fill="#f9b6d2", outline="#e07aa8",
@@ -33335,7 +33427,7 @@ class Mascot:
                 ec = {"cat": "#f5bdd2", "rose": "#f5bdd2"}.get(deco, "#2b2b2b")
                 for ex in (hx0 + 34, hx1 - 34):
                     if deco == "cat":
-                        cv.create_polygon(ex - 13, y + 18, ex + 2, y - 8,
+                        self._poly_soft(cv, ex - 13, y + 18, ex + 2, y - 8,
                                           ex + 13, y + 17,
                                           fill=ec, outline=cd["border"],
                                           width=2)
@@ -39360,7 +39452,8 @@ class Mascot:
                     if a < 2.6 * kk:
                         continue               # 잦아든 별은 잠깐 쉰다
                     sx, sy = x + dx * kk, base + dy * kk
-                    cv.create_polygon(
+                    a = round(a * 2) / 2.0        # 반 px 로 묶어 그림을 다시 쓴다
+                    self._poly_soft(cv,
                         sx, sy - a, sx + a * 0.3, sy - a * 0.3, sx + a, sy,
                         sx + a * 0.3, sy + a * 0.3, sx, sy + a,
                         sx - a * 0.3, sy + a * 0.3, sx - a, sy,
@@ -39425,6 +39518,218 @@ class Mascot:
             return cv.create_oval(x0, y0, x1, y1, fill=fill or "",
                                   outline=outline or "", width=width,
                                   tags=tags)
+
+    def _cv_keyed(self, cv):
+        """색상키 창의 캔버스인가 — 반투명을 못 담으므로 Tk 도형 그대로 둔다.
+
+        캐릭터 창(시트 포함)과 그 키 색으로 바탕을 칠한 덧창(축하·꼬들 끝)이
+        여기 든다. 유리 창은 근백색 키지만 판(진짜 알파)에 올릴 수 있으니
+        키 창으로 치지 않는다 — 그쪽은 _rr_soft·_soft_dot 이 알아서 가른다.
+        """
+        real = getattr(self, "_real_canvas", None) or getattr(self, "canvas", None)
+        if cv is real or cv is getattr(self, "canvas", None) \
+                or cv is getattr(self, "_sheet", None):
+            return True
+        try:
+            bg = str(cv.cget("bg")).lower()
+        except Exception:
+            return False
+        return bg in (str(getattr(self, "canvas_bg", "")).lower(),
+                      "#010203", MAC_KEY.lower())
+
+    def _soft_put(self, cv, im, x, y, tags, cache_key=None, fx=False):
+        """구운 RGBA 그림을 보통 창 캔버스에 얹는다 (유리면 판에).
+
+        cache_key 가 있으면 _soft_cache 에 담아 다시 쓴다. fx=True 는 매
+        프레임 모양이 바뀌는 연출용 — 캐시를 안 거치고 참조만 잠깐 붙든다
+        (그림은 다음 프레임에 지워지니 오래 들 이유가 없다).
+        """
+        gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+        route = bool(gl and self._pane_of(cv)[1] is not None)
+        if route:
+            it = self._pane_put(cv, x, y, im, "nw", tags)
+            if it is not None:
+                return it
+        if gl:
+            im = flat_on_key(im, GLASS_MIX, floor=40, cut=24)
+        ph = self._tkimg(im)
+        if fx or cache_key is None:
+            keep = getattr(cv, "_soft_fx", None)
+            if keep is None:
+                keep = cv._soft_fx = []
+            keep.append(ph)
+            if len(keep) > 800:          # 지난 프레임 것들 — 오래된 절반만
+                del keep[:400]
+        else:
+            if len(self._soft_cache) > 300:
+                for k2 in list(self._soft_cache)[:150]:
+                    self._soft_cache.pop(k2, None)
+            self._soft_cache[cache_key] = ph
+        return cv.create_image(x, y, image=ph, anchor="nw", tags=tags)
+
+    def _poly_soft(self, cv, *coords, fill="", outline="", width=1,
+                   smooth=False, tags="dyn", fx=False, **kw):
+        """매끈한 다각형 — `cv.create_polygon(` 자리에 `self._poly_soft(cv, `.
+
+        Tk 다각형은 안티에일리어싱이 없어 가장자리가 계단진다 (제보 —
+        브리핑 시계·귀·별). 4배로 그려 줄인 그림을 얹는다. smooth=True 는
+        Tk 와 같은 2차 스플라인으로 푼다(_CharSheet._spline). 색상키 창은
+        Tk 다각형 그대로(매끈 경로면 시트가 알아서 매끈하게 그린다). 모르는
+        인자(dash·stipple)가 오면 Tk 로 물러난다.
+        """
+        pts = list(coords[0]) if len(coords) == 1 else list(coords)
+        if pts and isinstance(pts[0], (tuple, list)):
+            pts = [v for p in pts for v in p]
+
+        def tk():
+            return cv.create_polygon(pts, fill=fill or "", outline=outline or "",
+                                     width=width, smooth=smooth, tags=tags, **kw)
+
+        if kw or len(pts) < 6 or self._cv_keyed(cv):
+            return tk()
+        try:
+            P = [(float(pts[i]), float(pts[i + 1]))
+                 for i in range(0, len(pts) - 1, 2)]
+            if smooth:
+                P = _CharSheet._spline(P, closed=True)
+            xs = [p[0] for p in P]
+            ys = [p[1] for p in P]
+            lw = max(1, int(round(width))) if outline else 0
+            pad = lw + 2
+            x0 = int(math.floor(min(xs))) - pad
+            y0 = int(math.floor(min(ys))) - pad
+            w = int(math.ceil(max(xs))) - x0 + pad + 1
+            h = int(math.ceil(max(ys))) - y0 + pad + 1
+            if w < 1 or h < 1 or w * h > 3000000:
+                return tk()
+            rel = tuple((round((px - x0) * 2) / 2.0, round((py - y0) * 2) / 2.0)
+                        for px, py in P)
+            gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+            key = None if fx else ("poly", rel, str(fill), str(outline), lw, gl)
+            ph = self._soft_cache.get(key) if key else None
+            if ph is not None:
+                return cv.create_image(x0, y0, image=ph, anchor="nw", tags=tags)
+            S = 4
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            sp = [(px * S, py * S) for px, py in rel]
+            if fill:
+                dr.polygon(sp, fill=fill)
+            if outline and lw:
+                dr.line(sp + [sp[0]], fill=outline, width=lw * S, joint="curve")
+                r9 = lw * S / 2.0            # 시작점의 이음매를 둥글게
+                dr.ellipse([sp[0][0] - r9, sp[0][1] - r9,
+                            sp[0][0] + r9, sp[0][1] + r9], fill=outline)
+            im = im.resize((w, h), Image.LANCZOS)
+            return self._soft_put(cv, im, x0, y0, tags, key, fx)
+        except Exception:
+            return tk()
+
+    def _line_soft(self, cv, *coords, fill="#000000", width=1, tags="dyn",
+                   fx=False, capstyle=None, joinstyle=None, **kw):
+        """매끈한 굵은 선(둥근 끝) — `cv.create_line(` 자리에 그대로.
+
+        1px 선은 Tk 그대로 둔다(그림으로 바꿔도 이득이 없다). 점선·화살표
+        같은 모르는 인자는 Tk 로 물러난다.
+        """
+        pts = list(coords[0]) if len(coords) == 1 else list(coords)
+        if pts and isinstance(pts[0], (tuple, list)):
+            pts = [v for p in pts for v in p]
+
+        def tk():
+            kw2 = dict(kw)
+            if capstyle:
+                kw2["capstyle"] = capstyle
+            if joinstyle:
+                kw2["joinstyle"] = joinstyle
+            return cv.create_line(pts, fill=fill, width=width, tags=tags, **kw2)
+
+        if kw or len(pts) < 4 or width < 1.5 or self._cv_keyed(cv):
+            return tk()
+        try:
+            P = [(float(pts[i]), float(pts[i + 1]))
+                 for i in range(0, len(pts) - 1, 2)]
+            xs = [p[0] for p in P]
+            ys = [p[1] for p in P]
+            lw = max(1.0, float(width))
+            pad = int(math.ceil(lw)) + 2
+            x0 = int(math.floor(min(xs))) - pad
+            y0 = int(math.floor(min(ys))) - pad
+            w = int(math.ceil(max(xs))) - x0 + pad + 1
+            h = int(math.ceil(max(ys))) - y0 + pad + 1
+            if w < 1 or h < 1 or w * h > 3000000:
+                return tk()
+            rel = tuple((round((px - x0) * 2) / 2.0, round((py - y0) * 2) / 2.0)
+                        for px, py in P)
+            gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+            key = None if fx else ("line", rel, str(fill), round(lw, 1), gl)
+            ph = self._soft_cache.get(key) if key else None
+            if ph is not None:
+                return cv.create_image(x0, y0, image=ph, anchor="nw", tags=tags)
+            S = 4
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            sp = [(px * S, py * S) for px, py in rel]
+            dr.line(sp, fill=fill, width=int(round(lw * S)), joint="curve")
+            r9 = lw * S / 2.0
+            for px, py in (sp[0], sp[-1]):   # 둥근 끝
+                dr.ellipse([px - r9, py - r9, px + r9, py + r9], fill=fill)
+            im = im.resize((w, h), Image.LANCZOS)
+            return self._soft_put(cv, im, x0, y0, tags, key, fx)
+        except Exception:
+            return tk()
+
+    def _arc_soft(self, cv, x0, y0, x1, y1, start=0.0, extent=90.0,
+                  style="pieslice", fill="", outline="", width=1, tags="dyn",
+                  fx=False, **kw):
+        """매끈한 호·부채꼴 — `cv.create_arc(` 자리에 그대로.
+
+        Tk 각도는 3시에서 반시계, PIL 은 3시에서 시계 방향이다 — 부호를
+        뒤집어 넘긴다.
+        """
+        def tk():
+            return cv.create_arc(x0, y0, x1, y1, start=start, extent=extent,
+                                 style=style, fill=fill or "",
+                                 outline=outline or "", width=width,
+                                 tags=tags, **kw)
+
+        if kw or self._cv_keyed(cv):
+            return tk()
+        try:
+            lw = max(1, int(round(width))) if outline else 0
+            pad = lw + 2
+            bx0, by0 = int(math.floor(min(x0, x1))) - pad, int(math.floor(min(y0, y1))) - pad
+            w = int(math.ceil(max(x0, x1))) - bx0 + pad + 1
+            h = int(math.ceil(max(y0, y1))) - by0 + pad + 1
+            if w < 1 or h < 1 or w * h > 3000000:
+                return tk()
+            a, b = -float(start), -(float(start) + float(extent))
+            ps, pe = round(min(a, b), 1), round(max(a, b), 1)
+            box = (round((min(x0, x1) - bx0) * 2) / 2.0, round((min(y0, y1) - by0) * 2) / 2.0,
+                   round((max(x0, x1) - bx0) * 2) / 2.0, round((max(y0, y1) - by0) * 2) / 2.0)
+            gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+            key = None if fx else ("arc", box, ps, pe, style, str(fill),
+                                   str(outline), lw, gl)
+            ph = self._soft_cache.get(key) if key else None
+            if ph is not None:
+                return cv.create_image(bx0, by0, image=ph, anchor="nw", tags=tags)
+            S = 4
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            sb = [v * S for v in box]
+            if style == "arc":
+                dr.arc(sb, ps, pe, fill=(outline or fill or None),
+                       width=max(1, int(round(width))) * S)
+            elif style == "chord":
+                dr.chord(sb, ps, pe, fill=fill or None,
+                         outline=outline or None, width=lw * S)
+            else:
+                dr.pieslice(sb, ps, pe, fill=fill or None,
+                            outline=outline or None, width=lw * S)
+            im = im.resize((w, h), Image.LANCZOS)
+            return self._soft_put(cv, im, bx0, by0, tags, key, fx)
+        except Exception:
+            return tk()
 
     def _flatten_key(self, im):
         """가장자리 반투명을 색상키와 미리 섞어 불투명하게.
@@ -39707,9 +40012,12 @@ class Mascot:
         raw = kw.pop("raw", False)
         # 유리 창의 캔버스도 위임한다 — 계단진 Tk 도형이 유리 위에서는
         # 더 거칠어 보이고, 위임하면 흰 테까지 같이 두른다 (요청).
-        if (not raw and (cv is getattr(self, "room_cv", None)
-                         or getattr(cv, "_glass_cv", False))
-                and set(kw) <= {"fill", "outline", "width", "tags"}):
+        # 그리고 **색상키가 아닌 창은 전부** 위임한다 (도장판·꼬들·설정
+        # — '픽셀이 깨져 보인다' 제보, 2026-09-10). 색상키 창만 Tk 도형.
+        if (not raw and set(kw) <= {"fill", "outline", "width", "tags"}
+                and (cv is getattr(self, "room_cv", None)
+                     or getattr(cv, "_glass_cv", False)
+                     or not self._cv_keyed(cv))):
             try:
                 return self._rr_soft(cv, x0, y0, x1, y1, r, **kw)
             except Exception:
@@ -39974,14 +40282,14 @@ class Mascot:
                 # 선으로 그린다 (이모지는 Tk 에서 컴퓨터마다 다르다).
                 ccx, ccy = W - 216 * k + 2 * k, mid - 25 * k + 2 * k
                 cr = 9 * k
-                cv.create_oval(ccx - cr, ccy - cr, ccx + cr, ccy + cr,
-                               fill="#7fc98f", outline="#ffffff",
-                               width=max(1, int(2 * k)), tags="dyn")
-                cv.create_line(ccx - 4 * k, ccy, ccx - 1 * k, ccy + 3.2 * k,
-                               ccx + 4.4 * k, ccy - 3.4 * k,
-                               fill="#ffffff", width=max(2, int(2.4 * k)),
-                               capstyle="round", joinstyle="round",
-                               tags="dyn")
+                self._oval(cv, ccx - cr, ccy - cr, ccx + cr, ccy + cr,
+                           fill="#7fc98f", outline="#ffffff",
+                           width=max(1, int(2 * k)), tags="dyn")
+                self._line_soft(cv, ccx - 4 * k, ccy, ccx - 1 * k, ccy + 3.2 * k,
+                                ccx + 4.4 * k, ccy - 3.4 * k,
+                                fill="#ffffff", width=max(2, int(2.4 * k)),
+                                capstyle="round", joinstyle="round",
+                                tags="dyn")
             gx0, gx1 = W - 204 * k, W - 24 * k
             gy = mid + 9 * k
             goal = self.ROOM_GOAL_MIN     # 다 같이 채우는 목표
@@ -41523,10 +41831,10 @@ class Mascot:
             # outline="" 필수 — 맥 Tk9 는 width=0 이어도 기본 검정
             # 외곽선을 헤어라인으로 그려서, 작은 삼각형이 통째로 까맣게
             # 보인다 (사가 제보 '하트 아래가 까만 삼각형' — CI 캡처 재현)
-            cv.create_polygon(hx - hw * 0.47, ty + r2 * 0.35,
-                              hx + hw * 0.47, ty + r2 * 0.35,
-                              hx, cy2 + hw * 0.52,
-                              fill=pink, outline="", width=0, tags="dyn")
+            self._poly_soft(cv, hx - hw * 0.47, ty + r2 * 0.35,
+                            hx + hw * 0.47, ty + r2 * 0.35,
+                            hx, cy2 + hw * 0.52,
+                            fill=pink, outline="", width=0, tags="dyn")
             cv.create_text(hx + hw / 2 + gap, cy2, text=num, font=f2,
                            fill=pink, anchor="w", tags="dyn")
         self._room_song_hits[slot] = ((x0 - 3 * k, y0 - 3 * k,
@@ -41781,7 +42089,7 @@ class Mascot:
             cv.create_image(cx, cy, image=img)
             if kind == "gold":               # 여덟 시간 — 금별을 달아 준다
                 sx, sy, a = cx + r * 0.85, cy - r * 0.85, r * 0.5
-                cv.create_polygon(
+                self._poly_soft(cv,
                     sx, sy - a, sx + a * 0.3, sy - a * 0.3, sx + a, sy,
                     sx + a * 0.3, sy + a * 0.3, sx, sy + a,
                     sx - a * 0.3, sy + a * 0.3, sx - a, sy,
@@ -45704,9 +46012,9 @@ class Mascot:
                             and now2 - f["born"] > 1.6
                             and abs(f["vy"]) < 45 and abs(f["vx"]) < 45):
                         sx3, sy3 = to_scr(f)
-                        cv.create_oval(sx3 - r3 * k - 3, sy3 - r3 * k - 3,
-                                       sx3 + r3 * k + 3, sy3 + r3 * k + 3,
-                                       outline=wc, width=2, tags="warn")
+                        self._oval(cv, sx3 - r3 * k - 3, sy3 - r3 * k - 3,
+                                   sx3 + r3 * k + 3, sy3 + r3 * k + 3,
+                                   outline=wc, width=2, tags="warn")
             # 조준선과 들고 있는 공
             cv.delete("aim")
             if not g2["over"]:
@@ -47023,9 +47331,9 @@ class Mascot:
                     s5 = max(1.0, 3.4 * k * (1.0 - p3))
                     sx5 = cx4 + math.cos(a4) * rr4
                     sy5 = cy4 + math.sin(a4) * rr4
-                    cv.create_oval(sx5 - s5, sy5 - s5, sx5 + s5, sy5 + s5,
-                                   fill=self._tint(cd["fill"], 0.35),
-                                   outline="", tags="ctpop")
+                    self._oval(cv, sx5 - s5, sy5 - s5, sx5 + s5, sy5 + s5,
+                               fill=self._tint(cd["fill"], 0.35),
+                               outline="", tags="ctpop")
             g2["pop"] = alive
             # ── 새로 놓인 타일 — 작게 시작해 커진다 (사라짐의 반대) ──
             # 수명이 다한 칸이 생기면 그때 판을 다시 그려 정식 타일로
@@ -47105,8 +47413,8 @@ class Mascot:
                                     y9 + ax * s9 + ay * c9]
                         if not (BX < x9 < bx1 and BY < y9 < by1):
                             continue      # 판 밖(랭킹 칸)까지 안 날아가게
-                        cv.create_polygon(pts, fill=q9["c"], outline="",
-                                          tags="overcf")
+                        self._poly_soft(cv, pts, fill=q9["c"], outline="",
+                                        tags="overcf", fx=True)
                     cv.tag_raise("overcf")
             # ── 헛클릭 — 무엇과 견줬는지 잠깐 테두리로 ──
             # 짝의 61%는 한쪽이 세 칸 이상 떨어져 있어, 어느 타일이
@@ -47170,11 +47478,11 @@ class Mascot:
                                   (bb9[3] - bb9[1]) / 2 + 9 * k,
                                   fill=self._tint(cd["fill"], 0.86),
                                   outline=line, width=3, tags="over")
-                    cv.create_polygon(mx2 - 7 * k, bb9[3] + 7 * k,
-                                      mx2 + 7 * k, bb9[3] + 7 * k,
-                                      mx2, bb9[3] + 17 * k,
-                                      fill=self._tint(cd["fill"], 0.86),
-                                      outline="", tags="over")
+                    self._poly_soft(cv, mx2 - 7 * k, bb9[3] + 7 * k,
+                                    mx2 + 7 * k, bb9[3] + 7 * k,
+                                    mx2, bb9[3] + 17 * k,
+                                    fill=self._tint(cd["fill"], 0.86),
+                                    outline="", tags="over")
                     cv.tag_raise(tid)
                 # 캐릭터 — 자리만 잡아 두고 **프레임마다** 그린다.
                 # 여기서 한 번 그려 두면 가만히 서 있게 된다 (제보).
@@ -48538,11 +48846,11 @@ class Mascot:
                                   (bb9[3] - bb9[1]) / 2 + 8 * k,
                                   fill=self._tint(cd["fill"], 0.86),
                                   outline=line, width=3, tags="g2say")
-                    cv.create_polygon(say_c[0] - 6 * k, bb9[3] + 6 * k,
-                                      say_c[0] + 6 * k, bb9[3] + 6 * k,
-                                      say_c[0], bb9[3] + 15 * k,
-                                      fill=self._tint(cd["fill"], 0.86),
-                                      outline="", tags="g2say")
+                    self._poly_soft(cv, say_c[0] - 6 * k, bb9[3] + 6 * k,
+                                    say_c[0] + 6 * k, bb9[3] + 6 * k,
+                                    say_c[0], bb9[3] + 15 * k,
+                                    fill=self._tint(cd["fill"], 0.86),
+                                    outline="", tags="g2say")
                     cv.tag_raise(tid)
             if g2["over"] and not st["over_ui"]:
                 st["over_ui"] = True
@@ -49789,8 +50097,8 @@ class Mascot:
                     cx9, cy9 = RX + int(22 * k), yy + rh / 2
                     r9 = 8 * k
                     if pf:
-                        cv.create_oval(cx9 - r9, cy9 - r9, cx9 + r9, cy9 + r9,
-                                       fill=pf, outline="", tags="kkrank")
+                        self._oval(cv, cx9 - r9, cy9 - r9, cx9 + r9, cy9 + r9,
+                                   fill=pf, outline="", tags="kkrank")
                     cv.create_text(cx9, cy9, text=pm, font=uf(8, True),
                                    fill=(pi or sub2), tags="kkrank")
                 # 이름은 꼬리 글자와 안 부딪히게 잘라 둔다
