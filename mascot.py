@@ -8426,6 +8426,13 @@ class Mascot:
         self._pomo_wk_off = 0             # '이번 주' 그래프의 몇 주 전인가
         self._pomo_tf_page = 0            # 같이한 친구 줄의 쪽
         self._tf_boxes = []               # 친구 얼굴 자리 (호버용)
+        self._sw_badge = None             # 카드 위 스톱워치 아이콘 자리 (x, y, r)
+        self._sw_img_cache = {}           # 스톱워치·탭 아이콘 그림 (지뢰 18)
+        self._sw_page = 0                 # 구간 기록 쪽
+        self._pomo_tab_hits = []          # 뽀모도로 창 탭 자리
+        self._pomo_burger_box = None      # 위 띠 메뉴 단추 자리 (띠 좌표)
+        self._pomo_bar = None             # 뽀모도로 창 위 띠 (맥은 없다)
+        self._pomo_bar_draw = None
         # ── 뽀모도로 같이하기 (요청 — 지금은 내 도로롱만) ──────────
         self._tm = None            # 지금 세션 (없으면 None)
         self._tm_inv = None        # 받은 초대 — 책상에 토마토가 놓인다
@@ -10957,6 +10964,7 @@ class Mascot:
                 self._press = None
                 return
             pb = getattr(self, "_pomo_badge", None)
+            sw9b = getattr(self, "_sw_badge", None)
             tb9 = getattr(self, "_pomo_tom_box", None)
             bb = getattr(self, "_bubble_btn", None)
             act = getattr(self, "_bubble_act", None)
@@ -11013,6 +11021,11 @@ class Mascot:
                 # 카드 위 토마토 = '잠깐 쉬기' (요청). 창의 단추와 같다.
                 self._safe("ui_click", self._ui_click)
                 self._safe("tom_rest", self._pomo_rest_toggle)
+            elif (sw9b and (px - sw9b[0]) ** 2 + (py - sw9b[1]) ** 2
+                    <= (sw9b[2] + 3) ** 2):
+                # 스톱워치 아이콘 — 스톱워치 탭으로 창을 연다 (요청)
+                self._safe("ui_click", self._ui_click)
+                self._safe("sw_open", self._sw_open)
             elif pb and (px - pb[0]) ** 2 + (py - pb[1]) ** 2 <= (pb[2] + 3) ** 2:
                 # 뽀모도로가 도는 동안만 뜨는 시계 배지 — 창을 연다
                 self._safe("ui_click", self._ui_click)
@@ -13012,6 +13025,9 @@ class Mascot:
         # 아이콘은 **한 줄**이다 (요청 — 두 줄로 쌓으니 너무 높았다).
         # 하드모드 불꽃이 시계 위로 솟으므로 그만큼만 더 (없으면 잘린다).
         if not pomo9:
+            # 스톱워치를 켜 두면 그 아이콘도 이 줄에 선다 (요청)
+            if self._sw_shown():
+                return base9 or YT_BAR
             return base9
         return (base9 or YT_BAR) + 12
 
@@ -18674,6 +18690,8 @@ class Mascot:
             others.append(("pomo", 28.0))
             if self._tom_top_want():
                 others.append(("tom", 26.0))
+        if self._sw_shown():                    # 스톱워치 (요청)
+            others.append(("sw", 28.0))
         # **양옆에 번갈아** 나눈다 — 한쪽에 둘을 몰면 창 밖으로 삐져나간다
         # (제보: 시계·토마토가 둘 다 오른쪽에 붙어 잘렸다). 첫째는 왼쪽.
         left, right = [], []
@@ -18911,6 +18929,12 @@ class Mascot:
             dot, status = self.POMO_DOT.get(po["phase"], DOT_ON), \
                 self.POMO_NAME.get(po["phase"], "집중")
             label = "%d:%02d" % (left // 60, left % 60)
+        elif self._sw_shown():
+            # 뽀모도로가 안 돌면 스톱워치 시간 (요청 — 둘 다면 뽀모도로가 먼저)
+            sw9 = self._sw()
+            dot = self.SW_DOT if sw9["on"] else DOT_OFF
+            status = "스톱워치" if sw9["on"] else "스톱워치 멈춤"
+            label = self._sw_fmt(self._sw_elapsed(sw9, now))
         g = self._card_geom()
         x0, y0, x1, y1 = g["x0"], g["y0"], g["x1"], g["y1"]
         pad = 14
@@ -18976,7 +19000,7 @@ class Mascot:
         if self.has_clock and self.clock_open:
             # 세로 카드: 상태(위) → 시계(가운데) → 시간(아래) — 모두 정중앙 정렬
             cxm = (x0 + x1) / 2
-            f_stat = self._fit(status, 7, (x1 - x0) - 34)
+            f_stat = self._fit(status, 9, (x1 - x0) - 34, True)
             tw = self._mw(status, f_stat)
             gx = cxm - (16 + tw) / 2            # 점+간격+텍스트 그룹 중앙
             status_dot(gx + 5, y0 + 16)
@@ -18995,13 +19019,17 @@ class Mascot:
             status_dot(x0 + pad + 5, row)
             avail = (x1 - pad) - (x0 + pad + 16)
             f_time = self._fit(label, 13, avail * 0.62, True)
-            f_stat = self._fit(status, 7,
-                               avail - self._mw(label, f_time) - 8)
+            # 상태 글자는 9 굵게 (요청 2026-09-11 — 작고 옅어서 안 보였다).
+            # 자리가 모자라면 _fit 이 줄이므로 시간 글자와 안 겹친다.
+            f_stat = self._fit(status, 9,
+                               avail - self._mw(label, f_time) - 8, True)
             self._gtext(c, x0 + pad + 16, row + INK_DY, anchor="w", text=status,
                         font=f_stat, fill=cd["sub"], on_glass=hole)
             self._gtext(c, x1 - pad, row + INK_DY, anchor="e", text=label,
                         font=f_time, fill=cd["text"], on_glass=hole)
-            self._goal_bar(x0 + pad + 2, x1 - pad, row + 25)
+            if not self._safe_str(self._sw_card_lap, x0 + pad + 2, x1 - pad,
+                                  row + 25, hole):
+                self._goal_bar(x0 + pad + 2, x1 - pad, row + 25)
         else:
             # 게이지형(준사): 상태+시간 윗줄 + 목표 진행바 아랫줄
             row1 = y0 + 20
@@ -19010,13 +19038,17 @@ class Mascot:
             # 넣었더니 그 폭만큼 상태·시간 글자가 줄어 읽기 힘들어졌다.
             avail = (x1 - pad) - (x0 + pad + 16)
             f_time = self._fit(label, 13, avail * 0.62, True)
-            f_stat = self._fit(status, 7,
-                               avail - self._mw(label, f_time) - 8)
+            # 상태 글자는 9 굵게 (요청 2026-09-11 — 작고 옅어서 안 보였다).
+            # 자리가 모자라면 _fit 이 줄이므로 시간 글자와 안 겹친다.
+            f_stat = self._fit(status, 9,
+                               avail - self._mw(label, f_time) - 8, True)
             self._gtext(c, x0 + pad + 16, row1 + INK_DY, anchor="w", text=status,
                         font=f_stat, fill=cd["sub"], on_glass=hole)
             self._gtext(c, x1 - pad, row1 + INK_DY, anchor="e", text=label,
                         font=f_time, fill=cd["text"], on_glass=hole)
-            self._goal_bar(x0 + pad + 2, x1 - pad, y0 + 45)
+            if not self._safe_str(self._sw_card_lap, x0 + pad + 2, x1 - pad,
+                                  y0 + 45, hole):
+                self._goal_bar(x0 + pad + 2, x1 - pad, y0 + 45)
             # 작업 종료는 우클릭 메뉴로 옮겼다 — 카드에는 버튼이 없다
 
     # ── 매 프레임 갱신 (~30fps) ──────────────────────────────────────────
@@ -22321,8 +22353,10 @@ class Mascot:
                 out.add(i)
         return out
 
-    TF_ROW = 96                  # '이번 주 같이한 친구' 줄 높이 (배율 1)
-    TF_COL = 100                 # 친구 한 칸 폭
+    TF_ROW = 84                  # '이번 주 같이한 친구' 줄 높이 (배율 1)
+    TF_COL = 52                  # 친구 한 칸 폭 — 기본 폭에 넷 (요청)
+    TF_TOM_DY = -0.5             # 알약 속 토마토·숫자의 세로 보정 (눈금 · 찍어서 맞춤)
+    TF_TXT_DY = -0.5
 
     def _team_week_row(self, cv, u, uf, W, pad, line, gy1, off):
         """그래프 아래 — 같이한 친구들 (얼굴 / 토마토 ×N / 이름) (요청).
@@ -22353,7 +22387,7 @@ class Mascot:
         total = cw * len(shown)
         sx = (x_l + x_r) / 2 - total / 2
         py = gy1 + u(18)
-        ph9 = u(44)
+        ph9 = u(30)                     # 한 줄에 넷이 들어가게 작게 (요청)
         for i, (slot, n) in enumerate(shown):
             cx = sx + cw * (i + 0.5)
             ph = self._seat_photo(slot, ph9)
@@ -22362,24 +22396,34 @@ class Mascot:
                 self._pomo_keep.append(ph)
             # 토마토 ×N 알약 — 얼굴 바로 아래 정중앙 (토마토는 살짝 작게)
             lab = "×%d" % n
-            f9 = uf(9, True)
+            f9 = uf(7, True)
             tw = self._mw(lab, f9)
-            pw = u(17) + tw + u(14)
+            pw = u(13) + tw + u(8)
             px0 = cx - pw / 2
-            py0 = py + ph9 + u(4)
-            self._rr_soft(cv, px0, py0, px0 + pw, py0 + u(18), u(9),
+            py0 = py + ph9 + u(3)
+            pph = u(14)
+            pcy = py0 + pph / 2.0          # 알약 세로 정중앙 (제보 — 내려가 있었다)
+            self._rr_soft(cv, px0, py0, px0 + pw, py0 + pph, pph / 2.0,
                           fill="#fff0f3", outline=self._tint(cd["fill"], 0.45),
                           width=1)
-            tim = self._safe_str(self._tomgauge_pic, u(14), 1.0)
+            tim = self._safe_str(self._tomgauge_pic, u(11), 1.0)
             if tim:
-                cv.create_image(px0 + u(4) + u(7), py0 + u(9), image=tim)
+                cv.create_image(px0 + u(3) + u(5.5), pcy + self.TF_TOM_DY * u(1),
+                                image=tim)
                 self._pomo_keep.append(tim)
-            cv.create_text(px0 + u(4) + u(14) + u(3) + tw / 2, py0 + u(9),
-                           text=lab, font=f9, fill=self._shade(cd["fill"], 0.15))
-            cv.create_text(cx, py0 + u(18) + u(9), text=self._note_name(slot),
-                           font=uf(8, True), fill=cd["text"])
+            cv.create_text(px0 + u(3) + u(11) + u(1.5) + tw / 2,
+                           pcy + self.TF_TXT_DY * u(1), text=lab, font=f9,
+                           fill=self._shade(cd["fill"], 0.15))
+            nm9 = self._note_name(slot)
+            fn9 = uf(7, True)
+            if self._mw(nm9, fn9) > cw - u(2):
+                fn9 = uf(6, True)
+            while len(nm9) > 1 and self._mw(nm9, fn9) > cw - u(2):
+                nm9 = nm9[:-2] + "…"
+            cv.create_text(cx, py0 + pph + u(8), text=nm9, font=fn9,
+                           fill=cd["text"])
             self._tf_boxes.append((cx - cw * 0.45, py, cx + cw * 0.45,
-                                   py0 + u(18), cx, py, slot, n))
+                                   py0 + pph, cx, py, slot, n))
         if pages > 1:
             ay = py + ph9 / 2
             for tx, ch, on, d9 in ((x_l + u(10), "‹", page > 0, -1),
@@ -22389,9 +22433,10 @@ class Mascot:
                 if on:
                     self._pomo_hits.append((tx - u(11), ay - u(14), tx + u(11),
                                             ay + u(14), ("tfpg", d9)))
-            self._gtext(cv, (x_l + x_r) / 2, gy1 + u(self.TF_ROW) - u(6),
-                           text="%d / %d" % (page + 1, pages), font=uf(7),
-                           fill=cd["sub"])
+            # 쪽 번호는 제목 줄 오른쪽 — 한 줄에 넷이면 가운데 이름과 겹친다
+            self._gtext(cv, x_r - u(4), y0, anchor="e",
+                        text="%d / %d" % (page + 1, pages), font=uf(7),
+                        fill=cd["sub"])
         return gy1 + u(self.TF_ROW)
 
     def _team_week_hover(self, cv, u, uf, W, pad):
@@ -26611,6 +26656,718 @@ class Mascot:
                                fy + math.sin(a) * r1,
                                fill=col, width=2, capstyle="round")
 
+    # ── 스톱워치 (뽀모도로 창의 두 번째 탭 · 하독 요청) ──────────────────
+    # 뽀모도로와 따로 돈다 — 탭을 바꾸거나 창을 닫아도 둘 다 계속 간다.
+    # 저장은 설정의 "sw" 한 곳: 켜짐·시작 시각(t0)·그 전까지 쌓인 초(acc)·
+    # 구간 기록(누적 초 목록)·카드에 표시할지. **시각으로 계산**하므로 껐다
+    # 켜도 이어 간다 (지뢰 11 — 메모리에만 두면 재시작에 사라진다).
+    SW_DOT = "#84bae9"           # 카드 상태 점 (스톱워치)
+    SW_LAPS_MAX = 99
+    SW_PAGE = 4                  # 구간 기록 한 쪽에 몇 줄
+    SW_BEAT = 100 if IS_WIN else 200   # 재는 동안 창 다시 그리기 (맥은 느리다 · 지뢰 174)
+
+    def _sw_gate(self):
+        return True
+
+    def _sw(self):
+        d = self.us.get("sw")
+        d = d if isinstance(d, dict) else {}
+        try:
+            acc = max(0.0, float(d.get("acc") or 0.0))
+        except (TypeError, ValueError):
+            acc = 0.0
+        try:
+            t0 = float(d.get("t0") or 0.0)
+        except (TypeError, ValueError):
+            t0 = 0.0
+        laps = []
+        for v in (d.get("laps") if isinstance(d.get("laps"), list) else []):
+            try:
+                laps.append(max(0.0, float(v)))
+            except (TypeError, ValueError):
+                pass
+        return {"on": bool(d.get("on")) and t0 > 0, "t0": t0, "acc": acc,
+                "laps": laps[-self.SW_LAPS_MAX:],
+                "card": bool(d.get("card", True))}
+
+    def _sw_save(self, st):
+        self.us["sw"] = {"on": bool(st["on"]), "t0": round(float(st["t0"]), 3),
+                         "acc": round(float(st["acc"]), 3),
+                         "laps": [round(v, 2) for v in st["laps"]][-self.SW_LAPS_MAX:],
+                         "card": bool(st.get("card", True))}
+        self._safe("settings", self._save_settings)
+
+    def _sw_elapsed(self, st=None, now=None):
+        st = st or self._sw()
+        now = time.time() if now is None else now
+        run = max(0.0, now - st["t0"]) if st["on"] else 0.0
+        return st["acc"] + run
+
+    def _sw_toggle(self):
+        st = self._sw()
+        now = time.time()
+        if st["on"]:
+            st["acc"] = self._sw_elapsed(st, now)
+            st["on"], st["t0"] = False, 0.0
+        else:
+            st["on"], st["t0"] = True, now
+        self._sw_save(st)
+        self._sw_changed()
+
+    def _sw_lap(self):
+        st = self._sw()
+        if not st["on"]:
+            return
+        st["laps"].append(self._sw_elapsed(st))
+        self._sw_page = 0
+        self._sw_save(st)
+        self._sw_changed()
+
+    def _sw_reset(self):
+        st = self._sw()
+        st.update({"on": False, "t0": 0.0, "acc": 0.0, "laps": []})
+        self._sw_page = 0
+        self._sw_save(st)
+        self._sw_changed()
+
+    def _sw_card_toggle(self):
+        st = self._sw()
+        st["card"] = not st["card"]
+        self._sw_save(st)
+        self._sw_changed()
+
+    def _sw_changed(self):
+        """카드 위 줄이 서거나 사라질 수 있다 — 카드·창을 다시 맞춘다.
+        `_relayout_card` 는 여백이 그대로면 아무것도 안 한다 (지뢰 148)."""
+        self._safe("relayout", self._relayout_card)
+        fit = getattr(self, "_pomo_fit", None)
+        if fit is not None and self._pomo_tab() == "sw":
+            self._safe("pomo_fit", fit)
+        self._pomo_redraw()
+
+    def _sw_shown(self):
+        """카드에 스톱워치를 보이는가 — '카드에 표시'가 켜져 있고, 재고
+        있거나 멈춘 채 시간이 남아 있을 때 ('처음으로'를 누르면 사라진다)."""
+        if not getattr(self, "timer_on", False):
+            return False
+        try:
+            st = self._sw()
+        except Exception:
+            return False
+        return bool(st["card"] and (st["on"] or st["acc"] > 0.05))
+
+    @staticmethod
+    def _sw_fmt(secs, tenths=False):
+        secs = max(0.0, float(secs))
+        t = int(secs)
+        h, m, sec = t // 3600, t % 3600 // 60, t % 60
+        main = ("%d:%02d:%02d" % (h, m, sec)) if h else ("%02d:%02d" % (m, sec))
+        if tenths:
+            return main, ".%d" % (int(secs * 10) % 10)
+        return main
+
+    def _sw_lap_rows(self, st=None):
+        """구간 기록 — 새것부터 (번호, 구간 길이, 누적)."""
+        st = st or self._sw()
+        out, prev = [], 0.0
+        for i, tot in enumerate(st["laps"]):
+            out.append((i + 1, max(0.0, tot - prev), tot))
+            prev = tot
+        return list(reversed(out))
+
+    def _sw_act(self, args):
+        a = args[0] if args else ""
+        if a == "toggle":
+            self._sw_toggle()
+        elif a == "lap":
+            self._sw_lap()
+        elif a == "reset":
+            self._sw_reset()
+        elif a == "card":
+            self._sw_card_toggle()
+        elif a == "chip":                 # 뽀모도로 알약 — 그 탭으로
+            self._pomo_tab_set("pomo")
+            return
+        elif a == "pg" and len(args) > 1:
+            self._sw_page = max(0, int(self._sw_page) + int(args[1]))
+        self._pomo_redraw()
+
+    def _sw_open(self):
+        """스톱워치 탭으로 뽀모도로 창을 연다 (카드 아이콘·'보여 줘')."""
+        self._feat_seen("stopwatch")
+        if self._pomo_tab() != "sw":
+            self.us["pomo_tab"] = "sw"
+            self._safe("settings", self._save_settings)
+        self._pomo_win()
+        fit = getattr(self, "_pomo_fit", None)
+        if fit is not None:
+            self._safe("pomo_fit", fit)
+        self._pomo_redraw()
+
+    def _sw_base_h(self):
+        """스톱워치 탭 내용 높이 (배율 1 눈금) — _sw_draw 의 자리와 같은 수."""
+        n = len(self._sw()["laps"])
+        k = min(n, self.SW_PAGE)
+        y0l = 64 + 24 + 76 * 2 + 16 + 12 + 40 + 22 + 14
+        return y0l + (k * 30 + 8 if k else 40) + 30
+
+    def _sw_cache_put(self, key, im):
+        c = self._sw_img_cache
+        if len(c) > 160:                          # 지뢰 18 — 오래된 절반만
+            for k in list(c)[:80]:
+                c.pop(k, None)
+        c[key] = im
+
+    def _sw_ph(self, key, make):
+        """그림을 PhotoImage 로 (캐시). make 는 캐시가 없을 때만 부른다."""
+        k = ("ph",) + tuple(key)
+        got = self._sw_img_cache.get(k)
+        if got is None:
+            pil = make()
+            if pil is None:
+                return None
+            got = self._tkimg(pil)
+            self._sw_cache_put(k, got)
+        return got
+
+    def _sw_icon_pil(self, px, col, face="#ffffff", deg=40.0, ticks=True):
+        """스톱워치 아이콘 (RGBA · px 정사각) — 꼭지·옆 단추·몸통·초침."""
+        px = max(10, int(px))
+        deg = (int(deg) // 6) * 6
+        key = ("icon", px, str(col), str(face), deg, bool(ticks))
+        got = self._sw_img_cache.get(key)
+        if got is not None:
+            return got
+        S = 4
+        n = px * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        cx, cy, r = n / 2.0, n * 0.58, n * 0.34
+        d.rounded_rectangle([cx - r * 0.36, cy - r * 1.46, cx + r * 0.36,
+                             cy - r * 1.12], radius=int(r * 0.14), fill=col)
+        d.rectangle([cx - r * 0.13, cy - r * 1.16, cx + r * 0.13, cy - r * 0.9],
+                    fill=col)
+        for sgn in (1, -1):
+            a = math.radians(-90 + sgn * 45)
+            bx, by, br = (cx + math.cos(a) * r * 1.1, cy + math.sin(a) * r * 1.1,
+                          r * 0.17)
+            d.ellipse([bx - br, by - br, bx + br, by + br], fill=col)
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=face or None,
+                  outline=col, width=max(S, int(r * 0.17)))
+        if ticks:
+            for k in range(4):
+                a = math.radians(k * 90)
+                tx, ty, tr = (cx + math.cos(a) * r * 0.64,
+                              cy + math.sin(a) * r * 0.64, r * 0.075)
+                d.ellipse([tx - tr, ty - tr, tx + tr, ty + tr], fill=col)
+        a = math.radians(-90 + deg)
+        hw = max(S, int(r * 0.16))
+        d.line([cx, cy, cx + math.cos(a) * r * 0.6, cy + math.sin(a) * r * 0.6],
+               fill=col, width=hw)
+        d.ellipse([cx - hw * 0.8, cy - hw * 0.8, cx + hw * 0.8, cy + hw * 0.8],
+                  fill=col)
+        got = im.resize((px, px), Image.LANCZOS)
+        self._sw_cache_put(key, got)
+        return got
+
+    def _tab_tomato_pil(self, px, col, bg):
+        """탭의 토마토 — 동그란 몸통 + 꼭지 잎 셋 (잎 둘레를 바탕색으로 가른다)."""
+        px = max(10, int(px))
+        key = ("tom", px, str(col), str(bg))
+        got = self._sw_img_cache.get(key)
+        if got is not None:
+            return got
+        S = 4
+        n = px * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        cx, cy, r = n / 2.0, n * 0.58, n * 0.36
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
+        ow = max(S, int(r * 0.14))
+        for ang in (-150, -90, -30):
+            a = math.radians(ang)
+            lx, ly, lr = (cx + math.cos(a) * r * 0.42,
+                          cy - r * 0.68 + math.sin(a) * r * 0.24, r * 0.3)
+            d.ellipse([lx - lr, ly - lr, lx + lr, ly + lr], fill=col,
+                      outline=bg, width=ow)
+        d.ellipse([cx - r * 0.2, cy - r * 0.98, cx + r * 0.2, cy - r * 0.58],
+                  fill=col, outline=bg, width=ow)
+        d.line([cx, cy - r * 0.9, cx + r * 0.2, cy - r * 1.3], fill=col,
+               width=max(S, int(r * 0.16)))
+        got = im.resize((px, px), Image.LANCZOS)
+        self._sw_cache_put(key, got)
+        return got
+
+    def _pie_icon(self, cv, cx, cy, r, col):
+        """'오늘' 집중 배지의 시계 — 글자(◔)는 원 안에서 한쪽으로 쏠려
+        그림으로 그린다 (제보). 원 한가운데에 정확히 선다."""
+        d9 = max(8, int(round(r * 2)))
+        ph = self._sw_ph(("pie", d9, str(col)), lambda: self._pie_pil(d9, col))
+        if ph is not None:
+            cv.create_image(cx, cy, image=ph)
+            self._pomo_keep.append(ph)
+
+    def _pie_pil(self, d9, col):
+        S = 4
+        n = d9 * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        w = max(S, int(n * 0.11))
+        d.ellipse([0, 0, n - 1, n - 1], outline=col, width=w)
+        ins = n * 0.24
+        d.pieslice([ins, ins, n - 1 - ins, n - 1 - ins], -90, 0, fill=col)
+        return im.resize((d9, d9), Image.LANCZOS)
+
+    def _sw_dial_pil(self, D, R, step, fill, track, tick, tip=True):
+        """스톱워치 다이얼 한 장 — 눈금·테·진행 호·꼭지·옆 단추 (3배로 그려 줄임).
+        호는 1초 단위라 캐시가 한 바퀴 60장을 넘지 않는다 (지뢰 42)."""
+        key = ("dial", int(D), int(R), int(step), str(fill), str(track),
+               str(tick), bool(tip))
+        got = self._sw_img_cache.get(key)
+        if got is not None:
+            return got
+        S = 3
+        n = int(D) * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        c = n / 2.0
+        r = R * S
+        wr = max(2 * S, R * S * 0.15)
+        for k in range(60):
+            a = math.radians(-90 + 6 * k)
+            rad = r - wr - R * S * 0.1
+            tr = R * S * (0.024 if k % 5 == 0 else 0.013)
+            x, y = c + math.cos(a) * rad, c + math.sin(a) * rad
+            d.ellipse([x - tr, y - tr, x + tr, y + tr], fill=tick)
+        kw, kh = R * S * 0.2, R * S * 0.12
+        top = c - r
+        d.rectangle([c - kw * 0.3, top - kh * 1.1, c + kw * 0.3, top + wr * 0.4],
+                    fill=fill)
+        d.rounded_rectangle([c - kw, top - kh * 2.1, c + kw, top - kh * 0.9],
+                            radius=int(kh * 0.5), fill=fill)
+        for sgn in (1, -1):
+            a = math.radians(-90 + sgn * 42)
+            x = c + math.cos(a) * (r + R * S * 0.1)
+            y = c + math.sin(a) * (r + R * S * 0.1)
+            b9 = R * S * 0.075
+            d.ellipse([x - b9, y - b9, x + b9, y + b9], fill=fill)
+        box = [c - r, c - r, c + r, c + r]
+        d.ellipse(box, outline=track, width=int(wr))
+        if step > 0:
+            d.arc(box, start=-90, end=-90 + 6 * int(step), fill=fill,
+                  width=int(wr))
+        if tip:
+            a = math.radians(-90 + 6 * int(step))
+            rr9 = r - wr / 2.0
+            x, y = c + math.cos(a) * rr9, c + math.sin(a) * rr9
+            tr = wr * 0.72
+            d.ellipse([x - tr, y - tr, x + tr, y + tr], fill="#ffffff",
+                      outline=fill, width=max(S, int(wr * 0.26)))
+        got = im.resize((int(D), int(D)), Image.LANCZOS)
+        self._sw_cache_put(key, got)
+        return got
+
+    def _draw_sw_top(self, now):
+        """카드 위 줄의 스톱워치 아이콘 — 초침이 흐른 초를 따라 돈다."""
+        if not self._sw_shown():
+            return
+        g = self._card_geom()
+        xs = self._top_row_x()
+        bx = xs.get("sw", (g["x0"] + g["x1"]) / 2.0)
+        by = self._top_row_y("sw")
+        st = self._sw()
+        el = self._sw_elapsed(st, now)
+        deg = int(el % 60.0) * 6
+        col = (self._shade(self.card["fill"], 0.15) if st["on"]
+               else self.card["sub"])
+        px = 30
+        key = ("swtop", px, deg, str(col), str(self.canvas_bg))
+
+        def make():
+            pil = self._sw_icon_pil(px, col, "#ffffff", deg)
+            key2 = tuple(int(str(self.canvas_bg)[i:i + 2], 16) for i in (1, 3, 5))
+            return (flat_on_key(pil, key2), pil)
+
+        got = self._sw_img_cache.get(("ph",) + key)
+        if got is None:
+            flat, pil = make()
+            got = self._tkimg(flat, soft=pil)      # 매끈 경로가 원본을 찾게 (지뢰 128)
+            self._sw_cache_put(("ph",) + key, got)
+        self.canvas.create_image(bx, by, image=got)
+        self._sw_badge = (bx, by, 14)
+
+    def _sw_card_lap(self, x0, x1, y, hole=False):
+        """카드 아래 줄 — 구간 기록이 있으면 게이지 대신 '구간 3 · 방금 +01:10'."""
+        if self._pomo_running() or not self._sw_shown():
+            return False
+        st = self._sw()
+        if not st["laps"]:
+            return False
+        n, dur, _tot = self._sw_lap_rows(st)[0]
+        txt = "구간 %d · 방금 +%s" % (n, self._sw_fmt(dur))
+        f = self._fit(txt, 8, (x1 - x0) - 4, True)
+        self._gtext(self.canvas, x0, y + INK_DY, anchor="w", text=txt, font=f,
+                    fill=self.card["sub"], on_glass=hole)
+        return True
+
+    # ── 뽀모도로 창의 탭·메뉴 단추 ─────────────────────────────────────────
+    def _pomo_tab(self):
+        return "sw" if self.us.get("pomo_tab") == "sw" else "pomo"
+
+    def _pomo_tab_set(self, tab):
+        tab = "sw" if tab == "sw" else "pomo"
+        if tab == "sw":
+            self._feat_seen("stopwatch")
+        if self._pomo_tab() == tab:
+            return
+        self.us["pomo_tab"] = tab
+        self._pomo_menu = False
+        self._safe("settings", self._save_settings)
+        fit = getattr(self, "_pomo_fit", None)
+        if fit is not None:
+            self._safe("pomo_fit", fit)
+        self._pomo_redraw()
+
+    def _pomo_tab_tips(self):
+        return [(h[0], h[1], h[2], h[3],
+                 "뽀모도로" if h[4] == "pomo" else "스톱워치")
+                for h in (getattr(self, "_pomo_tab_hits", None) or [])]
+
+    def _pomo_menu_click(self):
+        """메뉴 단추(≡) — 같이하기가 있는 판은 작은 메뉴, 없으면 꾸미기 창."""
+        if self._team_gate():
+            self._pomo_menu = not getattr(self, "_pomo_menu", False)
+            self._pomo_redraw()
+        else:
+            self._safe("stk_win", self._stk_win, "pomo")
+
+    def _pomo_burger_draw(self, cv, cx, cy, r):
+        """위 띠 왼쪽 끝의 메뉴 단추 — – □ × 와 같은 크기·같은 바탕 (요청)."""
+        cd = self.card
+        on = (bool(getattr(self, "_pomo_menu", False))
+              or getattr(self, "_stk_edit", None) == "pomo")
+        self._soft_dot(cv, cx, cy, r, cd["fill"] if on else cd["track"],
+                       tags="dyn")
+        col = "#ffffff" if on else cd["fill"]
+        lw = max(1, int(self._ui(1.4)))
+        for k in (-0.4, 0.0, 0.4):
+            cv.create_line(cx - r * 0.45, cy + r * k, cx + r * 0.45, cy + r * k,
+                           fill=col, width=lw, capstyle="round", tags="dyn")
+        self._pomo_burger_box = (cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3)
+        if (self._feat_new("pomo_vol") and self._team_gate() and not on):
+            self._feat_dot(cv, cx + r * 0.85, cy - r * 0.85, r=self._ui(2.6))
+
+    def _pomo_burger_press(self, e):
+        b = getattr(self, "_pomo_burger_box", None)
+        if not (b and b[0] <= e.x <= b[2] and b[1] <= e.y <= b[3]):
+            return False
+        self._safe("ui_click", self._ui_click)
+        self._pomo_menu_click()
+        return True
+
+    def _pomo_tabs_draw(self, cv, u, uf, W, line):
+        """왼쪽 위 탭 — [토마토 | 스톱워치] (아이폰 시계 앱처럼 · 요청).
+        안 보이는 쪽이 돌고 있으면 그 칸에 초록 점."""
+        cd = self.card
+        tab = self._pomo_tab()
+        keep = self._pomo_keep
+        x0 = u(12)
+        self._pomo_stk_btn = None
+        cy = u(26)
+        if getattr(self, "_pomo_bar", None) is None:
+            # 위 띠가 없는 창(맥) — 메뉴 단추를 탭 왼쪽에 둔다
+            br = u(13)
+            bx = u(24)
+            on = (bool(getattr(self, "_pomo_menu", False))
+                  or getattr(self, "_stk_edit", None) == "pomo")
+            self._safe("soft_btn", self._soft_dot, cv, bx, cy, br,
+                       cd["fill"] if on else "#ffffff", outline=line, width=1,
+                       shadow=True)
+            for k in (-4.0, 0.0, 4.0):
+                cv.create_line(bx - u(5.5), cy + u(k), bx + u(5.5), cy + u(k),
+                               fill="#ffffff" if on else cd["sub"],
+                               width=max(1, int(u(1.6))), capstyle="round")
+            self._pomo_stk_btn = (bx - br - u(3), cy - br - u(3),
+                                  bx + br + u(3), cy + br + u(3))
+            if (self._feat_new("pomo_vol") and self._team_gate() and not on):
+                self._feat_dot(cv, bx + br - u(1), cy - br + u(1))
+            x0 = u(44)
+        h, w = u(26), u(62)
+        y0, y1 = cy - h / 2.0, cy + h / 2.0
+        self._rr_soft(cv, x0, y0, x0 + w, y1, h / 2.0, fill="#ffffff",
+                      outline=line, width=1)
+        half = w / 2.0
+        self._pomo_tab_hits = []
+        run = {"pomo": self._pomo_running(), "sw": self._sw()["on"]}
+        for i, kind in enumerate(("pomo", "sw")):
+            hx0 = x0 + i * half
+            on = (kind == tab)
+            cx = hx0 + half / 2.0
+            if on:
+                self._rr_soft(cv, hx0 + u(2.5), y0 + u(2.5), hx0 + half - u(2.5),
+                              y1 - u(2.5), (h - u(5)) / 2.0, fill=cd["fill"],
+                              outline="", width=0)
+            col = "#ffffff" if on else cd["sub"]
+            bg = cd["fill"] if on else "#ffffff"
+            ipx = int(u(16))
+            if kind == "pomo":
+                ph = self._sw_ph(("tabtom", ipx, col, bg),
+                                 lambda: self._tab_tomato_pil(ipx, col, bg))
+            else:
+                ph = self._sw_ph(("tabsw", ipx, col, bg),
+                                 lambda: self._sw_icon_pil(ipx, col, bg, 42,
+                                                           ticks=False))
+            if ph is not None:
+                cv.create_image(cx, cy, image=ph)
+                keep.append(ph)
+            if not on and run[kind]:
+                self._safe("soft_btn", self._soft_dot, cv, hx0 + half - u(5),
+                           y0 + u(5), u(3.6), "#6fc4a6", outline="#ffffff",
+                           width=1.2)
+            elif kind == "sw" and not on and self._feat_new("stopwatch"):
+                self._feat_dot(cv, hx0 + half - u(5), y0 + u(5))
+            if kind == "sw" and self._feat_spot_on("pomo_sw"):
+                self._feat_ring(cv, hx0, y0, hx0 + half, y1, h / 2.0)
+            self._pomo_tab_hits.append((hx0, y0 - u(4), hx0 + half, y1 + u(4),
+                                        kind))
+
+    def _pomo_menu_draw(self, cv, u, uf, line):
+        """메뉴 단추(≡) 아래의 작은 메뉴 — 꾸미기 / 시간 조절 / 소리 조절."""
+        self._pomo_menu_hits = []
+        if not (self._team_gate() and getattr(self, "_pomo_menu", False)):
+            return
+        cd = self.card
+        mw9, mh9 = u(104), u(30)
+        if getattr(self, "_pomo_bar", None) is None:
+            mx9, my9 = u(16), u(46)          # 맥 — 캔버스의 메뉴 단추 아래
+        else:
+            mx9, my9 = u(8), u(4)            # 위 띠의 메뉴 단추 바로 아래
+        items = [("스티커 꾸미기", "stk")]
+        if self._pomo_tab() != "sw":         # 시간 조절은 뽀모도로 것
+            items.append(("시간 조절", "len"))
+        items.append(("소리 조절", "vol"))
+        for i9, (lab9, act9) in enumerate(items):
+            y9 = my9 + i9 * (mh9 + u(4))
+            self._rr_soft(cv, mx9, y9, mx9 + mw9, y9 + mh9, u(12),
+                          fill="#ffffff", outline=line, width=1)
+            cv.create_text(mx9 + u(12), y9 + mh9 / 2, anchor="w",
+                           text=lab9, font=uf(9, True), fill=cd["text"])
+            self._pomo_menu_hits.append((mx9, y9, mx9 + mw9, y9 + mh9, act9))
+            if act9 == "vol":
+                if self._feat_new("pomo_vol"):      # 새로움 점
+                    self._feat_dot(cv, mx9 + mw9 - u(9), y9 + u(8))
+                if self._feat_spot_on("pomo_vol"):  # '보여 줘' 테두리
+                    self._feat_ring(cv, mx9, y9, mx9 + mw9, y9 + mh9, u(12))
+
+    def _sw_draw(self, cv, u, uf, W, pad, line, stk=None):
+        """스톱워치 탭 본문 (요청 · 목업 3)."""
+        cd = self.card
+        st = self._sw()
+        now = time.time()
+        el = self._sw_elapsed(st, now)
+        run = st["on"]
+        keep = self._pomo_keep
+        cv.create_text(W / 2, u(26), text="스톱워치", font=uf(13, True),
+                       fill=cd["text"])
+        # 오른쪽 위 — 카드에 표시 (켜 두면 바탕화면 카드 위 줄에도)
+        br = u(13)
+        tx8 = W - u(24)
+        on9 = bool(st["card"])
+        self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
+                   cd["fill"] if on9 else "#ffffff", outline=line, width=1,
+                   shadow=True)
+        ipx = int(u(18))
+        c9, f9 = ("#ffffff", cd["fill"]) if on9 else (cd["sub"], "#ffffff")
+        ph = self._sw_ph(("cardbtn", ipx, c9, f9),
+                         lambda: self._sw_icon_pil(ipx, c9, f9, 40, ticks=False))
+        if ph is not None:
+            cv.create_image(tx8, u(26), image=ph)
+            keep.append(ph)
+        self._gtext(cv, tx8, u(47), text="카드에 표시", font=uf(6, True),
+                    fill=cd["sub"])
+        bx9 = (tx8 - br - u(3), u(26) - br - u(3), tx8 + br + u(3),
+               u(26) + br + u(3))
+        self._pomo_hits.append(bx9 + (("sw", "card"),))
+        self._pomo_tips.append(bx9 + ("카드에 표시 " + ("켜짐" if on9 else "꺼짐"),))
+        # 뒤에서 도는 뽀모도로 — 눌러서 넘어가는 알약 (요청: 안 끊긴다)
+        if self._pomo_running():
+            po = self._pomo()
+            left = int(self._pomo_left(po))
+            txt = "%s %d:%02d · 뽀모도로 도는 중" % (
+                self.POMO_NAME.get(po["phase"], "집중"), left // 60, left % 60)
+            f = uf(8, True)
+            cw9 = self._mw(txt, f) + u(30)
+            x0c, y0c, y1c = W / 2 - cw9 / 2, u(40), u(57)
+            self._rr_soft(cv, x0c, y0c, x0c + cw9, y1c, u(8.5), fill="#e1f5ed",
+                          outline="", width=0)
+            tpx = int(u(12))
+            ph = self._sw_ph(("chiptom", tpx),
+                             lambda: self._tab_tomato_pil(tpx, "#6fc4a6", "#e1f5ed"))
+            if ph is not None:
+                cv.create_image(x0c + u(11), (y0c + y1c) / 2, image=ph)
+                keep.append(ph)
+            cv.create_text(x0c + u(20), (y0c + y1c) / 2, anchor="w", text=txt,
+                           font=f, fill="#4a9c80")
+            self._pomo_hits.append((x0c, y0c, x0c + cw9, y1c, ("sw", "chip")))
+        # 큰 카드 + 다이얼
+        cy0 = u(64)
+        R = u(76)
+        cy = cy0 + u(24) + R
+        cy1 = cy + R + u(16)
+        self._rr_soft(cv, pad, cy0, W - pad, cy1, u(18), fill="#ffffff",
+                      outline=line, width=1)
+        step = int(el % 60.0) if el > 0 else 0
+        fill9 = cd["fill"] if run else self._tint(cd["fill"], 0.35)
+        track9 = self._tint(cd["fill"], 0.82)
+        D = int(R * 2.6) + 2
+        R9 = int(R)
+        ph = self._sw_ph(("dial", D, R9, step, fill9, track9, el > 0),
+                         lambda: self._sw_dial_pil(D, R9, step, fill9, track9,
+                                                   "#ebe0ee", tip=el > 0))
+        if ph is not None:
+            cv.create_image(W / 2, cy, image=ph)
+            keep.append(ph)
+        main, frac = self._sw_fmt(el, tenths=True)
+        inner = (R - u(20)) * 2
+        size = 30
+        fm, ff = uf(size, True), uf(15, True)
+        while size > 14:
+            fm, ff = uf(size, True), uf(max(8, size // 2), True)
+            if self._mw(main, fm) + self._mw(frac, ff) <= inner:
+                break
+            size -= 2
+        wm, wf = self._mw(main, fm), self._mw(frac, ff)
+        xs = W / 2 - (wm + wf) / 2
+        ty = cy + u(6)
+        hm, hf = self._mh(fm), self._mh(ff)
+        cv.create_text(xs, ty, anchor="sw", text=main, font=fm, fill=cd["text"])
+        cv.create_text(xs + wm, ty - (hm - hf) * 0.2, anchor="sw", text=frac,
+                       font=ff, fill=cd["sub"])
+        if run:
+            lab, bg, ink = ("재는 중", self._tint(cd["fill"], 0.8),
+                            self._shade(cd["fill"], 0.25))
+        elif el > 0:
+            lab, bg, ink = "멈춤", "#f2edf4", cd["sub"]
+        else:
+            lab, bg, ink = "준비", "#f2edf4", cd["sub"]
+        fp = uf(8, True)
+        pw9 = self._mw(lab, fp) + u(20)
+        py0, py1 = cy + u(14), cy + u(30)
+        self._rr_soft(cv, W / 2 - pw9 / 2, py0, W / 2 + pw9 / 2, py1, u(8),
+                      fill=bg, outline="", width=0)
+        cv.create_text(W / 2, (py0 + py1) / 2 - u(0.5), text=lab, font=fp,
+                       fill=ink)
+        if el > 0:
+            lapc = el - (st["laps"][-1] if st["laps"] else 0.0)
+            m9, f8 = self._sw_fmt(lapc, tenths=True)
+            # '이번 구간'은 알약 바로 아래로 올렸다 (요청). 원 안의 눈금에
+            # 안 걸리게 한 단계 작게 (찍어서 확인).
+            self._gtext(cv, W / 2, cy + u(37), text="이번 구간 +%s%s" % (m9, f8),
+                        font=uf(7, True), fill=cd["sub"])
+        if stk is not None:
+            stk()
+        # 단추 셋 (뽀모도로와 같은 자리·크기)
+        by0 = cy1 + u(12)
+        by1 = by0 + u(40)
+        rows = [(("멈춤" if run else ("계속" if el > 0 else "시작")), "toggle",
+                 True, True),
+                ("구간 기록", "lap", run, False),
+                ("처음으로", "reset", el > 0, False)]
+        bw = (W - pad * 2 - u(8) * 2) / 3.0
+        for i, (lab, act, en, main_b) in enumerate(rows):
+            x0 = pad + i * (bw + u(8))
+            x1 = x0 + bw
+            if main_b:
+                fl, ol, wd, ik = cd["fill"], "", 0, "#ffffff"
+            elif en:
+                fl, ol, wd, ik = "#f2edf4", line, 1, cd["text"]
+            else:
+                fl, ol, wd, ik = "#f7f5f8", line, 1, "#c9c3ce"
+            self._rr_soft(cv, x0, by0, x1, by1, u(13), fill=fl, outline=ol,
+                          width=wd)
+            fb9 = uf(9, main_b)
+            for s9 in range(9, 5, -1):
+                fb9 = uf(s9, main_b)
+                if self._mw(lab, fb9) <= (x1 - x0) - u(10):
+                    break
+            cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab, font=fb9,
+                           fill=ik)
+            if en:
+                self._pomo_hits.append((x0, by0, x1, by1, ("sw", act)))
+        # 구간 기록
+        n = len(st["laps"])
+        ly = by1 + u(22)
+        f_h = uf(9, True)
+        self._gtext(cv, W / 2, ly, text="구간 기록", font=f_h, fill=cd["sub"])
+        if n:
+            cxn = W / 2 + self._mw("구간 기록", f_h) / 2 + u(13)
+            self._safe("soft_btn", self._soft_dot, cv, cxn, ly, u(8),
+                       self._tint(cd["fill"], 0.8))
+            cv.create_text(cxn, ly, text=str(n), font=uf(7, True),
+                           fill=self._shade(cd["fill"], 0.25))
+        per = self.SW_PAGE
+        pages = max(1, int(math.ceil(n / float(per))))
+        self._sw_page = max(0, min(pages - 1, int(self._sw_page or 0)))
+        pg = self._sw_page
+        if pages > 1:
+            for tx9, ch9, on9b, d9 in ((pad + u(8), "‹", pg > 0, -1),
+                                       (W - pad - u(8), "›", pg < pages - 1, 1)):
+                cv.create_text(tx9, ly, text=ch9, font=uf(12, True),
+                               fill=cd["text"] if on9b else "#d8d2dc")
+                if on9b:
+                    self._pomo_hits.append((tx9 - u(10), ly - u(11), tx9 + u(10),
+                                            ly + u(11), ("sw", "pg", d9)))
+        y0l = ly + u(14)
+        k = min(n, per)
+        y1l = y0l + (k * u(30) + u(8) if k else u(40))
+        self._rr_soft(cv, pad, y0l, W - pad, y1l, u(14), fill="#ffffff",
+                      outline=line, width=1)
+        if not n:
+            self._gtext(cv, W / 2, (y0l + y1l) / 2,
+                        text="재는 중에 '구간 기록'을 누르면 여기에 쌓여요",
+                        font=uf(8), fill=cd["sub"])
+        rows_all = self._sw_lap_rows(st)
+        fast = slow = None
+        if n >= 2:
+            durs = [(dur, num) for num, dur, _t in rows_all]
+            if max(durs)[0] - min(durs)[0] > 0.05:
+                fast, slow = min(durs)[1], max(durs)[1]
+        page_rows = rows_all[pg * per:(pg + 1) * per]
+        for j, (num, dur, tot) in enumerate(page_rows):
+            ry = y0l + u(4) + u(30) * (j + 0.5)
+            self._safe("soft_btn", self._soft_dot, cv, pad + u(18), ry, u(9),
+                       self._tint(cd["fill"], 0.82))
+            cv.create_text(pad + u(18), ry, text=str(num),
+                           font=uf(8 if num < 10 else 7, True),
+                           fill=self._shade(cd["fill"], 0.25))
+            m9, f8 = self._sw_fmt(dur, tenths=True)
+            fl9 = uf(10, True)
+            lap = "+%s%s" % (m9, f8)
+            cv.create_text(pad + u(34), ry, anchor="w", text=lap, font=fl9,
+                           fill=cd["text"])
+            tag = None
+            if num == fast:
+                tag = ("가장 빨라요", "#e1f5ed", "#4a9c80")
+            elif num == slow:
+                tag = ("가장 길어요", self._tint(cd["fill"], 0.82),
+                       self._shade(cd["fill"], 0.25))
+            if tag:
+                ft = uf(7, True)
+                tx0 = pad + u(34) + self._mw(lap, fl9) + u(6)
+                tww = self._mw(tag[0], ft) + u(12)
+                self._rr_soft(cv, tx0, ry - u(8), tx0 + tww, ry + u(8), u(8),
+                              fill=tag[1], outline="", width=0)
+                cv.create_text(tx0 + tww / 2, ry - u(0.5), text=tag[0], font=ft,
+                               fill=tag[2])
+            m8, f7 = self._sw_fmt(tot, tenths=True)
+            cv.create_text(W - pad - u(12), ry, anchor="e", text=m8 + f7,
+                           font=uf(9, True), fill=cd["sub"])
+            if j < len(page_rows) - 1:
+                cv.create_line(pad + u(12), ry + u(15), W - pad - u(12),
+                               ry + u(15), fill="#f1e6ee", dash=(3, 3))
+        self._gtext(cv, W / 2, y1l + u(16), text="창을 닫아도 둘 다 계속 돌아가요",
+                    font=uf(8), fill=cd["sub"])
+
     def _pomo_redraw(self):
         got = getattr(self, "_pomo_draw", None)
         if got is not None:
@@ -26729,7 +27486,7 @@ class Mascot:
          "say": "플레이리스트의 목록 단추를 우클릭하면 이름을 바꾸고 친구들이 들을 대표 목록을 정할 수 있어요",
          "open": "bgm_set", "gate": "_yt_on"},
         {"id": "pomo_vol", "label": "뽀모도로 소리 조절",
-         "say": "뽀모도로 창 ✿ 메뉴에 '소리 조절'이 생겼어요 — 알림음마다 크기를 맞춰요",
+         "say": "뽀모도로 창 맨 위 메뉴 단추에 '소리 조절'이 있어요 — 알림음마다 크기를 맞춰요",
          "open": "pomo_vol", "gate": "_team_gate"},
         {"id": "pl_stop", "label": "플레이리스트 정지",
          "say": "플레이리스트에 정지(■) 단추가 생겼어요 — 재생기를 끄고 위 재생 줄도 접어요",
@@ -26737,6 +27494,9 @@ class Mascot:
         {"id": "team_bye", "label": "같이하기 퇴장 인사",
          "say": "같이하기 중에 앱을 끄면 이제 친구들에게 퇴장 인사가 나가요",
          "open": None, "gate": "_team_gate"},
+        {"id": "stopwatch", "label": "스톱워치",
+         "say": "뽀모도로 창 왼쪽 위 탭을 누르면 스톱워치로 바뀌어요 — 뽀모도로는 그대로 계속 돌아요",
+         "open": "pomo_sw", "gate": "_sw_gate"},
     )
     FEAT_FIRST = 12.0            # 켜고 이만큼 지나면 첫 안내
     FEAT_GAP = 10 * 60.0         # 앞 안내를 그냥 흘려보냈으면 다음까지 이만큼
@@ -26859,6 +27619,8 @@ class Mascot:
             self._safe("pomo_win", self._pomo_win)
             self._pomo_menu = True
             self._pomo_redraw()
+        elif op == "pomo_sw":
+            self._safe("sw_open", self._sw_open)
         elif op in ("bgm_stop", "bgm_friends", "bgm_video", "bgm_set"):
             self._safe("bgm_win", self._bgm_win, "pl")
             st9 = getattr(self, "_bgm_st", None)
@@ -26933,6 +27695,8 @@ class Mascot:
 
         def base_h():
             """지금 구성의 내용 높이 (배율 1 기준 눈금)."""
+            if self._pomo_tab() == "sw":
+                return self._sw_base_h()
             ty1 = 186 + (100 if self.us.get("pomo_edit") else 20)
             wk = 0
             if self.cfg.get("pomo_stats", True):   # '이번 주' (기본 켜짐)
@@ -26970,15 +27734,24 @@ class Mascot:
                        highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True)
         self._chrome_setup(win, cv, band=lambda: 0, on_close=win.destroy)
+        self._pomo_bar = bar
+        self._pomo_bar_draw = None
         if bar is not None:
             def bar_draw(_e=None):
                 bar.delete("all")
                 self._chrome_draw(win, bar, bar.winfo_width() - self._ui(20),
                                   BARH / 2.0 + self._ui(2), dir=-1,
                                   r=self._ui(6.5))
+                # 메뉴 단추(≡) — – □ × 와 같은 크기로 띠 왼쪽 끝 (요청 —
+                # 탭·꽃 단추·제목이 한 줄에 붙어 못생겼다)
+                self._safe("pomo_burger", self._pomo_burger_draw, bar,
+                           self._ui(20), BARH / 2.0 + self._ui(2),
+                           self._ui(6.5))
+            self._pomo_bar_draw = bar_draw
             bar.bind("<Configure>", bar_draw)
             bar.bind("<Button-1>", lambda e: self._safe(
                 "pomo_bar", lambda: (self._chrome_press(win, e)
+                                     or self._pomo_burger_press(e)
                                      or self._chrome_press_band(win, e))))
             bar.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
             bar.bind("<ButtonRelease-1>", lambda _e: self._chrome_release(win))
@@ -27042,6 +27815,29 @@ class Mascot:
             self._pomo_ox = max(0.0, (max(W, cv.winfo_width()) - W) / 2.0)
             cv.delete("all")
             self._pomo_keep = []           # 이번 프레임 그림만 붙든다 (지뢰 18)
+            if self._pomo_tab() == "sw":
+                # 스톱워치 탭 (요청) — 뽀모도로는 그리지만 않을 뿐 계속 돈다
+                self._pomo_hits = []
+                self._pomo_stk_btn = self._pomo_time_btn = None
+                self._pomo_inv_btn = self._pomo_hard_btn = None
+                self._tf_boxes = []
+                self._pomo_tips = []
+                try:
+                    self._stk_hit["pomo"] = []
+                except Exception:
+                    pass
+                self._safe("sw_draw", self._sw_draw, cv, u, uf, W, pad, line,
+                           lambda: self._safe("stk_pomo", self._stk_draw, cv,
+                                              "pomo", W, H))
+                self._safe("pomo_tabs", self._pomo_tabs_draw, cv, u, uf, W,
+                           line)
+                self._pomo_tips += self._pomo_tab_tips()
+                self._safe("pomo_menu", self._pomo_menu_draw, cv, u, uf, line)
+                if self._pomo_ox > 0.5:
+                    cv.move("all", self._pomo_ox, 0)
+                if self._pomo_bar_draw is not None:
+                    self._safe("pomo_bar", self._pomo_bar_draw)
+                return
             st = self._pomo()
             left = self._pomo_left(st)
             ph = st["phase"]
@@ -27216,6 +28012,9 @@ class Mascot:
                            fill=bg8 if on8 else "#f1eef3", outline="")
                 if lab8 == "하드":       # 불꽃은 그림으로 (BMP 밖 금지)
                     self._flame_icon(cv, cx8, cy8, r8 * 1.5, lit=on8)
+                elif lab8 == "집중":     # 시계도 그림으로 — 글자는 쏠렸다 (제보)
+                    self._safe("pie_icon", self._pie_icon, cv, cx8, cy8,
+                               r8 * 0.58, ink8 if on8 else "#c9c3ce")
                 else:
                     cv.create_text(cx8, cy8 + u(1), text=ic8,
                                    font=uf(9, True),
@@ -27380,22 +28179,11 @@ class Mascot:
             if self._tm and time.time() - self._tm_fx < 3.2:
                 self._safe("team_fx", self._team_fx_draw, cv, u, W, H,
                            time.time() - self._tm_fx)
-            # 꾸미기(스티커)는 **왼쪽 위**, 시간 조절은 **오른쪽 위**
-            # (요청 — 제목 양옆)
+            # 왼쪽 위는 뽀모도로 ↔ 스톱워치 탭 (요청). 꾸미기·시간·소리 메뉴는
+            # 위 띠 왼쪽 끝의 메뉴 단추(≡)로 옮겼다 — 아이콘 셋이 붙어 못생겼다.
+            # 시간 조절은 **오른쪽 위**.
             br = u(13)
-            sx8 = u(24)
-            on_stk = (self._stk_edit == "pomo")
-            self._safe("soft_btn", self._soft_dot, cv, sx8, u(26), br,
-                       cd["fill"] if on_stk else "#ffffff",
-                       outline=line, width=1, shadow=True)
-            cv.create_text(sx8, u(26), text="✿", font=uf(10, True),
-                           fill="#ffffff" if on_stk else cd["sub"])
-            self._pomo_stk_btn = (sx8 - br - u(3), u(26) - br - u(3),
-                                  sx8 + br + u(3), u(26) + br + u(3))
-            # 새로움 점 — 메뉴 안에 안 눌러 본 새 기능이 있으면 ✿ 에 (닫혀 있을 때)
-            if (self._feat_new("pomo_vol") and self._team_gate()
-                    and not getattr(self, "_pomo_menu", False)):
-                self._feat_dot(cv, sx8 + br - u(1), u(26) - br + u(1))
+            self._safe("pomo_tabs", self._pomo_tabs_draw, cv, u, uf, W, line)
             tx8 = W - u(24)
             self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
                        cd["fill"] if edit9 else "#ffffff",
@@ -27428,7 +28216,7 @@ class Mascot:
                 self._pomo_inv_btn = (tx8 - br - u(3), u(26) - br - u(3),
                                       tx8 + br + u(3), u(26) + br + u(3))
                 self._pomo_time_btn = None
-            # ✿ 안의 작은 메뉴 — 꾸미기 / 시간 조절 (요청)
+            # 이름표 — 시간 조절·초대·탭 (메뉴 단추는 위 띠에 있다)
             self._pomo_tips = [b for b in (
                 (self._pomo_stk_btn + ("스티커 · 시간 · 소리",))
                 if getattr(self, "_pomo_stk_btn", None) else None,
@@ -27436,27 +28224,8 @@ class Mascot:
                 if getattr(self, "_pomo_time_btn", None) else None,
                 (self._pomo_inv_btn + ("같이하기",))
                 if getattr(self, "_pomo_inv_btn", None) else None) if b]
-            self._pomo_menu_hits = []
-            if self._team_gate() and getattr(self, "_pomo_menu", False):
-                mw9, mh9 = u(104), u(30)
-                mx9, my9 = sx8 - u(8), u(46)
-                for i9, (lab9, act9) in enumerate((("스티커 꾸미기", "stk"),
-                                                   ("시간 조절", "len"),
-                                                   ("소리 조절", "vol"))):
-                    y9 = my9 + i9 * (mh9 + u(4))
-                    self._rr_soft(cv, mx9, y9, mx9 + mw9, y9 + mh9, u(12),
-                                  fill="#ffffff", outline=line, width=1)
-                    cv.create_text(mx9 + u(12), y9 + mh9 / 2, anchor="w",
-                                   text=lab9, font=uf(9, True),
-                                   fill=cd["text"])
-                    self._pomo_menu_hits.append(
-                        (mx9, y9, mx9 + mw9, y9 + mh9, act9))
-                    if act9 == "vol":
-                        if self._feat_new("pomo_vol"):      # 새로움 점
-                            self._feat_dot(cv, mx9 + mw9 - u(9), y9 + u(8))
-                        if self._feat_spot_on("pomo_vol"):  # '보여 줘' 테두리
-                            self._feat_ring(cv, mx9, y9, mx9 + mw9, y9 + mh9,
-                                            u(12))
+            self._pomo_tips += self._pomo_tab_tips()
+            self._safe("pomo_menu", self._pomo_menu_draw, cv, u, uf, line)
             # 하드모드 켜고 끄기 — 시간 조절 아이콘 **바로 왼쪽**에 같은
             # 크기로 (요청 — 1~2px 여유만 두고 붙인다)
             self._pomo_hard_btn = None
@@ -27474,6 +28243,8 @@ class Mascot:
             # 다 그렸다 — 창 정중앙으로 통째로 옮긴다 (요청)
             if self._pomo_ox > 0.5:
                 cv.move("all", self._pomo_ox, 0)
+            if self._pomo_bar_draw is not None:   # 메뉴 단추의 켜짐 표시
+                self._safe("pomo_bar", self._pomo_bar_draw)
 
         def on_click(e):
             # 표시줄 없는 창의 가장자리·– × 단추가 먼저다 (원래 좌표로)
@@ -27492,12 +28263,7 @@ class Mascot:
             sb = getattr(self, "_pomo_stk_btn", None)
             if sb and sb[0] <= e.x <= sb[2] and sb[1] <= e.y <= sb[3]:
                 self._safe("ui_click", self._ui_click)
-                if self._team_gate():
-                    # 시간 조절이 이 안으로 들어왔다 (요청) — 작은 메뉴
-                    self._pomo_menu = not getattr(self, "_pomo_menu", False)
-                    draw()
-                else:
-                    self._safe("stk_win", self._stk_win, "pomo")
+                self._pomo_menu_click()     # 위 띠가 없는 창(맥)의 메뉴 단추
                 return
             for x0, y0, x1, y1, act in getattr(self, "_pomo_menu_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
@@ -27514,6 +28280,12 @@ class Mascot:
                         self._safe("pomo_edit_save", self._save_settings)
                         fit_win()
                     draw()
+                    return
+            # 탭 — 뽀모도로 ↔ 스톱워치 (요청). 메뉴가 탭을 덮으므로 메뉴 다음.
+            for x0, y0, x1, y1, tab9 in list(getattr(self, "_pomo_tab_hits",
+                                                     None) or []):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._pomo_tab_set(tab9)
                     return
             ib = getattr(self, "_pomo_inv_btn", None)
             if ib and ib[0] <= e.x <= ib[2] and ib[1] <= e.y <= ib[3]:
@@ -27568,6 +28340,9 @@ class Mascot:
             for x0, y0, x1, y1, act in getattr(self, "_pomo_hits", []):
                 if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                     self._safe("ui_click", self._ui_click)
+                    if isinstance(act, tuple) and act[0] == "sw":
+                        self._safe("sw_act", self._sw_act, act[1:])
+                        return
                     if isinstance(act, tuple) and act[0] == "wkoff":
                         # 지난주 넘기기 — 창을 여는 동안만 기억한다
                         off0 = max(0, int(getattr(self, "_pomo_wk_off", 0)
@@ -27682,7 +28457,10 @@ class Mascot:
             # 여섯 장짜리 폭죽이 '렉'으로 보였다). 평소엔 0.5초.
             fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4
                                        or self._team_bye_on())
-            self._pomo_after = win.after(40 if fx9 else 500, beat)
+            # 스톱워치 탭에서 재는 중이면 10분의 1초 자리가 흐르게 빠르게
+            sw9 = self._pomo_tab() == "sw" and self._sw()["on"]
+            self._pomo_after = win.after(
+                40 if fx9 else (self.SW_BEAT if sw9 else 500), beat)
 
         def fit_win():
             """지금 구성에 딱 맞게 창 높이를 맞춘다 (열 때·여닫을 때)."""
@@ -27766,6 +28544,9 @@ class Mascot:
                     pass
                 self._pomo_after = None
             self._pomo_draw = None
+            self._pomo_bar_draw = None
+            self._pomo_bar = None
+            self._pomo_menu = False
         win.bind("<Destroy>", lambda e: gone() if e.widget is win else None)
 
     # ── 환경음 (BGM) ──────────────────────────────────────────────────
@@ -32240,6 +33021,8 @@ class Mascot:
             # 뽀모 시계도 이 줄에 — 자리는 구역 밖에서 지운다 (같은 이유)
             self._pomo_badge = None
             self._safe("pomo_top", self._draw_pomo_top, now)
+            self._sw_badge = None
+            self._safe("sw_top", self._draw_sw_top, now)
             # 같이하기 중 — 내 각오 말풍선은 그 줄들보다 위에 (요청)
             self._safe("my_vow", self._draw_my_vow)
             # 점 자리도 구역 밖에서 지운다 — 이 구역이 꺼졌을 때 옛 자리가
