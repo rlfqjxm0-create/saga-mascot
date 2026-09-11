@@ -8429,6 +8429,7 @@ class Mascot:
         self._sw_badge = None             # 카드 위 스톱워치 아이콘 자리 (x, y, r)
         self._sw_img_cache = {}           # 스톱워치·탭 아이콘 그림 (지뢰 18)
         self._sw_page = 0                 # 구간 기록 쪽
+        self._sw_live = None              # 0.1초마다 갈아 끼울 글자 자리 (_sw_fast)
         self._pomo_tab_hits = []          # 뽀모도로 창 탭 자리
         self._pomo_burger_box = None      # 위 띠 메뉴 단추 자리 (띠 좌표)
         self._pomo_bar = None             # 뽀모도로 창 위 띠 (맥은 없다)
@@ -26830,6 +26831,52 @@ class Mascot:
             self._sw_cache_put(k, got)
         return got
 
+    def _sw_img_center(self, cv, pil, key, cx, cy):
+        """그림의 **보이는 부분**(알파 상자)을 (cx, cy) 정중앙에 둔다.
+        꼭지·잎이 위로 솟은 아이콘을 그림 칸 가운데에 두면 몸통이 아래로
+        처져 보였다 (요청 — 세로축 정중앙)."""
+        if pil is None:
+            return
+        ph = self._sw_ph(key, lambda: pil)
+        if ph is None:
+            return
+        bk = ("bb",) + tuple(key)
+        bb = self._sw_img_cache.get(bk)
+        if bb is None:
+            try:
+                bb = pil.getchannel("A").point(
+                    lambda a: 255 if a > 24 else 0).getbbox() or ()
+            except Exception:
+                bb = ()
+            self._sw_cache_put(bk, bb)
+        dx = dy = 0.0
+        if bb:
+            dx = pil.width / 2.0 - (bb[0] + bb[2]) / 2.0
+            dy = pil.height / 2.0 - (bb[1] + bb[3]) / 2.0
+        cv.create_image(cx + dx, cy + dy, image=ph)
+        self._pomo_keep.append(ph)
+
+    def _sw_fast(self, cv):
+        """재는 동안 0.1초마다 — 초가 그대로면 소수점·'이번 구간' 글자만
+        갈아 끼운다. 창을 통째로 다시 그리던 것이 숫자 깜빡임에 한몫했다
+        (요청). 초가 바뀌었거나 그릴 자리가 없으면 False (다시 그리기)."""
+        live = getattr(self, "_sw_live", None)
+        if not live or live.get("cv") is not cv or self._pomo_tab() != "sw":
+            return False
+        st = self._sw()
+        if not st["on"] or not live.get("on"):
+            return False
+        el = self._sw_elapsed(st)
+        if int(el) != live.get("sec"):
+            return False
+        _m9, frac = self._sw_fmt(el, tenths=True)
+        cv.itemconfigure(live["frac"], text=frac)
+        if live.get("lap") is not None:
+            lapc = el - (st["laps"][-1] if st["laps"] else 0.0)
+            m9, f8 = self._sw_fmt(lapc, tenths=True)
+            cv.itemconfigure(live["lap"], text="이번 구간 +%s%s" % (m9, f8))
+        return True
+
     def _sw_icon_pil(self, px, col, face="#ffffff", deg=40.0, ticks=True):
         """스톱워치 아이콘 (RGBA · px 정사각) — 꼭지·옆 단추·몸통·초침."""
         px = max(10, int(px))
@@ -27111,15 +27158,10 @@ class Mascot:
             bg = cd["fill"] if on else "#ffffff"
             ipx = int(u(16))
             if kind == "pomo":
-                ph = self._sw_ph(("tabtom", ipx, col, bg),
-                                 lambda: self._tab_tomato_pil(ipx, col, bg))
+                pil9 = self._tab_tomato_pil(ipx, col, bg)
             else:
-                ph = self._sw_ph(("tabsw", ipx, col, bg),
-                                 lambda: self._sw_icon_pil(ipx, col, bg, 42,
-                                                           ticks=False))
-            if ph is not None:
-                cv.create_image(cx, cy, image=ph)
-                keep.append(ph)
+                pil9 = self._sw_icon_pil(ipx, col, bg, 42, ticks=False)
+            self._sw_img_center(cv, pil9, ("tab", kind, ipx, col, bg), cx, cy)
             if not on and run[kind]:
                 self._safe("soft_btn", self._soft_dot, cv, hx0 + half - u(5),
                            y0 + u(5), u(3.6), "#6fc4a6", outline="#ffffff",
@@ -27178,11 +27220,8 @@ class Mascot:
                    shadow=True)
         ipx = int(u(18))
         c9, f9 = ("#ffffff", cd["fill"]) if on9 else (cd["sub"], "#ffffff")
-        ph = self._sw_ph(("cardbtn", ipx, c9, f9),
-                         lambda: self._sw_icon_pil(ipx, c9, f9, 40, ticks=False))
-        if ph is not None:
-            cv.create_image(tx8, u(26), image=ph)
-            keep.append(ph)
+        self._sw_img_center(cv, self._sw_icon_pil(ipx, c9, f9, 40, ticks=False),
+                            ("cardbtn", ipx, c9, f9), tx8, u(26))
         self._gtext(cv, tx8, u(47), text="카드에 표시", font=uf(6, True),
                     fill=cd["sub"])
         bx9 = (tx8 - br - u(3), u(26) - br - u(3), tx8 + br + u(3),
@@ -27201,11 +27240,8 @@ class Mascot:
             self._rr_soft(cv, x0c, y0c, x0c + cw9, y1c, u(8.5), fill="#e1f5ed",
                           outline="", width=0)
             tpx = int(u(12))
-            ph = self._sw_ph(("chiptom", tpx),
-                             lambda: self._tab_tomato_pil(tpx, "#6fc4a6", "#e1f5ed"))
-            if ph is not None:
-                cv.create_image(x0c + u(11), (y0c + y1c) / 2, image=ph)
-                keep.append(ph)
+            self._sw_img_center(cv, self._tab_tomato_pil(tpx, "#6fc4a6", "#e1f5ed"),
+                                ("chiptom", tpx), x0c + u(11), (y0c + y1c) / 2)
             cv.create_text(x0c + u(20), (y0c + y1c) / 2, anchor="w", text=txt,
                            font=f, fill="#4a9c80")
             self._pomo_hits.append((x0c, y0c, x0c + cw9, y1c, ("sw", "chip")))
@@ -27227,22 +27263,37 @@ class Mascot:
         if ph is not None:
             cv.create_image(W / 2, cy, image=ph)
             keep.append(ph)
+        # 시간 — 아이폰 스톱워치처럼 **숫자 칸 폭을 고정**한다 (요청: 숫자가
+        # 커졌다 줄었다 깜빡였다). 숫자마다 폭이 달라 0.1초마다 폭을 다시 재
+        # 글자 크기를 골랐던 것이 뿌리다. 이제 크기는 숫자와 무관한 본(모든 숫자를
+        # 가장 넓은 숫자로)으로 정하고, 숫자는 그 폭의 칸에 하나씩 세운다.
+        # 크기는 다이얼 **눈금 원** 안에 들어가게 (요청 — 초침 자리에 닿았다).
         main, frac = self._sw_fmt(el, tenths=True)
-        inner = (R - u(20)) * 2
-        size = 30
-        fm, ff = uf(size, True), uf(15, True)
-        while size > 14:
-            fm, ff = uf(size, True), uf(max(8, size // 2), True)
-            if self._mw(main, fm) + self._mw(frac, ff) <= inner:
+        rt = R * 0.75                    # 눈금 반지름 (_sw_dial_pil 과 같은 비)
+        ty = cy + u(3)
+        size = 28
+        while True:
+            fm = uf(size, True)
+            ff = uf(max(8, int(size * 0.48)), True)
+            dw = max(self._mw(d9, fm) for d9 in "0123456789")
+            dwf = max(self._mw(d9, ff) for d9 in "0123456789")
+            cells = [dw if c9.isdigit() else self._mw(c9, fm) for c9 in main]
+            wfr = self._mw(".", ff) + dwf
+            total = sum(cells) + wfr
+            hm = self._mh(fm)
+            dy9 = max(abs(ty - cy), abs(ty - hm - cy))
+            lim = 2 * math.sqrt(max(1.0, rt * rt - dy9 * dy9)) - u(12)
+            if total <= lim or size <= 14:
                 break
-            size -= 2
-        wm, wf = self._mw(main, fm), self._mw(frac, ff)
-        xs = W / 2 - (wm + wf) / 2
-        ty = cy + u(6)
-        hm, hf = self._mh(fm), self._mh(ff)
-        cv.create_text(xs, ty, anchor="sw", text=main, font=fm, fill=cd["text"])
-        cv.create_text(xs + wm, ty - (hm - hf) * 0.2, anchor="sw", text=frac,
-                       font=ff, fill=cd["sub"])
+            size -= 1
+        x = W / 2 - total / 2
+        for c9, w9 in zip(main, cells):
+            cv.create_text(x + w9 / 2, ty, anchor="s", text=c9, font=fm,
+                           fill=cd["text"])
+            x += w9
+        hf = self._mh(ff)
+        frac_it = cv.create_text(x, ty - (hm - hf) * 0.2, anchor="sw", text=frac,
+                                 font=ff, fill=cd["sub"])
         if run:
             lab, bg, ink = ("재는 중", self._tint(cd["fill"], 0.8),
                             self._shade(cd["fill"], 0.25))
@@ -27250,20 +27301,28 @@ class Mascot:
             lab, bg, ink = "멈춤", "#f2edf4", cd["sub"]
         else:
             lab, bg, ink = "준비", "#f2edf4", cd["sub"]
-        fp = uf(8, True)
-        pw9 = self._mw(lab, fp) + u(20)
-        py0, py1 = cy + u(14), cy + u(30)
-        self._rr_soft(cv, W / 2 - pw9 / 2, py0, W / 2 + pw9 / 2, py1, u(8),
+        fp = uf(7, True)
+        pw9 = self._mw(lab, fp) + u(18)
+        py0, py1 = cy + u(9), cy + u(23)
+        self._rr_soft(cv, W / 2 - pw9 / 2, py0, W / 2 + pw9 / 2, py1, u(7),
                       fill=bg, outline="", width=0)
         cv.create_text(W / 2, (py0 + py1) / 2 - u(0.5), text=lab, font=fp,
                        fill=ink)
+        lap_it = None
         if el > 0:
             lapc = el - (st["laps"][-1] if st["laps"] else 0.0)
             m9, f8 = self._sw_fmt(lapc, tenths=True)
-            # '이번 구간'은 알약 바로 아래로 올렸다 (요청). 원 안의 눈금에
-            # 안 걸리게 한 단계 작게 (찍어서 확인).
-            self._gtext(cv, W / 2, cy + u(37), text="이번 구간 +%s%s" % (m9, f8),
-                        font=uf(7, True), fill=cd["sub"])
+            fl9 = uf(6, True)
+            # 왼쪽 끝을 고정한다 — 가운데 정렬이면 0.1초마다 글자가 옆으로 떨린다
+            wd9 = max("0123456789", key=lambda d9: self._mw(d9, fl9))
+            tpl = "이번 구간 +" + "".join(wd9 if c9.isdigit() else c9
+                                        for c9 in m9 + f8)
+            lap_it = cv.create_text(W / 2 - self._mw(tpl, fl9) / 2, cy + u(33),
+                                    anchor="w", text="이번 구간 +%s%s" % (m9, f8),
+                                    font=fl9, fill=cd["sub"])
+        # 0.1초마다는 이 둘만 갈아 끼운다 (_sw_fast) — 초가 바뀌면 통째로
+        self._sw_live = {"cv": cv, "sec": int(el), "frac": frac_it,
+                         "lap": lap_it, "on": run}
         if stk is not None:
             stk()
         # 단추 셋 (뽀모도로와 같은 자리·크기)
@@ -27815,6 +27874,7 @@ class Mascot:
             self._pomo_ox = max(0.0, (max(W, cv.winfo_width()) - W) / 2.0)
             cv.delete("all")
             self._pomo_keep = []           # 이번 프레임 그림만 붙든다 (지뢰 18)
+            self._sw_live = None
             if self._pomo_tab() == "sw":
                 # 스톱워치 탭 (요청) — 뽀모도로는 그리지만 않을 뿐 계속 돈다
                 self._pomo_hits = []
@@ -28452,7 +28512,10 @@ class Mascot:
         def beat():
             if not win.winfo_exists():
                 return
-            draw()
+            # 스톱워치를 재는 중이고 초가 그대로면 소수점만 갈아 끼운다 (요청 —
+            # 0.1초마다 통째로 다시 그리면 숫자가 깜빡였다). 아니면 다시 그리기.
+            if not self._safe_str(self._sw_fast, cv):
+                draw()
             # 폭죽·색종이가 터지는 3초만 빠르게 (제보: 0.5초에 한 장이라
             # 여섯 장짜리 폭죽이 '렉'으로 보였다). 평소엔 0.5초.
             fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4
