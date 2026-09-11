@@ -1,7 +1,7 @@
 {
- "version": 1789114840,
+ "version": 1789133350,
  "files": {
-  "mascot.py": "05fe607827b429cb7562b9b7c31cd67303b84c95aea6d2b5ec812bbcdf1e238a",
+  "mascot.py": "a33dcd5a357f46f49fbceac49b2d2846cb3451f87fb44e6253286129b83736f3",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,7 +14,7 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "da9a335a3116f44cd2a75b502c1fec5d6069d6b5fb0fce971f4aa93c024a4bd3",
+  "parts_saga/config.json": "3d5f3633e36fe4c646ecf8fe468e32dd056df61f114734f6b6efe9ddc1f3dd36",
   "parts_saga/config.json.bak": "5e9aa3efda582170ad9660042a9e4710c673d3dc9ab91cc50ca0d3ae9c65a9eb",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
@@ -636,7 +636,11 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "스톱워치 숫자가 커졌다 작아졌다 깜빡이던 것 고침 — 아이폰처럼 같은 크기·같은 자리에서 부드럽게 흘러요",
-  "스톱워치 다이얼 안 글자를 조금 줄여 눈금에 안 닿게 · 뽀모도로/스톱워치 탭 아이콘을 세로 정중앙에"
+  "새 기능 '데드라인 시계' — 뽀모도로 창 가운데 탭(시계 아이콘)에서 이름과 목표 시각을 정하면 바탕화면에 아날로그 시계 스티커가 붙어요. 창을 닫으면 시계가 나타나고, 끌어서 자리를 옮기고, 시계를 누르면 창이 열려요",
+  "목표는 '23:00' · '3시간' · '90분' · '내일 09:00' 처럼 적어요 (빠른 단추: +1시간 · +3시간 · 자정 · 06:00). 지난 시각을 적으면 내일 그 시각이에요",
+  "읽는 법 — 1시간 넘게 남으면 테두리 띠(시침 기준)로, 1시간 안이면 판 안쪽 칠(분침 기준)로 남은 시간이 보여요. 진한 점이 목표 시각이고, 색은 여유 → 1시간 안 → 15분 안 순으로 진해져요. 아래 알약에 이름·남은 시간·연장 횟수",
+  "시각이 되면 캐릭터가 물어요 — 끝냈어 / 그만할래 / +15분·+30분·+1시간·직접 입력. 답이 없으면 5분마다 다시 물어요 (자동으로 실패 처리하지 않아요). 결과는 탭 아래 '최근 기록'에 남아요",
+  "시계 우클릭 메뉴 — 끝냈어 · +30분/+1시간 연장 · 직접 입력('30' · '1시간 30분' · '23:00') · 크게/작게 · 아래 글자 숨기기 · 위치 고정 · 시계 창 열기 · 그만두기",
+  "함께 고친 것 — 플레이리스트를 켤 때 작업표시줄에 엉뚱한 이름의 단추가 뜨던 것. 맥은 시계 스티커가 색상키 창으로 떠요 (모양은 같고 그림자만 없어요)"
  ]
 }

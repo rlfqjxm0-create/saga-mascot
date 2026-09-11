@@ -1447,6 +1447,7 @@ DEFAULT_SETTINGS = {
     "end_day": "",           # '작업 종료'로 마무리한 작업일 (06시 자동 마무리와 겹치지 않게)
     "floor_fix": 0,          # 오늘 바닥값을 한 번 지운 판 번호 (FLOOR_FIX)
     "lv_cut": 0,             # 레벨을 하루 기록으로 되돌린 판 번호 (config.lv_cut)
+    "restore_n": 0,          # 옛 기록을 한 번 되살린 판 번호 (config.restore)
     "wg_wipe": 0,            # 미니 게임 기록을 한 번 지운 판 번호 (WG_WIPE)
     "wg_bgm_on": True,       # 수박게임 브금 재생 여부
     "wg_bgm_vol": 18,        # 수박게임 브금 볼륨 (0~100, 원본보다 훨씬 작게)
@@ -8431,6 +8432,15 @@ class Mascot:
         self._sw_page = 0                 # 구간 기록 쪽
         self._sw_live = None              # 0.1초마다 갈아 끼울 글자 자리 (_sw_fast)
         self._pomo_tab_hits = []          # 뽀모도로 창 탭 자리
+        self._dl_strip = None             # 데드라인 시계 스티커 창 (TeamStrip)
+        self._dl_im = None                # 지금 올라간 시계 그림
+        self._dl_key = None               # 다시 그릴지 가르는 열쇠 (초 단위)
+        self._dl_root = None              # 그릴 때의 캐릭터 창 자리
+        self._dl_z = 0.0                  # 마지막으로 맨 앞으로 올린 때
+        self._dl_cache = {}               # 판(face) 캐시 (지뢰 18)
+        self._dl_ent = None               # 탭의 입력칸 둘
+        self._dl_err = ("", 0.0)          # 입력 오류 안내
+        self._dl_prompt_ref = None        # 시간 됐을 때의 카드
         self._pomo_burger_box = None      # 위 띠 메뉴 단추 자리 (띠 좌표)
         self._pomo_bar = None             # 뽀모도로 창 위 띠 (맥은 없다)
         self._pomo_bar_draw = None
@@ -11605,6 +11615,8 @@ class Mascot:
                 self._safe("team_quit", self._team_quit_notify)
             # 영상 창을 먼저 떼어 낸다 — 자식 창은 부모와 함께 죽는다
             self._safe("vid_park", self._vid_park)
+            if getattr(self, "_dl_strip", None) is not None:
+                self._safe("dl_gone", self._dl_strip.destroy)
             if getattr(self, "_pane", None):
                 self._safe("pane_gone", self._pane.destroy)
             # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
@@ -11854,8 +11866,27 @@ class Mascot:
         """
         try:
             fl = self.cfg.get("lv_floor") or {}
+            if fl.get("add"):
+                return 0.0         # 더하는 바닥은 _lv_guard 가 맡는다
             until = str(fl.get("until") or "")
             if until and self._my_workday() <= until:
+                return max(0.0, float(fl.get("secs") or 0))
+        except Exception:
+            pass
+        return 0.0
+
+    def _lv_floor_add(self):
+        """더하는 바닥 (`lv_floor` 의 `"add": true`) — 잃은 레벨 + 그 뒤에 그린 시간.
+
+        락스가 컴퓨터를 포맷해 상태 폴더를 통째로 잃었다. 보통 바닥은
+        '큰 쪽'이라, 포맷 뒤 며칠 그린 시간이 바닥에 삼켜진다. 이쪽은
+        아직 잃은 채(바닥보다 작다)일 때만 옛 값에 지금 값을 **더한다.**
+        더한 뒤에는 바닥보다 커지므로 몇 번을 다시 켜도 두 번 안 더해진다.
+        """
+        try:
+            fl = self.cfg.get("lv_floor") or {}
+            until = str(fl.get("until") or "")
+            if fl.get("add") and until and self._my_workday() <= until:
                 return max(0.0, float(fl.get("secs") or 0))
         except Exception:
             pass
@@ -11892,6 +11923,14 @@ class Mascot:
         except Exception:
             hist = 0.0
         best = max(got, keep, hist)
+        add = self._lv_floor_add()
+        if add > 0 and best < add:     # 아직 잃은 채 — 옛 값에 지금 값을 더한다
+            try:
+                self._log_error("lv_restore add=%d now=%d"
+                                % (int(add), int(best)))
+            except Exception:
+                pass
+            best = add + best
         if best > got + 120:           # 2분 넘게 잃었을 때만 흔적을 남긴다
             try:
                 self._log_error("lv_recover state=%d keep=%d hist=%d"
@@ -13934,7 +13973,8 @@ class Mascot:
                         pass
                 for holder in (self.shadow, self.todo_panel,
                                self.due_panel, self._fx,
-                               getattr(self, "_strip", None)):
+                               getattr(self, "_strip", None),
+                               getattr(self, "_dl_strip", None)):
                     h = getattr(holder, "hwnd", None)
                     if h:
                         kin.add(h)
@@ -21400,6 +21440,7 @@ class Mascot:
         # 기준인 '오늘치'가 오늘 날짜로 저장돼 하루 종일 못 박힌다.
         self._safe("floor_fix", self._floor_fix_once)
         self._safe("wg_wipe", self._wg_wipe_once)
+        self._safe("restore", self._restore_once)     # 지우기 다음이어야 한다
         self._safe("day_roll", self._day_roll, now)
         self._safe("room_diag", self._room_diag, now)
         # 그림 캐시 비우기는 **본 스레드에서** (지뢰 150). _room_tick 안이
@@ -25558,6 +25599,8 @@ class Mascot:
         if self._team_gate():
             self._safe("team_tick", self._team_tick, now)
             self._safe("strip", self._strip_tick, now)
+        if self._dl_gate():
+            self._safe("deadline", self._dl_tick, now)
         st = self._pomo()
         if not st["on"] or st["end"] <= 0:
             return
@@ -27057,14 +27100,1117 @@ class Mascot:
                     fill=self.card["sub"], on_glass=hole)
         return True
 
+    # ── 데드라인 시계 (요청 · 2026-09-11 · config "deadline" — 지금은 내 도로롱만) ──
+    # 목표 시각을 정해 두면 바탕화면에 **진짜 아날로그 시계**(시침·분침·초침)가
+    # 스티커처럼 붙고, 테두리 띠가 '지금 → 목표' 구간을 보여 준다. 끌어서
+    # 옮기고 자리는 캐릭터 창 기준으로 기억한다 (같이하기 띠와 같은 창 —
+    # TeamStrip). 시각이 되면 캐릭터가 묻고, 카드에서 끝냈어/연장을 고른다.
+    # 저장은 설정 "dl" 한 곳 — 시각으로 계산하므로 껐다 켜도 이어 간다 (지뢰 11).
+    DL_R_MIN, DL_R_MAX, DL_R_DEF = 40, 150, 70
+    DL_ASK_AGAIN = 300.0         # 응답이 없으면 이만큼 뒤에 다시 묻는다
+    DL_HIST_MAX = 60
+    DL_NAME_N = 16
+
+    def _dl_pal(self):
+        """시계 빛깔 — **캐릭터 테마색**(카드 채움색, 폼이 바꾼 것 포함)에서 뽑는다
+        (요청 — 사해 프리셋이면 하늘색). 바늘·테·숫자는 테마색을 어둡게, 초침은
+        테마색을 조금만 어둡게, 트랙은 옅게."""
+        fill = self.card["fill"]
+        ink = self._shade(fill, 0.58)
+        return {"fill": fill, "ink": ink, "line": ink,
+                "light": self._tint(ink, 0.55), "sec": self._shade(fill, 0.12),
+                "track": self._tint(fill, 0.86),
+                # 남은 시간 띠·글자 — 테마색의 연한/중간/진한 (요청: 주황·빨강은 안 예쁘다)
+                "lo": self._tint(fill, 0.42), "mid": fill,
+                "hi": self._shade(fill, 0.38)}
+
+    def _dl_gate(self):
+        return bool(self.cfg.get("deadline"))
+
+    def _dl(self):
+        d = self.us.get("dl")
+        d = d if isinstance(d, dict) else {}
+
+        def f9(k):
+            try:
+                return max(0.0, float(d.get(k) or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+        goal = f9("goal")
+        pos = d.get("pos")
+        if not (isinstance(pos, (list, tuple)) and len(pos) == 2):
+            pos = None
+        try:
+            size = max(self.DL_R_MIN, min(self.DL_R_MAX,
+                                          int(d.get("size") or self.DL_R_DEF)))
+        except (TypeError, ValueError):
+            size = self.DL_R_DEF
+        try:
+            ext = max(0, int(d.get("ext") or 0))
+        except (TypeError, ValueError):
+            ext = 0
+        return {"on": bool(d.get("on")) and goal > 0,
+                "name": str(d.get("name") or "")[:self.DL_NAME_N],
+                "goal": goal, "set": f9("set"), "ext": ext, "asked": f9("asked"),
+                "pos": pos, "size": size, "lock": bool(d.get("lock")),
+                "pill": bool(d.get("pill", True)), "show": bool(d.get("show", True))}
+
+    def _dl_save(self, st):
+        self.us["dl"] = {"on": bool(st["on"]), "name": str(st.get("name") or ""),
+                         "goal": round(float(st["goal"]), 1),
+                         "set": round(float(st.get("set") or 0), 1),
+                         "ext": int(st.get("ext") or 0),
+                         "asked": round(float(st.get("asked") or 0), 1),
+                         "pos": (list(st["pos"]) if st.get("pos") else None),
+                         "size": int(st["size"]), "lock": bool(st.get("lock")),
+                         "pill": bool(st.get("pill", True)),
+                         "show": bool(st.get("show", True))}
+        self._safe("settings", self._save_settings)
+
+    def _dl_hist(self):
+        v = self.us.get("dl_hist")
+        return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
+
+    def _dl_hist_add(self, st, ok, now=None):
+        """결과 한 줄 — 이름·목표·정한 때·끝낸 때·연장 횟수·초과 초. 새것이 앞."""
+        now = time.time() if now is None else now
+        rows = self._dl_hist()
+        rows.insert(0, {"name": st.get("name") or "", "goal": round(float(st["goal"]), 1),
+                        "set": round(float(st.get("set") or 0), 1),
+                        "done": round(now, 1), "ok": bool(ok),
+                        "ext": int(st.get("ext") or 0),
+                        "over": int(max(0.0, now - float(st["goal"]))),
+                        "day": self._my_workday()})
+        self.us["dl_hist"] = rows[:self.DL_HIST_MAX]
+
+    @staticmethod
+    def _dl_fmt(secs):
+        """남은(지난) 시간 글자 — 1시간 넘으면 h:mm, 15분 안이면 mm:ss."""
+        s = int(abs(float(secs)))
+        h, m, sec = s // 3600, s % 3600 // 60, s % 60
+        if h >= 24:
+            return "%d일 %d:%02d" % (h // 24, h % 24, m)
+        if s >= 900:
+            return "%d:%02d" % (h, m)
+        return "%d:%02d" % (m, sec)
+
+    def _dl_color(self, left):
+        """여유 → 1시간 안 → 15분 안·지남 = 테마색의 연한 → 중간 → 진한 (요청)."""
+        pal = self._dl_pal()
+        if left < 15 * 60:
+            return pal["hi"]
+        if left < 3600:
+            return pal["mid"]
+        return pal["lo"]
+
+    def _dl_parse(self, text, now=None):
+        """사람이 쓴 목표를 시각(epoch)으로. 못 읽으면 0.
+
+        받아 주는 꼴 — 23:00 · 2300 · 23시 · 23시 30분 · 오후 11시 · 11pm ·
+        내일 09:00 · 3시간 · 90분 · 1시간 30분 · 1h30m. 시각이 이미 지났으면
+        내일로 본다. 정규식 모듈은 안 쓴다 (지뢰 21 — 새 import 금지).
+        """
+        kind, v = self._dl_parse2(text, now)
+        if kind == "dur":
+            return (time.time() if now is None else now) + v
+        return v if kind else 0.0
+
+    def _dl_parse2(self, text, now=None):
+        """_dl_parse 의 본체 — ("dur", 초) / ("abs", 시각) / (None, 0).
+        연장 입력에서는 '30분'은 더하고 '23:00'은 그 시각으로 옮겨야 해서 가른다.
+        단위 없는 25~99 는 분으로 본다 ('30' 은 30분 — 시각으로는 못 읽는 수)."""
+        t = str(text or "").strip().lower()
+        now = time.time() if now is None else now
+        if not t:
+            return None, 0.0
+        if t.isdigit() and len(t) <= 2 and 25 <= int(t) <= 99:
+            return "dur", int(t) * 60.0
+        tomorrow = False
+        if t.startswith("내일"):
+            tomorrow, t = True, t[2:].strip()
+        # 길이인가 — '시간'이 들어 있거나, '분/m/h'로 끝나면서 시각 표시(시·pm·am)가 없는 것
+        dur = False
+        if ":" not in t and not tomorrow:
+            if "시간" in t:
+                dur = True
+            elif (t.endswith(("분", "m", "h")) and "시" not in t
+                  and "pm" not in t and "am" not in t):
+                dur = True
+        if dur:
+            hrs = mins = 0
+            buf = ""
+            ok9 = False
+            for ch in t.replace(" ", "").lstrip("+"):
+                if ch.isdigit():
+                    buf += ch
+                elif buf:
+                    if ch in ("시", "h"):
+                        hrs += int(buf)
+                        ok9 = True
+                    elif ch in ("분", "m"):
+                        mins += int(buf)
+                        ok9 = True
+                    buf = ""
+            if buf:                    # 끝에 단위 없이 남은 숫자는 분
+                mins += int(buf)
+                ok9 = True
+            if ok9 and (hrs or mins):
+                return "dur", float(hrs * 3600 + mins * 60)
+            return None, 0.0
+        pm = ("오후" in t) or ("pm" in t)
+        am = ("오전" in t) or ("am" in t)
+        for w in ("오후", "오전", "pm", "am", "분", " "):
+            t = t.replace(w, "")
+        t = t.replace("시", ":").rstrip(":")
+        h = mi = None
+        try:
+            if ":" in t:
+                a, b = t.split(":", 1)
+                h, mi = int(a), int(b or 0)
+            elif t.isdigit():
+                if len(t) <= 2:
+                    h, mi = int(t), 0
+                elif len(t) in (3, 4):
+                    h, mi = int(t[:-2]), int(t[-2:])
+        except ValueError:
+            return None, 0.0
+        if h is None:
+            return None, 0.0
+        if pm and h < 12:
+            h += 12
+        if am and h == 12:
+            h = 0
+        if not (0 <= h <= 24 and 0 <= mi < 60):
+            return None, 0.0
+        lt = time.localtime(now)
+        try:
+            base = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h % 24, mi, 0,
+                                0, 0, -1))
+        except (OverflowError, ValueError):
+            return None, 0.0
+        if h == 24:
+            base += 86400
+        if tomorrow:
+            base += 86400
+        elif base <= now:
+            base += 86400
+        return "abs", base
+
+    def _dl_extend_text(self, text):
+        """직접 입력한 연장 — '30'·'30분'·'1시간 30분'은 그만큼 더하고, '23:00'·
+        '오후 11시'는 그 시각으로 옮긴다. 못 읽으면 False."""
+        kind, v = self._dl_parse2(text)
+        if kind == "dur" and v > 0:
+            self._dl_extend(v)
+            return True
+        if kind == "abs":
+            st = self._dl()
+            if not st["on"]:
+                return False
+            st["goal"] = float(v)
+            st["ext"] = int(st["ext"]) + 1
+            st["asked"] = 0.0
+            self._dl_save(st)
+            self._dl_prompt_close()
+            self._dl_key = None
+            self._dl_changed()
+            self._say("%s까지로 옮겼어! 힘내자" % time.strftime(
+                "%H:%M", time.localtime(v)), 4.0)
+            return True
+        return False
+
+    def _dl_extend_win(self):
+        """우클릭 메뉴 '직접 입력' — 작은 창에 얼마나 더할지 적는다 (요청)."""
+        got = getattr(self, "_dl_ext_ref", None)
+        try:
+            if got is not None and got.winfo_exists():
+                got.lift()
+                return
+        except Exception:
+            pass
+        if not self._dl()["on"]:
+            return
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(236)), int(u(118))
+        win = tk.Toplevel(self.root)
+        self._dl_ext_ref = win
+        win.title("데드라인 연장")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=True)
+        if not getattr(win, "_ena_saved_pos", False):
+            strip = self._dl_strip
+            try:
+                if strip is not None and strip.visible:
+                    x9, y9 = strip.x + strip.w + 8, strip.y
+                else:
+                    x9 = self.root.winfo_rootx() + self.root.winfo_width() + 12
+                    y9 = self.root.winfo_rooty()
+                if not self._box_on_screen(x9, y9, W, H):
+                    x9, y9 = self.root.winfo_rootx() - W - 12, self.root.winfo_rooty()
+                win.geometry("+%d+%d" % (int(x9), int(y9)))
+            except Exception:
+                pass
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        cv.create_text(u(16), u(20), anchor="w", text="얼마나 더 할까요?",
+                       font=self._uf(11, True), fill=cd["text"])
+        cv.create_text(u(16), u(38), anchor="w", text="30분 · 1시간 30분 · 23:00 처럼",
+                       font=self._uf(8), fill=cd["sub"])
+        self._rr_soft(cv, u(16), u(52), u(148), u(78), u(9), fill="#fffdf7",
+                      outline=line, width=1)
+        box = tk.Entry(cv, bd=0, relief="flat", bg="#fffdf7", fg=cd["text"],
+                       font=self._uf(10), highlightthickness=0)
+        cv.create_window(u(24), u(65), anchor="w", window=box, width=int(u(118)),
+                         height=int(u(18)))
+        bx0, by0, bx1, by1 = u(156), u(52), u(220), u(78)
+        self._rr_soft(cv, bx0, by0, bx1, by1, u(13), fill=cd["fill"], outline="", width=0)
+        cv.create_text((bx0 + bx1) / 2, (by0 + by1) / 2, text="연장",
+                       font=self._uf(10, True), fill="#ffffff")
+        err = {"it": None}
+
+        def go(_e=None):
+            try:
+                t = box.get().strip()
+            except Exception:
+                t = ""
+            if self._dl_extend_text(t):
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                return
+            if err["it"] is not None:
+                cv.delete(err["it"])
+            err["it"] = cv.create_text(
+                u(16), u(98), anchor="w",
+                text="못 읽었어요 — 30분 이나 23:00 처럼 적어 주세요",
+                font=self._uf(7), fill="#d9534f")
+
+        def click(e):
+            if bx0 <= e.x <= bx1 and by0 <= e.y <= by1:
+                self._safe("ui_click", self._ui_click)
+                go()
+        cv.bind("<Button-1>", click)
+        box.bind("<Return>", go)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        try:
+            box.focus_set()
+        except Exception:
+            pass
+
+    # ── 동작 ────────────────────────────────────────────────────────
+    def _dl_start(self, name, goal):
+        st = self._dl()
+        st.update({"on": True, "name": str(name or "").strip()[:self.DL_NAME_N]
+                   or "목표", "goal": float(goal), "set": time.time(), "ext": 0,
+                   "asked": 0.0})
+        self._dl_save(st)
+        self._feat_seen("deadline")
+        self._dl_key = None
+        self._dl_changed()
+        self._say("%s까지! 시계를 바탕화면에 붙여 뒀어" % time.strftime(
+            "%H:%M", time.localtime(goal)), 4.0)
+
+    def _dl_done(self, ok):
+        """끝냈어(True) / 그만할래(False) — 기록에 남기고 시계를 내린다."""
+        st = self._dl()
+        if not st["on"]:
+            return
+        now = time.time()
+        self._dl_hist_add(st, ok, now)
+        st["on"] = False
+        st["asked"] = 0.0
+        self._dl_save(st)
+        self._dl_prompt_close()
+        self._dl_key = None
+        self._dl_changed()
+        if ok:
+            self.smile_until = now + 4.0
+            self._safe("gest", self._gest_start, "clap", True)
+            over = now - float(st["goal"])
+            self._say("해냈다! %s" % ("제때 끝냈어!" if over <= 0 else
+                                     "%s 늦었지만 끝냈어!" % self._dl_fmt(over)), 5.0)
+            cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff"]
+            for _ in range(24):
+                ang = random.uniform(-2.7, -0.45)
+                spd = random.uniform(3.0, 7.0)
+                self.particles.append([self.card_cx + random.uniform(-50, 50),
+                                       self.oy + 46, math.cos(ang) * spd,
+                                       math.sin(ang) * spd, random.choice(cols),
+                                       random.randint(40, 70)])
+        else:
+            self._say("괜찮아, 다음엔 꼭!", 4.0)
+
+    def _dl_extend(self, secs):
+        st = self._dl()
+        if not st["on"]:
+            return
+        now = time.time()
+        st["goal"] = max(float(st["goal"]), now) + float(secs)
+        st["ext"] = int(st["ext"]) + 1
+        st["asked"] = 0.0
+        self._dl_save(st)
+        self._dl_prompt_close()
+        self._dl_key = None
+        self._dl_changed()
+        self._say("%s까지 연장! 힘내자" % time.strftime(
+            "%H:%M", time.localtime(st["goal"])), 4.0)
+
+    def _dl_changed(self):
+        self._pomo_redraw()
+        fit = getattr(self, "_pomo_fit", None)
+        if fit is not None and self._pomo_tab() == "dl":
+            self._safe("pomo_fit", fit)
+
+    def _dl_open(self):
+        """데드라인 탭으로 뽀모도로 창을 연다 ('보여 줘'·스티커 클릭)."""
+        self._feat_seen("deadline")
+        if self._pomo_tab() != "dl":
+            self.us["pomo_tab"] = "dl"
+            self._safe("settings", self._save_settings)
+        self._pomo_win()
+        fit = getattr(self, "_pomo_fit", None)
+        if fit is not None:
+            self._safe("pomo_fit", fit)
+        self._pomo_redraw()
+
+    def _dl_set(self, **kw):
+        st = self._dl()
+        st.update(kw)
+        self._dl_save(st)
+        self._dl_key = None
+        self._dl_changed()
+
+    # ── 그림 ────────────────────────────────────────────────────────
+    @staticmethod
+    def _dl_ang(secs):
+        """하루 시각(초) → 시계 방향 각도 (12시 = -90)."""
+        return -90.0 + (float(secs) % 43200.0) / 43200.0 * 360.0
+
+    def _dl_face(self, R, S=3, shadow=True):
+        """바뀌지 않는 판 두 장 (S배 크기·캐시) — 아래(그림자·원판·테·트랙)와
+        위(속 흰 원·눈금·숫자). 띠는 둘 사이에 그린다.
+
+        shadow=False 면 흐린 그림자를 안 그린다 — 색상키 창(맥·레이어 없는
+        윈도우)은 반투명을 못 담아 그림자가 키 색과 섞여 어두운 얼룩이 된다
+        (지뢰 181 과 같은 뿌리). 띠는 레이어일 때만 그림자를 받는다."""
+        pal = self._dl_pal()
+        key = ("face", int(R), S, pal["fill"], bool(shadow))
+        got = self._dl_cache.get(key)
+        if got is not None:
+            return got
+        W, H, cx, cy = self._dl_geo(R)
+        n = (int(W * S), int(H * S))
+        cxs, cys, r = cx * S, cy * S, R * S
+        low = Image.new("RGBA", n, (0, 0, 0, 0))
+        if shadow:
+            m = Image.new("L", n, 0)
+            ImageDraw.Draw(m).ellipse((cxs - r, cys - r + 5 * S, cxs + r, cys + r + 5 * S),
+                                      fill=255)
+            m = m.filter(ImageFilter.GaussianBlur(6 * S))
+            sh = Image.new("RGBA", n, (60, 40, 70, 0))
+            sh.putalpha(m.point(lambda v: v * 70 // 255))
+            low.alpha_composite(sh)
+        d = ImageDraw.Draw(low)
+        d.ellipse((cxs - r, cys - r, cxs + r, cys + r), fill="#ffffff",
+                  outline=pal["line"], width=max(2, int(R * 0.045 * S)))
+        o1 = r - int(R * 0.06 * S)
+        d.ellipse((cxs - o1, cys - o1, cxs + o1, cys + o1), fill=pal["track"])
+        # 위 판 — 눈금·숫자만 (속 흰 원과 칠은 장마다 그 아래에 그린다)
+        top = Image.new("RGBA", n, (0, 0, 0, 0))
+        d = ImageDraw.Draw(top)
+        bw = int(R * 0.13 * S)
+        o0 = o1 - bw
+        light = pal["light"]
+        for k in range(60):
+            a = math.radians(k * 6 - 90)
+            big = k % 5 == 0
+            L = int((5 if big else 2.5) * R / 70.0 * S)
+            o = o0 - int(3 * R / 70.0 * S)
+            d.line((cxs + math.cos(a) * (o - L), cys + math.sin(a) * (o - L),
+                    cxs + math.cos(a) * o, cys + math.sin(a) * o),
+                   fill=pal["line"] if big else self._tint(pal["line"], 0.62),
+                   width=max(1, int((2.2 if big else 1.2) * R / 70.0 * S)))
+        # 숫자 열둘 — 12·3·6·9 는 진하게, 나머지는 연하게 (요청)
+        fb = self._pil_font(max(8, int(R * 0.19 * S)), True)
+        fs = self._pil_font(max(7, int(R * 0.14 * S)), False)
+        nr = o0 - int(R * 0.21 * S)
+        for n9 in range(1, 13):
+            a = math.radians(n9 * 30 - 90)
+            main = n9 % 3 == 0
+            f = fb if main else fs
+            t = str(n9)
+            try:
+                bb = d.textbbox((0, 0), t, font=f)
+            except Exception:
+                bb = (0, 0, 10, 10)
+            tw, th = bb[2] - bb[0], bb[3] - bb[1]
+            px, py = cxs + math.cos(a) * nr, cys + math.sin(a) * nr
+            d.text((px - tw / 2 - bb[0], py - th / 2 - bb[1]), t, font=f,
+                   fill=pal["ink"] if main else light)
+        got = (low, top, o0, o1)
+        if len(self._dl_cache) > 12:
+            for k9 in list(self._dl_cache)[:6]:
+                self._dl_cache.pop(k9, None)
+        self._dl_cache[key] = got
+        return got
+
+    def _dl_geo(self, R):
+        """그림 크기와 판 중심 (1배 눈금) — 아래 알약 자리까지."""
+        pw = int(R * 2 + 44)
+        ph = int(R * 2 + 14 + max(20, R * 0.32) + 18)
+        return pw, ph, pw / 2.0, R + 8.0
+
+    def _dl_sheet(self, st, now, R=None, pill=True, S=3, shadow=True):
+        """지금 시각의 시계 한 장 (PIL RGBA · 1배). shadow 는 _dl_face 참고."""
+        R = int(R or st["size"])
+        pal = self._dl_pal()
+        low, top, o0, o1 = self._dl_face(R, S, shadow)
+        im = low.copy()
+        d = ImageDraw.Draw(im)
+        W, H, cx, cy = self._dl_geo(R)
+        cxs, cys = cx * S, cy * S
+        lt = time.localtime(now)
+        tod = lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec
+        left = float(st["goal"]) - now
+        a_now = self._dl_ang(tod)
+        a_goal = self._dl_ang(tod + left)
+        col = self._dl_color(left)
+        box = (cxs - o1, cys - o1, cxs + o1, cys + o1)
+        ibox = (cxs - o0, cys - o0, cxs + o0, cys + o0)
+        m_now = (lt.tm_min * 60 + lt.tm_sec) / 3600.0 * 360 - 90
+        glt = time.localtime(float(st["goal"]))
+        m_goal = (glt.tm_min * 60 + glt.tm_sec) / 3600.0 * 360 - 90
+        # 두 눈금을 나눠 쓴다 (요청) —
+        # · 한 시간 **넘게** 남음: 테두리 띠에 **시침 기준**(12시간 눈금) '지금 → 목표'
+        # · 한 시간 **안**: 판 안쪽에 **분침 기준** 부채꼴 '분침 → 목표 분' (주방 타이머)
+        # 지나면 같은 자리에 '목표 → 지금'이 진한 색. 판 안 점(시간 수)은 거슬려 뺐다.
+        # 바늘은 칠 위에 진한 색으로 그리므로 시침이 칠과 겹쳐도 그대로 읽힌다.
+        far = abs(left) >= 3600
+        if far:
+            if abs(left) >= 43200:
+                d.ellipse(box, fill=col)
+            elif left > 0:
+                d.pieslice(box, a_now, a_goal, fill=col)
+            else:
+                d.pieslice(box, a_goal, a_now, fill=col)
+        d.ellipse(ibox, fill="#ffffff")
+        if not far:
+            fill9 = self._tint(col, 0.40 if left > 0 else 0.30)
+            if left > 0:
+                d.pieslice(ibox, m_now, m_goal, fill=fill9)
+            else:
+                d.pieslice(ibox, m_goal, m_now, fill=fill9)
+        im.alpha_composite(top)
+        d = ImageDraw.Draw(im)
+        # 목표 표식 — 띠 위 점, **진한 테마색**(요청 — 노랑 아님). 한 시간 넘으면
+        # 12시간 눈금 자리, 한 시간 안이면 분 눈금 자리.
+        ga = math.radians(a_goal if far else m_goal)
+        gr = (o0 + o1) / 2.0
+        gx, gy = cxs + math.cos(ga) * gr, cys + math.sin(ga) * gr
+        fr9 = max(2 * S, int(R * 0.075 * S))
+        d.ellipse((gx - fr9, gy - fr9, gx + fr9, gy + fr9), fill=pal["hi"],
+                  outline="#ffffff", width=max(1, int(1.6 * R / 70.0 * S)))
+
+        def hand(angle, length, width, colr, tail=0.18):
+            a = math.radians(angle)
+            x1, y1 = cxs + math.cos(a) * length, cys + math.sin(a) * length
+            x0, y0 = cxs - math.cos(a) * length * tail, cys - math.sin(a) * length * tail
+            wd = max(1.0, width * S)
+            d.line((x0, y0, x1, y1), fill=colr, width=int(wd))
+            for x, y in ((x0, y0), (x1, y1)):
+                hw = wd / 2.0
+                d.ellipse((x - hw, y - hw, x + hw, y + hw), fill=colr)
+        h, m, sec = lt.tm_hour, lt.tm_min, lt.tm_sec
+        hand(self._dl_ang(tod), o0 * 0.50, R * 0.085, pal["ink"])
+        hand(-90 + (m * 60 + sec) / 3600.0 * 360, o0 * 0.74, R * 0.06, pal["ink"])
+        hand(-90 + sec / 60.0 * 360, o0 * 0.82, R * 0.028, pal["sec"], tail=0.28)
+        cr = max(2 * S, int(R * 0.07 * S))
+        d.ellipse((cxs - cr, cys - cr, cxs + cr, cys + cr), fill=pal["ink"])
+        cr2 = cr * 0.45
+        d.ellipse((cxs - cr2, cys - cr2, cxs + cr2, cys + cr2), fill=pal["sec"])
+        # 아래 알약 — 이름 · 남은 시간 · 연장 점
+        if pill and st.get("pill", True):
+            ft = self._pil_font(max(7, int(R * 0.14 * S)), True)
+            fd = self._pil_font(max(8, int(R * 0.17 * S)), True)
+            t1 = str(st.get("name") or "")[:self.DL_NAME_N]
+            t2 = (self._dl_fmt(left) + (" 남음" if left >= 900 else "")) if left > 0 \
+                else ("+" + self._dl_fmt(left) + " 초과")
+            w1 = d.textlength(t1, font=ft) if t1 else 0
+            w2 = d.textlength(t2, font=fd)
+            gap = int(6 * S) if t1 else 0
+            ext = int(st.get("ext") or 0)
+            extw = (ext * 8 + 6) * S if ext else 0
+            pw = w1 + gap + w2 + extw + int(24 * S)
+            ph = int(max(20, R * 0.32) * S)
+            px0 = cxs - pw / 2.0
+            py0 = cys + R * S + int(8 * S)
+            pbox = (px0, py0, px0 + pw, py0 + ph)
+            if shadow:
+                m = Image.new("L", im.size, 0)
+                ImageDraw.Draw(m).rounded_rectangle(pbox, ph / 2, fill=255)
+                m = m.filter(ImageFilter.GaussianBlur(4 * S))
+                sh = Image.new("RGBA", im.size, (60, 40, 70, 0))
+                sh.putalpha(m.point(lambda v: v * 55 // 255))
+                im.alpha_composite(sh, (0, 3 * S))
+                d = ImageDraw.Draw(im)
+            d.rounded_rectangle(pbox, ph / 2, fill="#ffffff", outline=pal["line"],
+                                width=max(1, int(1.8 * R / 70.0 * S)))
+            x = px0 + int(12 * S)
+            if t1:
+                d.text((x, py0 + ph / 2 - ft.size * 0.58), t1, font=ft,
+                       fill=self._tint(pal["ink"], 0.35))
+                x += w1 + gap
+            d.text((x, py0 + ph / 2 - fd.size * 0.6), t2, font=fd,
+                   fill=col)
+            x += w2 + int(8 * S)
+            for _k in range(ext):
+                rr9 = int(2.6 * S)
+                d.ellipse((x - rr9, py0 + ph / 2 - rr9, x + rr9, py0 + ph / 2 + rr9),
+                          fill=pal["fill"], outline=pal["line"], width=S)
+                x += 8 * S
+        return im.resize((int(W), int(H)), Image.LANCZOS)
+
+    def _dl_icon_pil(self, px, col, bg):
+        """탭 아이콘 — 동그란 시계 + 시침·분침."""
+        px = max(10, int(px))
+        key = ("dlicon", px, str(col), str(bg))
+        got = self._sw_img_cache.get(key)
+        if got is not None:
+            return got
+        S = 4
+        n = px * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        cx = cy = n / 2.0
+        r = n * 0.42
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=bg or None, outline=col,
+                  width=max(S, int(r * 0.2)))
+        hw = max(S, int(r * 0.17))
+        d.line([cx, cy, cx, cy - r * 0.55], fill=col, width=hw)
+        d.line([cx, cy, cx + r * 0.42, cy + r * 0.2], fill=col, width=hw)
+        d.ellipse([cx - hw * 0.7, cy - hw * 0.7, cx + hw * 0.7, cy + hw * 0.7], fill=col)
+        got = im.resize((px, px), Image.LANCZOS)
+        self._sw_cache_put(key, got)
+        return got
+
+    # ── 바탕화면 스티커 ─────────────────────────────────────────────
+    def _dl_pos(self, im):
+        """스티커 자리 — 캐릭터 창 기준 (끌어 옮긴 값이 있으면 그것). 화면 밖이면
+        저장된 자리를 버린다 (띠와 같은 규칙)."""
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+            rw = self.root.winfo_width()
+        except Exception:
+            rx = ry = 0
+            rw = int(self.W)
+        st = self._dl()
+        if st["pos"]:
+            try:
+                x9, y9 = rx + int(st["pos"][0]), ry + int(st["pos"][1])
+                if self._box_on_screen(x9, y9, im.width, im.height):
+                    return x9, y9
+            except (TypeError, ValueError):
+                pass
+            st["pos"] = None
+            self._dl_save(st)
+        return rx + rw + int(self._ui(12)), ry
+
+    def _dl_strip_make(self):
+        self._dl_strip = TeamStrip(self.root, self.canvas_bg, self._dl_click,
+                                   self._dl_drag, self._dl_menu_at, self._dl_drop)
+
+    def _dl_click(self):
+        self._safe("dl_open", self._dl_open)
+
+    def _dl_drag(self, dx, dy):
+        st = self._dl()
+        strip = self._dl_strip
+        if strip is None or self._dl_im is None or st["lock"]:
+            return
+        try:
+            rx, ry = self.root.winfo_rootx(), self.root.winfo_rooty()
+        except Exception:
+            rx = ry = 0
+        st["pos"] = [strip.x + dx - rx, strip.y + dy - ry]
+        self.us["dl"] = dict(self.us.get("dl") or {}, pos=st["pos"])
+        self._dl_follow()
+
+    def _dl_drop(self):
+        self._safe("settings", self._save_settings)
+
+    def _dl_follow(self):
+        strip = self._dl_strip
+        if strip is None or self._dl_im is None or not strip.visible:
+            return
+        x, y = self._dl_pos(self._dl_im)
+        self._dl_root = self._last_pos
+        if (x, y) != (strip.x, strip.y):
+            strip.show(self._dl_im, x, y)
+
+    def _dl_hide(self):
+        strip = self._dl_strip
+        if strip is not None and strip.visible:
+            try:
+                strip.hide()
+            except Exception:
+                pass
+        self._dl_key = None
+
+    def _dl_menu_at(self, _x, _y, xr, yr):
+        st = self._dl()
+        items = [("데드라인 시계", None), ("-", None),
+                 ("끝냈어!", lambda: self._dl_done(True)),
+                 ("+30분 연장", lambda: self._dl_extend(1800)),
+                 ("+1시간 연장", lambda: self._dl_extend(3600)),
+                 ("직접 입력…", self._dl_extend_win),
+                 ("-", None),
+                 ("크게", lambda: self._dl_set(size=min(self.DL_R_MAX, st["size"] + 10))),
+                 ("작게", lambda: self._dl_set(size=max(self.DL_R_MIN, st["size"] - 10))),
+                 (("아래 글자 숨기기" if st["pill"] else "아래 글자 보이기"),
+                  lambda: self._dl_set(pill=not st["pill"])),
+                 (("위치 고정 ✓" if st["lock"] else "위치 고정"),
+                  lambda: self._dl_set(lock=not st["lock"])),
+                 ("-", None),
+                 ("시계 창 열기", self._dl_open),
+                 ("그만두기", lambda: self._dl_done(False))]
+        self._strip_popup(items, xr, yr)
+
+    def _dl_tick(self, now):
+        """매 프레임 — 초가 바뀌면 다시 그리고, 시각이 되면 묻는다."""
+        st = self._dl()
+        want = st["on"] and st["show"] and not getattr(self, "_fs_hidden", False)
+        pw = getattr(self, "_pomo_winref", None)
+        try:
+            # 창이 **화면에 보이면** 거기서 본다 — '있다'가 아니라 state() 로 (지뢰 179)
+            if want and pw is not None and pw.winfo_exists() \
+                    and str(pw.state()) not in ("iconic", "withdrawn"):
+                want = False
+        except Exception:
+            pass
+        if not want:
+            self._dl_hide()
+        else:
+            key = (int(now), round(st["goal"], 1), st["size"], st["name"], st["ext"],
+                   st["pill"], self.card["fill"])
+            if key != self._dl_key or self._dl_im is None:
+                self._dl_key = key
+                if self._dl_strip is None:
+                    self._dl_strip_make()
+                # 색상키 창(맥)이면 흐린 그림자를 뺀다 — 키 색과 섞여 얼룩이
+                # 된다 (지뢰 181). 레이어 창(윈도우)만 진짜 반투명을 담는다.
+                self._dl_im = self._dl_sheet(
+                    st, now, shadow=(getattr(self._dl_strip, "mode", "key") == "layer"))
+                x, y = self._dl_pos(self._dl_im)
+                self._dl_root = self._last_pos
+                self._dl_strip.show(self._dl_im, x, y)
+                if now - self._dl_z > 1.0:
+                    self._dl_z = now
+                    pop = getattr(self, "_strip_pop_ref", None)
+                    try:
+                        pop_on = bool(pop is not None and pop.winfo_exists())
+                    except Exception:
+                        pop_on = False
+                    if pop_on:
+                        self._win_top(pop)
+                    else:
+                        self._dl_strip.raise_top()
+            else:
+                lp = self._last_pos
+                if lp is not None and lp != self._dl_root:
+                    self._dl_follow()
+        if st["on"] and now >= st["goal"]:
+            asked = st["asked"]
+            if asked < st["goal"] or now - asked > self.DL_ASK_AGAIN:
+                st["asked"] = now
+                self._dl_save(st)
+                self._safe("dl_ask", self._dl_ask, st, asked < st["goal"])
+
+    def _dl_ask(self, st, first):
+        """시간이 됐다 — 소리·말풍선·카드. 응답이 없으면 5분마다 다시."""
+        got = self.pomosnd if isinstance(self.pomosnd, dict) else None
+        snd = (got.get("end") or got.get("start")) if got else None
+        if snd is None:
+            snd = self.roomsnd
+        if snd is not None:
+            self._safe("dl_snd", snd.play)
+        nm = st.get("name") or "목표"
+        self._say(("시간 됐어! '%s' 어떻게 됐어?" % nm) if first
+                  else ("'%s' 아직이야? 연장할까?" % nm), 12.0, big=True,
+                  btn="어때?", act=self._dl_prompt_win)
+        self._safe("dl_prompt", self._dl_prompt_win)
+
+    def _dl_prompt_close(self):
+        got = getattr(self, "_dl_prompt_ref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.destroy()
+            except Exception:
+                pass
+        self._dl_prompt_ref = None
+
+    def _dl_prompt_win(self):
+        """시간이 됐을 때의 카드 — 끝냈어 / 그만할래 / 연장 (목업 ⑥)."""
+        got = getattr(self, "_dl_prompt_ref", None)
+        try:
+            if got is not None and got.winfo_exists():
+                got.lift()
+                return
+        except Exception:
+            pass
+        st = self._dl()
+        if not st["on"]:
+            return
+        u, cd = self._ui, self.card
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(268)), int(u(172))
+        win = tk.Toplevel(self.root)
+        self._dl_prompt_ref = win
+        win.title("데드라인 시계")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        if not getattr(win, "_ena_saved_pos", False):
+            # 처음엔 스티커 옆에
+            strip = self._dl_strip
+            try:
+                if strip is not None and strip.visible:
+                    x9, y9 = strip.x + strip.w + 8, strip.y
+                else:
+                    x9 = self.root.winfo_rootx() + self.root.winfo_width() + 12
+                    y9 = self.root.winfo_rooty()
+                if not self._box_on_screen(x9, y9, W, H):
+                    x9, y9 = self.root.winfo_rootx() - W - 12, self.root.winfo_rooty()
+                win.geometry("+%d+%d" % (int(x9), int(y9)))
+            except Exception:
+                pass
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        hits = []
+        goal_s = time.strftime("%H:%M", time.localtime(st["goal"]))
+        cv.create_text(u(16), u(20), anchor="w", text="시간 됐어!  " + (st["name"] or "목표"),
+                       font=self._uf(11, True), fill=cd["text"])
+        over = time.time() - float(st["goal"])
+        cv.create_text(u(16), u(40), anchor="w", font=self._uf(8), fill=cd["sub"],
+                       text="목표 %s · %s" % (goal_s, ("지금이 그 시각" if over < 60 else
+                                                  "+%s 지났어요" % self._dl_fmt(over))))
+        bw, bh, by = (W - u(48)) / 2, u(30), u(56)
+        for i, (lab, fl, ink, ol, fn) in enumerate((
+                ("✓  끝냈어", "#cdeccd", "#2e6b3a", "#9fcf9f",
+                 lambda: self._dl_done(True)),
+                ("✗  그만할래", "#ffe3e3", "#a33f3f", "#e8b0b0",
+                 lambda: self._dl_done(False)))):
+            x0 = u(16) + i * (bw + u(16))
+            self._rr_soft(cv, x0, by, x0 + bw, by + bh, bh / 2, fill=fl,
+                          outline=ol, width=1)
+            cv.create_text(x0 + bw / 2, by + bh / 2, text=lab,
+                           font=self._uf(10, True), fill=ink)
+            hits.append((x0, by, x0 + bw, by + bh, fn))
+        cv.create_text(u(16), u(104), anchor="w", text="더 필요하면",
+                       font=self._uf(8), fill=cd["sub"])
+        py, ph = u(116), u(26)
+        for i, (lab, secs) in enumerate((("+15분", 900), ("+30분", 1800),
+                                         ("+1시간", 3600))):
+            x0 = u(16) + i * u(58)
+            self._rr_soft(cv, x0, py, x0 + u(52), py + ph, ph / 2, fill="#fff3cf",
+                          outline="#e8cf8a", width=1)
+            cv.create_text(x0 + u(26), py + ph / 2, text=lab,
+                           font=self._uf(9, True), fill=cd["text"])
+            hits.append((x0, py, x0 + u(52), py + ph,
+                         lambda s9=secs: self._dl_extend(s9)))
+        # 직접 — 분 입력 + 연장
+        self._rr_soft(cv, u(194), py, u(232), py + ph, u(8), fill="#fffdf7",
+                      outline=line, width=1)
+        box = tk.Entry(cv, bd=0, relief="flat", bg="#fffdf7", fg=cd["text"],
+                       justify="center", font=self._uf(9), highlightthickness=0)
+        cv.create_window(u(213), py + ph / 2, window=box, width=int(u(32)),
+                         height=int(u(18)))
+        cv.create_text(u(246), py + ph / 2, anchor="w", text="분",
+                       font=self._uf(9), fill=cd["sub"])
+
+        def custom(_e=None):
+            try:
+                n9 = int(float(box.get().strip() or 0))
+            except ValueError:
+                n9 = 0
+            if n9 > 0:
+                self._dl_extend(n9 * 60)
+        box.bind("<Return>", custom)
+        cv.create_text(W / 2, u(156), text="아무것도 안 누르면 5분 뒤에 다시 물어요",
+                       font=self._uf(7), fill=cd["sub"])
+
+        def click(e):
+            for x0, y0, x1, y1, fn in hits:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    fn()
+                    return
+        cv.bind("<Button-1>", click)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+    # ── 뽀모도로 창의 탭 본문 ───────────────────────────────────────
+    DL_QUICK = (("+1시간", "1시간"), ("+3시간", "3시간"), ("자정", "24:00"),
+                ("06:00", "06:00"))
+
+    def _dl_ents(self, cv):
+        """입력칸 둘 — 캔버스가 바뀌면(창을 다시 열면) 새로 만든다. 부모는 캔버스
+        (지뢰 22). 그릴 때마다 create_window 로 다시 얹지만 글은 남는다."""
+        got = getattr(self, "_dl_ent", None)
+        if got is not None and got.get("cv") is cv:
+            try:
+                if got["name"].winfo_exists():
+                    return got
+            except Exception:
+                pass
+        cd = self.card
+        mk = lambda: tk.Entry(cv, bd=0, relief="flat", bg="#fffdf7", fg=cd["text"],
+                              font=self._uf(9), highlightthickness=0)
+        got = {"cv": cv, "name": mk(), "when": mk()}
+        got["when"].bind("<Return>", lambda _e: self._safe("dl_go", self._dl_go))
+        got["name"].bind("<Return>", lambda _e: got["when"].focus_set())
+        self._dl_ent = got
+        return got
+
+    def _dl_go(self):
+        """'시작' — 입력칸을 읽어 목표를 세운다."""
+        ent = getattr(self, "_dl_ent", None)
+        if not ent:
+            return
+        try:
+            name = ent["name"].get().strip()
+            when = ent["when"].get().strip()
+        except Exception:
+            return
+        goal = self._dl_parse(when)
+        if goal <= 0:
+            self._dl_err = ("언제까지인지 못 읽었어요 — 23:00 이나 3시간 처럼", time.time())
+            self._pomo_redraw()
+            return
+        self._dl_start(name, goal)
+        try:
+            ent["name"].delete(0, "end")
+            ent["when"].delete(0, "end")
+        except Exception:
+            pass
+
+    def _dl_base_h(self):
+        """데드라인 탭 내용 높이 (배율 1 눈금) — _dl_draw 와 같은 수."""
+        n = min(3, len(self._dl_hist()))
+        rec = 22 + (n * 24 + 10 if n else 36)
+        if self._dl()["on"]:
+            return 64 + 2 * 66 + 46 + 12 + 40 + 22 + rec + 32
+        return 64 + 178 + 12 + rec + 32
+
+    def _dl_act(self, args):
+        a = args[0] if args else ""
+        st = self._dl()
+        if a == "go":
+            self._dl_go()
+        elif a == "done":
+            self._dl_done(True)
+        elif a == "quit":
+            self._dl_done(False)
+        elif a == "ext" and len(args) > 1:
+            self._dl_extend(float(args[1]))
+        elif a == "quick" and len(args) > 1:
+            ent = getattr(self, "_dl_ent", None)
+            if ent:
+                try:
+                    ent["when"].delete(0, "end")
+                    ent["when"].insert(0, str(args[1]))
+                    ent["when"].focus_set()
+                except Exception:
+                    pass
+        elif a == "show":
+            self._dl_set(show=not st["show"])
+        elif a == "size" and len(args) > 1:
+            self._dl_set(size=max(self.DL_R_MIN, min(self.DL_R_MAX,
+                                                      st["size"] + int(args[1]))))
+        elif a == "lock":
+            self._dl_set(lock=not st["lock"])
+        elif a == "home":
+            self._dl_set(pos=None)
+        elif a == "pill":
+            self._dl_set(pill=not st["pill"])
+        self._pomo_redraw()
+
+    def _dl_draw(self, cv, u, uf, W, pad, line, stk=None):
+        """데드라인 시계 탭 본문 (요청 · 목업)."""
+        cd = self.card
+        st = self._dl()
+        now = time.time()
+        keep = self._pomo_keep
+        cv.create_text(W / 2, u(26), text="데드라인 시계", font=uf(13, True),
+                       fill=cd["text"])
+        # 오른쪽 위 — 바탕화면에 표시
+        br = u(13)
+        tx8 = W - u(24)
+        on9 = bool(st["show"])
+        self._safe("soft_btn", self._soft_dot, cv, tx8, u(26), br,
+                   cd["fill"] if on9 else "#ffffff", outline=line, width=1,
+                   shadow=True)
+        ipx = int(u(18))
+        c9, f9 = ("#ffffff", cd["fill"]) if on9 else (cd["sub"], "#ffffff")
+        self._sw_img_center(cv, self._dl_icon_pil(ipx, c9, f9),
+                            ("dlbtn", ipx, c9, f9), tx8, u(26))
+        self._gtext(cv, tx8, u(47), text="바탕화면에", font=uf(6, True), fill=cd["sub"])
+        bx9 = (tx8 - br - u(3), u(26) - br - u(3), tx8 + br + u(3), u(26) + br + u(3))
+        self._pomo_hits.append(bx9 + (("dl", "show"),))
+        self._pomo_tips.append(bx9 + ("바탕화면에 시계 " + ("보임" if on9 else "숨김"),))
+        cy0 = u(64)
+        if st["on"]:
+            # 도는 중 — 작은 시계 + 이름·목표 + 단추
+            R9 = 66
+            cy1 = cy0 + u(2 * R9 + 46)          # 글자 아래 여백만 남긴다
+            self._rr_soft(cv, pad, cy0, W - pad, cy1, u(18), fill="#ffffff",
+                          outline=line, width=1)
+            Rp = int(u(R9 * 0.78))
+            key = ("mini", int(now), round(st["goal"], 1), Rp, st["name"], st["ext"],
+                   cd["fill"])
+            ph = self._sw_ph(key, lambda: self._dl_sheet(st, now, R=Rp, pill=False))
+            # 시계 + 글자 셋을 **한 묶음**으로 카드 세로 정중앙에 (요청). 그림
+            # 아래쪽은 알약 자리라 비어 있어 그림을 가운데 두면 글자가 처진다 —
+            # 묶음 높이(그림 위 여백 8 + 지름 + 글자 세 줄)로 위끝을 잡는다.
+            gh9 = 8 + 2 * Rp + u(16) + u(38) + u(10)
+            top9 = cy0 + max(u(4), ((cy1 - cy0) - gh9) / 2.0)
+            if ph is not None:
+                cv.create_image(W / 2, top9, anchor="n", image=ph)
+                keep.append(ph)
+            left = float(st["goal"]) - now
+            colr = self._dl_color(left)
+            ty = top9 + 8 + 2 * Rp + u(16)            # 시계 아래끝 + 16
+            cv.create_text(W / 2, ty, text=st["name"] or "목표", font=uf(11, True),
+                           fill=cd["text"])
+            t2 = ((self._dl_fmt(left) + " 남음") if left > 0
+                  else ("+" + self._dl_fmt(left) + " 초과"))
+            cv.create_text(W / 2, ty + u(20), text=t2, font=uf(14, True),
+                           fill=colr)
+            sub9 = "%s 까지" % time.strftime("%H:%M", time.localtime(st["goal"]))
+            if st["ext"]:
+                sub9 += " · 연장 %d번" % st["ext"]
+            cv.create_text(W / 2, ty + u(38), text=sub9, font=uf(8), fill=cd["sub"])
+            if stk is not None:
+                stk()
+            by0 = cy1 + u(12)
+            by1 = by0 + u(40)
+            rows = [("끝냈어", ("dl", "done"), True), ("+30분", ("dl", "ext", 1800), False),
+                    ("그만두기", ("dl", "quit"), False)]
+            bw = (W - pad * 2 - u(8) * 2) / 3.0
+            for i, (lab, act, main_b) in enumerate(rows):
+                x0 = pad + i * (bw + u(8))
+                x1 = x0 + bw
+                fl, ol, wd, ik = ((cd["fill"], "", 0, "#ffffff") if main_b
+                                  else ("#f2edf4", line, 1, cd["text"]))
+                self._rr_soft(cv, x0, by0, x1, by1, u(13), fill=fl, outline=ol, width=wd)
+                cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
+                               font=uf(9, main_b), fill=ik)
+                self._pomo_hits.append((x0, by0, x1, by1, act))
+            # (크기·고정·글자 알약 줄은 뺐다 — 우클릭 메뉴에 있다 · 요청)
+            ry = by1 + u(22)
+        else:
+            # 새로 정하기 — 이름 · 언제까지 · 빠른 단추 · 시작
+            cy1 = cy0 + u(178)
+            self._rr_soft(cv, pad, cy0, W - pad, cy1, u(18), fill="#ffffff",
+                          outline=line, width=1)
+            ent = self._dl_ents(cv)
+            cv.create_text(pad + u(16), cy0 + u(18), anchor="w", text="무엇을",
+                           font=uf(8), fill=cd["sub"])
+            self._rr_soft(cv, pad + u(14), cy0 + u(28), W - pad - u(14), cy0 + u(52),
+                          u(8), fill="#fffdf7", outline=line, width=1)
+            cv.create_window(pad + u(22), cy0 + u(40), anchor="w", window=ent["name"],
+                             width=int(W - pad * 2 - u(44)), height=int(u(18)))
+            cv.create_text(pad + u(16), cy0 + u(68), anchor="w", text="언제까지",
+                           font=uf(8), fill=cd["sub"])
+            self._rr_soft(cv, pad + u(14), cy0 + u(78), pad + u(118), cy0 + u(102),
+                          u(8), fill="#fffdf7", outline=line, width=1)
+            cv.create_window(pad + u(22), cy0 + u(90), anchor="w", window=ent["when"],
+                             width=int(u(88)), height=int(u(18)))
+            f7 = uf(7, True)
+            for k, (lab, val) in enumerate(self.DL_QUICK):
+                xx = pad + u(126) + (k % 2) * u(60)
+                yy = cy0 + u(78) + (k // 2) * u(28)
+                self._rr_soft(cv, xx, yy, xx + u(54), yy + u(22), u(11),
+                              fill="#fff3cf", outline="#e8cf8a", width=1)
+                cv.create_text(xx + u(27), yy + u(11) - u(0.5), text=lab, font=f7,
+                               fill=cd["text"])
+                self._pomo_hits.append((xx, yy, xx + u(54), yy + u(22),
+                                        ("dl", "quick", val)))
+            gx0, gy0 = pad + u(14), cy0 + u(136)
+            self._rr_soft(cv, gx0, gy0, gx0 + u(104), gy0 + u(28), u(14),
+                          fill=cd["fill"], outline="", width=0)
+            cv.create_text(gx0 + u(52), gy0 + u(14), text="시작", font=uf(10, True),
+                           fill="#ffffff")
+            self._pomo_hits.append((gx0, gy0, gx0 + u(104), gy0 + u(28), ("dl", "go")))
+            err = getattr(self, "_dl_err", ("", 0.0))
+            if err[0] and now - err[1] < 4.0:
+                cv.create_text(gx0 + u(112), gy0 + u(14), anchor="w", text=err[0],
+                               font=uf(7), fill="#d9534f", width=int(W - gx0 - u(130)))
+            else:
+                cv.create_text(gx0 + u(112), gy0 + u(14), anchor="w",
+                               text="23:00 처럼 시각, 3시간 처럼 길이", font=uf(7),
+                               fill=cd["sub"], width=int(W - gx0 - u(130)))
+            if stk is not None:
+                stk()
+            ry = cy1 + u(12) + u(16)
+        # 최근 기록
+        rows = self._dl_hist()[:3]
+        f_h = uf(9, True)
+        self._gtext(cv, W / 2, ry, text="최근 기록", font=f_h, fill=cd["sub"])
+        y0l = ry + u(14)
+        n = len(rows)
+        y1l = y0l + (n * u(24) + u(10) if n else u(36))
+        self._rr_soft(cv, pad, y0l, W - pad, y1l, u(14), fill="#ffffff",
+                      outline=line, width=1)
+        if not n:
+            self._gtext(cv, W / 2, (y0l + y1l) / 2, text="아직 기록이 없어요",
+                        font=uf(8), fill=cd["sub"])
+        for j, r9 in enumerate(rows):
+            yy = y0l + u(5) + u(24) * (j + 0.5)
+            ok9 = bool(r9.get("ok"))
+            over9 = int(r9.get("over") or 0)
+            if ok9 and over9 <= 60:
+                tag, tc = "제때", "#4a9c80"
+            elif ok9:
+                tag, tc = "+%s 늦게" % self._dl_fmt(over9), "#b8802a"
+            else:
+                tag, tc = "그만둠", "#a33f3f"
+            self._safe("soft_btn", self._soft_dot, cv, pad + u(16), yy, u(4),
+                       "#6fc4a6" if ok9 else "#e8a0a0")
+            nm9 = self._fit_text(cv, str(r9.get("name") or "목표"), uf(9, True), u(110))
+            cv.create_text(pad + u(28), yy, anchor="w", text=nm9, font=uf(9, True),
+                           fill=cd["text"])
+            cv.create_text(W / 2 + u(18), yy, anchor="w", text=tag, font=uf(8, True),
+                           fill=tc)
+            try:
+                ds = time.strftime("%m/%d %H:%M", time.localtime(float(r9.get("goal") or 0)))
+            except Exception:
+                ds = ""
+            cv.create_text(W - pad - u(12), yy, anchor="e", text=ds, font=uf(7),
+                           fill=cd["sub"])
+        self._gtext(cv, W / 2, y1l + u(16),
+                    text="창을 닫으면 바탕화면에 시계가 나타나요 · 우클릭으로 메뉴를 열어요",
+                    font=uf(8), fill=cd["sub"])
+
     # ── 뽀모도로 창의 탭·메뉴 단추 ─────────────────────────────────────────
     def _pomo_tab(self):
-        return "sw" if self.us.get("pomo_tab") == "sw" else "pomo"
+        t = self.us.get("pomo_tab")
+        if t == "sw":
+            return "sw"
+        if t == "dl" and self._dl_gate():
+            return "dl"
+        return "pomo"
 
     def _pomo_tab_set(self, tab):
-        tab = "sw" if tab == "sw" else "pomo"
+        tab = tab if tab in ("sw", "dl") else "pomo"
         if tab == "sw":
             self._feat_seen("stopwatch")
+        elif tab == "dl":
+            self._feat_seen("deadline")
         if self._pomo_tab() == tab:
             return
         self.us["pomo_tab"] = tab
@@ -27076,8 +28222,8 @@ class Mascot:
         self._pomo_redraw()
 
     def _pomo_tab_tips(self):
-        return [(h[0], h[1], h[2], h[3],
-                 "뽀모도로" if h[4] == "pomo" else "스톱워치")
+        names = {"pomo": "뽀모도로", "dl": "데드라인 시계", "sw": "스톱워치"}
+        return [(h[0], h[1], h[2], h[3], names.get(h[4], ""))
                 for h in (getattr(self, "_pomo_tab_hits", None) or [])]
 
     def _pomo_menu_click(self):
@@ -27139,14 +28285,17 @@ class Mascot:
             if (self._feat_new("pomo_vol") and self._team_gate() and not on):
                 self._feat_dot(cv, bx + br - u(1), cy - br + u(1))
             x0 = u(44)
-        h, w = u(26), u(62)
+        kinds = ("pomo", "dl", "sw") if self._dl_gate() else ("pomo", "sw")
+        # 탭이 셋이면 칸을 좁게 — 아이콘도 한 단계 작게 (요청)
+        h, w = u(26), (u(84) if len(kinds) == 3 else u(62))
         y0, y1 = cy - h / 2.0, cy + h / 2.0
         self._rr_soft(cv, x0, y0, x0 + w, y1, h / 2.0, fill="#ffffff",
                       outline=line, width=1)
-        half = w / 2.0
+        half = w / float(len(kinds))
         self._pomo_tab_hits = []
-        run = {"pomo": self._pomo_running(), "sw": self._sw()["on"]}
-        for i, kind in enumerate(("pomo", "sw")):
+        run = {"pomo": self._pomo_running(), "sw": self._sw()["on"],
+               "dl": self._dl()["on"] if self._dl_gate() else False}
+        for i, kind in enumerate(kinds):
             hx0 = x0 + i * half
             on = (kind == tab)
             cx = hx0 + half / 2.0
@@ -27156,19 +28305,22 @@ class Mascot:
                               outline="", width=0)
             col = "#ffffff" if on else cd["sub"]
             bg = cd["fill"] if on else "#ffffff"
-            ipx = int(u(16))
+            ipx = int(u(14 if len(kinds) == 3 else 16))
             if kind == "pomo":
                 pil9 = self._tab_tomato_pil(ipx, col, bg)
+            elif kind == "dl":
+                pil9 = self._dl_icon_pil(ipx, col, bg)
             else:
                 pil9 = self._sw_icon_pil(ipx, col, bg, 42, ticks=False)
             self._sw_img_center(cv, pil9, ("tab", kind, ipx, col, bg), cx, cy)
+            fid9 = {"sw": "stopwatch", "dl": "deadline"}.get(kind)
             if not on and run[kind]:
                 self._safe("soft_btn", self._soft_dot, cv, hx0 + half - u(5),
                            y0 + u(5), u(3.6), "#6fc4a6", outline="#ffffff",
                            width=1.2)
-            elif kind == "sw" and not on and self._feat_new("stopwatch"):
+            elif fid9 and not on and self._feat_new(fid9):
                 self._feat_dot(cv, hx0 + half - u(5), y0 + u(5))
-            if kind == "sw" and self._feat_spot_on("pomo_sw"):
+            if fid9 and self._feat_spot_on("pomo_" + kind):
                 self._feat_ring(cv, hx0, y0, hx0 + half, y1, h / 2.0)
             self._pomo_tab_hits.append((hx0, y0 - u(4), hx0 + half, y1 + u(4),
                                         kind))
@@ -27185,7 +28337,7 @@ class Mascot:
         else:
             mx9, my9 = u(8), u(4)            # 위 띠의 메뉴 단추 바로 아래
         items = [("스티커 꾸미기", "stk")]
-        if self._pomo_tab() != "sw":         # 시간 조절은 뽀모도로 것
+        if self._pomo_tab() == "pomo":       # 시간 조절은 뽀모도로 것
             items.append(("시간 조절", "len"))
         items.append(("소리 조절", "vol"))
         for i9, (lab9, act9) in enumerate(items):
@@ -27556,6 +28708,9 @@ class Mascot:
         {"id": "stopwatch", "label": "스톱워치",
          "say": "뽀모도로 창 왼쪽 위 탭을 누르면 스톱워치로 바뀌어요 — 뽀모도로는 그대로 계속 돌아요",
          "open": "pomo_sw", "gate": "_sw_gate"},
+        {"id": "deadline", "label": "데드라인 시계",
+         "say": "뽀모도로 창 가운데 탭이 데드라인 시계예요 — 목표 시각을 정하면 바탕화면에 아날로그 시계가 붙어요",
+         "open": "pomo_dl", "gate": "_dl_gate"},
     )
     FEAT_FIRST = 12.0            # 켜고 이만큼 지나면 첫 안내
     FEAT_GAP = 10 * 60.0         # 앞 안내를 그냥 흘려보냈으면 다음까지 이만큼
@@ -27680,6 +28835,8 @@ class Mascot:
             self._pomo_redraw()
         elif op == "pomo_sw":
             self._safe("sw_open", self._sw_open)
+        elif op == "pomo_dl":
+            self._safe("dl_open", self._dl_open)
         elif op in ("bgm_stop", "bgm_friends", "bgm_video", "bgm_set"):
             self._safe("bgm_win", self._bgm_win, "pl")
             st9 = getattr(self, "_bgm_st", None)
@@ -27756,6 +28913,8 @@ class Mascot:
             """지금 구성의 내용 높이 (배율 1 기준 눈금)."""
             if self._pomo_tab() == "sw":
                 return self._sw_base_h()
+            if self._pomo_tab() == "dl":
+                return self._dl_base_h()
             ty1 = 186 + (100 if self.us.get("pomo_edit") else 20)
             wk = 0
             if self.cfg.get("pomo_stats", True):   # '이번 주' (기본 켜짐)
@@ -27875,8 +29034,9 @@ class Mascot:
             cv.delete("all")
             self._pomo_keep = []           # 이번 프레임 그림만 붙든다 (지뢰 18)
             self._sw_live = None
-            if self._pomo_tab() == "sw":
-                # 스톱워치 탭 (요청) — 뽀모도로는 그리지만 않을 뿐 계속 돈다
+            tab9 = self._pomo_tab()
+            if tab9 in ("sw", "dl"):
+                # 스톱워치·데드라인 탭 (요청) — 뽀모도로는 그리지만 않을 뿐 계속 돈다
                 self._pomo_hits = []
                 self._pomo_stk_btn = self._pomo_time_btn = None
                 self._pomo_inv_btn = self._pomo_hard_btn = None
@@ -27886,7 +29046,9 @@ class Mascot:
                     self._stk_hit["pomo"] = []
                 except Exception:
                     pass
-                self._safe("sw_draw", self._sw_draw, cv, u, uf, W, pad, line,
+                self._safe("sw_draw" if tab9 == "sw" else "dl_draw",
+                           self._sw_draw if tab9 == "sw" else self._dl_draw,
+                           cv, u, uf, W, pad, line,
                            lambda: self._safe("stk_pomo", self._stk_draw, cv,
                                               "pomo", W, H))
                 self._safe("pomo_tabs", self._pomo_tabs_draw, cv, u, uf, W,
@@ -28402,6 +29564,9 @@ class Mascot:
                     self._safe("ui_click", self._ui_click)
                     if isinstance(act, tuple) and act[0] == "sw":
                         self._safe("sw_act", self._sw_act, act[1:])
+                        return
+                    if isinstance(act, tuple) and act[0] == "dl":
+                        self._safe("dl_act", self._dl_act, act[1:])
                         return
                     if isinstance(act, tuple) and act[0] == "wkoff":
                         # 지난주 넘기기 — 창을 여는 동안만 기억한다
@@ -38512,6 +39677,75 @@ class Mascot:
             except Exception:
                 pass
         self._save_settings()
+
+    def _restore_once(self):
+        """config 의 `restore` 번호가 새것이면 옛 기록을 **한 번만** 되살린다.
+
+        락스가 컴퓨터를 포맷해 상태 폴더를 통째로 잃었다(옛 파일 없음).
+        남의 캐시(.room_who.json·.month_snap.json)에 남은 마지막 값으로
+        게임 최고 점수와 닉네임을 돌려준다. 레벨은 `lv_floor`(add)가 맡는다.
+        **지금 값이 더 크면 안 건드리고**, 닉네임은 비어 있을 때만 넣는다.
+        날짜별 기록(하루 기록·게임 랭킹 줄)은 남은 곳이 없어 못 살린다.
+        """
+        rs = self.cfg.get("restore") or {}
+        try:
+            want = int(rs.get("n") or 0)
+        except Exception:
+            want = 0
+        if want <= 0:
+            return
+        try:
+            done = int(self.us.get("restore_n") or 0)
+        except Exception:
+            done = 0
+        if done >= want:
+            return
+        until = str(rs.get("until") or "")
+        if not until or self._my_workday() > until:
+            return
+        if int(self.us.get("wg_wipe") or 0) < self.WG_WIPE:
+            return             # 기록 지우기가 먼저 돌아야 한다 (안 그러면 지워진다)
+        self.us["restore_n"] = want
+        got = []
+        try:
+            v = int(rs.get("wgb") or 0)
+            if v > 0 and not _load_failed(self._wg_path()):
+                g = self._wg_load()
+                if int(g.get("best") or 0) < v:
+                    g["best"] = v
+                    self._wg_save()
+                    got.append("wgb")
+        except Exception:
+            pass
+        try:
+            v = int(rs.get("ctb") or 0)
+            best, rank = self._ct_store()
+            if v > best and not _load_failed(self._ct_path()):
+                self._ct_save(v, rank)
+                if isinstance(self._ct, dict):
+                    self._ct["best"] = max(int(self._ct.get("best") or 0), v)
+                got.append("ctb")
+        except Exception:
+            pass
+        try:
+            v = int(rs.get("g2b") or 0)
+            if v > 0 and not _load_failed(self._g2_path()):
+                g = self._g2 if isinstance(self._g2, dict) else self._g2_load()
+                if int(g.get("best") or 0) < v:
+                    g["best"] = v
+                    self._g2_save(g)
+                    got.append("g2b")
+        except Exception:
+            pass
+        nick = str(rs.get("nick") or "").strip()[:14]
+        if nick and not str(self.us.get("room_nick") or "").strip():
+            self.us["room_nick"] = nick
+            got.append("nick")
+        self._save_settings()
+        try:
+            self._log_error("restore n=%d %s" % (want, ",".join(got) or "-"))
+        except Exception:
+            pass
 
     def _floor_fix_once(self):
         """**이제 아무것도 지우지 않는다** — 표시만 찍고 지나간다.
