@@ -19158,11 +19158,86 @@ class Mascot:
             ago = now - (self._fail_at.get(w) or 0)
             rows.append("%-16s %d번  %.0f분 전  %s"
                         % (w, c, ago / 60.0, self._fail_why.get(w, "")))
+        # 메모리가 무엇으로 찼는지 — 밖에서는 프로세스 총량밖에 못 보므로
+        # 캐시별 용량을 여기 남긴다 (실제 355MB 의 구성을 못 갈랐던 일).
+        try:
+            rows.append("")
+            rows.append("메모리 " + self._cache_report())
+        except Exception:
+            pass
         try:
             _save_json_text(os.path.join(self.state_dir, ".health.txt"),
                             "\n".join(rows) + "\n")
         except Exception:
             pass
+
+    CACHE_NAMES = ("_tilt_cache", "_back_cache", "_arm_cache", "_strip_sheets",
+                   "_dl_cache", "_pen_rot", "_strip_seat_cache", "_pil_cache",
+                   "_soft_cache", "_room_img_cache", "_room_head_cache",
+                   "_anim_pil_cache", "_sw_img_cache", "fx_imgs", "hop",
+                   "_tw_cache", "_strip_tom_cache", "_tom_top_cache")
+
+    @staticmethod
+    def _img_bytes(v, depth=0):
+        """그림(PIL·PhotoImage)이 든 값의 대략 바이트 — 캐시 용량 셈용."""
+        if depth > 4:
+            return 0
+        try:
+            w9 = getattr(v, "width", None)
+            h9 = getattr(v, "height", None)
+            if w9 is not None and h9 is not None:
+                if callable(w9):
+                    w9, h9 = w9(), h9()
+                return int(w9) * int(h9) * 4
+        except Exception:
+            return 0
+        if isinstance(v, dict):
+            return sum(Mascot._img_bytes(x, depth + 1) for x in v.values())
+        if isinstance(v, (list, tuple)):
+            return sum(Mascot._img_bytes(x, depth + 1) for x in v)
+        return 0
+
+    def _mem_mb(self):
+        """(작업 집합, 사적 메모리) MB — 윈도우만. 자기 WinDLL 로 (지뢰 21·23)."""
+        if not IS_WIN:
+            return None
+        try:
+            got = getattr(self, "_psapi9", None)
+            if got is None:
+                class _PMC(ctypes.Structure):
+                    _fields_ = [("cb", ctypes.c_uint32), ("pf", ctypes.c_uint32)] + \
+                        [(n9, ctypes.c_size_t) for n9 in
+                         ("pws", "ws", "a", "b", "c", "d", "pg", "ppg", "priv")]
+                ps9 = ctypes.WinDLL("psapi")
+                k9 = ctypes.WinDLL("kernel32")
+                k9.GetCurrentProcess.restype = ctypes.c_void_p
+                ps9.GetProcessMemoryInfo.argtypes = [
+                    ctypes.c_void_p, ctypes.POINTER(_PMC), ctypes.c_uint32]
+                got = (ps9, k9, _PMC)
+                self._psapi9 = got
+            ps9, k9, _PMC = got
+            p9 = _PMC()
+            p9.cb = ctypes.sizeof(_PMC)
+            ps9.GetProcessMemoryInfo(k9.GetCurrentProcess(), ctypes.byref(p9), p9.cb)
+            return p9.ws / 1e6, p9.priv / 1e6
+        except Exception:
+            return None
+
+    def _cache_report(self):
+        """'작업집합 126MB · 사적 355MB · 캐시 34.8MB (tilt 4장 4.2MB · …)' 꼴."""
+        parts = []
+        tot = 0
+        for nm in self.CACHE_NAMES:
+            v = getattr(self, nm, None)
+            if not isinstance(v, dict) or not v:
+                continue
+            b = self._img_bytes(v)
+            tot += b
+            if b >= 300000:
+                parts.append("%s %d개 %.1fMB" % (nm.strip("_"), len(v), b / 1e6))
+        got = self._mem_mb()
+        head = ("작업집합 %.0fMB · 사적 %.0fMB · " % got) if got else ""
+        return head + "캐시 합계 %.1fMB (%s)" % (tot / 1e6, " · ".join(parts) or "없음")
 
     # 캐릭터가 화면에 보이려면 살아 있어야 하는 구역들. 이것들이 꺼지면
     # 사람에게는 '캐릭터가 사라지고 그림자만 남은' 것으로 보인다.
@@ -21296,7 +21371,14 @@ class Mascot:
         """
         if self._cur_near or self.gest is not None:
             return True
-        if self.bubble is not None or self.particles or self.notes:
+        if self.bubble is not None or self.particles:
+            return True
+        # **음악 음표는 안 센다.** 재생 내내 하나가 늘 떠 있어서(_yt_notes)
+        # 그것까지 '보고 있다'로 치면 음악을 듣는 동안 내내 60fps 였다 —
+        # 실측 한 코어 20% → 36% (내 도로롱은 49%). 천천히 오르는 그림이라
+        # 30fps 로도 차이가 안 보인다. 하트·물음표 같은 다른 음표만 올린다.
+        yn = getattr(self, "_yt_note", None)
+        if any(n is not yn for n in self.notes):
             return True
         return now < max(self.click_bounce, self.smile_until,
                          self.hat_until, self.celebrate_until)
@@ -27109,6 +27191,7 @@ class Mascot:
     DL_R_MIN, DL_R_MAX, DL_R_DEF = 40, 150, 70
     DL_ASK_AGAIN = 300.0         # 응답이 없으면 이만큼 뒤에 다시 묻는다
     DL_HIST_MAX = 60
+    DL_CACHE_MAX = 4             # 시계 판 캐시 (한 쌍 4.6MB)
     DL_NAME_N = 16
 
     def _dl_pal(self):
@@ -27552,8 +27635,10 @@ class Mascot:
             d.text((px - tw / 2 - bb[0], py - th / 2 - bb[1]), t, font=f,
                    fill=pal["ink"] if main else light)
         got = (low, top, o0, o1)
-        if len(self._dl_cache) > 12:
-            for k9 in list(self._dl_cache)[:6]:
+        # 한 쌍이 4.6MB(3배 판 둘)라 장수가 아니라 용량으로 상한을 잡는다
+        # (지뢰 42) — 크기·색을 바꿀 때만 새로 생기니 넷이면 넉넉하다.
+        if len(self._dl_cache) > self.DL_CACHE_MAX:
+            for k9 in list(self._dl_cache)[:self.DL_CACHE_MAX // 2]:
                 self._dl_cache.pop(k9, None)
         self._dl_cache[key] = got
         return got
