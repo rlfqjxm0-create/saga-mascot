@@ -1,7 +1,7 @@
 {
- "version": 1789224505,
+ "version": 1789257556,
  "files": {
-  "mascot.py": "5fccdc816afc94fd084dcd2c19a2a0e083ba273de2871d02f8bc3b4cca0b849e",
+  "mascot.py": "1eca135341642be61ba8ad23fcc5e3441ca685ace5f135c611bd39cd7e31abef",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,7 +14,7 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "3d5f3633e36fe4c646ecf8fe468e32dd056df61f114734f6b6efe9ddc1f3dd36",
+  "parts_saga/config.json": "7a8358eb3f2fd1b3570aa504446883a190da72db9de22140d0d843d491c5dba4",
   "parts_saga/config.json.bak": "5e9aa3efda582170ad9660042a9e4710c673d3dc9ab91cc50ca0d3ae9c65a9eb",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
@@ -635,6 +635,10 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "**다크 테마가 생겼어요 (윈도우)** — 환경설정 › 표시 › 테마에서 '다크'를 고르고 저장하면, 캐릭터 타이머 카드·할 일/마감 말풍선·홈·뽀모도로·플레이리스트·환경설정·우클릭 메뉴까지 모든 창이 흑백 톤으로 바뀌어요",
+  "다크 테마에서는 글자가 하얗게 보이고, 마감 말풍선의 D-day 는 가까워지면 원래처럼 주황·빨강으로 보여요. 홈 타이틀 그림은 흑백, 바탕 점무늬는 은은하게 바뀌어요",
+  "음악을 트는 동안 CPU 사용이 절반 가까이 줄었어요 — 머리 위 음표 하나 때문에 재생 내내 초당 60번 다시 그리고 있었어요 · 데드라인 시계가 쓰는 메모리도 줄였어요",
+  "뽀모도로 창 — 아래 가장자리를 잡고 끌어도 크기가 바뀌어요 · 끌어 정한 크기(배율·넓힌 폭)를 다음에 켤 때도 기억해요 (데드라인·스톱워치 탭에서 끄거나 탭을 바꿔도 작아지지 않아요)"
+ ]
 }

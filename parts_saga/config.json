@@ -1,5 +1,6 @@
 {
  "themes": true,
+ "dark_theme": true,
  "name": "사가",
  "scale": 0.28,
  "screen_quad": [

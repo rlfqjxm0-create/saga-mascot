@@ -1316,6 +1316,126 @@ GLASS_KEY = "#fdfcfe"
 GLASS_MIX = (214, 210, 218)
 _GLASS_HOST = None               # 유리 테마로 도는 Mascot (캔버스 도우미가 본다)
 
+# ── 다크 테마 (흑백) ──────────────────────────────────────────────
+# 창 전부에 걸린다 (트위터 다크모드처럼) — 창을 여는 자리마다 손대지 않고,
+# 캔버스 항목·위젯·PIL 도형이 색을 받는 길목에서 `_dk` 가 색을 바꾼다.
+# 밝은 바탕은 어둡게, 어두운 글자는 희게, 채도는 0 (흑백). 키 색(투명)은
+# 절대 안 건드린다. 만들어 낸 색은 (r, r, r+1) 꼴이라 다시 지나도 안 바뀐다
+# — 같은 색을 읽어 되쓰는 코드(itemcget → itemconfigure)가 있어도 뒤집히지
+# 않는다 (진짜 무채색 r=g=b 와도 안 겹친다).
+_DARK_ON = False
+_DARK_KEEP = frozenset(("#010203", "#5d0051", "#fdfcfe", "#808080"))
+_DARK_NAMES = {"white": (255, 255, 255), "black": (0, 0, 0),
+               "gray": (128, 128, 128), "grey": (128, 128, 128),
+               "systembuttonface": (240, 240, 240), "systemwindow": (255, 255, 255),
+               "systemwindowtext": (0, 0, 0), "systembuttontext": (0, 0, 0),
+               "systemmenu": (240, 240, 240), "systemmenutext": (0, 0, 0)}
+_DARK_MEMO = {}
+_DARK_KEEP_DYN = set()           # 다크에서도 그대로 둘 색 (_dk_keep 으로 등록)
+_DARK_HOST = None                # 다크 테마로 도는 Mascot (색상키 창의 글자를 굽는다)
+
+
+def _dk_keep(col):
+    """이 색은 다크에서도 안 바꾼다 — 마감 말풍선의 디데이 색처럼 '뜻이 있는
+    색'. 등록하고 그대로 돌려준다."""
+    try:
+        _DARK_KEEP_DYN.add(str(col).strip().lower())
+    except Exception:
+        pass
+    return col
+# 밝기 대응표 (밝기 → 밝기) — 흰 바탕 0.09, 옅은 판 0.16, 파스텔 단추 0.38,
+# 중간 색 0.6~0.7, 진한 글자 0.92~1.0
+_DARK_CURVE = ((0.0, 1.0), (0.50, 1.0), (0.65, 0.80), (0.75, 0.55),
+               (0.82, 0.40), (0.90, 0.24), (0.96, 0.16), (1.0, 0.09))
+_DARK_WHITE = "#fefeff"          # 글자용 흰색 ((r, r, r+1) 꼴 — 다시 안 바뀐다)
+
+
+def _dk_text(col):
+    """글자 색 — 바꾼 결과가 어두우면(밝은 바탕에 흰 글자였던 것) 흰색으로.
+    다크에서 글자는 늘 밝아야 읽힌다 (요청 — 잘 보여야 하는 글자는 완전한 흰색)."""
+    out = _dk(col)
+    if not _DARK_ON or out is None:
+        return out
+    try:
+        c = str(out)
+        if c.lower() in _DARK_KEEP_DYN:
+            return out
+        if c.startswith("#") and len(c) == 7:
+            # 이미 바꾼 회색(카드 채움색으로 칠한 글자 등)도 여기서 본다 —
+            # 밝기 0.7 아래면 흰색. 보조 글자(0.78 언저리)만 회색으로 남는다.
+            v = (0.299 * int(c[1:3], 16) + 0.587 * int(c[3:5], 16)
+                 + 0.114 * int(c[5:7], 16))
+            if v < 180:
+                return _DARK_WHITE
+    except Exception:
+        pass
+    return out
+
+
+def _dk_dim(col):
+    """큰 판(홈 카드 바닥 띠 등)의 채움색 — 원래 어두운 테마색(준사 #4a4a52)은
+    뒤집으면 흰 판이 되어 버린다. 바꾼 결과가 밝으면 어두운 회색으로 누른다."""
+    out = _dk(col)
+    if not _DARK_ON or out is None:
+        return out
+    try:
+        c = str(out)
+        if c.startswith("#") and len(c) == 7 and int(c[1:3], 16) > 110:
+            return "#4a4a4b"
+    except Exception:
+        pass
+    return out
+
+
+def _dk(col):
+    """다크 테마 색. 꺼져 있거나 모르는 값이면 그대로."""
+    if not _DARK_ON or col is None:
+        return col
+    try:
+        if isinstance(col, (tuple, list)):
+            if len(col) < 3:
+                return col
+            key = "#%02x%02x%02x" % (int(col[0]), int(col[1]), int(col[2]))
+            out = _dk(key)
+            if out == key:
+                return col
+            return (tuple(int(out[i:i + 2], 16) for i in (1, 3, 5))
+                    + tuple(col[3:]))
+        c = str(col).strip()
+        if not c:
+            return col
+        cl = c.lower()
+        if cl in _DARK_KEEP or cl in _DARK_KEEP_DYN:
+            return col
+        got = _DARK_MEMO.get(cl)
+        if got is not None:
+            return got
+        if cl.startswith("#") and len(cl) == 7:
+            r, g, b = (int(cl[i:i + 2], 16) for i in (1, 3, 5))
+        elif cl.startswith("#") and len(cl) == 4:
+            r, g, b = (int(cl[i] * 2, 16) for i in (1, 2, 3))
+        elif cl in _DARK_NAMES:
+            r, g, b = _DARK_NAMES[cl]
+        else:
+            return col
+        if g == r and b == r + 1:
+            return col                       # 이미 바꾼 색
+        L = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        out_l = _DARK_CURVE[-1][1]
+        for (a0, b0), (a1, b1) in zip(_DARK_CURVE, _DARK_CURVE[1:]):
+            if L <= a1:
+                t = (L - a0) / (a1 - a0) if a1 > a0 else 0.0
+                out_l = b0 + (b1 - b0) * t
+                break
+        v = max(0, min(254, int(round(out_l * 255))))
+        out = "#%02x%02x%02x" % (v, v, v + 1)
+        if len(_DARK_MEMO) > 4000:
+            _DARK_MEMO.clear()
+        _DARK_MEMO[cl] = out
+        return out
+    except Exception:
+        return col
+
 # 맥 전용 투명 키 색. 윈도우는 창 관리자가 색상키를 처리해 주지만 맥에는 그게 없어서
 # CoreImage 로 직접 뺀다(_MacChromaKey). 파츠 이미지와 UI 팔레트 어디에도 없는 색을
 # 골라야 캐릭터에 구멍이 뚫리지 않는다. 이 색은 파츠 전체를 훑어 고른 값으로,
@@ -1404,6 +1524,7 @@ DEFAULT_SETTINGS = {
     "pomo_vow": "",       # 같이하기 각오 한마디 (머리 위 말풍선)
     "pomo_team_now": None,  # 지금 같이하는 방 (껐다 켜도 이어진다)
     "pomo_zoom": 1.0,     # 뽀모도로 창 크기 배율 (모서리를 끌어 정한다)
+    "pomo_w": 0,          # 뽀모도로 창을 옆으로 넓혀 둔 폭(px) — 0 이면 기본 폭
     "pomo_focus": 25,     # 뽀모도로 집중 길이(분) — 창 안에서 바꾼다
     "pomo_short": 5,      # 짧은 휴식(분)
     "pomo_long": 15,      # 네 번째 뒤 긴 휴식(분)
@@ -1419,7 +1540,7 @@ DEFAULT_SETTINGS = {
     "slime_kind": "",     # 슬라임 종류 (sounds/slime/ 아래 폴더 이름)
     "sound_pack": "banana split lubed",
     "skin": "기본",        # 패션 슬롯 이름
-    "theme": "기본",       # 창 테마 — 기본 / 유리 (config 의 themes 를 켠 캐릭터만)
+    "theme": "기본",       # 창 테마 — 기본 / 유리 / 다크 (config 의 themes·dark_theme 를 켠 캐릭터만)
     "glass_alpha": 40,     # 유리 불투명도 (%) — 아크릴 틴트의 알파
     "stickers_show": True,   # 바탕화면 스티커 보이기 (config의 stickers를 켠 캐릭터만)
     "stickers_lock": False,  # 스티커 잠금 — 클릭이 스티커를 통과한다
@@ -3392,6 +3513,8 @@ class _CharSheet:
                 ax = "l" if "w" in anc else ("r" if "e" in anc else "m")
                 ay = "a" if "n" in anc else ("d" if "s" in anc else "m")
             fill = self._col(kw.get("fill", "#000000")) or "#000000"
+            if _DARK_ON:
+                fill = _dk_text(fill)            # 다크 테마 — 글자는 밝게
             lines = txt.split("\n")
             if len(lines) == 1:
                 d.text((x, y), txt, font=font, fill=fill, anchor=ax + ay)
@@ -3498,6 +3621,7 @@ def bubble_img(w, h, r, tail, fill, outline, lw, S=4, pad=0):
     셋 다 몸통 왼쪽 위 모서리 기준이고, 끝점은 몸통 아랫변에서 그만큼 아래다.
     w·h·r·lw 은 1배 기준이고, 안에서 S배로 그린 뒤 줄인다.
     """
+    fill, outline = _dk(fill), _dk(outline)      # 다크 테마
     th = tail[3] if tail else 0
     W2, H2 = int(w + pad * 2 + 2), int(h + th + pad * 2 + 2)
     im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
@@ -5839,7 +5963,10 @@ class TodoPanel:
     HEAVY = 0.6
 
     def _ptext(self, x, y, **kw):
-        """말풍선 글자 — 두 번 그려 조금 더 두껍게. 그린 것들을 돌려준다."""
+        """말풍선 글자 — 두 번 그려 조금 더 두껍게. 그린 것들을 돌려준다.
+        다크 테마는 구운 글자(그림)라 한 번만 — 겹치면 흐릿해 보인다."""
+        if _DARK_ON:
+            return (self.canvas.create_text(x, y, **kw),)
         return (self.canvas.create_text(x, y, **kw),
                 self.canvas.create_text(x + self.HEAVY, y, **kw))
 
@@ -5974,13 +6101,19 @@ class TodoPanel:
                 lines, hs = lay
                 ty = mid - sum(hs) / 2
                 ids = []
-                for ln, lh in zip(lines, hs):
+                for li9, (ln, lh) in enumerate(zip(lines, hs)):
                     total = sum(w for _t, _f, w in ln)
                     tx = (x0 + x1) / 2 - total / 2
                     for seg, font, w in ln:
+                        # 다크 테마: 디데이(첫 줄)만 원래 색을 지키고 나머지
+                        # 글자는 흰색 (요청). 기본 테마는 전과 같다.
+                        if _DARK_ON:
+                            f9 = (_dk_keep(tint) if (tint and li9 == 0)
+                                  else cd["text"])
+                        else:
+                            f9 = tint or cd["text"]
                         ids += self._ptext(tx, ty + lh / 2, anchor="w",
-                                           text=seg, font=font,
-                                           fill=tint or cd["text"])
+                                           text=seg, font=font, fill=f9)
                         tx += w
                     ty += lh
                 # 줄 높이를 더해 놓은 자리는 글자 상자 기준이라 위아래 여백이
@@ -5993,7 +6126,9 @@ class TodoPanel:
             else:
                 ids = self._ptext((x0 + x1) / 2, mid, text=todo_text(item),
                                   width=tw, font=todo_font(item, self.FS),
-                                  fill=tint or cd["text"], justify="center")
+                                  fill=(_dk_keep(tint) if (tint and _DARK_ON)
+                                        else (tint or cd["text"])),
+                                  justify="center")
                 tb = c.bbox(ids[0])  # 실제 그려진 높이로 세로 중앙을 다시 맞춘다
                 if tb:
                     dy = round(mid - (tb[1] + tb[3]) / 2) - 1
@@ -7501,6 +7636,30 @@ class Mascot:
                 _cv_init2.__doc__ = _orig_cv_init.__doc__
                 tk.Canvas.__init__ = _cv_init2
                 tk.Canvas._ena_glass = True
+        # 다크 테마 (요청 · 흑백) — 창 전부에 걸린다. config `dark_theme` 를
+        # 켠 캐릭터만 (지금은 내 도로롱). 캔버스가 만들어지는 순간 색 도우미를
+        # 끼우고, 위젯(Entry·Frame…)은 _dark_tick 이 1초마다 훑어 바꾼다.
+        global _DARK_ON, _DARK_HOST
+        self._dark = bool(self.cfg.get("dark_theme")
+                          and str(self.us.get("theme") or "") == "다크")
+        self._dark_at = 0.0
+        self._dtext_cache = {}
+        _DARK_ON = bool(self._dark)
+        if self._dark:
+            _DARK_HOST = self
+        if self._dark and not getattr(tk.Canvas, "_ena_dark", False):
+            _orig_cv_init3 = tk.Canvas.__init__
+
+            def _cv_init3(cv, *a, **kw):
+                _orig_cv_init3(cv, *a, **kw)
+                try:
+                    if _DARK_ON:
+                        Mascot._dark_canvas_shim(cv)
+                except Exception:
+                    pass
+            _cv_init3.__doc__ = _orig_cv_init3.__doc__
+            tk.Canvas.__init__ = _cv_init3
+            tk.Canvas._ena_dark = True
         self.card = {
             "bg": cc.get("bg", "#ffffff"), "border": cc.get("border", CARD_BORDER),
             "text": cc.get("text", CARD_NAVY), "sub": cc.get("sub", CARD_GRAY),
@@ -7512,6 +7671,10 @@ class Mascot:
             "soft": cc.get("soft", "#fbf3f7"),
             "line": cc.get("line", "#f0e6ec"),
         }
+        if self._dark:
+            for k9, v9 in list(self.card.items()):
+                if k9 != "deco" and isinstance(v9, str) and v9.startswith("#"):
+                    self.card[k9] = _dk_text(v9) if k9 == "text" else _dk(v9)
 
         # 워크스페이스 워크타이머 연동 (config의 workspace_timer = 라이브 파일 경로)
         # 연동 모드 = 게이지 대신 시계 토글 카드. 비연동(준사) = 목표 게이지 카드.
@@ -8084,11 +8247,19 @@ class Mascot:
         if self.timer_on:
             # 파스텔 테마에서도 흰 글자가 읽히도록 카드색을 조금 어둡게 쓴다
             _bg = self._shade(self.card["fill"], 0.22)
+            # 다크 테마는 이 띠가 밝게 뒤집히므로 글자를 검정으로 (요청 —
+            # 흰 글자가 안 보였다). _dk_keep 으로 등록해 메뉴 훑기가 안 바꾼다.
+            _fg9 = _dk_keep("#101011") if self._dark else "#ffffff"
+            _abg9 = self._shade(_bg, 0.25)
+            if self._dark:
+                # 띠 색을 테마색에서 뽑으면 캐릭터·폼마다 밝게도 어둡게도
+                # 뒤집힌다 — 다크에서는 밝은 회색 띠 + 검은 글자로 못 박는다
+                _bg, _abg9 = _dk_keep("#e6e6e7"), _dk_keep("#c9c9ca")
             menu.add_command(label="  작업 종료  ", command=self._end_workday,
                              font=self._uf(9, True),
-                             foreground="#ffffff", background=_bg,
-                             activeforeground="#ffffff",
-                             activebackground=self._shade(_bg, 0.25))
+                             foreground=_fg9, background=_bg,
+                             activeforeground=_fg9,
+                             activebackground=_abg9)
         menu.add_command(label="종료", command=self.close)
         self._menu = menu            # 트레이 아이콘에서도 같은 메뉴를 쓴다
         # 메뉴 항목을 고를 때도 '똑' — 항목이 스무 개가 넘어 하나하나
@@ -18909,7 +19080,9 @@ class Mascot:
                 self._rrect(bx, pcy - h / 2, bx + w2 + pad * 2, pcy + h / 2,
                             h / 2, fill=pill_col, outline="")
             self._gtext(c, bx + pad, cy + INK_DY, anchor="w", text=title,
-                        font=f2, fill=self._shade(cd["fill"], 0.35),
+                        font=f2,
+                        fill=(_DARK_WHITE if self._dark      # 다크 — 흰색 (요청)
+                              else self._shade(cd["fill"], 0.35)),
                         on_glass=False)          # 알약 위
 
     def _goal_bar(self, bx0, right, row):
@@ -18936,6 +19109,7 @@ class Mascot:
         c = getattr(self, "_ring_cache", None)
         if c is None:
             c = self._ring_cache = {}
+        border = _dk(border)                          # 다크 테마
         key = (w, h, r, border, lw)
         got = c.get(key)
         if got is not None:
@@ -19661,6 +19835,7 @@ class Mascot:
         """
         w = int(round(w))
         h = int(round(w * 0.75))
+        fill = _dk(fill)                              # 다크 테마
         ck = ("heart", w, fill, pad, self.canvas_bg)
         got = self._soft_cache.get(ck)
         if got is not None:
@@ -20173,6 +20348,7 @@ class Mascot:
                                width=lw, capstyle="round", tags=tags)
             hits.append((bx - r, y - r, bx + r, y + r, act))
         ch["hits"] = hits
+        ch["hits_w"] = cv          # 단추 자리는 이 캔버스 기준 — 다른 캔버스의 클릭은 안 본다
 
     def _chrome_max_toggle(self, win):
         """□ — 그 창이 놓인 모니터의 작업 영역에 꽉 채우고, 다시 누르면 원래
@@ -20223,14 +20399,26 @@ class Mascot:
         if not ch:
             return False
         try:
-            ed = self._chrome_edge(win, e.x, e.y)
+            # **창 기준 좌표로 잰다.** 뽀모도로는 위 띠 캔버스 아래에 내용
+            # 캔버스가 있어서, 캔버스 기준 y 로는 창 아래끝에 못 닿아 아래
+            # 가장자리가 영영 안 잡혔다 (제보). 표시줄 없는 창이라 rootx 가
+            # 곧 창 자리다. 검사의 가짜 이벤트(x_root 없음)는 예전처럼.
+            wx, wy = self._chrome_xy(win, e)
+            ed = self._chrome_edge(win, wx, wy)
         except Exception:
             return False
         if ed:
             ch["rz"] = (ed, e.x_root, e.y_root, win.winfo_width(),
                         win.winfo_height(), win.winfo_x(), win.winfo_y())
             return True
-        for x0, y0, x1, y1, act in ch.get("hits", []):
+        # 단추(– □ ×)는 그것을 그린 캔버스에서 눌렀을 때만 — 내용 캔버스의
+        # 같은 좌표(왼쪽 위)를 눌렀는데 띠의 단추가 눌리면 안 된다
+        hw = ch.get("hits_w")
+        if hw is not None and getattr(e, "widget", hw) is not hw:
+            hits9 = []
+        else:
+            hits9 = ch.get("hits", [])
+        for x0, y0, x1, y1, act in hits9:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 self._safe("ui_click", self._ui_click)
                 if act == "close":
@@ -20241,9 +20429,24 @@ class Mascot:
                     win.withdraw()
                 return True
         band = ch["band"]() if callable(ch["band"]) else ch["band"]
-        if e.y <= band:
+        if wy <= band:
             self._chrome_press_band(win, e)
         return False
+
+    @staticmethod
+    def _chrome_xy(win, e):
+        """이벤트 자리를 창 기준 좌표로 (캔버스가 여럿이어도 같은 눈금).
+
+        x_root 가 아니라 **누른 위젯의 자리**로 옮긴다 — 검사의 가짜 이벤트는
+        x_root 가 0 이라 그것으로 재면 창 밖이 되어 가장자리로 잡힌다."""
+        try:
+            w9 = getattr(e, "widget", None)
+            if w9 is not None and w9 is not win:
+                return (int(e.x) + w9.winfo_rootx() - win.winfo_rootx(),
+                        int(e.y) + w9.winfo_rooty() - win.winfo_rooty())
+        except Exception:
+            pass
+        return int(e.x), int(e.y)
 
     def _chrome_press_band(self, win, e):
         """잡아 옮길 띠를 눌렀다 — 4px 넘게 끌면 옮기기가 시작된다."""
@@ -20325,7 +20528,8 @@ class Mascot:
         if not ch:
             return
         try:
-            ed = self._chrome_edge(win, e.x, e.y)
+            wx, wy = self._chrome_xy(win, e)
+            ed = self._chrome_edge(win, wx, wy)
         except Exception:
             return
         cur = {"": "", "l": "size_we", "r": "size_we", "t": "size_ns",
@@ -20782,6 +20986,7 @@ class Mascot:
         c = getattr(self, "_pill_cache", None)
         if c is None:
             c = self._pill_cache = {}
+        fill = _dk(fill)                              # 다크 테마
         key = (w, h, fill)
         got = c.get(key)
         if got is not None:
@@ -21260,6 +21465,415 @@ class Mascot:
         cv.type = type_
         cv.delete = delete
 
+    # ── 다크 테마 도우미 ──────────────────────────────────────────
+    DARK_TICK = 1.0
+    DARK_WOPTS = ("bg", "fg", "activebackground", "activeforeground",
+                  "insertbackground", "selectbackground", "selectforeground",
+                  "highlightbackground", "highlightcolor", "troughcolor",
+                  "disabledforeground", "readonlybackground")
+
+    @staticmethod
+    def _dark_canvas_shim(cv):
+        """다크 창의 캔버스 — 항목을 만들거나 고칠 때 색을 _dk 로 바꾼다.
+
+        Tk 기본값(글자·선·다각형 검정, 네모·원·호 테두리 검정)도 흰색으로
+        — 색을 안 준 항목은 검은 바탕에서 사라지기 때문이다.
+        """
+        if getattr(cv, "_dark_cv", False):
+            return
+        cv._dark_cv = True
+        CK = ("fill", "outline", "activefill", "activeoutline",
+              "disabledfill", "disabledoutline")
+        WK = ("bg", "background", "highlightbackground", "highlightcolor",
+              "selectbackground", "insertbackground")
+        try:
+            bg = str(cv.cget("bg"))
+            nb = _dk(bg)
+            if nb != bg:
+                cv.configure(bg=nb)
+        except Exception:
+            pass
+
+        def _mapkw(kw, keys):
+            for k in keys:
+                if k in kw:
+                    kw[k] = _dk(kw[k])
+
+        def _wrap_create(nm, default):
+            fn = getattr(cv, nm)
+
+            def w(*a, **kw):
+                if default and default not in kw:
+                    kw[default] = _dk("#000000")
+                _mapkw(kw, CK)
+                if nm == "create_text" and "fill" in kw:
+                    kw["fill"] = _dk_text(kw["fill"])
+                return fn(*a, **kw)
+            setattr(cv, nm, w)
+
+        for nm, df in (("create_text", "fill"), ("create_line", "fill"),
+                       ("create_polygon", "fill"),
+                       ("create_rectangle", "outline"),
+                       ("create_oval", "outline"), ("create_arc", "outline")):
+            _wrap_create(nm, df)
+        o_cfg = cv.itemconfigure
+
+        o_type9 = cv.type
+
+        def itemconfigure(tag=None, cnf=None, **kw):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _mapkw(cnf, CK)
+            _mapkw(kw, CK)
+            if "fill" in kw and isinstance(tag, int):
+                try:
+                    if o_type9(tag) == "text":
+                        kw["fill"] = _dk_text(kw["fill"])
+                except Exception:
+                    pass
+            if cnf is not None:
+                return o_cfg(tag, cnf, **kw)
+            return o_cfg(tag, **kw)
+        cv.itemconfigure = itemconfigure
+        cv.itemconfig = itemconfigure
+        o_conf = cv.configure
+
+        def configure(cnf=None, **kw):
+            if isinstance(cnf, dict):
+                cnf = dict(cnf)
+                _mapkw(cnf, WK)
+            _mapkw(kw, WK)
+            if cnf is not None:
+                return o_conf(cnf, **kw)
+            return o_conf(**kw)
+        cv.configure = configure
+        cv.config = configure
+        # 색상키 창(캐릭터·할 일·마감 말풍선)의 글자는 PIL 로 굽는다 —
+        # Tk 글자는 키 색(#010203)과 섞여 흰 글자 둘레에 검은 테가 진다
+        # (다크에서 '글자가 깨진다' 제보). 유리 창의 _gtext 와 같은 길.
+        try:
+            if str(bg).lower() in (TRANSPARENT, MAC_KEY):
+                Mascot._dark_text_shim(cv)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _dark_text_shim(cv):
+        """색상키 캔버스 — create_text 를 구운 글자(그림)로. itemconfigure(text=·
+        fill=·font=)·itemcget·type 도 글자처럼 굴게 한다 (유리 도우미의 축소판).
+        width(줄바꿈)·못 굽는 기호는 Tk 글자 그대로."""
+        gt = cv._dt = {}
+        cv._dt_keep = {}
+        imgs = cv._dt_imgs = {}          # 그림 항목 → PhotoImage (바탕색 읽기용)
+        o_ct, o_cfg, o_cget, o_type, o_del = (cv.create_text, cv.itemconfigure,
+                                              cv.itemcget, cv.type, cv.delete)
+        o_ci = cv.create_image
+        KEYS = ("text", "font", "fill", "justify", "anchor")
+
+        def bake(d, x, y):
+            host = _DARK_HOST
+            if host is None:
+                return None
+            return host._dtext_img(cv, x, y, d.get("text", ""), d.get("font"),
+                                   d.get("fill", "#000000"),
+                                   d.get("justify", "center"),
+                                   d.get("anchor", "center"))
+
+        def create_text(x, y, **kw):
+            if "width" in kw or "state" in kw or not kw.get("text"):
+                return o_ct(x, y, **kw)
+            kw = dict(kw)
+            # 글자색은 여기서 다크용으로 — 굽는 길은 색 도우미(o_ct)를 안
+            # 지나서, 칭호처럼 진한 색을 준 글자가 진회색으로 남았다 (제보)
+            kw["fill"] = _dk_text(kw.get("fill") or "#000000")
+            ph = bake(kw, x, y)
+            if ph is None:
+                return o_ct(x, y, **kw)
+            it = o_ci(x, y, image=ph, anchor=kw.get("anchor", "center"),
+                      tags=kw.get("tags", ""))
+            gt[it] = dict(kw, x=x, y=y)
+            cv._dt_keep[it] = ph
+            return it
+
+        def create_image(*a, **kw):
+            it = o_ci(*a, **kw)
+            if kw.get("image") is not None:
+                imgs[it] = kw["image"]
+            return it
+
+        def itemconfigure(tag=None, cnf=None, **kw):
+            d = gt.get(tag) if isinstance(tag, int) else None
+            if d is not None and kw and any(k in kw for k in KEYS):
+                for k in KEYS:
+                    if k in kw:
+                        d[k] = kw.pop(k) if k != "anchor" else kw["anchor"]
+                d["fill"] = _dk_text(d.get("fill") or "#000000")
+                try:
+                    xy = cv.coords(tag)
+                    x9, y9 = xy[0], xy[1]
+                except Exception:
+                    x9, y9 = d.get("x", 0), d.get("y", 0)
+                ph = bake(d, x9, y9)
+                if ph is not None:
+                    kw["image"] = ph
+                    cv._dt_keep[tag] = ph
+            elif isinstance(tag, int) and kw.get("image") is not None:
+                imgs[tag] = kw["image"]
+            if cnf is not None:
+                return o_cfg(tag, cnf, **kw)
+            return o_cfg(tag, **kw)
+
+        def itemcget(tag, opt):
+            d = gt.get(tag) if isinstance(tag, int) else None
+            if d is not None and opt in ("text", "font", "fill", "justify"):
+                return d.get(opt, "")
+            return o_cget(tag, opt)
+
+        def type_(tag):
+            if isinstance(tag, int) and tag in gt:
+                return "text"
+            return o_type(tag)
+
+        def delete(*args):
+            for a in args:
+                if a == "all":
+                    gt.clear()
+                    cv._dt_keep.clear()
+                    imgs.clear()
+                elif isinstance(a, int):
+                    gt.pop(a, None)
+                    cv._dt_keep.pop(a, None)
+                    imgs.pop(a, None)
+                else:
+                    try:
+                        for it in cv.find_withtag(a):
+                            gt.pop(it, None)
+                            cv._dt_keep.pop(it, None)
+                            imgs.pop(it, None)
+                    except Exception:
+                        pass
+            return o_del(*args)
+
+        cv.create_text = create_text
+        cv.create_image = create_image
+        cv.itemconfigure = itemconfigure
+        cv.itemconfig = itemconfigure
+        cv.itemcget = itemcget
+        cv.type = type_
+        cv.delete = delete
+
+    def _dtext_raw(self, text, font=None, fill="#000000", justify="center"):
+        """다크 테마 글자 한 장 — 진짜 알파 그대로 (캐시). 실패하면 None."""
+        try:
+            fam, size = (font[0], font[1]) if font else (UI_FONT, 9)
+            bold = len(font) > 2 and "bold" in str(font[2:]) if font else False
+            px = max(6, int(round(abs(float(size)) * self._tk_ppp())))
+        except Exception:
+            return None
+        text = str(text)
+        if not self._gtext_bakeable(text):
+            return None
+        ck = ("raw", text, px, bold, str(fill), justify)
+        cache = self._dtext_cache
+        got = cache.get(ck)
+        if got is not None:
+            cache[ck] = cache.pop(ck)
+            return got
+        try:
+            fnt = self._pil_font(px, bold)
+            d0 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            bb = d0.multiline_textbbox((0, 0), text, font=fnt, align=justify)
+            pad = 3
+            im = Image.new("RGBA", (bb[2] - bb[0] + pad * 2,
+                                    bb[3] - bb[1] + pad * 2), (0, 0, 0, 0))
+            ImageDraw.Draw(im).multiline_text((pad - bb[0], pad - bb[1]), text,
+                                              font=fnt, fill=fill, align=justify)
+        except Exception:
+            return None
+        got = (ck, im)
+        if len(cache) > 1500:
+            for old in list(cache)[:500]:
+                cache.pop(old, None)
+        cache[ck] = got
+        return got
+
+    def _dark_bg_at(self, cv, x, y):
+        """색상키 캔버스에서 (x, y) 바로 아래에 칠해진 색 (#rrggbb) — 없으면 None.
+
+        글자는 늘 무언가 위에 놓인다(카드·알약·말풍선). 그 색을 알면 글자
+        가장자리를 **정확히 그 색과** 섞어 둘 수 있어, 반투명을 못 담는
+        색상키 창에서도 진짜 알파처럼 매끈하다. 짐작한 회색과 섞던 앞 판은
+        가장자리가 바탕과 달라 거칠게 보였다 (제보)."""
+        gt = getattr(cv, "_dt", {})
+        imgs = getattr(cv, "_dt_imgs", {})
+        try:
+            ids = cv.find_overlapping(x, y, x, y)
+        except Exception:
+            return None
+        for it in reversed(ids):
+            if it in gt:
+                continue
+            try:
+                t = str(cv.tk.call(cv._w, "type", it))
+                if str(cv.tk.call(cv._w, "itemcget", it, "-state")) == "hidden":
+                    continue
+            except Exception:
+                continue
+            if t in ("rectangle", "oval", "polygon"):
+                try:
+                    f = str(cv.tk.call(cv._w, "itemcget", it, "-fill"))
+                except Exception:
+                    f = ""
+                if not f:
+                    continue
+                try:
+                    rgb9 = tuple(v // 257 for v in cv.winfo_rgb(f))
+                except Exception:
+                    continue
+                if "#%02x%02x%02x" % rgb9 in (TRANSPARENT, MAC_KEY):
+                    return None
+                return rgb9
+            if t != "image":
+                continue
+            ph = imgs.get(it)
+            if ph is None:
+                continue
+            pil = getattr(ph, "_pil_src", None)
+            if pil is None:
+                pc = self.__dict__.setdefault("_dt_pil_cache", {})
+                key9 = str(ph)
+                pil = pc.get(key9)
+                if pil is None:
+                    try:
+                        pil = ImageTk.getimage(ph).convert("RGBA")
+                    except Exception:
+                        continue
+                    if len(pc) > 200:
+                        pc.clear()
+                    pc[key9] = pil
+            try:
+                co = cv.coords(it)
+                anc = str(cv.tk.call(cv._w, "itemcget", it, "-anchor"))
+                w9, h9 = pil.size
+                tlx, tly = self._anchor_tl(co[0], co[1], w9, h9, anc)
+                px9, py9 = int(x - tlx), int(y - tly)
+                if not (0 <= px9 < w9 and 0 <= py9 < h9):
+                    continue
+                p = pil.getpixel((px9, py9))
+            except Exception:
+                continue
+            if len(p) >= 4 and p[3] < 200:
+                continue
+            rgb9 = tuple(int(v) for v in p[:3])
+            if "#%02x%02x%02x" % rgb9 in (TRANSPARENT, MAC_KEY):
+                return None
+            return rgb9
+        return None
+
+    def _dtext_img(self, cv, x, y, text, font=None, fill="#000000",
+                   justify="center", anchor="center"):
+        """다크 테마 · 색상키 창용 구운 글자 (캐시). 실패하면 None (Tk 글자로).
+
+        글자 한가운데 아래의 바탕색을 읽어(_dark_bg_at) 가장자리를 그 색과
+        미리 섞고 불투명으로 만든다 — 그 바탕 위에서는 진짜 알파와 같다.
+        바탕을 못 읽으면(맨 바탕화면) 카드 바탕색과 섞는다."""
+        got = self._dtext_raw(text, font, fill, justify)
+        if got is None:
+            return None
+        rk, raw = got
+        w9, h9 = raw.size
+        try:
+            tlx, tly = self._anchor_tl(x, y, w9, h9, anchor)
+            bg = self._dark_bg_at(cv, tlx + w9 / 2.0, tly + h9 / 2.0)
+        except Exception:
+            bg = None
+        if bg is None:
+            bg = self._rgb_of(_dk("#ffffff"))[:3]
+        ck = ("on", rk, tuple(bg))
+        cache = self._dtext_cache
+        ph = cache.get(ck)
+        if ph is not None:
+            cache[ck] = cache.pop(ck)
+            return ph
+        try:
+            im = Image.new("RGBA", raw.size, tuple(bg) + (255,))
+            im.alpha_composite(raw)
+            im.putalpha(raw.split()[3].point(lambda v: 255 if v >= 6 else 0))
+            ph = self._tkimg(im)                # 시트가 알아보게 (지뢰 128)
+        except Exception:
+            return None
+        if len(cache) > 1500:
+            for old in list(cache)[:500]:
+                cache.pop(old, None)
+        cache[ck] = ph
+        return ph
+
+    def _dark_tick(self, now):
+        """위젯(Entry·Text·Frame·Toplevel…)의 색을 1초마다 훑어 바꾼다 —
+        이미 바꾼 색은 _dk 가 그대로 돌려주므로 몇 번 지나도 같다."""
+        if now - self._dark_at < self.DARK_TICK:
+            return
+        self._dark_at = now
+        stack = [self.root]
+        while stack:
+            w = stack.pop()
+            try:
+                kids = w.winfo_children()
+            except Exception:
+                continue
+            for c in kids:
+                stack.append(c)
+                self._dark_widget(c)
+
+    DARK_FGOPTS = ("fg", "activeforeground", "selectforeground",
+                   "insertbackground")
+    DARK_MOPTS = ("foreground", "background", "activeforeground",
+                  "activebackground", "selectcolor")
+
+    @classmethod
+    def _dark_widget(cls, w):
+        for opt in cls.DARK_WOPTS:
+            try:
+                v = str(w.cget(opt))
+            except Exception:
+                continue
+            if not v:
+                continue
+            nv = _dk_text(v) if opt in cls.DARK_FGOPTS else _dk(v)
+            if nv != v:
+                try:
+                    w.configure(**{opt: nv})
+                except Exception:
+                    pass
+        if isinstance(w, tk.Menu):
+            cls._dark_menu(w)
+
+    @classmethod
+    def _dark_menu(cls, m):
+        """우클릭 메뉴 — 윈도우의 팝업 메뉴는 Tk 가 직접 그리므로 색이 먹는다.
+        항목마다 준 색(홈·작업 종료의 색 띠)도 같이 바꾼다 (요청)."""
+        try:
+            n = m.index("end")
+        except Exception:
+            n = None
+        if n is None:
+            return
+        for i in range(n + 1):
+            for opt in cls.DARK_MOPTS:
+                try:
+                    v = str(m.entrycget(i, opt))
+                except Exception:
+                    continue
+                if not v:
+                    continue
+                nv = (_dk_text(v) if opt in ("foreground", "activeforeground")
+                      else _dk(v))
+                if nv != v:
+                    try:
+                        m.entryconfigure(i, **{opt: nv})
+                    except Exception:
+                        pass
+
     def _pil_of(self, ph):
         """PhotoImage 의 원본(PIL RGBA). 달려 있지 않으면 Tk 에서 되읽어 달아 둔다
         (한 번만 — 그 뒤로는 붙어 있다)."""
@@ -21500,6 +22114,8 @@ class Mascot:
         if self._glass:
             self._safe("glass", self._glass_tick, now)
             self._safe("pane", self._pane_tick, now)
+        if self._dark:
+            self._safe("dark", self._dark_tick, now)
         # 진단은 방 처리 밖에서 돈다. 안에 두면 방이 멈출 때 진단도 같이
         # 멈춰서, 정작 알아야 할 '멈췄다'는 사실이 안 남는다 (실제로 겪음).
         self._frames = getattr(self, "_frames", 0) + 1
@@ -28986,6 +29602,12 @@ class Mascot:
         except (TypeError, ValueError):
             zoom0 = 1.0
         zst = {"z": zoom0, "save": 0.0}
+        # 지난번에 옆으로 넓혀 둔 폭 — 배율과 따로 기억한다 (요청: 다음에 켤 때
+        # 같은 크기로). 예전에는 폭이 세션 안에서만 살아 켤 때마다 기본 폭이었다.
+        try:
+            zst["user_w"] = max(0, int(self.us.get("pomo_w") or 0))
+        except (TypeError, ValueError):
+            zst["user_w"] = 0
 
         def u(v):                       # 배율이 들어간 눈금 (지역)
             return self._ui(v) * zst["z"]
@@ -29076,12 +29698,19 @@ class Mascot:
                 # 정해진 배율을 기억한다. **<Configure> 에 기대지 않는다**
                 # — 그 이벤트가 안 오는 경우가 있었다(실측). 창을 끌면
                 # beat(0.5초)가 어차피 다시 그리므로 여기가 확실하다.
+                # **사람이 끌었을 때만** 저장한다. 예전에는 배율이 조금만
+                # 달라져도 저장해서, 탭을 바꾸거나 내용 높이가 바뀌어 배율이
+                # 잠깐 작게 잡힌 값이 굳었다 — 다음에 켤 때 창이 작아졌다
+                # (제보 — 데드라인 탭에서 끄면 초기화되는 것처럼 보였다).
                 now8 = time.time()
-                if (now8 - zst["save"] > 0.5
-                        and abs(float(self.us.get("pomo_zoom") or 1)
-                                - zst["z"]) > 0.02):
+                if zst.get("user") and now8 - zst["save"] > 0.5:
                     zst["save"] = now8
+                    zst["user"] = False
                     self.us["pomo_zoom"] = round(zst["z"], 3)
+                    try:
+                        self.us["pomo_w"] = int(win.winfo_width())
+                    except Exception:
+                        pass
                     self._safe("pomo_zoom_save", self._save_settings)
             W = u(BASE_W)
             pad = u(16)
@@ -29787,7 +30416,8 @@ class Mascot:
                     # 끌어 정한 폭(on_resize 가 적어 둔 것)을 쓴다.
                     w9 = max(int(u(BASE_W)), int(zst.get("user_w") or 0))
                     zst["w_set"] = w9
-                    win.geometry("%dx%d" % (w9, int(u(base_h())) + BARH))
+                    zst["h_set"] = int(u(base_h())) + BARH
+                    win.geometry("%dx%d" % (w9, zst["h_set"]))
             except Exception:
                 pass
 
@@ -29805,10 +30435,14 @@ class Mascot:
             if wh9 is not None and wh9 == zst.get("wh"):
                 return
             zst["wh"] = wh9
-            # fit_win 이 정한 폭과 다르면 사람이 끌어 바꾼 것 — 기억해 둔다
+            # fit_win 이 정한 크기와 다르면 사람이 끌어 바꾼 것 — 폭을 기억하고
+            # 배율·폭 저장을 켠다 (draw 가 저장한다)
             try:
-                if e is not None and int(e.width) != int(zst.get("w_set") or 0):
-                    zst["user_w"] = int(e.width)
+                if e is not None and (int(e.width) != int(zst.get("w_set") or 0)
+                                      or int(e.height) != int(zst.get("h_set") or 0)):
+                    zst["user"] = True
+                    if int(e.width) != int(zst.get("w_set") or 0):
+                        zst["user_w"] = int(e.width)
             except Exception:
                 pass
             draw()
@@ -33227,6 +33861,7 @@ class Mascot:
 
     def _gl_make(self, kind, d, col, raw=False):
         """아이콘 한 장 (PIL 4배 렌더 → 축소). 모르는 종류면 None."""
+        col = _dk(col)                                # 다크 테마
         S = 4
         n = int(d) * S
         im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
@@ -33365,6 +34000,7 @@ class Mascot:
         반투명 가장자리가 근백색 키와 섞여 흰 테가 두른다 (볼륨 아이콘 제보).
         """
         d = max(5, int(round(d)))
+        col = _dk(col)                                # 다크 테마
         key = ("gl", kind, d, str(col))
         ph = self._soft_cache.get(key)
         if ph is None:
@@ -36319,7 +36955,9 @@ class Mascot:
                                                   self.skin_names))
             if self.cfg.get("themes") and IS_WIN:
                 disp.append(lambda ry: open_picker(ry, "테마", "theme",
-                                                  ["기본", "유리"]))
+                                                  ["기본", "유리"]
+                                                  + (["다크"] if self.cfg.get("dark_theme")
+                                                     else [])))
                 if str(st.get("theme") or "") == "유리":
                     # 유리 불투명도 — 끌면 그 자리에서 바로 보인다 (요청)
                     disp.append(lambda ry: slider(ry, "유리 불투명도",
@@ -40920,6 +41558,7 @@ class Mascot:
         끝이라 틈이 없다.
         """
         w, h, band_h = int(w), int(h), int(band_h)
+        color = _dk_dim(color)                        # 다크 테마
         key = ("floor", w, h, int(r), band_h, color)
         ph = self._soft_cache.get(key)
         if ph is not None:
@@ -40947,6 +41586,7 @@ class Mascot:
         틈이 있을 수 없다 (게이지와 같은 이야기 — 지뢰 65).
         """
         w, h = int(w), int(h)
+        top, floor = _dk_dim(top), _dk_dim(floor)    # 다크 테마
         key = ("cardbg", w, h, int(r), int(floor_h), top, floor)
         ph = self._soft_cache.get(key)
         if ph is not None:
@@ -41722,6 +42362,7 @@ class Mascot:
                 x0 = (im0.width - int(W)) // 2
                 y0 = (im0.height - int(top)) // 2
                 im0 = im0.crop((x0, y0, x0 + int(W), y0 + int(top)))
+                im0 = self._dark_sky(im0)
                 # 글자가 놓이는 왼쪽 절반의 밝기 — 글자색을 고르는 기준
                 lums = im0.crop((0, 0, max(1, int(W * 0.45)), int(top)))
                 st2 = lums.resize((16, 8)).convert("L")
@@ -41832,12 +42473,28 @@ class Mascot:
                            fill=sample + (255,))
         im = Image.alpha_composite(im.convert("RGBA"), ov)
         im = im.resize((int(W), int(top)), Image.LANCZOS)
+        im = self._dark_sky(im)
         lums = im.crop((0, 0, max(1, im.width * 45 // 100), im.height))
         st2 = lums.resize((16, 8)).convert("L")
         self._sky_lum = sum(st2.getdata()) / 128.0
         self._sky_img = ImageTk.PhotoImage(self._glass_topround(im))
         self._sky_key = key
         return self._sky_img
+
+    def _dark_sky(self, im):
+        """다크 테마 — 홈 타이틀의 시간대 하늘 그림을 흑백으로, 조금 어둡게 (요청).
+        시간대마다 밝기가 다른 것은 그대로 남는다 (아침은 밝은 회색, 밤은 짙은 회색)."""
+        if not self._dark:
+            return im
+        try:
+            a = im.split()[3] if im.mode == "RGBA" else None
+            g = im.convert("L").point(lambda v: int(v * 0.72))
+            out = Image.merge("RGB", (g, g, g))
+            if a is not None:
+                out.putalpha(a)
+            return out
+        except Exception:
+            return im
 
     def _glass_topround(self, im, r=8):
         """유리 창의 하늘 띠 — 위 두 모서리를 둥글게 잘라 뒤 유리 판(DWM 둥근
@@ -42052,6 +42709,7 @@ class Mascot:
             w = max(1, int(round(x1 - x0)))
             h = max(1, int(round(y1 - y0)))
             keyed = False
+            fill, outline = _dk(fill), _dk(outline)      # 다크 테마
             key = ("oval", w, h, str(fill), str(outline),
                    int(width * 10), keyed)
             ph = self._soft_cache.get(key)
@@ -42141,6 +42799,7 @@ class Mascot:
         Tk 다각형 그대로(매끈 경로면 시트가 알아서 매끈하게 그린다). 모르는
         인자(dash·stipple)가 오면 Tk 로 물러난다.
         """
+        fill, outline = _dk(fill), _dk(outline)      # 다크 테마
         pts = list(coords[0]) if len(coords) == 1 else list(coords)
         if pts and isinstance(pts[0], (tuple, list)):
             pts = [v for p in pts for v in p]
@@ -42196,6 +42855,7 @@ class Mascot:
         1px 선은 Tk 그대로 둔다(그림으로 바꿔도 이득이 없다). 점선·화살표
         같은 모르는 인자는 Tk 로 물러난다.
         """
+        fill = _dk(fill)                              # 다크 테마
         pts = list(coords[0]) if len(coords) == 1 else list(coords)
         if pts and isinstance(pts[0], (tuple, list)):
             pts = [v for p in pts for v in p]
@@ -42251,6 +42911,8 @@ class Mascot:
         Tk 각도는 3시에서 반시계, PIL 은 3시에서 시계 방향이다 — 부호를
         뒤집어 넘긴다.
         """
+        fill, outline = _dk(fill), _dk(outline)      # 다크 테마
+
         def tk():
             return cv.create_arc(x0, y0, x1, y1, start=start, extent=extent,
                                  style=style, fill=fill or "",
@@ -42318,6 +42980,7 @@ class Mascot:
         shadow=True 면 아래로 살짝 처진 그림자까지 한 장에 넣는다.
         """
         d = int(r * 2 + 0.5)
+        fill, outline = _dk(fill), _dk(outline)      # 다크 테마
         gl = bool(self._glass and getattr(cv, "_glass_cv", False))
         # 유리 창 — 판에 진짜 알파로 (가장자리가 매끈하다). 캐시에는 PIL 을 담는다.
         route = bool(gl and self._pane_of(cv)[1] is not None)
@@ -42460,6 +43123,7 @@ class Mascot:
             return self._rr(cv, x0, y0, x1, y1, r, fill=fill,
                             outline=outline, width=width, tags=tags,
                             raw=True)
+        fill, outline = _dk(fill), _dk(outline)      # 다크 테마
         th = int(round(tail[1])) if tail else 0
         tx = int(round(tail[0] - x0)) if tail else 0
         td = 1 if tail_dir > 0 else -1
@@ -42626,6 +43290,9 @@ class Mascot:
             return None
         w, h, step = max(1, int(w)), max(1, int(h)), max(4, int(step))
         S = 8
+        # 다크 테마 — 점도 회색으로, 불투명도는 낮춰 은은하게 (요청: 흰 점이 튄다)
+        if self._dark:
+            color = self._rgb_of(_dk(color))[:3] + (110,)
         # 예전 Tk 원(create_oval(x, y, x+3, y+3))과 같은 4px 자리를 채운다.
         # 3px 로 그리면 눈에 띄게 작아져 벽지가 성겨 보인다 (찍어서 비교).
         stamp = Image.new("RGBA", (4 * S, 4 * S), (0, 0, 0, 0))
