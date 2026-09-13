@@ -1331,7 +1331,11 @@ _DARK_NAMES = {"white": (255, 255, 255), "black": (0, 0, 0),
                "systemwindowtext": (0, 0, 0), "systembuttontext": (0, 0, 0),
                "systemmenu": (240, 240, 240), "systemmenutext": (0, 0, 0)}
 _DARK_MEMO = {}
-_DARK_KEEP_DYN = set()           # 다크에서도 그대로 둘 색 (_dk_keep 으로 등록)
+_DARK_BLACK = "#111112"          # 밝은 판 위 글자용 검정 ((r, r, r+1) 꼴)
+# 다크에서도 그대로 둘 색 (_dk_keep 으로 등록). 검정 글자는 처음부터 —
+# _dk_text 가 어두운 글자를 흰색으로 돌리므로 등록해 두지 않으면 다음 바퀴에
+# 도로 흰 글자가 된다 (지뢰 213)
+_DARK_KEEP_DYN = set((_DARK_BLACK,))
 _DARK_HOST = None                # 다크 테마로 도는 Mascot (색상키 창의 글자를 굽는다)
 
 
@@ -1348,6 +1352,23 @@ def _dk_keep(col):
 _DARK_CURVE = ((0.0, 1.0), (0.50, 1.0), (0.65, 0.80), (0.75, 0.55),
                (0.82, 0.40), (0.90, 0.24), (0.96, 0.16), (1.0, 0.09))
 _DARK_WHITE = "#fefeff"          # 글자용 흰색 ((r, r, r+1) 꼴 — 다시 안 바뀐다)
+
+
+def _dk_lum(col):
+    """색의 밝기 0~1 (hex·이름만). 못 읽으면 None."""
+    try:
+        c = str(col).strip().lower()
+        if c in _DARK_NAMES:
+            r, g, b = _DARK_NAMES[c]
+        elif c.startswith("#") and len(c) == 7:
+            r, g, b = (int(c[i:i + 2], 16) for i in (1, 3, 5))
+        elif c.startswith("#") and len(c) == 4:
+            r, g, b = (int(c[i] * 2, 16) for i in (1, 2, 3))
+        else:
+            return None
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    except Exception:
+        return None
 
 
 def _dk_text(col):
@@ -1876,6 +1897,61 @@ def _glass_accent(hwnd, tint=0x66E8E4EC, state=None, corners=True):
             pass
 
 
+def _screen_grab(x, y, w, h):
+    """화면 한 구역을 지금 보이는 그대로 읽는다 (DWM 합성 결과 · 윈도우 전용).
+
+    유리 판을 끄는 동안 굳힐 때 쓴다. 공용 windll 이 아니라 따로 연 손잡이에
+    규격을 준다 (지뢰 21·23). 못 읽으면 None.
+    """
+    if not IS_WIN or w <= 0 or h <= 0:
+        return None
+    try:
+        u32 = ctypes.WinDLL("user32")
+        g32 = ctypes.WinDLL("gdi32")
+        u32.GetDC.restype = ctypes.c_void_p
+        u32.GetDC.argtypes = [ctypes.c_void_p]
+        u32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g32.CreateCompatibleDC.restype = ctypes.c_void_p
+        g32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        g32.CreateDIBSection.restype = ctypes.c_void_p
+        g32.CreateDIBSection.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32]
+        g32.SelectObject.restype = ctypes.c_void_p
+        g32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g32.BitBlt.restype = ctypes.c_int
+        g32.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                               ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        g32.DeleteObject.argtypes = [ctypes.c_void_p]
+        g32.DeleteDC.argtypes = [ctypes.c_void_p]
+        bmi = _BITMAPINFOHEADER()
+        bmi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bmi.biWidth, bmi.biHeight = int(w), -int(h)      # 음수 = 위에서 아래로
+        bmi.biPlanes, bmi.biBitCount = 1, 32
+        sdc = u32.GetDC(None)
+        mdc = g32.CreateCompatibleDC(sdc)
+        bits = ctypes.c_void_p()
+        hbm = g32.CreateDIBSection(sdc, ctypes.byref(bmi), 0,
+                                   ctypes.byref(bits), None, 0)
+        got = None
+        if hbm:
+            old = g32.SelectObject(mdc, hbm)
+            # SRCCOPY | CAPTUREBLT
+            if g32.BitBlt(mdc, 0, 0, int(w), int(h), sdc, int(x), int(y),
+                          0x00CC0020) and bits.value:
+                buf = ctypes.string_at(bits, int(w) * int(h) * 4)
+                got = Image.frombuffer("RGB", (int(w), int(h)), buf, "raw",
+                                       "BGRX", 0, 1).copy()
+            g32.SelectObject(mdc, old)
+            g32.DeleteObject(hbm)
+        g32.DeleteDC(mdc)
+        u32.ReleaseDC(None, sdc)
+        return got
+    except Exception:
+        return None
+
+
 class _WINDOWPOS(ctypes.Structure):
     _fields_ = [("hwnd", ctypes.c_void_p), ("after", ctypes.c_void_p),
                 ("x", ctypes.c_int), ("y", ctypes.c_int),
@@ -2035,6 +2111,50 @@ class GlassPane:
 
     _cheap = False
     _moved_at = 0.0
+    _frozen = False       # 끄는 동안 — 그 순간 화면을 찍어 굳힌 판 (아크릴 끔)
+
+    def freeze(self):
+        """끌기 시작 — 지금 화면에 보이는 그대로 찍어 불투명하게 올리고 아크릴을 끈다.
+
+        아크릴은 창이 옮겨질 때마다 DWM 이 뒤 화면을 다시 흐려 끌 때 끊긴다
+        (윈도우 자신도 제 창을 끌 때 아크릴을 끈다). 옛 흐림으로 바꾸는
+        방식(DRAG_CHEAP)은 불투명도가 달라 보여 제보를 받았다 — 이쪽은 그
+        순간의 모습 그대로라 겉으로는 아무것도 안 바뀐다. 사진을 **먼저**
+        올리고(아직 아크릴이 뒤에 있지만 불투명이라 안 보인다) 그다음 아크릴을
+        끈다 — 순서가 바뀌면 한 프레임 맨 화면이 비친다. 못 찍으면 그냥 둔다.
+        """
+        if self._frozen or not self.shown or self.rect is None \
+                or self.size is None:
+            return False
+        w, h = self.size
+        im = _screen_grab(self.rect[0], self.rect[1], w, h)
+        if im is None:
+            return False
+        try:
+            pm = Image.frombytes("RGBA", im.size,
+                                 im.convert("RGBa").tobytes())
+            ShadowLayer._push(self, pm)
+            self._frozen = True
+            _glass_accent(self.hwnd, state=0, corners=False)
+        except Exception:
+            self._frozen = False
+            return False
+        return True
+
+    def unfreeze(self):
+        """놓았다 — 아크릴을 먼저 되걸고(아직 사진에 덮여 있다) 판을 다시 올린다."""
+        if not self._frozen:
+            return
+        self._frozen = False
+        try:
+            _glass_accent(self.hwnd, tint=self.tint, corners=False)
+        except Exception:
+            pass
+        if self.size and self.shown:
+            try:
+                self._push(*self.size)
+            except Exception:
+                pass
 
     def _drag_cheap(self):
         """끄는 동안은 아크릴 대신 옛 흐림 — 아크릴은 창이 움직일 때마다
@@ -2237,6 +2357,8 @@ class GlassPane:
         (카드가 글자보다 나중에 그려지는 창이 있다 — 환경설정).
         """
         w, h = max(1, int(w)), max(1, int(h))
+        if self._frozen:
+            return                      # 굳은 동안은 그대로 — 놓으면 다시 올린다
         im = self._base_im(w, h)
         if self.texts or self.srcs:
             im = im.copy()
@@ -7672,9 +7794,18 @@ class Mascot:
             "line": cc.get("line", "#f0e6ec"),
         }
         if self._dark:
+            # 바탕 계열(판·채움·띠)은 뒤집힌 결과가 밝으면 밝은 테마의 기본색을
+            # 뒤집은 값으로 — 준사(#4a4a52)처럼 테마색이 어두운 캐릭터는 판이
+            # 흰색으로 뒤집혀 흰 글자가 통째로 묻혔다 (제보: 칭호·꾸미기·
+            # 환경설정 글자가 안 보임). 다크 판에 밝은 판은 없어야 한다.
+            base9 = {"bg": "#ffffff", "panel": "#fffdfe", "soft": "#fbf3f7",
+                     "line": "#f0e6ec", "track": CARD_TRACK, "fill": CARD_FILL}
             for k9, v9 in list(self.card.items()):
                 if k9 != "deco" and isinstance(v9, str) and v9.startswith("#"):
-                    self.card[k9] = _dk_text(v9) if k9 == "text" else _dk(v9)
+                    out9 = _dk_text(v9) if k9 == "text" else _dk(v9)
+                    if k9 in base9 and (_dk_lum(out9) or 0.0) > 0.6:
+                        out9 = _dk(base9[k9])
+                    self.card[k9] = out9
 
         # 워크스페이스 워크타이머 연동 (config의 workspace_timer = 라이브 파일 경로)
         # 연동 모드 = 게이지 대신 시계 토글 카드. 비연동(준사) = 목표 게이지 카드.
@@ -8118,13 +8249,17 @@ class Mascot:
             # 작업 종료처럼 색을 깔아 눈에 띄게 둔다. 다만 한 단계 옅게 —
             # 되돌릴 수 없는 '작업 종료'가 여전히 가장 세 보여야 한다.
             _hb = self._tint(self.card["fill"], 0.62)
+            _hab = self._shade(self.card["fill"], 0.22)
+            if self._dark:
+                # 바꾼 회색에서 파생한 띠는 우연히 (r, r, r+1) 꼴이 되어 밝게
+                # 남을 수 있다 (지뢰 213) — 어두운 띠로 못 박는다
+                _hb, _hab = "#3a3a3b", "#4a4a4b"
             menu.add_command(label="  홈  ", command=self._room_toggle,
                              font=self._uf(9, True),
                              foreground=self._shade(self.card["fill"], 0.35),
                              background=_hb,
                              activeforeground="#ffffff",
-                             activebackground=self._shade(
-                                 self.card["fill"], 0.22))
+                             activebackground=_hab)
         menu.add_separator()
         if self.todo_on:
             menu.add_command(label="할 일 추가", command=self.add_todo)
@@ -8790,6 +8925,7 @@ class Mascot:
         self._stk_hit = {}         # 창 → [(x0,y0,x1,y1,id)]
         self._stk_grip = {}        # 창 → [(x,y,r,무엇)] 손잡이
         self._stk_wh = {}          # 창 → 그릴 때의 (폭, 높이)
+        self._stk_cv = {}          # 창 → (캔버스, 그릴 때의 tags) — 끌 때 그 항목만 옮긴다
         self._stk_drag = None      # 잡고 있는 것
         self._stk_winref = None    # 스티커 정리 창
         self._stk_wipe = False     # 배경 지우기 모드
@@ -11051,6 +11187,11 @@ class Mascot:
         if not self._dragged:
             # 옮기기 시작하는 순간에 한 번만 (끄는 내내 내면 웅웅거린다)
             self._safe("ui_click", self._ui_click)
+            if self._pane_ok():           # 카드 뒤 유리 판 — 끄는 동안 굳힌다
+                try:
+                    self._pane.freeze()
+                except Exception:
+                    pass
         self._dragged = True
         self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
 
@@ -11090,6 +11231,11 @@ class Mascot:
             return
         if self._dragged:
             self._safe("win_pos", self._save_win_pos)
+            if self._pane_ok():
+                try:
+                    self._pane.unfreeze()
+                except Exception:
+                    pass
         if self._press is not None and not self._dragged:
             px, py, _, _ = self._press
             g = self._card_geom()
@@ -19079,10 +19225,17 @@ class Mascot:
             if put9 is None:
                 self._rrect(bx, pcy - h / 2, bx + w2 + pad * 2, pcy + h / 2,
                             h / 2, fill=pill_col, outline="")
+            if self._dark:
+                # 알약이 **실제로 칠해지는 색**(캔버스 도우미가 _dk 로 바꾼 뒤)의
+                # 밝기로 글자색을 정한다 — 준사처럼 알약이 밝게 뒤집히면 흰
+                # 글자가 묻힌다 (제보). 검정도 (r, r, r+1) 꼴 + keep 등록이라
+                # 굽는 길의 _dk_text 가 도로 흰색으로 돌리지 않는다.
+                tcol = (_DARK_BLACK if (_dk_lum(_dk(pill_col)) or 0.0) > 0.5
+                        else _DARK_WHITE)
+            else:
+                tcol = self._shade(cd["fill"], 0.35)
             self._gtext(c, bx + pad, cy + INK_DY, anchor="w", text=title,
-                        font=f2,
-                        fill=(_DARK_WHITE if self._dark      # 다크 — 흰색 (요청)
-                              else self._shade(cd["fill"], 0.35)),
+                        font=f2, fill=tcol,
                         on_glass=False)          # 알약 위
 
     def _goal_bar(self, bx0, right, row):
@@ -20487,6 +20640,14 @@ class Mascot:
                                               or abs(e.y_root - pr[1]) > 4):
             ch["move"] = mv = (pr[0] - pr[2], pr[1] - pr[3])
             ch["maxed"] = None            # 끌기 시작하면 '꽉 채움'은 풀린 것
+            # 유리 판은 끄는 동안 굳힌다 — 아크릴을 옮길 때마다 다시 흐리면
+            # 끊긴다 (제보 '드래그가 버벅')
+            pane9 = getattr(win, "_glass_pane", None)
+            if pane9 is not None:
+                try:
+                    pane9.freeze()
+                except Exception:
+                    pass
         if mv:
             # 타블렛은 움직임 사건이 초당 이백 번 넘게 온다 — 사건마다
             # 옮기면 창(과 유리 판)을 그만큼 옮겨 드르륵거린다. 마지막
@@ -20520,6 +20681,12 @@ class Mascot:
             except Exception:
                 pass
         ch["rz"] = ch["move"] = ch["press"] = ch["target"] = None
+        pane9 = getattr(win, "_glass_pane", None)
+        if pane9 is not None:
+            try:
+                pane9.unfreeze()
+            except Exception:
+                pass
         return was
 
     def _chrome_motion(self, win, e):
@@ -21830,8 +21997,13 @@ class Mascot:
     DARK_MOPTS = ("foreground", "background", "activeforeground",
                   "activebackground", "selectcolor")
 
+    # 바탕·글자 짝 — 같은 쪽 밝기면 글자를 뒤집는다
+    DARK_PAIRS = (("bg", "fg"), ("activebackground", "activeforeground"),
+                  ("selectbackground", "selectforeground"))
+
     @classmethod
     def _dark_widget(cls, w):
+        got = {}
         for opt in cls.DARK_WOPTS:
             try:
                 v = str(w.cget(opt))
@@ -21839,7 +22011,21 @@ class Mascot:
                 continue
             if not v:
                 continue
-            nv = _dk_text(v) if opt in cls.DARK_FGOPTS else _dk(v)
+            got[opt] = (v, _dk_text(v) if opt in cls.DARK_FGOPTS else _dk(v))
+        # 바탕이 밝은데 글자도 밝으면(또는 둘 다 어두우면) 글자를 뒤집는다 —
+        # 준사처럼 테마색이 어두운 캐릭터는 판이 밝게 뒤집혀 흰 글자가 묻혔다
+        # (제보: 꾸미기·환경설정). 검정은 keep 등록이라 다음 바퀴에 도로
+        # 흰색이 되지 않고, 바뀐 값이 지금 값과 같으면 아무 일도 안 한다.
+        for bgk, fgk in cls.DARK_PAIRS:
+            if bgk in got and fgk in got:
+                lb, lf = _dk_lum(got[bgk][1]), _dk_lum(got[fgk][1])
+                if lb is None or lf is None:
+                    continue
+                if lb > 0.55 and lf > 0.55:
+                    got[fgk] = (got[fgk][0], _DARK_BLACK)
+                elif lb <= 0.45 and lf <= 0.45:
+                    got[fgk] = (got[fgk][0], _DARK_WHITE)
+        for opt, (v, nv) in got.items():
             if nv != v:
                 try:
                     w.configure(**{opt: nv})
@@ -21859,6 +22045,7 @@ class Mascot:
         if n is None:
             return
         for i in range(n + 1):
+            got = {}
             for opt in cls.DARK_MOPTS:
                 try:
                     v = str(m.entrycget(i, opt))
@@ -21866,8 +22053,20 @@ class Mascot:
                     continue
                 if not v:
                     continue
-                nv = (_dk_text(v) if opt in ("foreground", "activeforeground")
-                      else _dk(v))
+                got[opt] = (v, _dk_text(v) if opt in ("foreground", "activeforeground")
+                            else _dk(v))
+            # 띠가 밝게 남았으면 글자를 검정으로 (위젯과 같은 규칙)
+            for bgk, fgk in (("background", "foreground"),
+                             ("activebackground", "activeforeground")):
+                if bgk in got and fgk in got:
+                    lb, lf = _dk_lum(got[bgk][1]), _dk_lum(got[fgk][1])
+                    if lb is None or lf is None:
+                        continue
+                    if lb > 0.55 and lf > 0.55:
+                        got[fgk] = (got[fgk][0], _DARK_BLACK)
+                    elif lb <= 0.45 and lf <= 0.45:
+                        got[fgk] = (got[fgk][0], _DARK_WHITE)
+            for opt, (v, nv) in got.items():
                 if nv != v:
                     try:
                         m.entryconfigure(i, **{opt: nv})
@@ -46567,7 +46766,13 @@ class Mascot:
         if where == "pomo":
             self._pomo_redraw()
         else:
-            self._room_key_last = None
+            # 열쇠를 지우면 다음 프레임이 한 번 더 통째로 그린다 — 지금 열쇠를
+            # 적어 두고 한 번만 그린다 (스티커를 누를 때마다 두 번 그렸다)
+            try:
+                self._room_key_last = self._room_key()
+            except Exception:
+                self._room_key_last = None
+            self._room_bre_d = {}
             self._safe("room_draw", self._room_draw)
 
     # ── 그림 ──────────────────────────────────────────────────────────
@@ -46632,6 +46837,7 @@ class Mascot:
         self._stk_hit[where] = hits
         self._stk_grip[where] = grips
         self._stk_wh[where] = (max(1, int(W)), max(1, int(H)))
+        self._stk_cv[where] = (cv, tags)
         lst = self._stk_list(where)
         if not lst:
             return
@@ -46646,19 +46852,84 @@ class Mascot:
                 cy = float(meta.get("y", 0.5)) * H
             except Exception:
                 cx, cy = W / 2.0, H / 2.0
+            sid9 = str(meta.get("id") or "")
+            # 스티커마다 태그를 달아 끌 때 그 항목만 찾아 옮긴다 (_stk_nudge)
+            tg9 = self._stk_tags(tags, "stk_" + sid9)
             pil9 = getattr(ph, "_pil_src", None)
             # 유리 창 — 스티커 가장자리가 색상키에서 깨진다 (제보). 판에 올린다.
             if not (pil9 is not None and self._glass
                     and getattr(cv, "_glass_cv", False)
                     and self._pane_put(cv, int(cx), int(cy), pil9, "center",
-                                       tags) is not None):
+                                       tg9) is not None):
                 cv.create_image(int(cx), int(cy), image=ph, anchor="center",
-                                tags=tags)
+                                tags=tg9)
             hw, hh = ph.width() / 2.0, ph.height() / 2.0
-            hits.append((cx - hw, cy - hh, cx + hw, cy + hh,
-                         str(meta.get("id") or "")))
-            if edit and str(meta.get("id") or "") == self._stk_pick:
-                self._stk_marks(cv, where, cx, cy, hw, hh, k, tags)
+            hits.append((cx - hw, cy - hh, cx + hw, cy + hh, sid9))
+            if edit and sid9 == self._stk_pick:
+                self._stk_marks(cv, where, cx, cy, hw, hh, k,
+                                self._stk_tags(tags, "stkm"))
+
+    @staticmethod
+    def _stk_tags(tags, extra):
+        if isinstance(tags, (tuple, list)):
+            return tuple(tags) + (extra,)
+        return (tags, extra) if tags else (extra,)
+
+    def _stk_nudge(self, where, sid, meta):
+        """끄는 중 — 창을 통째로 다시 그리지 않고 그 스티커 항목만 옮긴다.
+
+        움직임마다 홈 전체를 다시 그리면(그리고 프레임 루프가 한 번 더 그리고,
+        유리 판이 항목 수백 개를 다시 합쳐 올리면) 한 걸음에 100ms 가 걸려
+        '스티커가 버벅이며 잘 안 움직인다'(제보). 크기·회전이 바뀌었으면
+        그림만 갈아 끼운다 — 유리 창은 캔버스 도우미가 판의 그림도 같이
+        갈아 끼운다. 자리 목록·손잡이도 같이 옮긴다. 못 하면 False (부르는
+        쪽이 전체를 다시 그린다).
+        """
+        got = self._stk_cv.get(where)
+        if not got:
+            return False
+        cv, tags = got
+        try:
+            if not cv.winfo_exists():
+                return False
+            items = cv.find_withtag("stk_" + str(sid))
+        except Exception:
+            return False
+        if not items:
+            return False
+        W, H = self._stk_wh.get(where) or (1, 1)
+        wpx = self._stk_wpx(meta, W)
+        ph = self._stk_photo(meta, wpx)
+        if ph is None:
+            return False
+        it = items[-1]
+        cx = float(meta.get("x", .5)) * W
+        cy = float(meta.get("y", .5)) * H
+        st = self._stk_drag or {}
+        look = (wpx, int(meta.get("a") or 0) % 360)
+        try:
+            if st.get("look") != look:
+                st["look"] = look
+                cv.itemconfigure(it, image=ph)
+            cv.coords(it, int(cx), int(cy))
+        except Exception:
+            return False
+        hw, hh = ph.width() / 2.0, ph.height() / 2.0
+        hits = self._stk_hit.get(where) or []
+        for i9, h9 in enumerate(hits):
+            if h9[4] == str(sid):
+                hits[i9] = (cx - hw, cy - hh, cx + hw, cy + hh, str(sid))
+                break
+        try:
+            cv.delete("stkm")
+        except Exception:
+            pass
+        self._stk_grip[where] = []
+        if self._stk_edit == where and str(sid) == self._stk_pick:
+            k = max(0.7, min(2.0, float(W) / 900.0)) if where == "room" else 1.0
+            self._safe("stk_marks", self._stk_marks, cv, where, cx, cy, hw, hh,
+                       k, self._stk_tags(tags, "stkm"))
+        return True
 
     def _stk_marks(self, cv, where, cx, cy, hw, hh, k, tags):
         """고른 스티커의 테두리와 손잡이 셋 (크기·회전·삭제)."""
@@ -46842,9 +47113,10 @@ class Mascot:
             a = math.degrees(math.atan2(y - cy, x - cx))
             meta["a"] = round((st["a"] + (a - st["a0"])) % 360)
         now = time.time()
-        if now - st["at"] > 0.03:              # 너무 잦은 다시 그리기 방지
+        if now - st["at"] > 0.016:             # 너무 잦은 다시 그리기 방지
             st["at"] = now
-            self._stk_redraw(where)
+            if not self._stk_nudge(where, st["id"], meta):
+                self._stk_redraw(where)        # 항목을 못 찾으면 전체를
         return True
 
     def _stk_drop(self, where):
