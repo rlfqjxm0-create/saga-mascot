@@ -8053,6 +8053,7 @@ class Mascot:
                                                              self.state_dir)
         self._update_win = None      # 업데이트 안내 팝업 (한 번만)
         self._menu_up = False        # 우클릭 메뉴가 떠 있는가 (z 복구를 쉰다)
+        self._menu_shown = False     # tk_popup 이 실제로 떠 있는 동안 (모달 안)
         self._menu_at = 0.0          # 그 깃발을 세운 시각 (감시견용)
         self._z_lose = {}            # 창 클래스별로 z순서 싸움에 진 횟수
         self._z_skip = {}            # 못 이겨서 한동안 못 본 척하는 창들
@@ -8608,6 +8609,8 @@ class Mascot:
         self._pomo_draw = None       # 그 창을 다시 그리는 함수
         self._pomo_after = None      # 그 창의 예약 프레임
         self._pomo_hits = []         # 그 창의 단추 자리
+        self._tower_winref = None    # 토마토 탑 창 (같이한 친구 머리 위 토마토)
+        self._tower_head = {}        # 앉은 그림의 머리 꼭대기 높이 비율 캐시
         self._slime_step = 0.0       # 물리 계산을 마지막으로 돌린 시각
         self._slime_grain = 0.0      # 끄는 소리를 마지막으로 낸 시각
         self._slime_px = 0.0         # 끈 거리 (소리 간격을 거리로 재려고)
@@ -11004,6 +11007,10 @@ class Mascot:
         self.mouse_pressed = pressed
         now = time.time()
         self.last_pointer = now
+        if pressed and getattr(self, "_menu_shown", False):
+            # 우클릭 메뉴가 떠 있다 — 어디를 눌렀는지만 적는다. 닫는 일은
+            # 본 스레드(_menu_outside_check)가 한다 (지뢰 150).
+            self._menu_close_req = (now, int(x), int(y), str(_button))
         # 작업 흔적: 누른 뒤 5px 넘게 끌었으면 '선', 아니면 '클릭'.
         # (기존 타이머의 input_tracker와 같은 기준으로 맞췄다)
         if pressed:
@@ -14757,13 +14764,14 @@ class Mascot:
         if self._menu_up:
             # 감시견 — 메뉴가 화면에 없는데 깃발만 서 있으면(띄우다 터짐 등)
             # 풀어 준다. 이 깃발이 서 있는 한 아래 복구가 통째로 안 돈다.
-            stuck = False
-            try:
-                stuck = not self._menu.winfo_ismapped()
-            except Exception:
-                stuck = True
+            # **`winfo_ismapped` 로 보면 안 된다** — 윈도우의 팝업 메뉴는 떠
+            # 있어도 늘 0 이라, 3초 뒤에 '굳었다'로 읽고 항상 위를 도로 걸어
+            # **메뉴를 읽는 동안 캐릭터 뒤로 숨겼다** (제보). tk_popup 이 모달
+            # 이라 떠 있는 동안 _menu_shown 이 서 있다. 상한도 5분으로 — 메뉴를
+            # 오래 읽어도 가리지 않게.
+            stuck = not getattr(self, "_menu_shown", False)
             if not (stuck and now - getattr(self, "_menu_at", 0.0) > 3.0) \
-                    and now - getattr(self, "_menu_at", 0.0) < 60.0:
+                    and now - getattr(self, "_menu_at", 0.0) < 300.0:
                 return
             self._menu_up = False
             if self.us.get("topmost", True):
@@ -15405,6 +15413,16 @@ class Mascot:
         깔렸다 (지뢰 15). 메뉴가 떠 있는 동안만 캐릭터의 항상 위를 내려
         두고, 닫히면 되돌린다.
         """
+        # 이미 떠 있는데 또 우클릭했다 — 다시 띄우지 말고 닫는다 (요청).
+        # **깃발(_menu_up)을 세우기 전에** 돌아가야 한다 — 세운 채 돌아가면
+        # z순서 복구가 감시견(3초)까지 멈춘다.
+        if getattr(self, "_menu_shown", False):
+            self._menu_closed_at = time.time()
+            self._menu_end()
+            return
+        # 방금 훅이 닫은 그 클릭이 창에도 들어와 도로 여는 것을 막는다
+        if time.time() - getattr(self, "_menu_closed_at", 0.0) < 0.4:
+            return
         self._safe("ui_click", self._ui_click)      # 메뉴 열리는 '똑'
         was = bool(self.us.get("topmost", True))
         # 메뉴가 떠 있는 동안 z순서 되걸기를 쉬게 한다 (_z_pin). 안 그러면
@@ -15415,9 +15433,13 @@ class Mascot:
         def back(tries=0):
             """메뉴가 다 닫힌 뒤에 되돌린다. **어느 길로 왔든 부른다** —
             항상 위가 꺼진 사람에게서 깃발이 영영 안 내려가면 z순서
-            자가 복구가 통째로 멈춘다."""
+            자가 복구가 통째로 멈춘다.
+
+            `winfo_ismapped` 는 윈도우의 팝업 메뉴에서 **늘 0** 이다(실측) —
+            tk_popup 이 모달이라 돌아온 순간이 곧 닫힌 순간이므로 그 깃발
+            (_menu_shown)로 본다."""
             try:
-                if self._menu.winfo_ismapped() and tries < 100:
+                if getattr(self, "_menu_shown", False) and tries < 100:
                     self.root.after(300, lambda: back(tries + 1))
                     return
                 self._menu_up = False
@@ -15441,11 +15463,27 @@ class Mascot:
                 # 그림자·파티클도 같이 내린다. 캐릭터만 내리면 그 둘이 위로
                 # 올라와, 우클릭할 때마다 그림자가 번쩍 보인다(제보).
                 self._menu_layers_topmost(False)
+            # **바깥을 누르면 닫히게** — 우리 창은 맨 앞이 아니라 윈도우가
+            # 바깥 클릭을 메뉴에 안 넘긴다. 창을 앞으로 올려 보았지만(트레이
+            # 메뉴 방식) 그러면 창 안 z순서 손질에 메뉴가 곧바로 취소됐다
+            # (실측). 대신 전역 마우스 훅(_on_click)이 메뉴 밖 클릭·우클릭을
+            # 보고 닫는다 (_menu_outside_check). 메뉴 자리는 여기서 적어 둔다.
             try:
-                self._menu.tk_popup(int(x), int(y))
+                self._menu.update_idletasks()
+                self._menu_rect = (int(x), int(y),
+                                   int(x) + int(self._menu.winfo_reqwidth()),
+                                   int(y) + int(self._menu.winfo_reqheight()))
+            except Exception:
+                self._menu_rect = None
+            self._menu_close_req = None
+            self._menu_shown = True
+            try:
+                self._menu.tk_popup(int(x), int(y))     # 윈도우에선 모달
             finally:
+                self._menu_shown = False
                 self._menu.grab_release()
         finally:
+            self._menu_shown = False
             try:
                 self.root.after(250, back)
             except Exception:
@@ -22378,8 +22416,43 @@ class Mascot:
             except Exception:
                 pass                        # 닫히는 중 — 루프를 끝낸다
 
+    def _menu_outside_check(self):
+        """우클릭 메뉴가 떠 있는데 메뉴 밖을 눌렀거나 우클릭했으면 닫는다 (요청).
+
+        윈도우는 우리 창이 맨 앞이 아니면 바깥 클릭을 메뉴에 안 넘겨 메뉴가
+        계속 떠 있었다. 전역 훅이 적어 둔 클릭 자리를 메뉴 자리와 견준다.
+        tk_popup 이 모달이라 이 함수는 그 안에서 도는 tick 이 부른다."""
+        req = getattr(self, "_menu_close_req", None)
+        if not req:
+            return
+        self._menu_close_req = None
+        if not getattr(self, "_menu_shown", False):
+            return
+        _t9, x, y, btn = req
+        r = getattr(self, "_menu_rect", None)
+        inside = bool(r and r[0] <= x <= r[2] and r[1] <= y <= r[3])
+        if "right" in btn or not inside:
+            self._menu_closed_at = time.time()
+            self._menu_end()
+
+    def _menu_end(self):
+        """떠 있는 팝업 메뉴를 코드에서 닫는다. 윈도우는 `EndMenu`(이 스레드의
+        메뉴 루프를 끝낸다)가 확실하다 — `unpost` 만으로는 모달이 안 끝나는
+        경우가 있었다(실측: 두 번째 띄운 메뉴). 둘 다 부른다."""
+        if IS_WIN:
+            try:
+                ctypes.windll.user32.EndMenu()
+            except Exception:
+                pass
+        try:
+            self._menu.unpost()
+        except Exception:
+            pass
+
     def _tick_body(self):
         now = time.time()
+        if getattr(self, "_menu_close_req", None):
+            self._safe("menu_outside", self._menu_outside_check)
         if self._amb_boot:
             # 지난번 환경음은 창이 다 뜬 뒤에 튼다. __init__ 에서 하면
             # 소리 장치를 여는 동안 캐릭터가 늦게 나타난다.
@@ -23484,7 +23557,562 @@ class Mascot:
             self._gtext(cv, x_r - u(4), y0, anchor="e",
                         text="%d / %d" % (page + 1, pages), font=uf(7),
                         fill=cd["sub"])
-        return gy1 + u(self.TF_ROW)
+        if self._tower_gate():
+            # 캐릭터들 밑 정중앙 — '쌓인 토마토 보러가기 ›' (요청). 누르면
+            # 토마토 탑 창(_tower_win)이 따로 뜬다. 그림은 그대로, 줄만 는다.
+            f6 = uf(7, True)
+            lab6 = "쌓인 토마토 보러가기 ›"
+            tw6 = self._mw(lab6, f6)
+            th6 = u(13)
+            bh6 = u(18)
+            bw6 = u(8) + th6 + u(4) + tw6 + u(10)
+            bx0 = (x_l + x_r) / 2 - bw6 / 2
+            by0 = gy1 + u(self.TF_ROW) - u(2)
+            self._rr_soft(cv, bx0, by0, bx0 + bw6, by0 + bh6, bh6 / 2.0,
+                          fill="#fff0f3", outline=self._tint(cd["fill"], 0.45),
+                          width=1)
+            tim6 = self._safe_str(self._tomato_ph, th6)
+            if tim6:
+                cv.create_image(bx0 + u(8) + th6 / 2, by0 + bh6 / 2, image=tim6)
+                self._pomo_keep.append(tim6)
+            cv.create_text(bx0 + u(8) + th6 + u(4) + tw6 / 2,
+                           by0 + bh6 / 2 - u(0.5), text=lab6, font=f6,
+                           fill=self._shade(cd["fill"], 0.15))
+            self._pomo_hits.append((bx0 - u(4), by0 - u(3), bx0 + bw6 + u(4),
+                                    by0 + bh6 + u(3), ("tower",)))
+        return gy1 + u(self._tf_row_h())
+
+    TF_BTN = 22                  # '쌓인 토마토 보러가기' 단추 줄 (배율 1)
+    TOWER_STEP = 0.76            # 탑에서 토마토 한 알이 차지하는 높이 (알 크기 비율).
+                                 # 게이지 토마토는 몸이 0.19~0.93, 꼭지가 0.10 까지 —
+                                 # 0.74 면 몸끼리 딱 닿고 꼭지는 위 알 뒤로 숨는다.
+                                 # 살짝 띄워 꼭지 끝만 보인다 (요청: 많이 안 겹치게)
+    TOWER_MAX = 6                # 탑 창에 세우는 친구 수
+
+    @staticmethod
+    def _josa(name, with_bat="과", without="와"):
+        """이름 뒤 조사 — 받침이 있으면 '과', 없으면 '와' ("사가와" · 요청).
+        한글이 아니면 받침 없는 쪽으로 둔다."""
+        name = str(name or "")
+        if not name:
+            return without
+        ch = name[-1]
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            return with_bat if (code - 0xAC00) % 28 else without
+        return without
+
+    def _tf_row_h(self):
+        """'같이한 친구' 줄 높이 — 탑 단추가 있으면 그만큼 더."""
+        return self.TF_ROW + (self.TF_BTN if self._tower_gate() else 0)
+
+    def _tower_gate(self):
+        """토마토 탑 창 — config `tomato_tower` 를 켠 캐릭터만 (지금은 내 도로롱)."""
+        return bool(self.cfg.get("tomato_tower"))
+
+    def _tomato_ph(self, h):
+        """다 익은 게이지 토마토(친구 머리 위·카드의 코랄 토마토, `_tomgauge_pil`)
+        PhotoImage — 보통 창용, 캐시. 처음엔 초대 토마토(_tomato_pil)를 썼는데
+        머리 위 토마토와 같은 모양으로 해 달라는 요청."""
+        h = max(6, int(round(h)))
+        key = ("ripe", h)
+        got = self._tomgauge_cache.get(key)
+        if got is not None:
+            return got
+        if len(self._tomgauge_cache) > 80:          # 지뢰 18 — 오래된 절반만
+            for k in list(self._tomgauge_cache)[:40]:
+                self._tomgauge_cache.pop(k, None)
+        got = ImageTk.PhotoImage(self._tomgauge_pil(h, 1.0))
+        self._tomgauge_cache[key] = got
+        return got
+
+    def _tower_head_ratio(self, slot):
+        """앉은 그림에서 머리 꼭대기(첫 불투명 줄)까지의 높이 비율 (0~1, 위에서)."""
+        p = self._room_art_file(slot, "seat.png")
+        key = (slot, p)
+        got = self._tower_head.get(key)
+        if got is not None:
+            return got
+        v = 0.0
+        try:
+            im = Image.open(p).convert("RGBA")
+            bb = im.getchannel("A").getbbox()
+            if bb:
+                v = bb[1] / float(im.height)
+        except Exception:
+            v = 0.0
+        if len(self._tower_head) > 40:
+            self._tower_head.clear()
+        self._tower_head[key] = v
+        return v
+
+    def _tower_win(self):
+        """토마토 탑 — 그 주에 같이한 친구들 머리 위에 같이한 만큼 토마토가 쌓인다.
+
+        뽀모도로 창의 '쌓인 토마토 보러가기'로 여는 별개 창 (요청). 실제
+        앉은 그림(seat.png) 위에 카드의 빨간 토마토(_tomato_pil)를 쌓는다.
+        1등이 가운데(시상대), 2등은 기우뚱, 1등 꼭대기에는 새. 탑은 열 때
+        아래부터 차오르고 살랑 흔들린다 — 항목을 옮기기만 하므로 값이
+        싸다(지뢰 215 와 같은 결). 토마토 하나가 몇 번인지는 제일 높은 탑이
+        창에 들어가는 가장 작은 단위로 정한다 (적으면 1:1).
+        """
+        got = getattr(self, "_tower_winref", None)
+        if got is not None:
+            try:
+                if got.winfo_exists():
+                    got.deiconify()
+                    got.lift()
+                    return got
+            except Exception:
+                pass
+        u, cd, uf = self._ui, self.card, self._uf
+        line = self._tint(cd["fill"], 0.55)
+        W, H = int(u(470)), int(u(600))
+        win = tk.Toplevel(self.root)
+        self._tower_winref = win
+        win.title("토마토 탑")
+        win.configure(bg=cd["panel"])
+        win.resizable(False, False)
+        self._keep_front(win, focus=False)
+        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
+                       highlightthickness=0, bd=0)
+        cv.pack()
+        self._chrome_setup(win, cv, band=lambda: u(52), on_close=win.destroy)
+        if getattr(win, "_chrome", None):
+            win._chrome["fixed"] = True
+        st = {"off": max(0, int(getattr(self, "_pomo_wk_off", 0) or 0)),
+              "keep": [], "tw": [], "shown": [], "born": 0.0, "after": None,
+              "hits": [], "tips": [], "per": 1, "page": 0, "pages": 1,
+              "clouds": [], "sky": None}
+        self._tower_st = st
+
+        def put_pil(im, x, y, tags):
+            """PIL 그림을 캔버스에 — 유리 창이면 판에 진짜 알파로 (말풍선과 같은 길)."""
+            gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+            if gl and self._pane_of(cv)[1] is not None:
+                it = self._pane_put(cv, int(x), int(y), im, "nw", tags)
+                if it is not None:
+                    return it
+            ph9 = ImageTk.PhotoImage(
+                flat_on_key(im, GLASS_MIX, floor=40, cut=24) if gl else im)
+            st["keep"].append(ph9)
+            return cv.create_image(int(x), int(y), image=ph9, anchor="nw", tags=tags)
+
+        def sky_img(w, h):
+            """하늘 — 위는 파랗고 아래로 갈수록 옅다. 모서리 둥글게. 다크는 흑백."""
+            key = (int(w), int(h), bool(self._dark))
+            if st.get("sky") and st["sky"][0] == key:
+                return st["sky"][1]
+            im = Image.new("RGBA", (int(w), int(h)), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            top, bot = (196, 226, 250), (238, 246, 255)
+            for yy in range(int(h)):
+                t = yy / float(max(1, int(h) - 1))
+                c = tuple(int(round(top[i] + (bot[i] - top[i]) * t)) for i in range(3))
+                d.line([(0, yy), (int(w), yy)], fill=c + (255,))
+            mask = Image.new("L", im.size, 0)
+            ImageDraw.Draw(mask).rounded_rectangle([0, 0, int(w) - 1, int(h) - 1],
+                                                   radius=int(u(14)), fill=255)
+            im.putalpha(mask)
+            im = self._dark_sky(im)
+            st["sky"] = (key, im)
+            return im
+
+        def cloud_img(w):
+            """뭉게구름 한 장 (RGBA) — 동그라미 넷을 겹치고 살짝 흐린다."""
+            w = int(w)
+            h = int(w * 0.6)
+            S9 = 3
+            im = Image.new("RGBA", (w * S9, h * S9), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            col = (225, 228, 236, 235) if self._dark else (255, 255, 255, 240)
+            for dx, dy, r in ((0.22, 0.62, 0.22), (0.45, 0.42, 0.30), (0.70, 0.60, 0.24),
+                              (0.47, 0.72, 0.26)):
+                d.ellipse([(dx - r) * w * S9, (dy - r) * w * S9,
+                           (dx + r) * w * S9, (dy + r) * w * S9], fill=col)
+            im = im.filter(ImageFilter.GaussianBlur(S9 * 0.6))
+            return im.resize((w, h), Image.LANCZOS)
+
+        def week_label(off):
+            return ("이번 주" if off == 0 else
+                    ("지난주" if off == 1 else "%d주 전" % off))
+
+        def week_range(off):
+            today = self._my_workday()
+            lt9 = time.strptime(today, "%Y-%m-%d")
+            mon = (time.mktime(lt9) + 12 * 3600 - lt9.tm_wday * 86400
+                   - off * 7 * 86400)
+            a, b = time.localtime(mon), time.localtime(mon + 6 * 86400)
+            return "%d/%d ~ %d/%d" % (a.tm_mon, a.tm_mday, b.tm_mon, b.tm_mday)
+
+        def bird(bx, by):
+            """작은 새 — 몸·머리·부리·눈·날개. 항목 목록을 돌려준다."""
+            k = u(1)
+            out = []
+            out.append(self._oval(cv, bx - 9 * k, by - 6 * k, bx + 9 * k, by + 6 * k,
+                                  fill="#8cc4ea", outline=""))
+            out.append(self._oval(cv, bx + 4 * k, by - 12 * k, bx + 14 * k, by - 2 * k,
+                                  fill="#8cc4ea", outline=""))
+            out.append(self._poly_soft(cv, bx + 13 * k, by - 8 * k, bx + 19 * k,
+                                       by - 6 * k, bx + 13 * k, by - 4 * k,
+                                       fill="#f2b04a", outline=""))
+            out.append(self._oval(cv, bx + 9 * k, by - 9 * k, bx + 11.5 * k,
+                                  by - 6.5 * k, fill="#333333", outline=""))
+            out.append(self._oval(cv, bx - 6 * k, by - 4 * k, bx + 3 * k, by + 3 * k,
+                                  fill="#6fb0dc", outline=""))
+            out.append(cv.create_text(bx + 30 * k, by - 4 * k, text="짹",
+                                      font=uf(9, True), fill="#7aa6c8"))
+            return [it for it in out if it]
+
+        def bubble(cx, by, txt, tx):
+            """작은 말풍선 — 꼬리 끝이 (tx, by), 몸통 가운데 cx.
+
+            몸통과 꼬리를 **한 실루엣**으로 굽는다 (bubble_img · 지뢰 123) —
+            따로 그리면 이음매에 선이 남는다 (요청: 구분선 없이 깔끔하게).
+            """
+            f8 = uf(8, True)
+            bw = int(self._mw(txt, f8) + u(20))
+            bh = int(u(22))
+            th9 = int(u(7))
+            bx0 = int(cx - bw / 2)
+            by0 = int(by - th9 - bh)
+            ta = max(u(8), min(bw - u(8), tx - bx0))
+            im = bubble_img(bw, bh, int(u(10)), (ta - u(5), ta + u(5), ta, th9),
+                            "#ffffff", line, 1.2)
+            gl = bool(self._glass and getattr(cv, "_glass_cv", False))
+            it = None
+            if gl and self._pane_of(cv)[1] is not None:
+                it = self._pane_put(cv, bx0, by0, im, "nw", "dyn")
+            if it is None:
+                ph9 = ImageTk.PhotoImage(
+                    flat_on_key(im, GLASS_MIX, floor=40, cut=24) if gl else im)
+                st["keep"].append(ph9)
+                cv.create_image(bx0, by0, image=ph9, anchor="nw")
+            cv.create_text(cx, by0 + bh / 2 - u(0.5), text=txt, font=f8,
+                           fill=self._shade(cd["fill"], 0.15))
+
+        def draw():
+            if not win.winfo_exists():
+                return
+            cv.delete("all")
+            st["keep"], st["tw"], st["shown"] = [], [], []
+            st["hits"], st["tips"] = [], []
+            st["born"] = time.time()
+            off = st["off"]
+            # 제목 — 왼쪽 위 (가운데 탑이 지나갈 자리를 비운다)
+            tph = self._safe_str(self._tomato_ph, u(18))
+            if tph:
+                cv.create_image(u(28), u(26), image=tph)
+                st["keep"].append(tph)
+            cv.create_text(u(44), u(26), anchor="w",
+                           text=week_label(off) + " 토마토 탑",
+                           font=uf(12, True), fill=cd["text"])
+            self._gtext(cv, u(44), u(44), anchor="w", text=week_range(off),
+                        font=uf(8), fill=cd["sub"])
+            self._safe("chrome", self._chrome_draw, win, cv, W - u(20), u(24),
+                       -1, "dyn", u(6.5))
+            # 주 넘기기 — 오른쪽 위, – × 아래
+            ny = u(62)
+            for tx9, ch9, on9, d9 in ((W - u(122), "‹", off < 8, 1),
+                                      (W - u(28), "›", off > 0, -1)):
+                cv.create_text(tx9, ny, text=ch9, font=uf(13, True),
+                               fill=cd["text"] if on9 else "#d8d2dc")
+                if on9:
+                    st["hits"].append((tx9 - u(11), ny - u(11), tx9 + u(11),
+                                       ny + u(11), ("wk", d9)))
+            self._gtext(cv, W - u(75), ny, text=week_label(off), font=uf(8, True),
+                        fill=cd["sub"])
+            who = [(s9, n9) for s9, n9 in
+                   (self._safe_str(self._pomo_team_week, off) or []) if n9 > 0]
+            # 여섯 넘으면 쪽으로 넘긴다 — 같이한 친구 모두를 볼 수 있게 (요청)
+            pages = max(1, int(math.ceil(len(who) / float(self.TOWER_MAX))))
+            page = max(0, min(pages - 1, int(st["page"])))
+            st["page"], st["pages"] = page, pages
+            who = who[page * self.TOWER_MAX:(page + 1) * self.TOWER_MAX]
+            if pages > 1:
+                for tx9, ch9, on9, d9 in ((u(44), "‹", page > 0, -1),
+                                          (u(112), "›", page < pages - 1, 1)):
+                    cv.create_text(tx9, ny, text=ch9, font=uf(13, True),
+                                   fill=cd["text"] if on9 else "#d8d2dc")
+                    if on9:
+                        st["hits"].append((tx9 - u(11), ny - u(11), tx9 + u(11),
+                                           ny + u(11), ("pg", d9)))
+                self._gtext(cv, u(78), ny, text="%d / %d" % (page + 1, pages),
+                            font=uf(8, True), fill=cd["sub"])
+            gy = H - u(118)
+            # 하늘 — 제목 아래부터 잔디 뒤까지, 구름이 천천히 흘러간다 (요청)
+            st["clouds"] = []
+            sx0, sy0 = u(16), u(80)
+            sw9, sh9 = W - u(32), gy + u(12) - sy0
+            put_pil(sky_img(sw9, sh9), sx0, sy0, ("dyn", "sky"))
+            for k9, (fx, fy, cw9, spd) in enumerate(((0.06, 0.06, 92, 0.28), (0.48, 0.16, 70, 0.20),
+                                                     (0.78, 0.04, 108, 0.34), (0.30, 0.34, 58, 0.16))):
+                cim = cloud_img(u(cw9))
+                cx9, cy9 = sx0 + sw9 * fx, sy0 + sh9 * fy
+                it = put_pil(cim, cx9, cy9, ("dyn", "cloud"))
+                st["clouds"].append([it, float(cx9), float(cy9), spd * u(1), cim.width])
+            # 잔디
+            self._rr_soft(cv, u(16), gy, W - u(16), gy + u(24), u(10),
+                          fill="#dff0d0", outline="", width=0)
+            lw9 = max(1, int(u(2)))
+            for i9 in range(int((W - u(40)) // u(21))):
+                x9 = u(28) + i9 * u(21)
+                cv.create_line(x9, gy + u(4), x9 + u(3), gy - u(4),
+                               fill="#b9dca4", width=lw9)
+            if not who:
+                self._gtext(cv, W / 2, gy - u(130),
+                            text=("이번 주엔 아직 같이한 기록이 없어요"
+                                  if off == 0 else "이 주에는 같이한 기록이 없어요"),
+                            font=uf(9), fill=cd["sub"])
+                st["per"] = 1
+                return
+            ranked = who                       # 많이 한 순
+            order = ([ranked[1], ranked[0]] + ranked[2:]) if len(ranked) >= 2                 else list(ranked)              # 시상대 — 1등 가운데
+            n = len(order)
+            span = W - u(40)
+            ch9 = u(96) if n <= 5 else u(80)
+            th = u(24) if n <= 5 else u(19)
+            step = th * self.TOWER_STEP
+            heads = {}
+            for slot, cnt in order:
+                r9 = self._safe_num(self._tower_head_ratio, slot) or 0.0
+                heads[slot] = gy + u(4) - ch9 + ch9 * r9   # 머리 꼭대기 y
+            limit = u(86)                      # 제목·주 넘기기 아래
+            mx = max(c9 for _s9, c9 in order)
+            per = 1
+            for p9 in (1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 100):
+                per = p9
+                need = math.ceil(mx / float(p9)) * step + th * 1.6
+                if min(heads.values()) - need >= limit:
+                    break
+            st["per"] = per
+            tops = {}
+            tim2 = self._safe_str(self._tomato_ph, th)
+            tim3 = self._safe_str(self._tomato_ph, th * 0.55)
+            for i, (slot, cnt) in enumerate(order):
+                cx = u(20) + span * (i + 0.5) / n
+                # 발밑 그림자 → 캐릭터
+                self._oval(cv, cx - u(30), gy - u(2), cx + u(30), gy + u(10),
+                           fill="#cfe2c0", outline="")
+                ph = self._seat_photo(slot, ch9)
+                if ph is not None:
+                    cv.create_image(cx, gy + u(4), image=ph, anchor="s")
+                    st["keep"].append(ph)
+                nm = self._note_name(slot)
+                col = self.ROOM_TINT.get(slot) or cd["fill"]
+                f11 = uf(10, True)
+                pw = self._mw(nm, f11) + u(20)
+                py9 = gy + u(44)
+                self._rr_soft(cv, cx - pw / 2, py9 - u(11), cx + pw / 2, py9 + u(11),
+                              u(11), fill=col, outline="", width=0)
+                cv.create_text(cx, py9 - u(0.5), text=nm, font=f11, fill="#ffffff")
+                # 개수 알약 — 토마토가 칸에 딱 맞게 크고 세로 정중앙 (요청)
+                lab = "×%d" % cnt
+                f10 = uf(10, True)
+                tw = self._mw(lab, f10)
+                pph = u(22)
+                tsz = pph - u(4)
+                pw2 = u(6) + tsz + u(5) + tw + u(9)
+                px0 = cx - pw2 / 2
+                py0 = gy + u(62)
+                pcy = py0 + pph / 2.0
+                self._rr_soft(cv, px0, py0, px0 + pw2, py0 + pph, pph / 2.0,
+                              fill="#fff0f3", outline=self._tint(cd["fill"], 0.45),
+                              width=1)
+                tim = self._safe_str(self._tomato_ph, tsz)
+                if tim:
+                    cv.create_image(px0 + u(6) + tsz / 2, pcy, image=tim)
+                    st["keep"].append(tim)
+                cv.create_text(px0 + u(6) + tsz + u(5) + tw / 2, pcy - u(0.5),
+                               text=lab, font=f10,
+                               fill=self._shade(cd["fill"], 0.15))
+                # 탑 — 아래부터 쌓인다. 2등(왼쪽 첫 칸)은 기우뚱.
+                ht = heads[slot]
+                items = []
+                y = ht + u(4)
+                xs = 0.0
+                lean = 0.9 if (n >= 2 and i == 0) else 0.0
+                nt, rest = divmod(cnt, per)
+                for k in range(nt):
+                    xs += (lean * (k / 8.0) ** 0.7 * 0.5
+                           + math.sin(k * 0.9) * 0.9) * u(1)
+                    if tim2:
+                        it = cv.create_image(cx + xs, y, image=tim2, anchor="s",
+                                             state="hidden", tags=("dyn", "tw"))
+                        items.append((it, cx + xs, y, (k + 1) / float(max(1, nt + (1 if rest else 0)))))
+                    y -= step
+                if rest and tim3:
+                    it = cv.create_image(cx + xs, y, image=tim3, anchor="s",
+                                         state="hidden", tags=("dyn", "tw", "tw_rest"))
+                    items.append((it, cx + xs, y, 1.0))
+                    y -= th * 0.55 * self.TOWER_STEP
+                if not items:
+                    y = ht
+                tops[slot] = (cx + xs, y)
+                st["tw"].append(items)
+                st["shown"].append(0)
+            if tim2:
+                st["keep"].append(tim2)
+            if tim3:
+                st["keep"].append(tim3)
+            # 새 — 1등 탑 꼭대기에 앉는다 (탑과 같이 흔들린다)
+            s1 = ranked[0][0]
+            bx, by = tops[s1]
+            i1 = order.index(ranked[0])
+            for it in bird(bx + u(2), by - u(4)):
+                try:
+                    c9 = cv.coords(it)
+                except Exception:
+                    continue
+                if len(c9) >= 2:
+                    st["tw"][i1].append((it, c9[0], c9[1], 1.0))
+                    # 이미 보이는 채로 두면 탑보다 먼저 떠 있다 — 탑과 같이 나온다
+                    try:
+                        cv.itemconfigure(it, state="hidden")
+                    except Exception:
+                        pass
+            # 말풍선 — 1등 '무…무거워…'(새 위), 꼴찌 '가볍다!'(제 탑 위).
+            # 머리 옆에 두면 이웃 탑과 겹친다 (찍어서 확인) — 탑 위는 비어 있다.
+            if n >= 2:
+                bubble(bx + u(2), by - u(24), "무…무거워…", bx + u(2))
+                il = n - 1
+                xl, yl = tops[order[il][0]]
+                bubble(xl, yl - u(8), "가볍다!", xl)
+            foot = ("토마토 하나 = 같이한 뽀모도로 %d번" % per if per > 1
+                    else "토마토 하나 = 같이한 뽀모도로 하나")
+            self._gtext(cv, W / 2, H - u(14), text=foot, font=uf(8), fill=cd["sub"])
+
+        def tick():
+            if not win.winfo_exists():
+                return
+            try:
+                if win.state() == "normal" and st["clouds"]:
+                    # 구름 — 오른쪽으로 흘러가다 끝에 닿으면 왼쪽에서 다시
+                    lx, rx = u(16), W - u(16)
+                    for c9 in st["clouds"]:
+                        c9[1] += c9[3]
+                        if c9[1] > rx:
+                            c9[1] = lx - c9[4]
+                        cv.coords(c9[0], c9[1], c9[2])
+                if win.state() == "normal" and st["tw"]:
+                    t = time.time() - st["born"]
+                    fr = min(1.0, t / 0.7)
+                    for i, items in enumerate(st["tw"]):
+                        k0 = st["shown"][i]
+                        while k0 < len(items) and items[k0][3] <= fr + 1e-6:
+                            cv.itemconfigure(items[k0][0], state="normal")
+                            k0 += 1
+                        st["shown"][i] = k0
+                        amp = u(1.6) * math.sin(t * 2.2 + i * 1.3)
+                        for it, bx, by, f in items[:k0]:
+                            if f < 0.15:
+                                continue
+                            cv.coords(it, bx + amp * (f ** 1.2), by)
+            except Exception:
+                pass
+            st["after"] = win.after(80, tick)
+
+        def on_click(e):
+            if self._chrome_press(win, e):
+                return
+            self._safe("ui_click", self._ui_click)
+            for x0, y0, x1, y1, act in st["hits"]:
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    if act[0] == "wk":
+                        st["off"] = max(0, min(8, st["off"] + act[1]))
+                        st["page"] = 0
+                        draw()
+                    elif act[0] == "pg":
+                        st["page"] = max(0, st["page"] + act[1])
+                        draw()
+                    return
+
+        def on_move(e):
+            self._chrome_motion(win, e)
+
+        def gone(e=None):
+            if e is not None and e.widget is not win:
+                return
+            if st["after"] is not None:
+                try:
+                    win.after_cancel(st["after"])
+                except Exception:
+                    pass
+                st["after"] = None
+            if self._tower_winref is win:
+                self._tower_winref = None
+
+        cv.bind("<Button-1>", lambda e: self._safe("tower_click", on_click, e))
+        cv.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+        cv.bind("<ButtonRelease-1>", lambda _e: self._chrome_release(win))
+        cv.bind("<Motion>", lambda e: self._safe("tower_move", on_move, e))
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.bind("<Destroy>", gone, add="+")
+        self._tower_draw = draw
+        draw()
+        st["after"] = win.after(80, tick)
+        return win
+
+    def _pomo_sig(self, cv):
+        """뽀모도로 창에 보이는 것의 서명 — 첫 칸은 남은 시간 글자.
+
+        beat 가 이것을 견줘, 남은 시간 말고 바뀐 것이 없으면 다시 그리지
+        않고 시간 글자만 갈아 끼운다 (요청 — 조작할 때 버벅). 스톱워치·
+        데드라인 탭은 늘 그린다. 여기서 빠뜨린 값은 3초 안전망이 덮는다.
+        """
+        tab = self._pomo_tab()
+        now = time.time()
+        if tab in ("sw", "dl"):
+            return ("", now)
+        st = self._pomo()
+        left = int(self._pomo_left(st))
+        tm = self._tm or {}
+        mem = tuple(sorted(
+            (k, tuple(sorted((a, str(b)) for a, b in (v or {}).items()
+                             if a != "at")))
+            for k, v in (tm.get("members") or {}).items()))
+        pos = getattr(self, "_pomo_mouse", None)
+
+        def hov(boxes):
+            if not pos or not boxes:
+                return -1
+            for i9, b9 in enumerate(boxes):
+                if b9[0] <= pos[0] <= b9[2] and b9[1] <= pos[1] <= b9[3]:
+                    return i9
+            return -1
+        try:
+            stk = repr(self._stk_list("pomo"))
+        except Exception:
+            stk = ""
+        say = self._tm_say
+        fx_on = bool(tm) and (now - self._tm_fx < 3.4 or self._team_bye_on())
+        off9 = int(getattr(self, "_pomo_wk_off", 0) or 0)
+        return ("%d:%02d" % (left // 60, left % 60),
+                tab, bool(st.get("on")), st.get("phase"),
+                int(st.get("round") or 0), bool(st.get("hard")),
+                bool(self.us.get("pomo_edit")), bool(self.us.get("pomo_week", True)),
+                off9, int(getattr(self, "_pomo_tf_page", 0) or 0),
+                bool(self.us.get("pomo_strip", True)),
+                bool(getattr(self, "_pomo_menu", False)),
+                self._pomo_sets(), self._pomo_runs(), self._pomo_hruns(),
+                (self._pomo_mins("focus"), self._pomo_mins("short"),
+                 self._pomo_mins("long")),
+                tm.get("sid"), tm.get("state"), tm.get("mode"), tm.get("host"),
+                bool(tm.get("auto")), tuple(sorted(tm.get("invited") or ())), mem,
+                bool(self._tm_ready), bool(self._tm_rest),
+                say[0] if (say[1] and now - say[1] < 4.0) else None,
+                bool(self._tm_bye_arm and now - self._tm_bye_arm < self.TEAM_BYE_ARM),
+                now if fx_on else 0,           # 연출 중에는 매 박자
+                left // 60 if tm else 0,       # 같이하기 토마토 게이지는 분마다
+                hov(getattr(self, "_tf_boxes", None)),
+                hov(getattr(self, "_tm_vow_box", None)),
+                hov(getattr(self, "_tm_tom_box", None)),
+                int(cv.winfo_width()), int(cv.winfo_height()), stk,
+                tuple(self._pomo_team_week(off9)),
+                (tuple(sorted(str(q.get("slot") or "")
+                              for q in (self.room_people or [])))
+                 if tm.get("invited") else ()),
+                len(self._team_people()) if tm else 0)
 
     def _team_week_hover(self, cv, u, uf, W, pad):
         """친구 얼굴에 커서 — '히헌과 4번 집중했어요' 말풍선 (맨 위에)."""
@@ -23497,7 +24125,8 @@ class Mascot:
             if not (x0 <= mx <= x1 and y0 <= my <= y1):
                 continue
             cd = self.card
-            txt = "%s과 %d번 집중했어요" % (self._note_name(slot), n)
+            nm9 = self._note_name(slot)
+            txt = "%s%s %d번 집중했어요" % (nm9, self._josa(nm9), n)
             f8 = uf(8, True)
             tw = self._mw(txt, f8)
             bw, bh = tw + u(20), u(20)
@@ -28177,6 +28806,14 @@ class Mascot:
         v = self.us.get("dl_hist")
         return [r for r in v if isinstance(r, dict)] if isinstance(v, list) else []
 
+    DL_GRACE = 600.0             # 시각이 된 뒤 이만큼 안에 '끝냈어'를 누르면 늦은 것이 아니다
+
+    def _dl_over(self, st, now):
+        """목표를 얼마나 넘겼나(초). 물어보는 말풍선을 보고 조금 뒤에 누른 것은
+        늦은 것이 아니다 (요청 — '2초 늦었지만'이 어색하다). DL_GRACE 안이면 0."""
+        over = now - float(st["goal"])
+        return int(max(0.0, over - self.DL_GRACE)) if over > 0 else 0
+
     def _dl_hist_add(self, st, ok, now=None):
         """결과 한 줄 — 이름·목표·정한 때·끝낸 때·연장 횟수·초과 초. 새것이 앞."""
         now = time.time() if now is None else now
@@ -28185,7 +28822,7 @@ class Mascot:
                         "set": round(float(st.get("set") or 0), 1),
                         "done": round(now, 1), "ok": bool(ok),
                         "ext": int(st.get("ext") or 0),
-                        "over": int(max(0.0, now - float(st["goal"]))),
+                        "over": self._dl_over(st, now),
                         "day": self._my_workday()})
         self.us["dl_hist"] = rows[:self.DL_HIST_MAX]
 
@@ -28436,7 +29073,7 @@ class Mascot:
         if ok:
             self.smile_until = now + 4.0
             self._safe("gest", self._gest_start, "clap", True)
-            over = now - float(st["goal"])
+            over = self._dl_over(st, now)
             self._say("해냈다! %s" % ("제때 끝냈어!" if over <= 0 else
                                      "%s 늦었지만 끝냈어!" % self._dl_fmt(over)), 5.0)
             cols = ["#ff9ec4", "#ffd479", "#9ad7ff", "#b8e986", "#c9a7ff"]
@@ -29112,11 +29749,12 @@ class Mascot:
             for i, (lab, act, main_b) in enumerate(rows):
                 x0 = pad + i * (bw + u(8))
                 x1 = x0 + bw
+                # 보조 단추는 흰 바탕 + 굵은 글자 (요청 — 분홍 섞인 회색이 탁했다)
                 fl, ol, wd, ik = ((cd["fill"], "", 0, "#ffffff") if main_b
-                                  else ("#f2edf4", line, 1, cd["text"]))
+                                  else ("#ffffff", line, 1, cd["text"]))
                 self._rr_soft(cv, x0, by0, x1, by1, u(13), fill=fl, outline=ol, width=wd)
                 cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
-                               font=uf(9, main_b), fill=ik)
+                               font=uf(9, True), fill=ik)
                 self._pomo_hits.append((x0, by0, x1, by1, act))
             # (크기·고정·글자 알약 줄은 뺐다 — 우클릭 메뉴에 있다 · 요청)
             ry = by1 + u(22)
@@ -29181,12 +29819,12 @@ class Mascot:
             yy = y0l + u(5) + u(24) * (j + 0.5)
             ok9 = bool(r9.get("ok"))
             over9 = int(r9.get("over") or 0)
-            if ok9 and over9 <= 60:
-                tag, tc = "제때", "#4a9c80"
+            if ok9 and over9 <= 60:          # 라벨은 성공·늦음·실패 (요청)
+                tag, tc = "성공", "#4a9c80"
             elif ok9:
-                tag, tc = "+%s 늦게" % self._dl_fmt(over9), "#b8802a"
+                tag, tc = "늦음", "#b8802a"
             else:
-                tag, tc = "그만둠", "#a33f3f"
+                tag, tc = "실패", "#a33f3f"
             self._safe("soft_btn", self._soft_dot, cv, pad + u(16), yy, u(4),
                        "#6fc4a6" if ok9 else "#e8a0a0")
             nm9 = self._fit_text(cv, str(r9.get("name") or "목표"), uf(9, True), u(110))
@@ -29499,14 +30137,14 @@ class Mascot:
             if main_b:
                 fl, ol, wd, ik = cd["fill"], "", 0, "#ffffff"
             elif en:
-                fl, ol, wd, ik = "#f2edf4", line, 1, cd["text"]
+                fl, ol, wd, ik = "#ffffff", line, 1, cd["text"]
             else:
                 fl, ol, wd, ik = "#f7f5f8", line, 1, "#c9c3ce"
             self._rr_soft(cv, x0, by0, x1, by1, u(13), fill=fl, outline=ol,
                           width=wd)
-            fb9 = uf(9, main_b)
+            fb9 = uf(9, True)
             for s9 in range(9, 5, -1):
-                fb9 = uf(s9, main_b)
+                fb9 = uf(s9, True)
                 if self._mw(lab, fb9) <= (x1 - x0) - u(10):
                     break
             cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab, font=fb9,
@@ -29938,7 +30576,7 @@ class Mascot:
                     # 같이한 기록이 있는 주면 친구 줄 (요청)
                     if self._safe_str(self._pomo_team_line,
                                       getattr(self, "_pomo_wk_off", 0)):
-                        wk += self.TF_ROW
+                        wk += self._tf_row_h()
             # 같이 하는 사람들 — 줄 수만큼 (한 줄에 넷이 기본, 창을 옆으로
             # 넓히면 한 줄에 더 들어가 줄이 준다 · 요청)
             rows9 = int(getattr(self, "_tm_rows", 0) or 0)
@@ -30080,6 +30718,8 @@ class Mascot:
                     cv.move("all", self._pomo_ox, 0)
                 if self._pomo_bar_draw is not None:
                     self._safe("pomo_bar", self._pomo_bar_draw)
+                zst["sig"] = self._safe_str(self._pomo_sig, cv) or None
+                zst["sig_at"] = time.time()
                 return
             st = self._pomo()
             left = self._pomo_left(st)
@@ -30102,7 +30742,8 @@ class Mascot:
                            fill=self._shade(tone, 0.25))
             cv.create_text(W / 2, u(118), text="%d:%02d" % (int(left) // 60,
                                                             int(left) % 60),
-                           font=uf(34, True), fill=cd["text"])
+                           font=uf(34, True), fill=cd["text"],
+                           tags=("dyn", "pomo_time"))
             # 몇 번째인가 — 동그라미 넷
             done = int(st["round"]) % self.POMO_ROUNDS
             if st["round"] and done == 0:
@@ -30205,15 +30846,15 @@ class Mascot:
                 main = act in ("toggle", "tmgo") or (
                     act == "tmrest" and self._tm_rest)
                 self._rr_soft(cv, x0, by0, x1, by1, u(13),
-                              fill=cd["fill"] if main else "#f2edf4",
+                              fill=cd["fill"] if main else "#ffffff",
                               outline="" if main else line,
                               width=0 if main else 1)
                 # 글자가 단추 밖으로 삐져나오지 않게 칸에 맞춰 줄인다
                 # (제보 — '오늘은 여기까지'가 넘쳤다). 창을 줄이면 글자도
-                # 같이 작아진다.
-                fb9 = uf(9, bool(main))
+                # 같이 작아진다. 보조 단추도 굵게 (요청).
+                fb9 = uf(9, True)
                 for s9 in range(9, 5, -1):
-                    fb9 = uf(s9, bool(main))
+                    fb9 = uf(s9, True)
                     if self._mw(lab, fb9) <= (x1 - x0) - u(10):
                         break
                 cv.create_text((x0 + x1) / 2, (by0 + by1) / 2, text=lab,
@@ -30488,6 +31129,9 @@ class Mascot:
                 cv.move("all", self._pomo_ox, 0)
             if self._pomo_bar_draw is not None:   # 메뉴 단추의 켜짐 표시
                 self._safe("pomo_bar", self._pomo_bar_draw)
+            # 지금 보이는 것의 서명 — 박자가 이것과 견줘 안 바뀌면 안 그린다
+            zst["sig"] = self._safe_str(self._pomo_sig, cv) or None
+            zst["sig_at"] = time.time()
 
         def on_click(e):
             # 표시줄 없는 창의 가장자리·– × 단추가 먼저다 (원래 좌표로)
@@ -30588,6 +31232,9 @@ class Mascot:
                         return
                     if isinstance(act, tuple) and act[0] == "dl":
                         self._safe("dl_act", self._dl_act, act[1:])
+                        return
+                    if isinstance(act, tuple) and act[0] == "tower":
+                        self._safe("tower_win", self._tower_win)
                         return
                     if isinstance(act, tuple) and act[0] == "wkoff":
                         # 지난주 넘기기 — 창을 여는 동안만 기억한다
@@ -30701,7 +31348,23 @@ class Mascot:
             # 스톱워치를 재는 중이고 초가 그대로면 소수점만 갈아 끼운다 (요청 —
             # 0.1초마다 통째로 다시 그리면 숫자가 깜빡였다). 아니면 다시 그리기.
             if not self._safe_str(self._sw_fast, cv):
-                draw()
+                # **바뀐 것이 없으면 안 그린다** (요청 — 창을 조작하면 버벅).
+                # 0.5초마다 항목 백여 개를 지우고 다시 만들던 것을, 보이는
+                # 것의 서명(_pomo_sig)이 같으면 건너뛰고 남은 시간만 바뀌었으면
+                # 그 글자만 갈아 끼운다. 서명에서 빠뜨린 값이 있어도 3초마다는
+                # 통째로 그린다 (안전망 · 지뢰 89).
+                sig9 = self._safe_str(self._pomo_sig, cv) or None
+                now9 = time.time()
+                old9 = zst.get("sig")
+                if (not sig9 or not old9 or sig9[1:] != old9[1:]
+                        or now9 - zst.get("sig_at", 0.0) > 3.0):
+                    draw()
+                elif sig9[0] != old9[0]:
+                    try:
+                        cv.itemconfigure("pomo_time", text=sig9[0])
+                        zst["sig"] = sig9
+                    except Exception:
+                        draw()
             # 폭죽·색종이가 터지는 3초만 빠르게 (제보: 0.5초에 한 장이라
             # 여섯 장짜리 폭죽이 '렉'으로 보였다). 평소엔 0.5초.
             fx9 = bool(self._tm) and (time.time() - self._tm_fx < 3.4
@@ -30725,6 +31388,10 @@ class Mascot:
                     zst["w_set"] = w9
                     zst["h_set"] = int(u(base_h())) + BARH
                     win.geometry("%dx%d" % (w9, zst["h_set"]))
+                    # 바로 이어 그리는 쪽이 **새 크기**를 보게 한다 (요청 — 탭을
+                    # 바꾸면 옛 크기로 작게 그렸다가 창에 맞춰 커졌다). 미뤄 둔
+                    # 크기 변경을 지금 적용한다 (지뢰 145 ②와 같은 이야기).
+                    win.update_idletasks()
             except Exception:
                 pass
 
@@ -41591,7 +42258,11 @@ class Mascot:
     # ── 앉은 모습 그림 받아 두기 ────────────────────────────────────────
     def _room_art_dir(self):
         d = os.path.join(self.state_dir, ".room_art")
-        os.makedirs(d, exist_ok=True)
+        # 그릴 때마다 사람 수만큼 mkdir 을 부르고 있었다 (실측 한 번 그리기에
+        # 일곱 번) — 한 번 만들었으면 다시 안 부른다
+        if getattr(self, "_room_art_dir_ok", None) != d:
+            os.makedirs(d, exist_ok=True)
+            self._room_art_dir_ok = d
         return d
 
     ART_RETRY = 600.0            # 그림을 못 받은 자리를 다시 해 보는 간격
