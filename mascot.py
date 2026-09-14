@@ -8056,6 +8056,10 @@ class Mascot:
         self._menu_at = 0.0          # 그 깃발을 세운 시각 (감시견용)
         self._z_lose = {}            # 창 클래스별로 z순서 싸움에 진 횟수
         self._z_skip = {}            # 못 이겨서 한동안 못 본 척하는 창들
+        self._z_giveups = {}         # 창별 (포기 횟수, 마지막 포기 시각) — 점점 늦추기
+        self._z_kick = 0.0           # 앞 창이 바뀐 사건이 온 시각 (_z_hook_install)
+        self._z_hook = None          # WinEvent 훅 손잡이 (None = 아직 안 걸었다)
+        self._z_raise_at = 0.0       # 마지막으로 HWND_TOP 으로 올린 시각
         self._front_wins = []        # '항상 위'보다 앞을 지켜 줄 창들 (_keep_front)
         self._dot_btn = None         # 안 본 업데이트 점 자리 (x, y, 반지름)
         self._read_ver = None        # 어디까지 읽었는지 (파일에서 한 번만 읽음)
@@ -11936,6 +11940,7 @@ class Mascot:
                 self._safe("dl_gone", self._dl_strip.destroy)
             if getattr(self, "_pane", None):
                 self._safe("pane_gone", self._pane.destroy)
+            self._safe("z_unhook", self._z_hook_release)
             # 예약해 둔 다음 프레임을 먼저 거둔다. 안 그러면 창을 닫은 뒤에
             # 그 프레임이 없어진 창을 불러 'invalid command name' 이 뜬다.
             if self._tick_after is not None:
@@ -14546,9 +14551,90 @@ class Mascot:
         self._last_pos = None
         self._panel_z = 0.0
 
-    Z_PIN = 1.0              # 이 간격으로 '내가 아직 맨 앞인가'를 본다
-    Z_GIVEUP = 60.0          # 올려도 또 덮는 창은 이만큼 못 본 척한다
-    Z_LOSE = 3               # 이만큼 연달아 지면 그 창은 못 이기는 상대다
+    # '내가 아직 맨 앞인가'는 **앞 창이 바뀌는 순간**(윈도우가 알려 준다 —
+    # _z_hook_install) 곧바로 보고, 그 밖에는 안전망으로 이 간격마다 본다.
+    # 예전엔 1초마다 훑기만 했고, 클립스튜디오 팔레트(항상 위 Qt 창 — 본창을
+    # 누를 때마다 무리째 앞으로 나온다)에 세 번 지면 60초를 통째로 포기해
+    # '자꾸 아래로 내려간다'가 됐다 (개 제보 2026-09-14).
+    Z_PIN = 3.0
+    Z_PIN_KICK = 0.12        # 사건이 오면 이만큼 뒤에(한 프레임 뒤) 본다 — 연타 방지
+    Z_GIVEUP = 60.0          # 늦추기의 상한 (Z_BACKOFF 의 마지막 칸)
+    Z_BACKOFF = (5.0, 15.0, 30.0, 60.0)   # 같은 창에 잇달아 지면 이만큼씩 쉰다
+    Z_LOSE = 3               # 이만큼 연달아 지면 그 창은 잠깐 못 이기는 상대다
+
+    def _z_hook_install(self):
+        """앞 창이 바뀌는 순간을 윈도우가 알려 준다 (SetWinEventHook ·
+        EVENT_SYSTEM_FOREGROUND · WINEVENT_OUTOFCONTEXT).
+
+        가만히 있을 때는 값이 0 이고, 사건이 오면 깃발(시각)만 세운다 — 콜백
+        안에서 Tk 를 부르면 프로세스째 죽는다 (지뢰 193). 올리는 일은 그리기
+        루프의 _z_pin 이 다음 프레임에 한다. 콜백 객체는 붙들어 둔다(GC 되면
+        즉사). 못 걸면 False — 3초 안전망만으로 돈다.
+        """
+        self._z_hook = False
+        if not IS_WIN:
+            return
+        try:
+            u = ctypes.WinDLL("user32")               # 지뢰 21 — 따로 연다
+            proto = ctypes.WINFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint,
+                                       ctypes.c_void_p, ctypes.c_long,
+                                       ctypes.c_long, ctypes.c_uint,
+                                       ctypes.c_uint)
+
+            def cb(hook, ev, hwnd, idobj, idchild, tid, t, self9=self):
+                try:
+                    self9._z_kick = time.time()
+                except Exception:
+                    pass
+            self._z_cb = proto(cb)
+            u.SetWinEventHook.argtypes = [ctypes.c_uint, ctypes.c_uint,
+                                          ctypes.c_void_p, proto,
+                                          ctypes.c_uint, ctypes.c_uint,
+                                          ctypes.c_uint]
+            u.SetWinEventHook.restype = ctypes.c_void_p
+            u.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+            u.UnhookWinEvent.restype = ctypes.c_int
+            h = u.SetWinEventHook(0x0003, 0x0003, None, self._z_cb, 0, 0, 0)
+            self._z_hook = h or False
+            self._z_hook_u = u
+        except Exception:
+            self._z_hook = False
+
+    def _z_hook_release(self):
+        h = getattr(self, "_z_hook", None)
+        u = getattr(self, "_z_hook_u", None)
+        self._z_hook = None
+        if h and u is not None:
+            try:
+                u.UnhookWinEvent(ctypes.c_void_p(h))
+            except Exception:
+                pass
+
+    Z_BACKOFF_FORGET = 300.0     # 이만큼 안 졌으면 처음(5초)부터 다시
+
+    def _z_delay(self, hwnd, now):
+        """이 창에 진 뒤 얼마나 쉴지 — 잇달아 질수록 길게, 오래 안 졌으면 처음부터."""
+        g = getattr(self, "_z_giveups", None)
+        if g is None:
+            g = self._z_giveups = {}
+        n, at = g.get(hwnd, (0, 0.0))
+        if now - at > self.Z_BACKOFF_FORGET:
+            n = 0
+        return self.Z_BACKOFF[min(max(n, 1) - 1, len(self.Z_BACKOFF) - 1)]
+
+    def _z_gave_up(self, hwnd, now):
+        """이 창에 (또) 졌다 — 횟수를 올리고 이번에 쉴 시간을 돌려준다."""
+        g = getattr(self, "_z_giveups", None)
+        if g is None:
+            g = self._z_giveups = {}
+        n, at = g.get(hwnd, (0, 0.0))
+        if now - at > self.Z_BACKOFF_FORGET:
+            n = 0
+        g[hwnd] = (n + 1, now)
+        if len(g) > 20:
+            for k9 in list(g)[:10]:
+                g.pop(k9, None)
+        return self.Z_BACKOFF[min(n, len(self.Z_BACKOFF) - 1)]
 
     def _u32z(self):
         """z순서를 **바꾸는** 데 쓸 user32 손잡이 — 규격을 정해 따로 연다.
@@ -14632,8 +14718,15 @@ class Mascot:
         올릴 필요가 있을 때만 올린다. 필요 없는데 주기적으로 밀어 넣으면
         눈에 띄게 깜빡인다 (그림자에서 겪은 일).
         """
-        if (self._fs_hidden or not self.us.get("topmost", True)
-                or now - self._z_pin_at < self.Z_PIN):
+        if self._fs_hidden or not self.us.get("topmost", True):
+            return
+        if IS_WIN and getattr(self, "_z_hook", None) is None:
+            self._z_hook_install()
+        # 앞 창이 바뀐 사건이 왔으면 한 프레임 뒤에 곧바로, 아니면 안전망 간격으로
+        kick = getattr(self, "_z_kick", 0.0)
+        due = now - self._z_pin_at >= self.Z_PIN or (
+            kick > self._z_pin_at and now - self._z_pin_at >= self.Z_PIN_KICK)
+        if not due:
             return
         if IS_MAC:
             # 맥 — 창 층을 재서 내려간 것만 올린다 (요청: 타이머와 친구
@@ -14767,9 +14860,9 @@ class Mascot:
                     # 포기는 **창 하나**에 대해서만 — 클래스로 하면 크롬
                     # 계열(브라우저·디스코드·전자 앱)이 전부 한 이름이라
                     # 하나에 진 60초 동안 진짜 묻힘도 못 본 척했다.
-                    if now - float(skip9.get(cur) or 0.0) < self.Z_GIVEUP:
+                    if now - float(skip9.get(cur) or 0.0) < self._z_delay(cur, now):
                         cur = u.GetWindow(cur, 2)
-                        continue           # 못 이기는 상대 — 한동안 쉰다
+                        continue           # 못 이기는 상대 — 잠깐 쉰다 (점점 길게)
                     buried = True
                     break
             cur = u.GetWindow(cur, 2)          # GW_HWNDNEXT
@@ -14782,18 +14875,32 @@ class Mascot:
         lose9 = getattr(self, "_z_lose", None)
         if lose9 is None:
             lose9 = self._z_lose = {}
-        n9 = int(lose9.get(cur) or 0) + 1
-        lose9[cur] = n9
+        # **사람이 창을 바꿔서 덮인 것은 진 것이 아니다.** 클립스튜디오 본창을
+        # 누르면 항상 위 팔레트들이 무리째 앞으로 나와 캐릭터를 덮는데, 그건
+        # 그 창이 나와 싸우는 게 아니라 클릭 한 번의 결과다 — 한 번 올리면
+        # 다음 클릭까지 그대로다. 마지막으로 올린 뒤 앞 창 바뀜 사건이
+        # 있었으면 세지 않는다. 사건 없이 또 덮였으면(스스로 되올리는 창 —
+        # 펜의 ShellHandwritingCanvas·작업 보기·항상 위 브라우저) 그때만
+        # 센다. 계속 싸우면 서로 올려 대며 눈에 띄게 깜빡인다.
+        kick9 = getattr(self, "_z_kick", 0.0)
+        if kick9 >= getattr(self, "_z_raise_at", 0.0) > 0.0:
+            n9 = int(lose9.get(cur) or 0)
+        else:
+            n9 = int(lose9.get(cur) or 0) + 1
+            lose9[cur] = n9
         if len(lose9) > 20:
             lose9.clear()
         if n9 >= self.Z_LOSE:
+            # 영영 포기하지 않는다 — 5·15·30·60초로 늦춰 가며 다시 해 본다.
+            # 60초를 통째로 쉬면 그 동안 '아래에 굳은' 것으로 보인다.
             skip9[cur] = now
             lose9.pop(cur, None)
             if len(skip9) > 20:
                 for k9 in list(skip9)[:10]:
                     skip9.pop(k9, None)
+            wait9 = self._z_gave_up(cur, now)
             self._z_note("giveup %s (%d번 졌다 — %.0f초 쉰다)"
-                         % (cls_now, n9, self.Z_GIVEUP))
+                         % (cls_now, n9, wait9))
             return
         # 무엇에 묻혔는지 남긴다 — 창 종류(클래스)와 자리만 (제목은 안 남긴다)
         try:
@@ -14810,6 +14917,7 @@ class Mascot:
         # HWND_TOP(0) — HWND_TOPMOST(-1)는 이미 항상 위인 창에는 무효라
         # 순서를 못 되돌린다 (지뢰 23).
         u.SetWindowPos(self._main_hwnd, 0, 0, 0, 0, 0, 0x1 | 0x2 | 0x10)
+        self._z_raise_at = now
         # 캐릭터가 맨 앞으로 갔으니 그림자와 말풍선을 다시 붙여 준다.
         # 여기서 직접 옮기지 않는 것은, 미뤄 둔 이동이 버려지기 때문이다
         # (지뢰 15) — 다음 프레임의 자리잡기에 맡긴다.
