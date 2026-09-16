@@ -1760,6 +1760,257 @@ def layer_api():
     return _LAYER_U, _LAYER_G
 
 
+# ── 캔버스가 제 그림을 붙잡는다 (지뢰 223) ─────────────────────────────
+# Tk 캔버스는 그림을 **이름**으로만 든다. 파이썬 PhotoImage 가 사라지면(공용 캐시가
+# 오래된 절반을 버리면) 그 자리가 빈칸이 된다 (지뢰 185). 캐릭터가 계속 그려서 공용
+# 캐시는 늘 넘치므로, 오래 떠 있는 창(작업 종료 브리핑)의 시계·아이콘·알약이 몇 분
+# 뒤 통째로 사라졌다 (제보 · 실측: 캐시가 한 번 넘치자 21장 전부 빈칸). 캐시마다
+# 고치면 한 곳을 반드시 빠뜨리므로(지뢰 55) 그림을 얹는 한 곳에서 붙잡는다.
+_CV_KEEP_MAX = 240
+
+
+def _cv_keep(cv, img):
+    """캔버스에 얹는 그림을 그 캔버스가 붙든다. 상한을 넘으면 **지금 걸린 그림만**
+    남긴다 (Tcl 안에서 한 번에 모은다 — 항목마다 부르면 느리다). 매 프레임 새로
+    그리는 캐릭터 캔버스(_no_img_keep)는 안 붙든다 — 한 장 1MB 짜리 기울인 머리가
+    쌓인다 (지뢰 42)."""
+    if img is None or isinstance(img, str):
+        return
+    try:
+        d9 = cv.__dict__
+        if d9.get("_no_img_keep"):
+            return
+        keep = d9.get("_img_keep")
+        if keep is None:
+            keep = d9["_img_keep"] = {}
+        keep[str(img)] = img
+        if len(keep) > _CV_KEEP_MAX:
+            w = cv._w
+            live = set(cv.tk.splitlist(cv.tk.eval(
+                'set ::ena_kr {}; foreach ::ena_ki [%s find all] '
+                '{if {[%s type $::ena_ki] eq "image"} '
+                '{lappend ::ena_kr [%s itemcget $::ena_ki -image]}}; '
+                'set ::ena_kr' % (w, w, w))))
+            for nm in [n for n in keep if n not in live]:
+                keep.pop(nm, None)
+    except Exception:
+        pass
+
+
+def _cv_keep_install():
+    if getattr(tk.Canvas, "_ena_img_keep", False):
+        return
+    o_ci = tk.Canvas.create_image
+    o_ic = tk.Canvas.itemconfigure
+
+    def create_image(self, *args, **kw):
+        _cv_keep(self, kw.get("image"))
+        return o_ci(self, *args, **kw)
+
+    def itemconfigure(self, tagOrId, cnf=None, **kw):
+        if "image" in kw:
+            _cv_keep(self, kw["image"])
+        elif isinstance(cnf, dict) and "image" in cnf:
+            _cv_keep(self, cnf["image"])
+        return o_ic(self, tagOrId, cnf, **kw)
+
+    tk.Canvas.create_image = create_image
+    tk.Canvas.itemconfigure = itemconfigure
+    tk.Canvas.itemconfig = itemconfigure
+    tk.Canvas._ena_img_keep = True
+
+
+_cv_keep_install()
+
+
+_MENU_U32 = None
+
+
+def _menu_u32():
+    """메뉴·팝업 판정에 쓰는 user32 — 따로 열고 규격을 준다 (지뢰 21·23)."""
+    global _MENU_U32
+    u = _MENU_U32
+    if u is None:
+        u = ctypes.WinDLL("user32")
+        u.WindowFromPoint.argtypes = [_POINT]
+        u.WindowFromPoint.restype = ctypes.c_void_p
+        u.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        u.GetAncestor.restype = ctypes.c_void_p
+        u.GetClassNameW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        u.GetWindow.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        u.GetWindow.restype = ctypes.c_void_p
+        u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(_RECT)]
+        u.GetWindowRect.restype = ctypes.c_int
+        u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        u.IsWindowVisible.restype = ctypes.c_int
+        u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p,
+                                               ctypes.POINTER(ctypes.c_ulong)]
+        u.GetWindowThreadProcessId.restype = ctypes.c_ulong
+        _MENU_U32 = u
+    return u
+
+
+def _menu_hit(x, y):
+    """화면 (x, y) 가 OS 팝업 메뉴 창(#32768 — 하위 메뉴 포함) 위인가.
+
+    True/False, 못 재면 None. 전역 훅 스레드에서 부른다 — Win32 만 쓰고 Tk 는
+    안 건드린다 (지뢰 150). 메뉴 자리를 **짐작하지 않고** 그 자리의 실제 창을
+    묻는다: 윈도우는 화면 아래끝에서 메뉴를 위로 뒤집어 띄우고 하위 메뉴는
+    옆으로 펼친다. 띄운 좌표에서 아래·오른쪽으로 잰 상자로 판정했더니 그때
+    항목 클릭이 '바깥'이 되어 메뉴를 닫았고, 소품 새로고침·종료 같은 명령이
+    한 번도 안 돌았다 (개 제보 · 지뢰 220). 직접 그린 메뉴는 _point_root 로 가른다."""
+    if not IS_WIN:
+        return None
+    try:
+        u = _menu_u32()
+        h = u.WindowFromPoint(_POINT(int(x), int(y)))
+        if not h:
+            return False
+        buf = ctypes.create_unicode_buffer(64)
+        if not u.GetClassNameW(h, buf, 64):
+            return None
+        return buf.value == "#32768"
+    except Exception:
+        return None
+
+
+def _point_root(x, y):
+    """화면 (x, y) 를 누르면 클릭을 받는 **최상위 창**(손잡이). 못 재면 None.
+
+    색상키로 뚫린 자리는 윈도우가 건너뛰므로, 유리 테마에서는 메뉴 뒤의 유리
+    판이 나온다 — 그래서 직접 그린 메뉴의 '안'은 메뉴 창과 그 판 둘이다
+    (지뢰 222). 훅 스레드에서 불러도 된다 (Win32 만)."""
+    if not IS_WIN:
+        return None
+    try:
+        u = _menu_u32()
+        h = u.WindowFromPoint(_POINT(int(x), int(y)))
+        if not h:
+            return None
+        r = u.GetAncestor(h, 2)                      # GA_ROOT
+        return int(r) if r else int(h)
+    except Exception:
+        return None
+
+
+def _pm_rgb(c, a=255):
+    """'#rrggbb' 또는 (r, g, b[, a]) → RGBA 튜플."""
+    if isinstance(c, (tuple, list)):
+        return tuple(int(v) for v in c) if len(c) == 4 else tuple(int(v) for v in c) + (a,)
+    c = str(c).lstrip("#")
+    return (int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16), a)
+
+
+def _pm_glyph(d, kind, cx, cy, g, c, hole):
+    """메뉴 아이콘 한 개 (한 가지 색 · 요청). g 는 반쯤 크기(px), c·hole 은 RGBA.
+
+    hole 은 아이콘 속을 뚫는 색 — 동그라미 바탕색을 그대로 준다 (ImageDraw 는
+    섞지 않고 덮어쓰므로 반투명 바탕이어도 모양이 산다)."""
+    w = max(1, int(0.26 * g))
+    if kind == "home":
+        d.polygon([(cx - 1.05 * g, cy - 0.02 * g), (cx, cy - 1.0 * g), (cx + 1.05 * g, cy - 0.02 * g)], fill=c)
+        d.rounded_rectangle([cx - 0.72 * g, cy - 0.32 * g, cx + 0.72 * g, cy + 0.86 * g], radius=0.2 * g, fill=c)
+        d.rounded_rectangle([cx - 0.2 * g, cy + 0.2 * g, cx + 0.2 * g, cy + 0.86 * g], radius=0.1 * g, fill=hole)
+    elif kind == "check":
+        d.rounded_rectangle([cx - 0.84 * g, cy - 0.84 * g, cx + 0.84 * g, cy + 0.84 * g], radius=0.3 * g,
+                            outline=c, width=w)
+        d.line([(cx - 0.42 * g, cy + 0.02 * g), (cx - 0.1 * g, cy + 0.36 * g), (cx + 0.48 * g, cy - 0.34 * g)],
+               fill=c, width=w, joint="curve")
+    elif kind == "cal":
+        d.rounded_rectangle([cx - 0.86 * g, cy - 0.66 * g, cx + 0.86 * g, cy + 0.88 * g], radius=0.26 * g,
+                            outline=c, width=w)
+        d.rounded_rectangle([cx - 0.86 * g, cy - 0.66 * g, cx + 0.86 * g, cy - 0.1 * g], radius=0.26 * g, fill=c)
+        for sx in (-0.42, 0.42):
+            d.line([(cx + sx * g, cy - 1.0 * g), (cx + sx * g, cy - 0.5 * g)], fill=c, width=w)
+        for sx in (-0.38, 0.08):
+            d.ellipse([cx + (sx - 0.13) * g, cy + 0.17 * g, cx + (sx + 0.13) * g, cy + 0.43 * g], fill=c)
+    elif kind == "tomato":
+        d.ellipse([cx - 0.88 * g, cy - 0.55 * g, cx + 0.88 * g, cy + 0.95 * g], fill=c)
+        d.polygon([(cx - 0.62 * g, cy - 0.5 * g), (cx, cy - 0.2 * g), (cx + 0.62 * g, cy - 0.5 * g),
+                   (cx, cy - 0.72 * g)], fill=hole)
+        d.polygon([(cx - 0.48 * g, cy - 0.62 * g), (cx, cy - 0.38 * g), (cx + 0.48 * g, cy - 0.62 * g),
+                   (cx, cy - 0.82 * g)], fill=c)
+        d.line([(cx, cy - 0.7 * g), (cx + 0.14 * g, cy - 1.05 * g)], fill=c, width=w)
+    elif kind == "note":
+        d.ellipse([cx - 0.78 * g, cy + 0.22 * g, cx - 0.04 * g, cy + 0.92 * g], fill=c)
+        d.line([(cx - 0.13 * g, cy + 0.55 * g), (cx - 0.13 * g, cy - 0.9 * g)], fill=c, width=w)
+        d.polygon([(cx - 0.13 * g, cy - 0.98 * g), (cx + 0.78 * g, cy - 0.6 * g), (cx + 0.78 * g, cy - 0.18 * g),
+                   (cx - 0.13 * g, cy - 0.52 * g)], fill=c)
+    elif kind == "dot_on":
+        d.ellipse([cx - 0.58 * g, cy - 0.58 * g, cx + 0.58 * g, cy + 0.58 * g], fill=c)
+    elif kind == "dot_off":
+        d.ellipse([cx - 0.58 * g, cy - 0.58 * g, cx + 0.58 * g, cy + 0.58 * g], outline=c, width=w)
+    elif kind == "refresh":
+        rr = 0.74 * g
+        d.arc([cx - rr, cy - rr, cx + rr, cy + rr], 40, 300, fill=c, width=w)
+        a = math.radians(300)
+        ex, ey = cx + rr * math.cos(a), cy + rr * math.sin(a)
+        tx, ty = -math.sin(a), math.cos(a)
+        px, py = -ty, tx
+        L, B = 0.46 * g, 0.34 * g
+        d.polygon([(ex + tx * L, ey + ty * L), (ex + px * B - tx * 0.1 * g, ey + py * B - ty * 0.1 * g),
+                   (ex - px * B - tx * 0.1 * g, ey - py * B - ty * 0.1 * g)], fill=c)
+    elif kind == "slime":
+        d.rounded_rectangle([cx - 0.92 * g, cy - 0.45 * g, cx + 0.92 * g, cy + 0.88 * g], radius=0.55 * g, fill=c)
+        d.ellipse([cx - 0.6 * g, cy - 0.95 * g, cx + 0.6 * g, cy + 0.1 * g], fill=c)
+        for sx in (-0.32, 0.32):
+            d.ellipse([cx + (sx - 0.12) * g, cy + 0.05 * g, cx + (sx + 0.12) * g, cy + 0.33 * g], fill=hole)
+    elif kind == "gear":
+        for i in range(8):
+            a = math.radians(i * 45 + 22.5)
+            tx, ty = cx + 0.76 * g * math.cos(a), cy + 0.76 * g * math.sin(a)
+            d.ellipse([tx - 0.24 * g, ty - 0.24 * g, tx + 0.24 * g, ty + 0.24 * g], fill=c)
+        d.ellipse([cx - 0.68 * g, cy - 0.68 * g, cx + 0.68 * g, cy + 0.68 * g], fill=c)
+        d.ellipse([cx - 0.27 * g, cy - 0.27 * g, cx + 0.27 * g, cy + 0.27 * g], fill=hole)
+    elif kind == "star":
+        pts = []
+        for i in range(8):
+            r9 = 0.98 * g if i % 2 == 0 else 0.34 * g
+            a = math.radians(-90 + i * 45)
+            pts.append((cx + r9 * math.cos(a), cy + r9 * math.sin(a)))
+        d.polygon(pts, fill=c)
+    elif kind == "clock":
+        rr = 0.84 * g
+        d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=c, width=w)
+        d.line([(cx, cy), (cx, cy - 0.48 * g)], fill=c, width=w)
+        d.line([(cx, cy), (cx + 0.36 * g, cy + 0.2 * g)], fill=c, width=w)
+    elif kind == "folder":
+        d.rounded_rectangle([cx - 0.92 * g, cy - 0.62 * g, cx - 0.02 * g, cy - 0.12 * g], radius=0.16 * g, fill=c)
+        d.rounded_rectangle([cx - 0.92 * g, cy - 0.38 * g, cx + 0.92 * g, cy + 0.82 * g], radius=0.24 * g, fill=c)
+    elif kind == "moon":
+        d.ellipse([cx - 0.82 * g, cy - 0.82 * g, cx + 0.82 * g, cy + 0.82 * g], fill=c)
+        d.ellipse([cx - 0.32 * g, cy - 1.16 * g, cx + 1.32 * g, cy + 0.48 * g], fill=hole)
+    elif kind == "power":
+        rr = 0.8 * g
+        d.arc([cx - rr, cy - rr + 0.1 * g, cx + rr, cy + rr + 0.1 * g], -55, 235, fill=c, width=w)
+        d.line([(cx, cy - 1.0 * g), (cx, cy - 0.1 * g)], fill=c, width=w)
+    elif kind == "game":
+        d.rounded_rectangle([cx - 0.95 * g, cy - 0.5 * g, cx + 0.95 * g, cy + 0.6 * g], radius=0.45 * g, fill=c)
+        d.line([(cx - 0.62 * g, cy + 0.05 * g), (cx - 0.22 * g, cy + 0.05 * g)], fill=hole, width=w)
+        d.line([(cx - 0.42 * g, cy - 0.15 * g), (cx - 0.42 * g, cy + 0.25 * g)], fill=hole, width=w)
+        for sx, sy in ((0.35, -0.08), (0.62, 0.18)):
+            d.ellipse([cx + (sx - 0.12) * g, cy + (sy - 0.12) * g, cx + (sx + 0.12) * g, cy + (sy + 0.12) * g],
+                      fill=hole)
+    elif kind == "movie":
+        d.rounded_rectangle([cx - 0.9 * g, cy - 0.35 * g, cx + 0.9 * g, cy + 0.85 * g], radius=0.2 * g, fill=c)
+        d.polygon([(cx - 0.9 * g, cy - 0.45 * g), (cx + 0.82 * g, cy - 0.95 * g), (cx + 0.95 * g, cy - 0.6 * g),
+                   (cx - 0.8 * g, cy - 0.12 * g)], fill=c)
+    elif kind == "bowl":
+        d.pieslice([cx - 0.95 * g, cy - 0.75 * g, cx + 0.95 * g, cy + 0.95 * g], 0, 180, fill=c)
+        for sx in (-0.3, 0.2):
+            d.line([(cx + sx * g, cy - 0.2 * g), (cx + (sx + 0.12) * g, cy - 0.55 * g), (cx + sx * g, cy - 0.9 * g)],
+                   fill=c, width=max(1, int(0.18 * g)), joint="curve")
+    elif kind == "tick":
+        d.line([(cx - 0.62 * g, cy + 0.02 * g), (cx - 0.18 * g, cy + 0.46 * g), (cx + 0.66 * g, cy - 0.44 * g)],
+               fill=c, width=max(1, int(0.3 * g)), joint="curve")
+    elif kind == "chev":
+        d.line([(cx - 0.25 * g, cy - 0.55 * g), (cx + 0.3 * g, cy), (cx - 0.25 * g, cy + 0.55 * g)],
+               fill=c, width=max(1, int(0.32 * g)), joint="curve")
+    else:                                           # 모르는 항목 — 작은 점
+        d.ellipse([cx - 0.32 * g, cy - 0.32 * g, cx + 0.32 * g, cy + 0.32 * g], fill=c)
+
+
 class ShadowLayer:
     """캐릭터 창 뒤에 깔리는 진짜 반투명 그림자 (per-pixel alpha 레이어 창).
 
@@ -2156,6 +2407,34 @@ class GlassPane:
             except Exception:
                 pass
 
+    _cur = ""             # 판 창에 단 커서 — 앞 창이 정한 것을 따른다
+
+    def cursor(self, cur):
+        """판 창의 커서를 앞 창 캔버스가 정한 것으로 (바뀔 때만)."""
+        cur = str(cur or "")
+        if cur == self._cur:
+            return
+        self._cur = cur
+        try:
+            self.top.configure(cursor=cur)
+        except Exception:
+            pass
+
+    _light = False        # 가장자리를 끌어 크기를 바꾸는 중 — 가볍게 올린다
+
+    def light(self, on):
+        """크기 조절 중에는 가볍게 (지뢰 219). 창 크기가 걸음마다 바뀌어 바탕
+        (가장자리 빛·위아래 결)을 2배로 새로 굽고, 크기가 바뀔 때마다 곧바로
+        올리고, 그리기가 또 한 번 올려 한 걸음에 세 번 올렸다. 그동안은 바탕을
+        1배로 굽고 크기 변화는 한 박자(25ms)에 모은다. 놓으면 제대로 한 번."""
+        on = bool(on)
+        if on == self._light:
+            return
+        self._light = on
+        if not on:
+            self._base = None
+            self.dirty()
+
     def _drag_cheap(self):
         """끄는 동안은 아크릴 대신 옛 흐림 — 아크릴은 창이 움직일 때마다
         DWM 이 큰 영역을 다시 흐려 끊긴다 (윈도우 자신도 제 창을 끌 때 아크릴을
@@ -2217,7 +2496,7 @@ class GlassPane:
             self.dirty()
 
     @staticmethod
-    def _glass_deco(im, r):
+    def _glass_deco(im, r, S=2):
         """유리 가장자리 — 위쪽 빛(하이라이트)·아래쪽 그늘·둘레 테 (요청).
 
         판은 per-pixel 알파라 여기 그린 것이 유리에 그대로 섞인다. 4배로
@@ -2227,7 +2506,7 @@ class GlassPane:
         w, h = im.size
         if w < 8 or h < 8:
             return im
-        S = 2
+        S = max(1, int(S))
         r9 = max(2, int(r))
         W, H = w * S, h * S
         lay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -2257,7 +2536,8 @@ class GlassPane:
         fx.alpha_composite(bot, (0, H - sh))
         fx.putalpha(ImageChops.multiply(fx.split()[3], mask))
         lay.alpha_composite(fx)
-        lay = lay.resize((w, h), Image.LANCZOS)
+        if S > 1:
+            lay = lay.resize((w, h), Image.LANCZOS)
         im.alpha_composite(lay)
         return im
 
@@ -2281,19 +2561,20 @@ class GlassPane:
         색상키 창은 반투명을 못 담아 카드 그림자가 딱딱한 회색 띠가 된다.
         판은 per-pixel 알파라 여기서 그리면 유리에 자연스럽게 섞인다 (요청).
         """
+        lt = bool(self._light)          # 크기 조절 중이면 1배로 가볍게
         got = self._base
-        if got is not None and got[0] == (w, h, self.shadows, self.radius):
+        if got is not None and got[0] == (w, h, self.shadows, self.radius, lt):
             return got[1]
         deco = getattr(self, "_deco", None)
-        if deco is None or deco[0] != (w, h, self.radius):
+        if deco is None or deco[0] != (w, h, self.radius, lt):
             # 가장자리 빛은 크기·반지름만 타므로 그림자와 따로 둔다 — 홈은
             # 카드가 하나씩 늘며 그림자 목록이 열두 번 바뀐다
             im0 = Image.new("RGBA", (w, h), (255, 255, 255, 1))
             try:
-                im0 = self._glass_deco(im0, self.radius)
+                im0 = self._glass_deco(im0, self.radius, S=1 if lt else 2)
             except Exception:
                 pass
-            deco = self._deco = ((w, h, self.radius), im0)
+            deco = self._deco = ((w, h, self.radius, lt), im0)
         im = deco[1].copy()
         for (x0, y0, x1, y1, r) in self.shadows:
             sw, sh = int(x1 - x0), int(y1 - y0)
@@ -2302,7 +2583,7 @@ class GlassPane:
             pad = 12
             lay = self._shadow_lay(sw, sh, int(r), pad)
             self._blit(im, lay, int(x0) - pad, int(y0) - pad + 6)
-        self._base = ((w, h, self.shadows, self.radius), im)
+        self._base = ((w, h, self.shadows, self.radius, lt), im)
         return im
 
     _shadow_cache = {}      # (w, h, r, pad) → 흐린 그림자 한 장 (모든 판이 나눠 쓴다)
@@ -2494,7 +2775,10 @@ class GlassPane:
             self.show(True)                 # 숨긴 창에는 올릴 수 없다 (지뢰 23)
         if (w, h) != self.size:
             self.size = (w, h)
-            self._push(w, h)
+            if self._light:
+                self.dirty()            # 크기 조절 중 — 한 박자에 모아 올린다
+            else:
+                self._push(w, h)
         self.u.SetWindowPos(self.hwnd, after_hwnd, int(x), int(y), int(w),
                             int(h), 0x10 | 0x40)      # NOACTIVATE | SHOWWINDOW
         self.rect = (int(x), int(y), int(w), int(h))
@@ -7927,6 +8211,8 @@ class Mascot:
         # 몸을 레이어 창에 그리는 동안 self.canvas 가 잠깐 시트를 가리킨다.
         # 진짜 캔버스는 늘 이쪽으로 남겨 둔다 (지뢰 24 — 되돌릴 곳이 있어야).
         self._real_canvas = self.canvas
+        # 캐릭터 캔버스는 매 프레임 새로 그린다 — 그림을 붙잡지 않는다 (지뢰 223)
+        self.canvas._no_img_keep = True
         self._boot_step("캔버스 만듦")
         if IS_MAC:                            # 제목 표시줄 제거 후 위치 재적용
             self._mac_borderless()
@@ -8516,7 +8802,10 @@ class Mascot:
         self._z_check = 0.0
         self._panel_z = 0.0          # 말풍선 창을 다시 올린 시각
         self._z_pin_at = 0.0         # 캐릭터가 맨 앞인지 마지막으로 본 시각
-        if self.shadow_img is not None and IS_WIN:
+        # 유리 테마에서는 그림자 창을 안 만든다 (요청 — 끌 때 본체·유리 판·
+        # 그림자 세 창이 같이 움직여 더 버벅여 보였다). 그림자를 쓰는 곳은
+        # 전부 None 을 본다 (지뢰 219).
+        if self.shadow_img is not None and IS_WIN and not self._glass:
             # 그림자 이미지가 P만큼 여백을 두므로, 창을 (offset - P)에 놓아 정렬
             self.shadow = ShadowLayer(self.root, self.shadow_img,
                                       offset=(7 - SHADOW_PAD, 9 - SHADOW_PAD))
@@ -11010,7 +11299,10 @@ class Mascot:
         if pressed and getattr(self, "_menu_shown", False):
             # 우클릭 메뉴가 떠 있다 — 어디를 눌렀는지만 적는다. 닫는 일은
             # 본 스레드(_menu_outside_check)가 한다 (지뢰 150).
-            self._menu_close_req = (now, int(x), int(y), str(_button))
+            # 그 자리가 메뉴 창인지도 **지금** 물어 둔다 (지뢰 220) — 본
+            # 스레드가 볼 때쯤이면 항목이 눌려 메뉴가 이미 닫혀 있을 수 있다
+            self._menu_close_req = (now, int(x), int(y), str(_button),
+                                    _menu_hit(x, y), _point_root(x, y))
         # 작업 흔적: 누른 뒤 5px 넘게 끌었으면 '선', 아니면 '클릭'.
         # (기존 타이머의 input_tracker와 같은 기준으로 맞췄다)
         if pressed:
@@ -14770,7 +15062,13 @@ class Mascot:
             # 이라 떠 있는 동안 _menu_shown 이 서 있다. 상한도 5분으로 — 메뉴를
             # 오래 읽어도 가리지 않게.
             stuck = not getattr(self, "_menu_shown", False)
-            if not (stuck and now - getattr(self, "_menu_at", 0.0) > 3.0) \
+            # 3초는 **메뉴가 닫힌 뒤부터** 센다. 연 때부터 세면 메뉴를 3초 넘게
+            # 읽고 항목을 누를 때마다, 닫힘과 되돌리기(back, 250ms) 사이의
+            # 프레임이 '굳었다'로 읽혀 menu_stuck 이 찍혔다 — 진짜 굳음과 구분이
+            # 안 돼 '캐릭터가 묻힌다' 진단이 흐려진다 (지뢰 204·220).
+            since = now - max(getattr(self, "_menu_at", 0.0),
+                              getattr(self, "_menu_hid_at", 0.0))
+            if not (stuck and since > 3.0) \
                     and now - getattr(self, "_menu_at", 0.0) < 300.0:
                 return
             self._menu_up = False
@@ -15424,6 +15722,17 @@ class Mascot:
         if time.time() - getattr(self, "_menu_closed_at", 0.0) < 0.4:
             return
         self._safe("ui_click", self._ui_click)      # 메뉴 열리는 '똑'
+        # **윈도우는 직접 그린 메뉴** — 둥근 모서리·아이콘·유리 (요청 · 지뢰 222).
+        # 항목은 self._menu 에서 그대로 읽는다. 새 메뉴가 터지면 OS 메뉴로
+        # 띄운다 — 메뉴가 통째로 안 뜨면 종료조차 못 한다. 조용히 넘기지 않고
+        # 기록에 남긴다 (지뢰 221). 맥은 OS 메뉴 그대로 (지뢰 163).
+        if IS_WIN:
+            try:
+                self._pm_menu(x, y)
+                return
+            except Exception:
+                self._log_error("popmenu_open")
+                self._safe("popmenu_reset", self._pm_close_all)
         was = bool(self.us.get("topmost", True))
         # 메뉴가 떠 있는 동안 z순서 되걸기를 쉬게 한다 (_z_pin). 안 그러면
         # 아래에서 내려 둔 '항상 위'를 1초 만에 도로 걸어 메뉴를 덮는다.
@@ -15484,6 +15793,7 @@ class Mascot:
                 self._menu.grab_release()
         finally:
             self._menu_shown = False
+            self._menu_hid_at = time.time()     # 감시견은 여기부터 센다
             try:
                 self.root.after(250, back)
             except Exception:
@@ -20328,17 +20638,34 @@ class Mascot:
                     return
             except Exception:
                 return
+            # **누른 동안의 끌기·떼기는 누른 캔버스로 보낸다.** 판은 누르는
+            # 순간 마우스를 붙잡으므로 커서가 창 밖으로 나가도 사건이 판에
+            # 온다. 그때 '커서 아래 캔버스'를 찾으면 없어서 버려져, 가장자리를
+            # 바깥으로 끌어 키우는 것이 멈추고 떼기까지 사라졌다 (하독 제보 —
+            # 유리 테마에서만 크기 조절이 안 되던 원인 · 지뢰 219).
             cv = None
-            for c9 in self._glass_canvases(w9):
+            grab9 = getattr(w9, "_glass_grab", None)
+            if grab9 is not None and kind in ("<B1-Motion>", "<ButtonRelease-1>"):
                 try:
-                    if not c9.winfo_viewable():
-                        continue
-                    x0, y0 = c9.winfo_rootx(), c9.winfo_rooty()
-                    if (x0 <= e.x_root < x0 + c9.winfo_width()
-                            and y0 <= e.y_root < y0 + c9.winfo_height()):
-                        cv = c9
+                    if grab9.winfo_exists():
+                        cv = grab9
                 except Exception:
-                    continue
+                    cv = None
+            if cv is None:
+                for c9 in self._glass_canvases(w9):
+                    try:
+                        if not c9.winfo_viewable():
+                            continue
+                        x0, y0 = c9.winfo_rootx(), c9.winfo_rooty()
+                        if (x0 <= e.x_root < x0 + c9.winfo_width()
+                                and y0 <= e.y_root < y0 + c9.winfo_height()):
+                            cv = c9
+                    except Exception:
+                        continue
+            if kind in ("<Button-1>", "<Double-Button-1>"):
+                w9._glass_grab = cv
+            elif kind == "<ButtonRelease-1>":
+                w9._glass_grab = None
             if cv is None:
                 return
             kw = {"x": int(e.x_root - cv.winfo_rootx()),
@@ -20347,6 +20674,14 @@ class Mascot:
             if kind == "<MouseWheel>":
                 kw["delta"] = int(getattr(e, "delta", 0) or 0)
             cv.event_generate(kind, **kw)
+            if kind in ("<Motion>", "<B1-Motion>"):
+                # **커서도 판에 옮겨 단다.** 구멍(키 색) 위에서는 마우스가 판
+                # 창에 있어 화면에 보이는 커서가 판의 것이다 — 창에 건 크기
+                # 조절 커서(_chrome_motion)가 유리 테마에서만 안 떴다 (요청 ·
+                # 지뢰 219). 사건을 넘긴 **뒤에** 그 캔버스가 정한 커서를 읽는다.
+                pane9 = getattr(w9, "_glass_pane", None)
+                if pane9 is not None:
+                    pane9.cursor(self._cursor_of(cv))
 
         try:
             pane = GlassPane(self.root, forward)
@@ -20697,6 +21032,11 @@ class Mascot:
         ch = getattr(win, "_chrome", None)
         if not ch:
             return False
+        # 지난 끌기가 안 끝난 채면(떼기를 놓쳤다) 먼저 끝낸다 — 남은 rz 로
+        # 다음 잔 흔들림이 옛 기준점에서 창을 확 늘이거나, 유리 판이 가벼운
+        # 채로 남는다 (지뢰 219)
+        if ch.get("rz") or ch.get("move") or ch.get("rz_light"):
+            self._chrome_release(win)
         try:
             # **창 기준 좌표로 잰다.** 뽀모도로는 위 띠 캔버스 아래에 내용
             # 캔버스가 있어서, 캔버스 기준 y 로는 창 아래끝에 못 닿아 아래
@@ -20731,6 +21071,22 @@ class Mascot:
         if wy <= band:
             self._chrome_press_band(win, e)
         return False
+
+    @staticmethod
+    def _cursor_of(w):
+        """위젯에 실제로 보이는 커서 — 자기 것이 비었으면 부모 것을 물려받는다
+        (Tk 의 규칙). 창(Toplevel)까지 올라가도 없으면 기본("")."""
+        try:
+            while w is not None:
+                c = str(w.cget("cursor") or "")
+                if c:
+                    return c
+                if isinstance(w, (tk.Tk, tk.Toplevel)):
+                    return ""
+                w = w.master
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def _chrome_xy(win, e):
@@ -20778,7 +21134,27 @@ class Mascot:
             if "t" in ed:
                 h = max(mh, h0 - dy)
                 y = y0 + (h0 - h)
-            win.geometry("%dx%d+%d+%d" % (w, h, x, y))
+            # 옮기기와 같은 박자로 — 타블렛 사건(초당 200번)마다 창 크기를
+            # 바꾸면 그때마다 창 내용과 유리 판을 다시 그려(실측 한 걸음
+            # 120ms) 끌수록 밀렸다. 마지막 크기만 적어 두고 12ms 에 한 번
+            # 적용한다. 놓을 때 마지막 크기를 한 번 더 (지뢰 219).
+            ch["rz_to"] = (int(w), int(h), int(x), int(y))
+            if not ch.get("rz_light"):
+                ch["rz_light"] = True
+                pane9 = getattr(win, "_glass_pane", None)
+                if pane9 is not None:
+                    try:
+                        pane9.light(True)
+                    except Exception:
+                        pass
+            if ch.get("rz_job") is None:
+                def rz_apply9(win9=win, ch9=ch):
+                    ch9["rz_job"] = None
+                    self._chrome_rz_apply(win9, ch9)
+                try:
+                    ch["rz_job"] = win.after(12, rz_apply9)
+                except Exception:
+                    self._chrome_rz_apply(win, ch)
             return True
         mv = ch.get("move")
         pr = ch.get("press")
@@ -20815,6 +21191,18 @@ class Mascot:
             return True
         return False
 
+    @staticmethod
+    def _chrome_rz_apply(win, ch):
+        """끌어 정한 크기를 창에 — 이미 그 크기로 걸었으면 건드리지 않는다."""
+        to = ch.get("rz_to")
+        if to is None or to == ch.get("rz_last"):
+            return
+        ch["rz_last"] = to
+        try:
+            win.geometry("%dx%d+%d+%d" % to)
+        except Exception:
+            pass
+
     def _chrome_release(self, win):
         ch = getattr(win, "_chrome", None)
         if not ch:
@@ -20826,13 +21214,29 @@ class Mascot:
                 win.geometry("+%d+%d" % tg)     # 마지막 자리는 놓치지 않게
             except Exception:
                 pass
+        job9 = ch.get("rz_job")
+        if job9 is not None:
+            try:
+                win.after_cancel(job9)
+            except Exception:
+                pass
+            ch["rz_job"] = None
+        if ch.get("rz") is not None:
+            self._chrome_rz_apply(win, ch)      # 마지막 크기도 놓치지 않게
         ch["rz"] = ch["move"] = ch["press"] = ch["target"] = None
+        ch["rz_to"] = ch["rz_last"] = None
         pane9 = getattr(win, "_glass_pane", None)
         if pane9 is not None:
             try:
                 pane9.unfreeze()
             except Exception:
                 pass
+            if ch.get("rz_light"):
+                try:
+                    pane9.light(False)          # 놓았다 — 가장자리 빛까지 제대로
+                except Exception:
+                    pass
+        ch["rz_light"] = False
         return was
 
     def _chrome_motion(self, win, e):
@@ -22428,17 +22832,33 @@ class Mascot:
         self._menu_close_req = None
         if not getattr(self, "_menu_shown", False):
             return
-        _t9, x, y, btn = req
-        r = getattr(self, "_menu_rect", None)
-        inside = bool(r and r[0] <= x <= r[2] and r[1] <= y <= r[3])
-        if "right" in btn or not inside:
+        btn = str(req[3]) if len(req) > 3 else ""
+        hit = req[4] if len(req) > 4 else None
+        # **메뉴 자리는 짐작하지 않는다** — 훅이 누른 자리의 실제 창을 물어 둔
+        # 값(hit)만 본다. 예전에는 띄운 좌표에서 아래·오른쪽으로 잰 상자
+        # (_menu_rect)로 판정해서, 화면 아래끝에서 위로 뒤집혀 뜬 메뉴·옆으로
+        # 펼친 하위 메뉴의 항목을 누르면 '바깥'으로 읽고 닫아 명령이 안 돌았다
+        # (개 제보 · 지뢰 220). 메뉴 위면 왼쪽이든 오른쪽이든 메뉴에 맡긴다.
+        # 못 잰 왼쪽 클릭(None)은 닫지 않는다 — 명령을 먹는 것보다 메뉴가
+        # 떠 있는 편이 낫다.
+        if hit is True:
+            return
+        # 직접 그린 메뉴 — 누른 자리의 최상위 창이 메뉴 창이나 그 유리 판이면
+        # 안이다 (유리는 색상키 구멍이라 클릭이 판에 떨어진다 · 지뢰 222)
+        root9 = req[5] if len(req) > 5 else None
+        if root9 and int(root9) in self._pm_own():
+            return
+        if hit is False or "right" in btn:
             self._menu_closed_at = time.time()
             self._menu_end()
 
     def _menu_end(self):
         """떠 있는 팝업 메뉴를 코드에서 닫는다. 윈도우는 `EndMenu`(이 스레드의
         메뉴 루프를 끝낸다)가 확실하다 — `unpost` 만으로는 모달이 안 끝나는
-        경우가 있었다(실측: 두 번째 띄운 메뉴). 둘 다 부른다."""
+        경우가 있었다(실측: 두 번째 띄운 메뉴). 둘 다 부른다.
+        직접 그린 메뉴(지뢰 222)가 떠 있으면 그것도 닫는다."""
+        if getattr(self, "_pm_stack", None):
+            self._pm_close_all()
         if IS_WIN:
             try:
                 ctypes.windll.user32.EndMenu()
@@ -22448,6 +22868,622 @@ class Mascot:
             self._menu.unpost()
         except Exception:
             pass
+
+    # ── 직접 그린 팝업 메뉴 (캐릭터 우클릭 · 띠 · 데드라인 시계 · 지뢰 222) ──
+    # 윈도우 기본 메뉴는 모양을 못 바꾼다 — 둥근 모서리·한 톤 아이콘·유리 (요청).
+    # 항목은 tk.Menu(self._menu) 하나에서 읽는다 (지뢰 55 — 두 벌이면 어긋난다).
+    PM_ROW, PM_SEP, PM_PAD, PM_BAND = 30, 11, 8, 34
+    PM_FADE = 0.10            # 커서를 올리면 바탕색이 차오르는 시간(초)
+    PM_SUB_DELAY = 0.18       # 하위 메뉴 줄에 머물면 옆으로 펼친다
+    PM_CACHE_MAX = 160        # 아이콘·알약 그림 캐시 (지뢰 18)
+    PM_ICON = {"홈": "home", "할 일 추가": "check", "마감 추가": "cal",
+               "뽀모도로 타이머": "tomato", "플레이리스트": "note",
+               "상태 칩": "dot_on", "소품 새로고침": "refresh", "슬라임": "slime",
+               "꺼내 놓기": "slime", "환경설정": "gear", "업데이트 소식": "star",
+               "시계 펼치기 / 접기": "clock", "타이머 초기화": "refresh",
+               "타이머 복구": "clock", "오류 기록 폴더 열기": "folder",
+               "작업 종료": "moon", "종료": "power"}
+    PM_CHIP_ICON = {"online": "dot_on", "away": "dot_off", "game": "game",
+                    "movie": "movie", "food": "bowl"}
+
+    def _pm_safe(self, fn, *a):
+        """메뉴 이벤트는 _safe 로 감싸지 않는다 — 세 번 터져 구역이 꺼지면 메뉴가
+        통째로 안 눌려 종료조차 못 한다 (지뢰 14). 기록만 남긴다."""
+        try:
+            return fn(*a)
+        except Exception:
+            self._log_error("popmenu")
+            return None
+
+    def _pm_pal(self):
+        """메뉴 빛깔 — 카드 색에서 뽑는다. 다크는 캔버스가 알아서 뒤집고
+        (지뢰 213), PIL 그림에 쓰는 색만 여기서 바꾼다."""
+        cd = self.card
+        fill = cd.get("fill") or "#f2a7c5"
+        if self._glass:
+            return {"glass": True, "bg": GLASS_KEY, "text": cd["text"], "sub": cd["sub"],
+                    "icon": (255, 255, 255, 255), "badge": (255, 255, 255, 70),
+                    "hov": (255, 255, 255, 64), "press": (255, 255, 255, 112),
+                    "sep": (255, 255, 255, 120), "ring": None,
+                    "band": (255, 255, 255, 230), "band_hov": (255, 255, 255, 255),
+                    "band_fg": cd["text"], "band_icon": _pm_rgb(cd["text"]),
+                    "chev": (255, 255, 255, 215), "dot": (255, 93, 122, 255)}
+        pal = {"glass": False, "bg": "#ffffff", "text": cd["text"], "sub": cd["sub"],
+               "icon": cd["text"], "badge": self._tint(fill, 0.80),
+               "hov": self._tint(fill, 0.72), "press": self._tint(fill, 0.55),
+               "sep": self._tint(fill, 0.42), "ring": self._tint(fill, 0.45),
+               "band": self._shade(fill, 0.22), "band_fg": "#ffffff",
+               "chev": cd["sub"], "dot": "#ff5d7a"}
+        pal["band_hov"] = self._shade(pal["band"], 0.14)
+        pal["band_icon"] = pal["band_fg"]
+        if self._dark:
+            for k9 in ("icon", "chev"):
+                pal[k9] = _dk_text(pal[k9])
+            # **뽑지 말고 못박는다.** 다크에서는 카드 fill 이 이미 어둡게 뒤집혀 있어
+            # 흰색을 섞은 옅은 색이 _dk 를 또 지나면 도로 밝아진다 — 커서를 올린 줄이
+            # 밝은 회색(#ddddde)이라 흰 글자가 안 읽혔다 (실측 · 지뢰 222)
+            pal["badge"], pal["hov"] = "#2c2c31", "#38383e"
+            pal["press"], pal["sep"] = "#48484f", "#4a4a50"
+            pal["ring"] = "#343438"
+            pal["band"], pal["band_hov"] = _dk_keep("#e6e6e7"), _dk_keep("#d2d2d3")
+            pal["band_fg"] = pal["band_icon"] = _dk_keep("#101011")
+            pal["dot"] = _dk_keep(pal["dot"])
+        return pal
+
+    def _pm_img(self, key, make):
+        """그림 캐시 — PIL 을 만들어 _tkimg 로 (유리 캔버스가 판에 올릴 원본을 단다)."""
+        cache = self.__dict__.setdefault("_pm_cache", {})
+        got = cache.get(key)
+        if got is None:
+            got = self._tkimg(make())
+            if len(cache) > self.PM_CACHE_MAX:       # 오래된 절반만 (지뢰 18)
+                for k9 in list(cache)[:self.PM_CACHE_MAX // 2]:
+                    cache.pop(k9, None)
+            cache[key] = got
+        return got
+
+    def _pm_icon(self, kind, d, fg, badge, hole=None):
+        def make():
+            S = 4
+            im = Image.new("RGBA", (d * S, d * S), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            if badge is not None:
+                dr.ellipse([0, 0, d * S - 1, d * S - 1], fill=_pm_rgb(badge))
+            hole9 = _pm_rgb(hole) if hole is not None else (
+                _pm_rgb(badge) if badge is not None else (0, 0, 0, 0))
+            c9 = d * S / 2.0
+            _pm_glyph(dr, kind, c9, c9, d * S * (0.286 if badge is not None else 0.45),
+                      _pm_rgb(fg), hole9)
+            return im.resize((d, d), Image.LANCZOS)
+        return self._pm_img(("icon", kind, d, str(fg), str(badge), str(hole)), make)
+
+    def _pm_pill(self, w, h, r, color):
+        w, h, r = max(2, int(w)), max(2, int(h)), max(1, int(r))
+
+        def make():
+            S = 4
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            ImageDraw.Draw(im).rounded_rectangle([0, 0, w * S - 1, h * S - 1],
+                                                 radius=r * S, fill=_pm_rgb(color))
+            return im.resize((w, h), Image.LANCZOS)
+        return self._pm_img(("pill", w, h, r, str(color)), make)
+
+    def _pm_ring(self, w, h, r, color, lw):
+        def make():
+            S = 4
+            im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            l9 = max(1, int(lw * S * 1.3))
+            ImageDraw.Draw(im).rounded_rectangle(
+                [l9 // 2, l9 // 2, w * S - 1 - l9 // 2, h * S - 1 - l9 // 2],
+                radius=r * S, outline=_pm_rgb(color), width=l9)
+            return im.resize((w, h), Image.LANCZOS)
+        return self._pm_img(("ring", w, h, r, str(color), lw), make)
+
+    def _pm_dots(self, w, color, step, rad):
+        w = max(4, int(w))
+
+        def make():
+            S = 4
+            hh = (rad * 2 + 2) * S
+            im = Image.new("RGBA", (w * S, hh), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            x9 = rad * S
+            while x9 <= w * S - rad * S:
+                dr.ellipse([x9 - rad * S, hh / 2 - rad * S, x9 + rad * S, hh / 2 + rad * S],
+                           fill=_pm_rgb(color))
+                x9 += step * S
+            return im.resize((w, hh // S), Image.LANCZOS)
+        return self._pm_img(("dots", w, str(color), step, rad), make)
+
+    def _pm_rows(self, menu, depth=0):
+        """tk.Menu → 그릴 줄들. 하위 메뉴는 펼칠 때 다시 읽는다 (postcommand 로
+        표시를 새로 찍으므로 — 상태 칩 ● 가 그렇게 돈다)."""
+        rows = []
+        if depth > 3:
+            return rows
+        try:
+            pc = str(menu.cget("postcommand") or "")
+            if pc:
+                menu.tk.call(pc)
+        except Exception:
+            self._log_error("popmenu_post")
+        try:
+            end = menu.index("end")
+        except Exception:
+            end = None
+        if end is None:
+            return rows
+        chips = {c9[1]: c9[0] for c9 in self.CHIPS}
+        try:
+            now_chip = self._chip()
+        except Exception:
+            now_chip = None
+        for i in range(int(end) + 1):
+            try:
+                typ = str(menu.type(i))
+            except Exception:
+                continue
+            if typ == "tearoff":
+                continue
+            if typ == "separator":
+                if rows and rows[-1]["kind"] != "sep":
+                    rows.append({"kind": "sep"})
+                continue
+            try:
+                label = str(menu.entrycget(i, "label") or "")
+                state = str(menu.entrycget(i, "state") or "normal")
+            except Exception:
+                continue
+            name = label.replace("●", "").strip()
+            row = {"kind": "item", "label": name, "dot": "●" in label,
+                   "disabled": state == "disabled",
+                   "icon": self.PM_ICON.get(name, "dot")}
+            if typ == "cascade":
+                try:
+                    sub = menu.nametowidget(menu.entrycget(i, "menu"))
+                except Exception:
+                    continue
+                row["kind"] = "sub"
+                row["sub"] = (lambda s9=sub, d9=depth: self._pm_rows(s9, d9 + 1))
+            else:
+                row["act"] = (lambda mm=menu, ii=i: mm.invoke(ii))
+            try:
+                if typ == "checkbutton":
+                    var = str(menu.entrycget(i, "variable") or "")
+                    onv = str(menu.entrycget(i, "onvalue"))
+                    val = str(menu.getvar(var)) if var else ""
+                    row["mark"] = (val == onv or (onv in ("1", "")
+                                                  and val.lower() in ("1", "true")))
+                elif typ == "radiobutton":
+                    var = str(menu.entrycget(i, "variable") or "")
+                    row["mark"] = bool(var) and str(menu.getvar(var)) == str(
+                        menu.entrycget(i, "value"))
+            except Exception:
+                row["mark"] = False
+            if name == "작업 종료":
+                row["kind"], row["icon"] = "band", "moon"
+            key9 = chips.get(name)
+            if key9 is not None and depth > 0:
+                row["icon"] = self.PM_CHIP_ICON.get(key9, "dot")
+                row["mark"] = key9 == now_chip
+                row["dot"] = False              # ● 는 지금 상태 표시였다
+            rows.append(row)
+        while rows and rows[-1]["kind"] == "sep":
+            rows.pop()
+        while rows and rows[0]["kind"] == "sep":
+            rows.pop(0)
+        return rows
+
+    def _pm_menu(self, x, y):
+        rows = self._pm_rows(self._menu)
+        if not rows:
+            raise RuntimeError("popmenu: empty")
+        self._pm_close_all()
+        self._pm_open(rows, x, y)
+
+    def _pm_open(self, rows, xr, yr, parent=None):
+        """메뉴 한 장을 띄운다 — 돌려주는 것은 상태 dict (win·cv·lay·x·y·W·H)."""
+        u, pal = self._ui, self._pm_pal()
+        f = self._uf(9, True)
+        R0, SEP, PAD, BAND = (u(self.PM_ROW), u(self.PM_SEP), u(self.PM_PAD),
+                              u(self.PM_BAND))
+        icons = any(r.get("icon") for r in rows)
+        tx = u(42) if icons else u(16)
+        side = u(34) if any(r["kind"] == "sub" or r.get("mark") is not None
+                            for r in rows) else u(18)
+        dotw = u(14) if any(r.get("dot") for r in rows) else 0
+        tw = max([self._mw(r["label"], f) for r in rows if r.get("label")] or [0])
+        W = int(max(u(150) if parent is not None else u(190), tw + tx + side + dotw))
+        lay, y = [], PAD
+        for r in rows:
+            h = SEP if r["kind"] == "sep" else (BAND if r["kind"] == "band" else R0)
+            lay.append((r, y, y + h))
+            y += h
+        H = int(y + PAD)
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.overrideredirect(True)          # 창에 올리기 전에 (지뢰 193)
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+        win.configure(bg=pal["bg"] if pal["glass"] else _dk(pal["bg"]))
+        cv = tk.Canvas(win, width=W, height=H, bg=pal["bg"], highlightthickness=0, bd=0)
+        cv.pack()
+        cv._pm_keep = set()
+        st = {"win": win, "cv": cv, "lay": lay, "W": W, "H": H, "pal": pal,
+              "hover": None, "t0": 0.0, "press": None, "anim": None, "poll": None,
+              "child": None, "parent": parent, "band_items": {}, "row": None,
+              "dead": False, "zn": 0, "paint": None}
+
+        def put(img, x9, y9, anchor="nw", tags=("pm",)):
+            cv._pm_keep.add(img)
+            return cv.create_image(int(round(x9)), int(round(y9)), image=img,
+                                   anchor=anchor, tags=tags)
+
+        if pal["ring"]:
+            r9 = max(4, int(self._glass_r()) + 1)
+            put(self._pm_ring(W, H, r9, pal["ring"], max(1, u(1))), 0, 0,
+                tags=("pm", "pm_ring"))
+        dsz = u(21)
+        for i, (r, y0, y1) in enumerate(lay):
+            cy = (y0 + y1) / 2.0
+            k = r["kind"]
+            if k == "sep":
+                put(self._pm_dots(W - u(40), pal["sep"], max(4, u(7)), max(1, u(1))),
+                    u(20), cy, "w")
+                continue
+            if k == "band":
+                st["band_items"][i] = put(
+                    self._pm_pill(W - u(16), y1 - y0 - u(6), u(13), pal["band"]),
+                    u(8), y0 + u(3))
+                t_w = self._mw(r["label"], f)
+                x0 = W / 2.0 - (t_w + u(22)) / 2.0
+                put(self._pm_icon(r.get("icon") or "moon", u(16), pal["band_icon"], None,
+                                  hole=pal["band"]), x0 + u(8), cy, "center")
+                cv.create_text(x0 + u(22), cy, text=r["label"], anchor="w", font=f,
+                               fill=pal["band_fg"], tags="pm")
+                continue
+            dis = bool(r.get("disabled")) or k == "head"
+            if icons and r.get("icon"):
+                put(self._pm_icon(r["icon"], dsz, pal["icon"], pal["badge"]),
+                    u(22), cy, "center")
+            cv.create_text(tx, cy, text=r["label"], anchor="w", font=f,
+                           fill=pal["sub"] if dis else pal["text"], tags="pm")
+            if r.get("dot"):
+                put(self._pm_icon("dot_on", u(7), pal["dot"], None),
+                    tx + self._mw(r["label"], f) + u(7), cy - u(5), "center")
+            if k == "sub":
+                put(self._pm_icon("chev", u(10), pal["chev"], None), W - u(18), cy, "center")
+            elif r.get("mark"):
+                put(self._pm_icon("tick", u(12), pal["icon"], None), W - u(20), cy, "center")
+
+        # 자리 — 아래가 모자라면 위로, 오른쪽이 모자라면 왼쪽으로 (OS 메뉴와 같게)
+        try:
+            l9, t9, r9_, b9 = monitor_work(int(xr), int(yr))
+        except Exception:
+            l9, t9, r9_, b9 = -10 ** 6, -10 ** 6, 10 ** 6, 10 ** 6
+        x, y = int(xr), int(yr)
+        if parent is None:
+            if y + H > b9:
+                y = int(yr) - H
+            if x + W > r9_:
+                x = int(xr) - W
+        elif x + W > r9_:
+            x = int(parent["x"]) - W + u(4)
+        x = max(l9, min(x, r9_ - W))
+        y = max(t9, min(y, b9 - H))
+        st["x"], st["y"] = x, y
+        win.geometry("%dx%d+%d+%d" % (W, H, x, y))
+        win.deiconify()
+        try:
+            win.update_idletasks()
+        except Exception:
+            pass
+        self._safe("pm_round", self._chrome_round, win)
+        self._win_top(win)
+        if pal["glass"]:
+            # 판을 **곧바로** 깐다 — 주기 훑기(0.3초)를 기다리면 그동안 키 색
+            # 바탕이 불투명하게 보였다가 유리로 번쩍인다 (지뢰 193)
+            self._safe("pm_glass", self._glass_tick, time.time(), True)
+
+        # **덧붙여 건다 (add="+")** — 유리 테마가 같은 창에 '닫히면 판도 치운다'
+        # (<Destroy> → _glass_win_gone) 를 걸어 둔다. 덮어쓰면 메뉴를 닫을 때마다
+        # 유리 판이 화면에 하나씩 남는다.
+        cv.bind("<Motion>", lambda e, s9=st: self._pm_safe(self._pm_motion, s9, e.y), add="+")
+        cv.bind("<Button-1>", lambda e, s9=st: self._pm_safe(self._pm_press, s9, e.y), add="+")
+        cv.bind("<ButtonRelease-1>",
+                lambda e, s9=st: self._pm_safe(self._pm_release, s9, e.y), add="+")
+        win.bind("<Escape>", lambda _e: self._pm_safe(self._pm_close_all), add="+")
+        win.bind("<FocusOut>", lambda _e: self._pm_safe(self._pm_focus_check), add="+")
+        win.bind("<Destroy>", lambda e, s9=st: (
+            self._pm_safe(self._pm_gone, s9) if e.widget is s9["win"] else None), add="+")
+
+        stack = getattr(self, "_pm_stack", None)
+        if parent is None or not stack:
+            self._pm_stack = [st]
+        else:
+            stack.append(st)
+        self._menu_shown = True             # 전역 훅이 바깥 클릭을 적는다
+        self._menu_up = True                # z순서 되걸기를 쉰다 (_z_pin)
+        if parent is None:
+            self._menu_at = time.time()
+            self._strip_pop_ref = win       # 띠·시계가 자기를 안 올리고 메뉴를 올린다
+            self._front_wins.append(win)    # 할 일·마감 말풍선이 겹치면 내린다
+            win.after(30, lambda: self._pm_safe(self._pm_focus, win))
+            st["poll"] = win.after(120, lambda: self._pm_safe(self._pm_poll, st))
+        return st
+
+    def _pm_focus(self, win):
+        if _win_alive(win):
+            win.focus_force()
+
+    def _pm_row_at(self, st, y):
+        for i, (r, y0, y1) in enumerate(st["lay"]):
+            if y0 <= y < y1:
+                if r["kind"] in ("sep", "head") or r.get("disabled"):
+                    return None
+                return i
+        return None
+
+    def _pm_motion(self, st, y):
+        i = self._pm_row_at(st, y)
+        if i != st["hover"]:
+            self._pm_set_hover(st, i)
+
+    def _pm_set_hover(self, st, i):
+        st["hover"], st["t0"], st["press"] = i, time.time(), None
+        ch = st.get("child")
+        if ch is not None and i is not None and i != ch.get("row"):
+            self._pm_close_from(ch)
+        self._pm_anim(st)
+
+    def _pm_anim(self, st):
+        """바탕색을 PM_FADE 동안 네 걸음으로 차오르게 — 칠하는 줄은 하나뿐."""
+        if st.get("anim") is not None:
+            try:
+                st["win"].after_cancel(st["anim"])
+            except Exception:
+                pass
+            st["anim"] = None
+        if st["dead"] or not _win_alive(st["win"]):
+            return
+        t = 1.0 if self.PM_FADE <= 0 else min(1.0, (time.time() - st["t0"]) / self.PM_FADE)
+        t = max(0.25, round(t * 4) / 4.0)
+        self._pm_paint(st, t)
+        if t < 1.0:
+            st["anim"] = st["win"].after(25, lambda: self._pm_safe(self._pm_anim, st))
+
+    def _pm_paint(self, st, t):
+        cv, pal, u = st["cv"], st["pal"], self._ui
+        cv.delete("pm_hov")
+        i = st["hover"]
+        for bi, it in st["band_items"].items():
+            r, y0, y1 = st["lay"][bi]
+            col = pal["band_hov"] if (bi == i and (st["press"] == bi or t >= 0.5)) else pal["band"]
+            img = self._pm_pill(st["W"] - u(16), y1 - y0 - u(6), u(13), col)
+            cv._pm_keep.add(img)
+            cv.itemconfigure(it, image=img)
+        st["paint"] = (i, t, None)
+        if i is None or st["lay"][i][0]["kind"] == "band":
+            return
+        r, y0, y1 = st["lay"][i]
+        pressed = st["press"] == i
+        col = pal["press"] if pressed else pal["hov"]
+        if pal["glass"]:
+            c9 = (col[0], col[1], col[2], col[3] if pressed else int(col[3] * t))
+        else:
+            c9 = col if pressed else self._mix(_dk(pal["bg"]), col, t)
+        st["paint"] = (i, t, c9)
+        img = self._pm_pill(st["W"] - u(12), y1 - y0 - u(4), u(11), c9)
+        cv._pm_keep.add(img)
+        cv.create_image(u(6), y0 + u(2), image=img, anchor="nw", tags=("pm", "pm_hov"))
+        cv.tag_lower("pm_hov")
+
+    def _pm_press(self, st, y):
+        i = self._pm_row_at(st, y)
+        st["press"] = i
+        if i is not None:
+            if st["hover"] != i:
+                st["hover"], st["t0"] = i, time.time() - self.PM_FADE
+            self._pm_paint(st, 1.0)
+
+    def _pm_release(self, st, y):
+        i = self._pm_row_at(st, y)
+        p, st["press"] = st["press"], None
+        if i is None or i != p:
+            if not st["dead"] and _win_alive(st["win"]):
+                self._pm_paint(st, 1.0)
+            return
+        self._pm_activate(st, i)
+
+    def _pm_activate(self, st, i):
+        r = st["lay"][i][0]
+        if r["kind"] == "sub":
+            self._pm_open_child(st, i)
+            return
+        act, snd = r.get("act"), r.get("snd")
+        self._pm_close_all()
+        if snd:
+            self._safe("ui_click", self._ui_click)
+        if act is not None:
+            def run(a=act):
+                try:
+                    a()
+                except Exception:
+                    self._log_error("popmenu_act")
+            self.root.after(1, run)
+
+    def _pm_open_child(self, st, i):
+        ch = st.get("child")
+        if ch is not None and ch.get("row") == i and not ch["dead"]:
+            return
+        if ch is not None:
+            self._pm_close_from(ch)
+        r, y0, _y1 = st["lay"][i]
+        make = r.get("sub")
+        rows = make() if make is not None else []
+        if not rows:
+            return
+        ch = self._pm_open(rows, st["x"] + st["W"] - self._ui(4),
+                           st["y"] + y0 - self._ui(self.PM_PAD), parent=st)
+        ch["row"] = i
+        st["child"] = ch
+
+    def _pm_kill(self, st):
+        st["dead"] = True
+        for k9 in ("anim", "poll"):
+            if st.get(k9) is not None:
+                try:
+                    st["win"].after_cancel(st[k9])
+                except Exception:
+                    pass
+                st[k9] = None
+        try:
+            if st["win"].winfo_exists():
+                st["win"].destroy()
+        except Exception:
+            pass
+
+    def _pm_close_from(self, st):
+        stack = getattr(self, "_pm_stack", None) or []
+        if st not in stack:
+            return
+        k = stack.index(st)
+        gone = stack[k:]
+        del stack[k:]
+        par = st.get("parent")
+        if par is not None and par.get("child") is st:
+            par["child"] = None
+        for s9 in reversed(gone):
+            self._pm_kill(s9)
+        if not stack:
+            self._menu_shown = False
+            self._menu_hid_at = time.time()   # 감시견은 여기부터 센다 (지뢰 220)
+            self._menu_up = False
+            self._strip_pop_ref = None
+
+    def _pm_close_all(self):
+        stack = getattr(self, "_pm_stack", None)
+        if stack:
+            self._pm_close_from(stack[0])
+
+    def _pm_gone(self, st):
+        """창이 밖에서 부서졌다(검사의 destroy 등) — 상태를 맞춘다."""
+        if not st["dead"]:
+            self._pm_close_from(st)
+
+    def _pm_own(self):
+        """떠 있는 메뉴 창과 그 유리 판의 손잡이들."""
+        out = set()
+        for s9 in getattr(self, "_pm_stack", None) or []:
+            w9 = s9["win"]
+            try:
+                out.add(int(w9.wm_frame(), 16))
+            except Exception:
+                pass
+            p9 = getattr(w9, "_glass_pane", None)
+            if p9 is not None:
+                try:
+                    out.add(int(p9.hwnd))
+                except Exception:
+                    pass
+        return out
+
+    def _pm_focus_check(self):
+        """포커스가 앱 밖·메뉴 밖으로 나가면 닫는다 — 전역 훅이 못 잡는 길
+        (Alt+Tab 등). 메뉴끼리·메뉴의 유리 판으로 옮긴 것은 안 닫는다."""
+        if not getattr(self, "_pm_stack", None):
+            return
+
+        def later():
+            stack = getattr(self, "_pm_stack", None) or []
+            if not stack:
+                return
+            try:
+                fw = self.root.focus_get()
+            except Exception:
+                return
+            if fw is None:
+                self._pm_close_all()
+                return
+            try:
+                top = fw.winfo_toplevel()
+            except Exception:
+                return
+            for s9 in stack:
+                w9 = s9["win"]
+                if top is w9 or top is getattr(getattr(w9, "_glass_pane", None), "top", None):
+                    return
+            self._pm_close_all()
+        self.root.after(80, lambda: self._pm_safe(later))
+
+    def _pm_poll(self, st):
+        """0.12초마다 — 커서가 메뉴 밖이면 칠한 줄을 지우고, 하위 메뉴 줄에
+        머물렀으면 펼치고, 가끔 z순서를 잰다 (유리에서는 커서가 판 위라 캔버스에
+        <Leave> 가 안 온다)."""
+        st["poll"] = None
+        stack = getattr(self, "_pm_stack", None) or []
+        if st["dead"] or not stack or stack[0] is not st or not _win_alive(st["win"]):
+            return
+        try:
+            px, py = self.root.winfo_pointerxy()
+        except Exception:
+            px = py = None
+        now = time.time()
+        for s9 in list(stack):
+            if s9["dead"] or not _win_alive(s9["win"]):
+                continue
+            inside = (px is not None and s9["x"] <= px < s9["x"] + s9["W"]
+                      and s9["y"] <= py < s9["y"] + s9["H"])
+            h9 = s9["hover"]
+            if not inside and h9 is not None and s9.get("press") is None:
+                ch = s9.get("child")
+                if not (ch is not None and ch.get("row") == h9):
+                    self._pm_set_hover(s9, None)
+                    continue
+            if (h9 is not None and s9["lay"][h9][0]["kind"] == "sub"
+                    and now - s9["t0"] >= self.PM_SUB_DELAY):
+                ch = s9.get("child")
+                if ch is None or ch.get("row") != h9:
+                    self._pm_open_child(s9, h9)
+        st["zn"] += 1
+        if st["zn"] % 3 == 0:
+            for s9 in list(getattr(self, "_pm_stack", None) or []):
+                self._pm_zfix(s9)
+        stack = getattr(self, "_pm_stack", None) or []
+        if not st["dead"] and stack and stack[0] is st and _win_alive(st["win"]):
+            st["poll"] = st["win"].after(120, lambda: self._pm_safe(self._pm_poll, st))
+
+    def _pm_zfix(self, st):
+        """내 다른 창이 메뉴 위에서 겹치면 메뉴를 올린다 — 재고 나서만 (지뢰 15)."""
+        if not IS_WIN or st["dead"] or not _win_alive(st["win"]):
+            return False
+        try:
+            u = _menu_u32()
+            me = int(st["win"].wm_frame(), 16)
+        except Exception:
+            return False
+        own, mine = self._pm_own(), os.getpid()
+        rc = _RECT()
+        if not u.GetWindowRect(me, ctypes.byref(rc)):
+            return False
+        h = u.GetWindow(me, 3)                          # GW_HWNDPREV — 위로
+        n = 0
+        while h and n < 80:
+            n += 1
+            if int(h) not in own and u.IsWindowVisible(h):
+                pid = ctypes.c_ulong()
+                u.GetWindowThreadProcessId(h, ctypes.byref(pid))
+                if pid.value == mine:
+                    r2 = _RECT()
+                    if (u.GetWindowRect(h, ctypes.byref(r2)) and r2.left < rc.right
+                            and r2.right > rc.left and r2.top < rc.bottom
+                            and r2.bottom > rc.top):
+                        self._win_top(st["win"])
+                        return True
+            h = u.GetWindow(h, 3)
+        return False
 
     def _tick_body(self):
         now = time.time()
@@ -25323,100 +26359,20 @@ class Mascot:
         """
         if IS_MAC:
             return self._strip_popup_mac(items, xr, yr)
-        old = getattr(self, "_strip_pop_ref", None)
-        try:
-            if old is not None and old.winfo_exists():
-                old.destroy()
-        except Exception:
-            pass
-        u, cd = self._ui, self.card
-        rowh = int(u(24))
-        f = self._uf(9, True)
-        W = int(max(u(150), max(self._mw(lab, f) for lab, _c in items)
-                    + u(36)))
-        H = 0
+        # 캐릭터 우클릭 메뉴와 같은 직접 그린 메뉴 (지뢰 222) — 둥근 모서리,
+        # 유리 테마에서 캔버스 테두리(highlight)가 둥근 판 밖으로 네모 각을
+        # 남기던 것도 이것으로 사라진다 (제보).
         rows = []
         for lab, cb in items:
-            h9 = int(u(8)) if lab == "-" else rowh
-            rows.append((lab, cb, H, H + h9))
-            H += h9
-        H += int(u(8))
-        win = tk.Toplevel(self.root)
-        self._strip_pop_ref = win
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.configure(bg=cd["panel"])
-        cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
-                       highlightthickness=1, highlightbackground=cd["border"],
-                       bd=0)
-        cv.pack()
-        st = {"hover": None}
-
-        def draw():
-            cv.delete("all")
-            for lab, cb, y0, y1 in rows:
-                if lab == "-":
-                    cv.create_line(u(10), (y0 + y1) / 2 + u(4), W - u(10),
-                                   (y0 + y1) / 2 + u(4),
-                                   fill=self._tint(cd["fill"], 0.55))
-                    continue
-                yy = y0 + u(4) + rowh / 2
-                if cb is not None and st["hover"] == lab:
-                    self._rr_soft(cv, u(6), yy - rowh / 2 + u(2), W - u(6),
-                                  yy + rowh / 2 - u(2), u(8),
-                                  fill=self._tint(cd["fill"], 0.82),
-                                  outline="")
-                cv.create_text(u(16), yy, anchor="w", text=lab, font=f,
-                               fill=cd["text"] if cb is not None
-                               else cd["sub"])
-
-        def at(y):
-            for lab, cb, y0, y1 in rows:
-                if y0 + u(4) <= y <= y1 + u(4) and cb is not None:
-                    return lab, cb
-            return None, None
-
-        def move(e):
-            lab, _cb = at(e.y)
-            if lab != st["hover"]:
-                st["hover"] = lab
-                draw()
-
-        def click(e):
-            lab, cb = at(e.y)
-            try:
-                win.destroy()
-            except Exception:
-                pass
-            if cb is not None:
-                self._safe("ui_click", self._ui_click)
-                cb()
-
-        def close(_e=None):
-            try:
-                win.destroy()
-            except Exception:
-                pass
-
-        cv.bind("<Motion>", move)
-        cv.bind("<Button-1>", click)
-        cv.bind("<Leave>", lambda _e: (st.__setitem__("hover", None),
-                                       draw()))
-        win.bind("<Escape>", close)
-        win.bind("<FocusOut>", close)
-        # 화면 밖으로 안 나가게
-        try:
-            l9, t9, r9, b9 = self._screen_box()
-            xr = min(max(int(xr), l9), r9 - W - 4)
-            yr = min(max(int(yr), t9), b9 - H - 4)
-        except Exception:
-            pass
-        win.geometry("%dx%d+%d+%d" % (W, H, int(xr), int(yr)))
-        draw()
-        win.after(30, lambda: (self._win_top(win),
-                               win.focus_force() if win.winfo_exists()
-                               else None))
-        return win
+            if lab == "-":
+                rows.append({"kind": "sep"})
+            elif cb is None:
+                rows.append({"kind": "head", "label": lab})
+            else:
+                rows.append({"kind": "item", "label": lab, "act": cb, "snd": True})
+        self._pm_close_all()
+        st = self._pm_open(rows, xr, yr)
+        return st["win"]
 
     def _strip_popup_mac(self, items, xr, yr):
         """맥 — OS 메뉴로 띄운다 (지뢰 49: 띄우면 그 자리에서 멈춘다).
@@ -30648,7 +31604,9 @@ class Mascot:
                 # 잠깐 작게 잡힌 값이 굳었다 — 다음에 켤 때 창이 작아졌다
                 # (제보 — 데드라인 탭에서 끄면 초기화되는 것처럼 보였다).
                 now8 = time.time()
-                if zst.get("user") and now8 - zst["save"] > 0.5:
+                # 끄는 동안은 저장하지 않는다 — 놓은 뒤 한 번 (지뢰 219)
+                if (zst.get("user") and now8 - zst["save"] > 0.5
+                        and not (getattr(win, "_chrome", None) or {}).get("rz")):
                     zst["save"] = now8
                     zst["user"] = False
                     self.us["pomo_zoom"] = round(zst["z"], 3)
@@ -31419,6 +32377,18 @@ class Mascot:
                         zst["user_w"] = int(e.width)
             except Exception:
                 pass
+            # 가장자리를 끄는 동안은 40ms 에 한 번만 그린다 — 크기가 걸음마다
+            # 바뀌어 통째로 다시 그리기(한 번 27ms)가 사건마다 돌았다 (지뢰 219)
+            if (getattr(win, "_chrome", None) or {}).get("rz"):
+                if zst.get("rz_job") is None:
+                    def later9():
+                        zst["rz_job"] = None
+                        draw()
+                    try:
+                        zst["rz_job"] = win.after(40, later9)
+                    except Exception:
+                        draw()
+                return
             draw()
 
         fit_win()
@@ -31440,8 +32410,17 @@ class Mascot:
             self._safe("stk_move", self._stk_move, "pomo",
                        e.x - getattr(self, "_pomo_ox", 0.0), e.y)
 
+        def after_up9():
+            zst["rz_job"] = None
+            draw()
+
         def on_up9(_e):
-            self._chrome_release(win)
+            if self._chrome_release(win) and zst.get("rz_job") is None:
+                # 놓은 크기로 한 번 그리고 저장한다 (끄는 동안은 미뤘다)
+                try:
+                    zst["rz_job"] = win.after(30, after_up9)
+                except Exception:
+                    pass
             self._safe("stk_drop", self._stk_drop, "pomo")
 
         cv.bind("<Motion>", lambda e: self._safe("pomo_move", on_move9, e))
@@ -31464,6 +32443,13 @@ class Mascot:
                 except Exception:
                     pass
                 self._pomo_after = None
+            job9 = zst.get("rz_job")            # 지뢰 20 — 미룬 그리기도
+            if job9 is not None:
+                try:
+                    win.after_cancel(job9)
+                except Exception:
+                    pass
+                zst["rz_job"] = None
             self._pomo_draw = None
             self._pomo_bar_draw = None
             self._pomo_bar = None
