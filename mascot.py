@@ -2111,12 +2111,58 @@ class ShadowLayer:
                        0, 0, SWP_NOSIZE | SWP_NOACTIVATE)
 
 
+_GLASS_BLUR = None
+
+
+def _glass_blur_ok():
+    """이 컴퓨터에서 아크릴 흐림이 실제로 걸리는가 (한 번만 재고 기억한다).
+
+    **옛 흐림(state 3)은 윈도우 10 1903 부터 흐리지 않는다** — 틴트 색이
+    불투명하게 채워져 뒤가 하나도 안 비치는 판이 된다 (기뽀 제보: '연분홍
+    판으로 꽉 차 있다'). 그래서 아크릴(state 4 · 빌드 17063 이상)이 없으면
+    accent 를 아예 안 걸고 판이 스스로 반투명하게 그린다.
+
+    설정의 **투명 효과**가 꺼져 있으면(배터리 절약도 이걸 끈다) DWM 이 흐림을
+    안 걸어 같은 모양이 되므로 같이 본다. 레지스트리는 ctypes 로 읽는다 —
+    새 import 는 굳힌 앱에서 없을 수 있다 (지뢰 21).
+    """
+    global _GLASS_BLUR
+    if _GLASS_BLUR is not None:
+        return _GLASS_BLUR
+    ok = False
+    if IS_WIN:
+        try:
+            ok = sys.getwindowsversion().build >= 17063
+        except Exception:
+            ok = False
+        if ok:
+            try:
+                adv = ctypes.WinDLL("advapi32")
+                adv.RegGetValueW.argtypes = [
+                    ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                    ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p,
+                    ctypes.c_void_p]
+                val, sz = ctypes.c_uint(1), ctypes.c_uint(4)
+                rc = adv.RegGetValueW(
+                    ctypes.c_void_p(0x80000001),          # HKEY_CURRENT_USER
+                    "Software\\Microsoft\\Windows\\CurrentVersion"
+                    "\\Themes\\Personalize",
+                    "EnableTransparency", 0x00000010,     # RRF_RT_REG_DWORD
+                    None, ctypes.byref(val), ctypes.byref(sz))
+                if rc == 0 and int(val.value) == 0:
+                    ok = False
+            except Exception:
+                pass
+    _GLASS_BLUR = bool(ok)
+    return _GLASS_BLUR
+
+
 def _glass_accent(hwnd, tint=0x66E8E4EC, state=None, corners=True):
-    """창 하나에 DWM 아크릴(윈도우 10 은 옛 흐림) + 둥근 모서리 (유리 테마).
+    """창 하나에 DWM 아크릴 + 둥근 모서리 (유리 테마). 걸었으면 True.
 
     ACCENT_POLICY {state, flags, color(ABGR), anim} 을 WCA 19 로 건다.
     공용 windll 을 안 건드리고 따로 연다 (지뢰 21). state 를 주면 그것으로
-    (3 = 옛 흐림 — 창을 끄는 동안 아크릴 대신 쓴다).
+    (0 = 끄기 — 끄는 동안 굳힐 때).
     """
     u32 = ctypes.WinDLL("user32")
     u32.SetWindowCompositionAttribute.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -2126,7 +2172,9 @@ def _glass_accent(hwnd, tint=0x66E8E4EC, state=None, corners=True):
     except Exception:
         build = 0
     if state is None:
-        state = 4 if build >= 22000 else 3
+        if not _glass_blur_ok():
+            return False        # 판이 스스로 반투명하게 그린다 (_base_im)
+        state = 4
     ap = (ctypes.c_int * 4)(int(state), 0, 0, 0)
     ctypes.cast(ap, ctypes.POINTER(ctypes.c_uint))[2] = int(tint)
     data = (ctypes.c_void_p * 3)(19, ctypes.cast(ap, ctypes.c_void_p),
@@ -2146,6 +2194,7 @@ def _glass_accent(hwnd, tint=0x66E8E4EC, state=None, corners=True):
             dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(col), 4)
         except Exception:
             pass
+    return True
 
 
 def _screen_grab(x, y, w, h):
@@ -2305,7 +2354,7 @@ class GlassPane:
         self.size = None
         self.rect = None
         self.shown = True
-        _glass_accent(self.hwnd, tint=self.tint)
+        self.blur = bool(_glass_accent(self.hwnd, tint=self.tint))
         for ev in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>",
                    "<Button-3>", "<Motion>", "<MouseWheel>",
                    "<Double-Button-1>"):
@@ -2324,6 +2373,11 @@ class GlassPane:
     _hook = None          # 앞 창의 이동 훅 (_WinPosHook)
     _hook_off = (0, 0)    # 앞 창 rect → 판 자리 (클라이언트 여백)
     _src_sig = None
+    _amask = None         # 마지막으로 올린 그림의 알파 썸네일 (16x16) — 빈 유리 찾기
+    _abase = 1            # 그 썸네일에서 '아무것도 안 그린' 알파 (바탕 알파)
+    _lum = None           # 이 판이 지금 얼마나 밝은가 (화면에서 잰 값 0~1)
+    _white = True         # 이 판 위 글자를 흰색으로 쓸 것인가
+    blur = True           # 아크릴 흐림이 걸렸는가 (아니면 판이 스스로 반투명하게)
 
     # ── 앞 창을 따라 같은 걸음에 옮기기 ────────────────────────────────
     def hook(self, front_hwnd, off=(0, 0)):
@@ -2569,7 +2623,23 @@ class GlassPane:
         if deco is None or deco[0] != (w, h, self.radius, lt):
             # 가장자리 빛은 크기·반지름만 타므로 그림자와 따로 둔다 — 홈은
             # 카드가 하나씩 늘며 그림자 목록이 열두 번 바뀐다
-            im0 = Image.new("RGBA", (w, h), (255, 255, 255, 1))
+            if self.blur:
+                im0 = Image.new("RGBA", (w, h), (255, 255, 255, 1))
+                self._abase = 1
+            else:
+                # 흐림이 안 걸리는 컴퓨터 — 아크릴을 걸면 뒤가 하나도 안 비치는
+                # 불투명 판이 된다 (기뽀 제보). 판이 스스로 반투명 유리를 그린다:
+                # 흐리지는 않지만 뒤가 비치고 글자도 읽힌다.
+                a9 = max(70, min(200, (int(self.tint) >> 24) & 0xFF))
+                self._abase = a9
+                im0 = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                r9 = max(0, int(self.radius))
+                if r9 > 0:
+                    ImageDraw.Draw(im0).rounded_rectangle(
+                        [0, 0, w - 1, h - 1], radius=r9, fill=(236, 233, 240, a9))
+                else:
+                    ImageDraw.Draw(im0).rectangle([0, 0, w - 1, h - 1],
+                                                  fill=(236, 233, 240, a9))
             try:
                 im0 = self._glass_deco(im0, self.radius, S=1 if lt else 2)
             except Exception:
@@ -2708,6 +2778,12 @@ class GlassPane:
                         im.alpha_composite(dst)
                 except Exception:
                     continue
+        # 유리 위 글자색을 정하려면 '우리가 아무것도 안 그린 유리'가 어디인지
+        # 알아야 한다 — 알파 썸네일을 남긴다 (주인이 그 자리를 화면에서 잰다).
+        try:
+            self._amask = im.getchannel("A").resize((16, 16), Image.BOX)
+        except Exception:
+            self._amask = None
         # premultiplied 로 (지뢰 117) — (255,255,255,1) 은 (1,1,1,1) 이 된다
         pm = Image.frombytes("RGBA", im.size, im.convert("RGBa").tobytes())
         ShadowLayer._push(self, pm)
@@ -8008,7 +8084,22 @@ class Mascot:
         self._glass_u32 = None
         if self._glass:
             GlassPane.tint = self._glass_tint_val()   # 설정의 불투명도로
+            # 흐림이 걸리는 컴퓨터인지 남긴다 — '유리가 불투명하다'는 제보는
+            # 이 줄 하나로 갈린다 (지뢰 51)
+            try:
+                b9 = sys.getwindowsversion().build if IS_WIN else 0
+            except Exception:
+                b9 = 0
+            self._boot_step("유리 · 흐림 %s · 빌드 %s"
+                            % ("있음" if _glass_blur_ok() else
+                               "없음(투명 효과 꺼짐이거나 옛 윈도우)", b9))
         self._gtext_cache = {}
+        # 유리 위 글자색 — 유리가 어두우면 흰색, 밝으면 원래 색 (기뽀 제보).
+        # 처음에는 흰색으로 두고 _glass_lum_tick 이 화면에서 재 바로잡는다.
+        self._glass_white = True
+        self._glass_lum = None
+        self._glass_ink_cache = {}   # (원래 색, 유리 밝기) → 읽히는 글자색
+        self._glass_lum_at = 0.0
         self._pane = None            # 타이머 카드 뒤 유리 판 (GlassPane)
         self._card_texts = {}        # 카드 글자 — 유리 판에 그린다
         self._room_shadow_boxes = [] # 홈 카드 그림자 — 유리 판에 그린다
@@ -20530,6 +20621,7 @@ class Mascot:
             return
         if not force:
             self._glass_at = now
+            self._safe("glass_lum", self._glass_lum_tick, now)
         for w in self._glass_tops(self.root):
             try:
                 if not w.winfo_exists():
@@ -20618,7 +20710,7 @@ class Mascot:
         except Exception:
             white = False
         return self._gtext_white(text, font, justify,
-                                 "#ffffff" if white else fill)
+                                 self._glass_ink(fill, cv) if white else fill)
 
     def _glass_apply(self, w):
         """창 하나를 유리로 — 색상키로 구멍을 내고 뒤에 유리 판을 깐다.
@@ -20691,6 +20783,7 @@ class Mascot:
             w.attributes("-transparentcolor", GLASS_KEY)
             return
         w._glass_pane = pane
+        pane._white = self._glass_white      # 재기 전에는 카드 판의 값으로
         w._glass_size_at = 0.0
         pane.resolve = self._cv_pane_off
         pane.render = self._pane_render
@@ -21394,9 +21487,184 @@ class Mascot:
             return GLASS_KEY
         return self.canvas_bg
 
-    def _glass_ink(self, fill):
-        """유리 바로 위에 놓이는 글자의 색 — 전부 흰색 (요청, 포인트 색 없이)."""
-        return "#ffffff"
+    GLASS_LUM_TICK = 2.0       # 유리 밝기를 다시 재는 간격 (초)
+    GLASS_LUM_DARK = 0.56      # 이보다 어두운 유리 → 흰 글자
+    GLASS_LUM_LIGHT = 0.64     # 이보다 밝은 유리 → 원래(어두운) 글자색
+    GLASS_PROBE_N = 6          # 한 판에서 재는 점 수
+
+    def _glass_ink(self, fill, cv=None):
+        """유리 바로 위에 놓이는 글자의 색 — 그 캔버스가 얹히는 판의 밝기로 정한다.
+
+        유리가 어두우면 흰색(요청 — 포인트 색 없이), **밝으면 원래 색**이다.
+        유리는 뒤 화면을 비추므로 바탕화면·뒤 창이 밝은 사람에게는 흰 글자가
+        통째로 안 읽힌다 (기뽀 제보 '분홍 바탕에 흰 글씨' · 실측: 분홍 배경에서
+        유리 밝기 0.85 · 흰 글자 대비 1.17:1). 밝기는 `_glass_lum_tick` 이
+        **화면에서 재 둔다** — 아크릴 합성은 단순 혼합이 아니라 계산으로
+        짐작하면 틀린다 (지뢰 24).
+        """
+        white, p9 = None, None
+        if cv is not None:
+            try:
+                p9 = self._pane_of(cv)[0]
+                white = getattr(p9, "_white", None) if p9 is not None else None
+            except Exception:
+                white = None
+        if white is None:
+            white = self._glass_white          # 판이 아직 없는 자리 (메뉴 등)
+        if white:
+            return "#ffffff"
+        lum = getattr(p9, "_lum", None) if cv is not None and p9 is not None else None
+        if lum is None:
+            lum = self._glass_lum
+        return fill if lum is None else self._glass_fit_ink(fill, lum)
+
+    GLASS_INK_CONTRAST = 3.0    # 밝은 유리 위 글자가 지켜야 할 명암비
+
+    def _glass_fit_ink(self, fill, lum):
+        """밝은 유리 위에서 읽히게 — 모자라면 **밝기만** 낮춘다 (지뢰 79).
+
+        보조 글자(연녹·연회색)는 흰 카드 위에서는 멀쩡하지만 분홍 유리 위에서는
+        1.4:1 로 사라진다 (기뽀 제보 화면 실측). 흰색·검정을 섞으면 탁해지므로
+        채도·색상은 그대로 두고 L* 만 내린다.
+        """
+        if lum < 0.5:
+            # 어두운 유리는 흰 글자 길이다 — 여기서 더 어둡게 하면 되레 묻힌다
+            return str(fill)
+        key = (str(fill), round(float(lum), 2))
+        got = self._glass_ink_cache.get(key)
+        if got is not None:
+            return got
+        out = str(fill)
+        try:
+            L, a9, b9 = _g2_lab(out)
+            C = math.hypot(a9, b9)
+            h = math.degrees(math.atan2(b9, a9))
+            for _k in range(12):
+                r8, g8, b8 = (int(out[i:i + 2], 16) for i in (1, 3, 5))
+                l8 = (0.299 * r8 + 0.587 * g8 + 0.114 * b8) / 255.0
+                if (lum + 0.05) / (l8 + 0.05) >= self.GLASS_INK_CONTRAST:
+                    break
+                L = max(12.0, L - 7.0)
+                out = _g2_lch(L, C, h)
+                if L <= 12.0:
+                    break
+        except Exception:
+            out = str(fill)
+        if len(self._glass_ink_cache) > 200:      # 지뢰 18
+            self._glass_ink_cache.clear()
+        self._glass_ink_cache[key] = out
+        return out
+
+    def _glass_probe_pts(self, pane):
+        """그 판에서 '우리가 아무것도 안 그린' 화면 좌표 몇 점.
+
+        판에 올린 그림의 알파 썸네일에서 빈 칸을 고른다 — 글자·카드 위를 재면
+        유리 밝기가 아니라 우리가 그린 색을 재게 된다.
+        """
+        rect = getattr(pane, "rect", None)
+        am = getattr(pane, "_amask", None)
+        if not rect or am is None:
+            return []
+        x, y, w, h = rect
+        if w < 24 or h < 24:
+            return []
+        n = am.width
+        cw, ch = w / float(n), h / float(n)
+        out = []
+        try:
+            px = list(am.getdata())
+        except Exception:
+            return []
+        base9 = int(getattr(pane, "_abase", 1) or 1)
+        for i, a in enumerate(px):
+            if a > base9 + 2:               # 우리가 뭔가 그린 칸
+                continue
+            col, row = i % n, i // n
+            if col == 0 or row == 0 or col == n - 1 or row == n - 1:
+                continue                    # 가장자리 빛·둥근 모서리는 유리가 아니다
+            out.append((int(x + (col + 0.5) * cw), int(y + (row + 0.5) * ch)))
+        if len(out) <= self.GLASS_PROBE_N:
+            return out
+        step = len(out) / float(self.GLASS_PROBE_N)
+        return [out[int(k * step)] for k in range(self.GLASS_PROBE_N)]
+
+    def _glass_panes(self):
+        """지금 떠 있는 유리 판들 (창 판 + 타이머 카드 판)."""
+        out = [getattr(w, "_glass_pane", None)
+               for w in self._glass_tops(self.root)]
+        if self._pane_ok():
+            out.append(self._pane)
+        return [p for p in out if p is not None and getattr(p, "shown", False)]
+
+    def _glass_pane_lum(self, pane):
+        """그 판이 지금 얼마나 밝은가 (0~1) — 빈 유리 몇 점의 중앙값. 못 재면 None."""
+        vals = []
+        for (cx, cy) in self._glass_probe_pts(pane):
+            im = _screen_grab(cx - 2, cy - 2, 5, 5)
+            if im is None:
+                continue
+            try:
+                r9, g9, b9 = im.convert("RGB").resize((1, 1)).getpixel((0, 0))
+            except Exception:
+                continue
+            vals.append((0.299 * r9 + 0.587 * g9 + 0.114 * b9) / 255.0)
+        if not vals:
+            return None
+        vals.sort()
+        return vals[len(vals) // 2]
+
+    def _glass_lum_tick(self, now):
+        """판마다 유리 밝기를 재서 그 판의 글자색을 정한다.
+
+        **창마다 뒤 배경이 다르다** — 하나로 합치면 어두운 바탕화면 위 카드와
+        밝은 문서 위 창이 서로의 값을 쓴다 (실측에서 드러났다). 타이머 카드 판의
+        값은 아직 판이 없는 자리(우클릭 메뉴가 뜨기 전)의 기본값으로도 쓴다.
+        """
+        if now - self._glass_lum_at < self.GLASS_LUM_TICK:
+            return
+        self._glass_lum_at = now
+        hit = False
+        for p in self._glass_panes():
+            lum = self._glass_pane_lum(p)
+            if lum is None:
+                continue
+            p._lum = lum
+            want = p._white
+            if lum >= self.GLASS_LUM_LIGHT:
+                want = False
+            elif lum <= self.GLASS_LUM_DARK:
+                want = True
+            if want != p._white:
+                p._white = want
+                hit = True
+            if p is getattr(self, "_pane", None):
+                self._glass_lum = lum
+                if want != self._glass_white:
+                    self._glass_white = want
+                    hit = True
+        if hit:
+            self._safe("glass_ink", self._glass_ink_reset)
+
+    def _glass_ink_reset(self):
+        """글자색이 바뀌었다 — 구워 둔 글자를 버리고 다시 그리게 한다.
+
+        판에 올린 글자는 **올릴 때** 색을 정하므로(_pane_render) 판을 다시
+        올리기만 하면 되고, 캔버스에 구워 얹은 글자는 그 창이 다시 그려야 한다.
+        뽀모도로 창은 3초 안전망으로, 홈은 열쇠를 비워서 곧 다시 그린다.
+        """
+        self._gtext_cache.clear()
+        self._room_key_last = None
+        for w in self._glass_tops(self.root):
+            p = getattr(w, "_glass_pane", None)
+            if p is not None:
+                p._base = None
+                p.dirty()
+        if self._pane_ok():
+            self._pane._base = None
+            self._pane.dirty()
+        # 떠 있는 메뉴는 아이콘·덧칠이 그릴 때 구워 박히므로 그 자리에서 다시 (기뽀 제보)
+        for st9 in list(getattr(self, '_pm_stack', None) or []):
+            self._safe('pm_ink', self._pm_ink_check, st9)
 
     def _gtext_white(self, text, font=None, justify="center", fill="#ffffff"):
         """유리 판에 올릴 글자 한 장 (PIL RGBA, 진짜 알파 · 캐시).
@@ -21801,7 +22069,7 @@ class Mascot:
         return True
 
     def _gtext_img(self, text, font=None, fill="#000000", justify="center",
-                   white=False):
+                   white=False, cv=None):
         """구운 글자 한 장 (캐시 · LRU). 실패하면 None.
 
         white=True 는 맨 유리 위의 글자 — 흰색(또는 밝은 원색)으로 바꾸고
@@ -21814,7 +22082,7 @@ class Mascot:
         except Exception:
             return None
         if white:
-            fill = self._glass_ink(fill)
+            fill = self._glass_ink(fill, cv)
         text = str(text)
         if not self._gtext_bakeable(text):
             return None
@@ -21900,12 +22168,14 @@ class Mascot:
         # 깨지지 않는다). 맨 유리 위면 흰색, 카드·알약 위면 원래 색 —
         # 창의 캔버스는 이 판정을 **올릴 때** 다시 한다 (_pane_render).
         it = self._gtext_pane(cv, x, y, text, font, anchor, tags, justify,
-                              "#ffffff" if on_glass else fill, spec_fill=fill)
+                              self._glass_ink(fill, cv) if on_glass else fill,
+                              spec_fill=fill)
         if it is not None:
             return it
         if on_glass and not self._gtext_bakeable(text):
-            fill = "#ffffff"        # 기호가 든 글자는 Tk 글자로 — 그래도 흰색
-        ph = self._gtext_img(text, font, fill, justify, white=bool(on_glass))
+            fill = self._glass_ink(fill, cv)   # 기호가 든 글자는 Tk 글자로
+        ph = self._gtext_img(text, font, fill, justify, white=bool(on_glass),
+                             cv=cv)
         if ph is None:
             return ct(x, y, text=text, font=font, fill=fill,
                       anchor=anchor, tags=tags, justify=justify)
@@ -22106,7 +22376,7 @@ class Mascot:
                     ph = host._gtext_img(d.get("text", ""), d.get("font"),
                                          d.get("fill", "#000000"),
                                          d.get("justify", "center"),
-                                         white=bool(d.get("_white")))
+                                         white=bool(d.get("_white")), cv=cv)
                     if ph is not None:
                         kw["image"] = ph
                         cv._gt_keep[tag] = ph
@@ -22895,20 +23165,40 @@ class Mascot:
             self._log_error("popmenu")
             return None
 
-    def _pm_pal(self):
+    def _pm_pal(self, white=None):
         """메뉴 빛깔 — 카드 색에서 뽑는다. 다크는 캔버스가 알아서 뒤집고
-        (지뢰 213), PIL 그림에 쓰는 색만 여기서 바꾼다."""
+        (지뢰 213), PIL 그림에 쓰는 색만 여기서 바꾼다.
+
+        유리는 판이 밝은지(white=False)에 따라 아이콘·덧칠이 갈린다 — 안 주면
+        지금 값(카드 판)으로 (메뉴가 뜬 뒤 _pm_ink_check 가 다시 본다).
+        """
         cd = self.card
         fill = cd.get("fill") or "#f2a7c5"
         if self._glass:
+            if white is None:
+                white = self._glass_white
+            if white:
+                return {"glass": True, "bg": GLASS_KEY, "text": cd["text"], "sub": cd["sub"],
+                        "icon": (255, 255, 255, 255), "badge": (255, 255, 255, 70),
+                        "hov": (255, 255, 255, 64), "press": (255, 255, 255, 112),
+                        "sep": (255, 255, 255, 120), "ring": None,
+                        "band": (255, 255, 255, 230), "band_hov": (255, 255, 255, 255),
+                        "band_fg": cd["text"], "band_icon": _pm_rgb(cd["text"]),
+                        "chev": (255, 255, 255, 215), "dot": (255, 93, 122, 255),
+                        "white": True}
+            # 밝은 유리 — 흰 아이콘·흰 덧칠은 통째로 안 보인다 (기뽀 제보).
+            # 같은 모양을 어두운 쪽으로 뒤집는다.
+            ink = _pm_rgb(cd["text"])
             return {"glass": True, "bg": GLASS_KEY, "text": cd["text"], "sub": cd["sub"],
-                    "icon": (255, 255, 255, 255), "badge": (255, 255, 255, 70),
-                    "hov": (255, 255, 255, 64), "press": (255, 255, 255, 112),
-                    "sep": (255, 255, 255, 120), "ring": None,
-                    "band": (255, 255, 255, 230), "band_hov": (255, 255, 255, 255),
+                    "icon": ink, "badge": (0, 0, 0, 26),
+                    "hov": (0, 0, 0, 30), "press": (0, 0, 0, 56),
+                    "sep": (0, 0, 0, 60), "ring": None,
+                    "band": (255, 255, 255, 235), "band_hov": (255, 255, 255, 255),
                     "band_fg": cd["text"], "band_icon": _pm_rgb(cd["text"]),
-                    "chev": (255, 255, 255, 215), "dot": (255, 93, 122, 255)}
-        pal = {"glass": False, "bg": "#ffffff", "text": cd["text"], "sub": cd["sub"],
+                    "chev": (0, 0, 0, 110), "dot": (255, 93, 122, 255),
+                    "white": False}
+        pal = {"glass": False, "white": False,
+               "bg": "#ffffff", "text": cd["text"], "sub": cd["sub"],
                "icon": cd["text"], "badge": self._tint(fill, 0.80),
                "hov": self._tint(fill, 0.72), "press": self._tint(fill, 0.55),
                "sep": self._tint(fill, 0.42), "ring": self._tint(fill, 0.45),
@@ -23121,42 +23411,52 @@ class Mascot:
             return cv.create_image(int(round(x9)), int(round(y9)), image=img,
                                    anchor=anchor, tags=tags)
 
-        if pal["ring"]:
-            r9 = max(4, int(self._glass_r()) + 1)
-            put(self._pm_ring(W, H, r9, pal["ring"], max(1, u(1))), 0, 0,
-                tags=("pm", "pm_ring"))
-        dsz = u(21)
-        for i, (r, y0, y1) in enumerate(lay):
-            cy = (y0 + y1) / 2.0
-            k = r["kind"]
-            if k == "sep":
-                put(self._pm_dots(W - u(40), pal["sep"], max(4, u(7)), max(1, u(1))),
-                    u(20), cy, "w")
-                continue
-            if k == "band":
-                st["band_items"][i] = put(
-                    self._pm_pill(W - u(16), y1 - y0 - u(6), u(13), pal["band"]),
-                    u(8), y0 + u(3))
-                t_w = self._mw(r["label"], f)
-                x0 = W / 2.0 - (t_w + u(22)) / 2.0
-                put(self._pm_icon(r.get("icon") or "moon", u(16), pal["band_icon"], None,
-                                  hole=pal["band"]), x0 + u(8), cy, "center")
-                cv.create_text(x0 + u(22), cy, text=r["label"], anchor="w", font=f,
-                               fill=pal["band_fg"], tags="pm")
-                continue
-            dis = bool(r.get("disabled")) or k == "head"
-            if icons and r.get("icon"):
-                put(self._pm_icon(r["icon"], dsz, pal["icon"], pal["badge"]),
-                    u(22), cy, "center")
-            cv.create_text(tx, cy, text=r["label"], anchor="w", font=f,
-                           fill=pal["sub"] if dis else pal["text"], tags="pm")
-            if r.get("dot"):
-                put(self._pm_icon("dot_on", u(7), pal["dot"], None),
-                    tx + self._mw(r["label"], f) + u(7), cy - u(5), "center")
-            if k == "sub":
-                put(self._pm_icon("chev", u(10), pal["chev"], None), W - u(18), cy, "center")
-            elif r.get("mark"):
-                put(self._pm_icon("tick", u(12), pal["icon"], None), W - u(20), cy, "center")
+        def rows_draw(pal):
+            """줄을 그린다 — 유리가 밝아 빛깔이 바뀌면 그대로 다시 부른다."""
+            cv.delete("pm")
+            cv._pm_keep = set()
+            st["band_items"] = {}
+            if pal["ring"]:
+                r9 = max(4, int(self._glass_r()) + 1)
+                put(self._pm_ring(W, H, r9, pal["ring"], max(1, u(1))), 0, 0,
+                    tags=("pm", "pm_ring"))
+            dsz = u(21)
+            for i, (r, y0, y1) in enumerate(lay):
+                cy = (y0 + y1) / 2.0
+                k = r["kind"]
+                if k == "sep":
+                    put(self._pm_dots(W - u(40), pal["sep"], max(4, u(7)), max(1, u(1))),
+                        u(20), cy, "w")
+                    continue
+                if k == "band":
+                    st["band_items"][i] = put(
+                        self._pm_pill(W - u(16), y1 - y0 - u(6), u(13), pal["band"]),
+                        u(8), y0 + u(3))
+                    t_w = self._mw(r["label"], f)
+                    x0 = W / 2.0 - (t_w + u(22)) / 2.0
+                    put(self._pm_icon(r.get("icon") or "moon", u(16), pal["band_icon"],
+                                      None, hole=pal["band"]), x0 + u(8), cy, "center")
+                    cv.create_text(x0 + u(22), cy, text=r["label"], anchor="w", font=f,
+                                   fill=pal["band_fg"], tags="pm")
+                    continue
+                dis = bool(r.get("disabled")) or k == "head"
+                if icons and r.get("icon"):
+                    put(self._pm_icon(r["icon"], dsz, pal["icon"], pal["badge"]),
+                        u(22), cy, "center")
+                cv.create_text(tx, cy, text=r["label"], anchor="w", font=f,
+                               fill=pal["sub"] if dis else pal["text"], tags="pm")
+                if r.get("dot"):
+                    put(self._pm_icon("dot_on", u(7), pal["dot"], None),
+                        tx + self._mw(r["label"], f) + u(7), cy - u(5), "center")
+                if k == "sub":
+                    put(self._pm_icon("chev", u(10), pal["chev"], None),
+                        W - u(18), cy, "center")
+                elif r.get("mark"):
+                    put(self._pm_icon("tick", u(12), pal["icon"], None),
+                        W - u(20), cy, "center")
+
+        st["rows"] = rows_draw
+        rows_draw(pal)
 
         # 자리 — 아래가 모자라면 위로, 오른쪽이 모자라면 왼쪽으로 (OS 메뉴와 같게)
         try:
@@ -23186,6 +23486,9 @@ class Mascot:
             # 판을 **곧바로** 깐다 — 주기 훑기(0.3초)를 기다리면 그동안 키 색
             # 바탕이 불투명하게 보였다가 유리로 번쩍인다 (지뢰 193)
             self._safe("pm_glass", self._glass_tick, time.time(), True)
+            # 뜬 자리의 유리가 밝으면 아이콘·덧칠까지 어두운 쪽으로 (기뽀 제보).
+            # 한 프레임 뒤에 재야 아크릴이 올라온 뒤의 색을 본다 (지뢰 24).
+            win.after(140, lambda: self._pm_safe(self._pm_ink_check, st))
 
         # **덧붙여 건다 (add="+")** — 유리 테마가 같은 창에 '닫히면 판도 치운다'
         # (<Destroy> → _glass_win_gone) 를 걸어 둔다. 덮어쓰면 메뉴를 닫을 때마다
@@ -23213,6 +23516,34 @@ class Mascot:
             win.after(30, lambda: self._pm_safe(self._pm_focus, win))
             st["poll"] = win.after(120, lambda: self._pm_safe(self._pm_poll, st))
         return st
+
+    def _pm_ink_check(self, st):
+        """메뉴가 뜬 자리의 유리 밝기를 재서 빛깔이 어긋나면 다시 그린다.
+
+        글자는 판이 **올릴 때** 색을 정하지만(_pane_render) 아이콘·구분선·덧칠은
+        그릴 때 구워 박힌다 — 띄운 순간의 값으로 흰 아이콘이 박히면 밝은 유리에서
+        통째로 안 보인다 (기뽀 제보 화면).
+        """
+        if st["dead"] or not _win_alive(st["win"]):
+            return
+        pane = getattr(st["win"], "_glass_pane", None)
+        if pane is None:
+            return
+        lum = self._glass_pane_lum(pane)
+        if lum is None:
+            return
+        pane._lum = lum
+        white = lum <= self.GLASS_LUM_LIGHT
+        pane._white = white
+        if white == bool(st["pal"].get("white", True)):
+            return
+        st["pal"] = self._pm_pal(white=white)
+        try:
+            st["cv"].configure(bg=st["pal"]["bg"])
+        except Exception:
+            pass
+        st["rows"](st["pal"])
+        self._pm_paint(st, 1.0)
 
     def _pm_focus(self, win):
         if _win_alive(win):
