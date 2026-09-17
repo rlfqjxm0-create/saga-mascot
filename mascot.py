@@ -7287,16 +7287,25 @@ def already_running(char, state_dir=None):
             except Exception:
                 old9 = 0
             if old9 and old9 != os.getpid():
+                alive9 = False
                 try:
                     os.kill(old9, 0)       # 살아 있으면 예외가 안 난다
-                    return True
+                    alive9 = True
                 except Exception:
                     pass                   # 죽은 프로세스 — 이어받는다
+                # **번호가 살아 있다고 우리 캐릭터인 것은 아니다.** 강제 종료·
+                # 재부팅으로 남은 .pid 의 번호를 다른 프로그램이 이어받으면,
+                # 새로 켠 캐릭터가 영영 조용히 물러난다 (사가 제보 — '타이머가
+                # 안 켜진다'). 살아 있는 캐릭터는 .pid 를 20초마다 새로 찍고
+                # .health.txt 를 30초마다 쓰므로, 둘 다 묵었으면 남의 번호다.
+                if alive9 and _pid_fresh(base9, p9):
+                    return True
             tmp9 = p9 + ".tmp"             # 지뢰 35 — 통째로 갈아 끼운다
             with open(tmp9, "w", encoding="utf-8") as fp9:
                 fp9.write(str(os.getpid()))
             os.replace(tmp9, p9)
             globals()["_INSTANCE_LOCK"] = p9
+            _pid_heartbeat(p9)
         except Exception:
             return False
         return False
@@ -7313,6 +7322,49 @@ def already_running(char, state_dir=None):
     except Exception:
         return False
     return False
+
+
+PID_FRESH = 150.0   # 이만큼 안 찍힌 .pid 는 살아 있는 캐릭터의 것이 아니다
+PID_BEAT = 20.0     # 살아 있는 캐릭터가 .pid 를 다시 찍는 간격
+
+
+def _pid_fresh(base, p):
+    """.pid 나 .health.txt 가 최근에 찍혔나 — 맥 중복 실행 판정.
+
+    못 읽으면 '묵었다'로 본다. 캐릭터가 둘 뜨는 것은 사람이 보고 하나를
+    끄면 되지만, 영영 안 뜨는 것은 빠져나올 길이 없다.
+    """
+    newest = 0.0
+    for f in (p, os.path.join(base, ".health.txt")):
+        try:
+            newest = max(newest, os.path.getmtime(f))
+        except Exception:
+            pass
+    return time.time() - newest < PID_FRESH
+
+
+def _pid_heartbeat(p):
+    """살아 있는 동안 .pid 를 주기적으로 다시 찍는다 (데몬 스레드).
+
+    그리기 루프가 아니라 스레드라서 창이 잠깐 굳어도 '살아 있음'이 남는다.
+    자물쇠를 놓았거나 파일이 남의 번호로 바뀌었으면 멈춘다.
+    """
+    me = str(os.getpid())
+
+    def beat():
+        while globals().get("_INSTANCE_LOCK") == p:
+            time.sleep(PID_BEAT)
+            try:
+                with open(p, encoding="utf-8") as fp:
+                    if (fp.read() or "").strip() != me:
+                        return
+                os.utime(p, None)
+            except Exception:
+                return
+    try:
+        threading.Thread(target=beat, daemon=True).start()
+    except Exception:
+        pass
 
 
 def release_instance_lock():
@@ -12446,6 +12498,10 @@ class Mascot:
                 except OSError:
                     pass
         finally:
+            # 맥의 자물쇠(.pid)는 끌 때 지운다 — 예전에는 다시 켜기에서만
+            # 지워서 늘 남았고, 그 번호를 남이 이어받으면 다음에 안 켜졌다.
+            if not getattr(self, "_restarting", False):
+                release_instance_lock()
             self.root.destroy()
 
     # ── 타이머 ───────────────────────────────────────────────────────────
