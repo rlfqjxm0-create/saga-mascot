@@ -10141,6 +10141,12 @@ class Mascot:
 
         # 잘 때 머리를 기울이는 축 = 목 (머리 가로 중심 · 몸통 윗선)
         self._tilt_cache = {}
+        # 기울임을 따라 돌린 소품 그림도 같이 비운다 — 안 비우면 소품을 바꾼 뒤
+        # 고개를 기울일 때만 옛 소품이 나온다 (멸종 제보: 웃으며 흔들 때 계란
+        # 후라이로 되돌아감 · 지뢰 227). 파도타기 팔·눈 목표 캐시도 파츠에 기댄다.
+        self._prop_rot_cache = {}
+        self._wavy_cache = {}
+        self._eye_pt_cache = None
         self._tilt_max = 0.0
         self._tilt_base = self._tilt_base_awake = None
         self._tilt_base_smile = None
@@ -38350,7 +38356,10 @@ class Mascot:
             pil = self._pil_cache.get(name)
             if pil is None or anchor != "nw" or not str(name).startswith("prop"):
                 return real_put(name, x, y, anchor)
-            key = (name, round(tilt), self.parts_dir, sheet)
+            # 열쇠는 자리 이름("prop")이 아니라 **지금 그 자리에 든 소품**이어야
+            # 한다 — 소품을 바꾸면 자리 이름은 같고 그림만 달라진다 (지뢰 227).
+            key = (name, str(getattr(self, "prop_name", "")), pil.size,
+                   round(tilt), self.parts_dir, sheet)
             ph = self._prop_rot_cache.get(key)
             if ph is None:
                 if len(self._prop_rot_cache) > self.PROP_ROT_MAX:
