@@ -1,7 +1,7 @@
 {
- "version": 1789658244,
+ "version": 1789881512,
  "files": {
-  "mascot.py": "a2585d0b895c3bfbe9eacbdbe5f1043ad51eeeec87f10defabc041f240801f94",
+  "mascot.py": "c6bfe77d4aa9faf9dd508cd27cb5a2c9601ab77e0c1de0f1e0dd947d258ae53c",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -635,6 +635,11 @@
   "parts_saga/stamps/sprout.png": "7fc5debfff894594c7ff5d2905de9ede3182d3f36365d5cfb24ab77f2c815036",
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
- "notes": [],
- "silent": true
+ "notes": [
+  "새 몸짓 넷 — 막춤·좌우 스텝·파도타기·눈 비비기. 작업 중이든 쉴 때든 가끔 나와요 (춤은 20~40분, 눈 비비기는 40~90분에 한 번쯤)",
+  "고개를 끄덕이거나 기울일 때 머리 위 소품·양갈래·날개가 같이 따라 움직여요",
+  "윈도우 10: 뽀모도로·홈·환경설정·쪽지함 창과 우클릭 메뉴 모서리를 각진 모양으로 통일했어요 (둥근 척 계단지던 것 정리)",
+  "유리 테마: 밝은 바탕화면에서 글자가 안 읽히던 것과 흐림이 안 걸리는 컴퓨터에서 판이 불투명하던 것을 고쳤어요",
+  "우클릭 메뉴의 오른쪽 끝을 눌러도 항목이 안 먹던 것을 고쳤어요"
+ ]
 }

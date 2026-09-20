@@ -8467,6 +8467,12 @@ class Mascot:
         self._doze_next = 0.0        # 다음 꾸벅
         self._think_next = 0.0       # 다음 생각
         self._sway_next = 0.0        # 다음 좌우 흔들기
+        self._dance_next = 0.0       # 다음 춤 (막춤·스텝·파도타기 중 하나)
+        self._eyerub_next = 0.0      # 다음 눈 비비기
+        self._gest_end_at = 0.0      # 마지막 몸짓이 끝난 시각 (연달아 안 나오게)
+        self._wavy_cache = {}        # 파도타기 구부린 팔 그림 (which·위상·각도)
+        self._prop_rot_cache = {}    # 고개 기울임을 따라 돌린 소품 그림 (1도 단위)
+        self._eye_pt_cache = None    # 눈 비비기 목표 (파츠 폴더별)
         self._heart_next = 0.0       # 다음 하트 (작업 중에만)
         self._fail = {}              # 구역별 실패 횟수 (3회면 그 구역만 끔)
         self._fail_at = {}           # 구역별 마지막 실패 시각 (한참 지나면 재시도)
@@ -10747,12 +10753,12 @@ class Mascot:
                 "steps": self.cfg.get("back_steps")}
 
     def _draw_back(self, now, yo):
-        """기본 몸 뒤 파츠 (사가 양갈래·기뽀 요정 날개)."""
-        self._back_anim("back", self._back_cfg(), now, yo)
+        """기본 몸 뒤 파츠 (사가 양갈래·기뽀 요정 날개) — 머리를 따라간다."""
+        self._follow_head(lambda yo9: self._back_anim("back", self._back_cfg(), now, yo9), yo)
 
     def _draw_prop_back(self, now, yo):
-        """뽑힌 소품의 몸 뒤 조각 (악마 꼬리·천사 날개)."""
-        self._back_anim("prop_back", self._prop_back_cfg, now, yo)
+        """뽑힌 소품의 몸 뒤 조각 (악마 꼬리·천사 날개) — 머리를 따라간다."""
+        self._follow_head(lambda yo9: self._back_anim("prop_back", self._prop_back_cfg, now, yo9), yo)
 
     def _back_anim(self, name, mo, now, yo):
         """몸 뒤 파츠 — 설정대로 살짝 움직인다.
@@ -17232,7 +17238,20 @@ class Mascot:
     GESTURES = {"wave": 2.0, "clap": 1.9, "nod": 1.2,
                 "shake": 1.3, "stretch": 3.0, "groove": 3.6,
                 "yawn": 2.8, "doze": 3.0, "think": 3.6, "startle": 1.1,
-                "cheer": 2.4, "sway": 3.8}
+                "cheer": 2.4, "sway": 3.8,
+                "dance": 4.2, "step": 4.0, "seawave": 5.3, "eyerub": 2.8}
+    # 2026-09-20 에 더한 넷 — 막춤·좌우 스텝·파도타기·눈 비비기. 전 캐릭터에서
+    # 무작위 주기로 나온다 (_gest_fun). 팔은 원래 길이의 GEST_REACH 배 안에서만
+    # 쓴다 — 머리 크고 손 짧은 컨셉이라 길게 늘이면 징그럽다 (요청).
+    GEST_NEW = ("dance", "step", "seawave", "eyerub")
+    GEST_DANCES = ("dance", "step", "seawave")   # 같은 확률로 하나
+    GEST_REACH = 1.2
+    DANCE_GAP = (20 * 60, 40 * 60)      # 춤 간격 (음악 중에는 DANCE_GAP_MUSIC)
+    DANCE_GAP_MUSIC = (10 * 60, 20 * 60)
+    EYERUB_GAP = (40 * 60, 90 * 60)     # 눈 비비기 (새벽 1~6시는 EYERUB_GAP_NIGHT)
+    EYERUB_GAP_NIGHT = (25 * 60, 50 * 60)
+    GEST_FUN_FIRST = (300, 600)         # 켠 뒤 처음 나오기까지
+    GEST_FUN_SPACING = 120.0            # 다른 몸짓이 끝난 뒤 이만큼은 쉰다
     # 아래 여섯은 config의 "gestures_plus"를 켠 캐릭터에서만 나온다.
     GEST_PLUS = ("yawn", "doze", "think", "startle", "cheer", "sway")
     STRETCH_EVERY = 20 * 60      # 기지개 간격 기본값 (환경설정에서 바꾼다)
@@ -17299,6 +17318,7 @@ class Mascot:
             return
         if self.gest is not None and now >= self.gest_t0 + self.gest_dur:
             self.gest = None
+            self._gest_end_at = now
         self._gest_schedule(now)
         if self.gest is None:
             return
@@ -17750,6 +17770,7 @@ class Mascot:
             self.gest_groove_next = now + random.uniform(480, 900)
             self._gest_start("groove")        # 1시간에 네댓 번
         self._gest_extra(now)
+        self._gest_fun(now)
         if not self.timer_on:
             return
         every = self._stretch_secs()
@@ -17767,6 +17788,42 @@ class Mascot:
         elif now >= self.gest_stretch_next:
             self.gest_stretch_next = now + every
             self._stretch_raise(now)           # 정해 둔 간격마다
+
+    def _gest_fun_ok(self, now):
+        """새 몸짓이 나와도 되는 때인가 — 메뉴·슬라임·자리비움 칩이면 안 낸다.
+        작업 중이든 쉬는 중이든 낸다 (요청: 갑자기 보고 귀여워할 수 있게)."""
+        if not self.gestures_on or self.gest is not None:
+            return False
+        if now - self._gest_end_at < self.GEST_FUN_SPACING:
+            return False
+        if self._menu_shown or getattr(self, "_pm_stack", None):
+            return False
+        if self._slime_grab is not None:
+            return False
+        if self.cfg.get("chips") and self._chip() == "away":
+            return False
+        return True
+
+    def _gest_fun(self, now):
+        """춤 셋·눈 비비기의 방아쇠 — 정한 범위 안의 무작위 간격."""
+        if self._dance_next == 0.0:
+            self._dance_next = now + random.uniform(*self.GEST_FUN_FIRST)
+            self._eyerub_next = now + random.uniform(*self.GEST_FUN_FIRST) + 600
+            return
+        if now < self._dance_next and now < self._eyerub_next:
+            return
+        if not self._gest_fun_ok(now):
+            return
+        if now >= self._dance_next:
+            gap = self.DANCE_GAP_MUSIC if self._yt.get("playing") else self.DANCE_GAP
+            self._dance_next = now + random.uniform(*gap)
+            self._gest_start(random.choice(self.GEST_DANCES))
+            return
+        if now >= self._eyerub_next:
+            hour = time.localtime(now).tm_hour
+            gap = self.EYERUB_GAP_NIGHT if 1 <= hour < 6 else self.EYERUB_GAP
+            self._eyerub_next = now + random.uniform(*gap)
+            self._gest_start("eyerub")
 
     def _gest_extra(self, now):
         """새 몸짓의 방아쇠 — 하품·꾸벅·생각. (움찔은 놀랄 일이 있을 때만)
@@ -17832,6 +17889,9 @@ class Mascot:
         g = self.gest
         if g in self.GEST_PLUS:
             self._pose_plus(g, p, now, s, tm)
+            return
+        if g in self.GEST_NEW:
+            self._pose_new(g, p, now, s, tm)
             return
         if g == "nod":                        # 끄덕끄덕 — 머리만 아래위로
             self._g_hdy = abs(math.sin(p * math.pi * 4)) * 18 * s * ease
@@ -18007,6 +18067,160 @@ class Mascot:
             self._g_tilt = math.sin(p * math.pi * 9) * tm * 0.7 * k
             self._g_hdy = -6 * s * k
 
+    def _gest_hand(self, which, ang, k=None, sh_dy=-4.0):
+        """어깨에서 각도 ang(도 · 0=화면 오른쪽 · -90=위)로 팔 길이 k배만큼 뻗은
+        손끝을 '평소 손끝에서 얼마나 옮길까'(_g_hands 값)로 돌려준다.
+        오른팔은 화면 왼쪽으로 처져 있어 '바깥'이 180, 왼팔은 거울(180-ang)."""
+        L = math.hypot(*self._arm_nat) * (self.GEST_REACH if k is None else k)
+        if which == "r":
+            sx, sy = self._gest_shoulder(self.arm_top, sh_dy)
+            bx, by = self.arm_bottom
+        else:
+            sx, sy = self._gest_shoulder(self.armk_top, sh_dy)
+            bx, by = self.armk_bottom
+            ang = 180 - ang
+        a = math.radians(ang)
+        return (sx + math.cos(a) * L - bx, sy + math.sin(a) * L - by)
+
+    @staticmethod
+    def _lerp_ang(a, b, k):
+        d = ((b - a + 180) % 360) - 180
+        return a + d * k
+
+    def _gest_eye_pt(self):
+        """눈 비비기 목표 — 화면 왼쪽 눈의 실제 중심 (동공 파츠 알파의 왼쪽
+        덩어리 무게중심). 파츠 상자의 1/4 자리는 눈 바깥에 떨어진다 (요청 —
+        눈 정중앙에 대야 비비는 느낌). 동공이 없는 캐릭터(농담곰)는 머리
+        그림에서 잰 비율. 파츠 폴더별로 한 번만 잰다."""
+        key = (self.parts_dir, self.s, self.ox, self.oy)
+        if self._eye_pt_cache and self._eye_pt_cache[0] == key:
+            return self._eye_pt_cache[1]
+        hx0, hy0, hx1, hy1 = self._head_box
+        pt = (hx0 + (hx1 - hx0) * 0.40, self.oy + hy0 + (hy1 - hy0) * 0.40)
+        try:
+            pil = self._pil_cache.get("pupils")
+            lay = self.layout.get("pupils")
+            if pil is not None and lay and pil.width > 8:
+                a = pil.split()[3]
+                w, h = a.size
+                px = a.load()
+                cols = [any(px[x, y] > 60 for y in range(0, h, 2)) for x in range(w)]
+                x0 = next((x for x in range(w) if cols[x]), None)
+                if x0 is not None:
+                    x1 = x0
+                    while x1 < w and cols[x1]:
+                        x1 += 1
+                    if x1 - x0 < w * 0.15:
+                        x0, x1 = 0, w // 2
+                    sx = sy = n = 0
+                    for x in range(x0, x1):
+                        for y in range(h):
+                            if px[x, y] > 60:
+                                sx += x; sy += y; n += 1
+                    if n:
+                        # 파츠 그림은 이미 s 배 — 상자(pos)만 배율을 곱한다
+                        pt = (lay["pos"][0] * self.s + self.ox + sx / n,
+                              lay["pos"][1] * self.s + self.oy + sy / n)
+        except Exception:
+            pass
+        self._eye_pt_cache = (key, pt)
+        return pt
+
+    def _pose_new(self, g, p, now, s, tm):
+        """막춤·좌우 스텝·파도타기·눈 비비기. 손은 팔 원래 길이의 GEST_REACH 배
+        안에서만 움직인다 (지뢰 14 의 제약 위에 — 얼굴 옆·턱 높이까지)."""
+        ease = math.sin(min(1.0, p * 4.0) * math.pi / 2) * \
+            math.sin(min(1.0, (1.0 - p) * 4.0) * math.pi / 2)
+
+        def hands(ra, la, k=None, sh=-4.0):
+            r = self._gest_hand("r", ra, k, sh)
+            l = self._gest_hand("l", la, k, sh)
+            return {"r": (r[0] * ease, r[1] * ease), "l": (l[0] * ease, l[1] * ease),
+                    "sh_dy": sh, "hide_pen": True}
+        if g == "dance":
+            # 막춤 — 4박 두 마디. 짧은 팔을 어깨 축으로 휙휙 돌린다(위·옆·아래·옆).
+            # 몸은 박자마다 통통, 고개는 박자마다 반대로. 마지막은 두 손 위로.
+            beats = 8
+            b = p * beats
+            i = int(b); f = b - i
+            RA = [-140, 195, -140, 230, 195, -140, 230, -125]
+            LA = [195, -140, 230, -140, -140, 230, 195, -125]
+            j = min(i + 1, beats - 1)
+            k = math.sin(min(1.0, f * 1.6) * math.pi / 2)
+            self._g_hands = hands(self._lerp_ang(RA[i], RA[j], k),
+                                  self._lerp_ang(LA[i], LA[j], k), sh=-6.0)
+            self._g_dy = -abs(math.sin(b * math.pi)) * 8 * ease
+            self._g_tilt = (1 if i % 2 else -1) * tm * 0.8 * ease * \
+                math.sin(min(1.0, f * 2.0) * math.pi / 2)
+            self._g_hdy = -abs(math.sin(b * math.pi * 2)) * 3 * s * ease
+            self._g_smile = True
+            if self._note_left > 0 and now >= self._note_next:
+                self._note_left -= 1
+                self._note_next = now + random.uniform(0.45, 0.7)
+                self._spawn_note(now)
+            return
+        if g == "step":
+            # 좌우 스텝 — 몸이 기우는 쪽 손이 옆으로 나가고 반대 손은 살짝.
+            beat = math.sin(p * math.pi * 4)
+            a = abs(beat)
+            self._g_tilt = -beat * tm * 0.9 * ease
+            self._g_dy = -abs(math.sin(p * math.pi * 8)) * 6 * ease
+            if beat >= 0:
+                ra, la = self._lerp_ang(245, 185, a), self._lerp_ang(245, 235, a)
+            else:
+                ra, la = self._lerp_ang(245, 235, a), self._lerp_ang(245, 185, a)
+            self._g_hands = hands(ra, la, k=1.05, sh=-2.0)
+            self._g_smile = True
+            return
+        if g == "seawave":
+            # 파도타기 — 두 팔을 양옆으로 벌리고, 파도가 오른손끝에서 시작해
+            # 고개를 지나 왼손끝으로 빠져나간다. 팔은 통째로 돌리지 않고 그림을
+            # 길이 방향 '~' 로 구부린다(_wavy_arm). **한 방향으로만 흐른다** —
+            # 방향을 번갈면 되감기듯 끊겨 보인다 (요청). 폼마다 어깨 자리가 달라
+            # 팔을 벌리는 기본 각도는 config `wave_arm_deg` 로 내릴 수 있다 (사해).
+            T = 1.7
+            t = (now - self.gest_t0) / T
+            q = t - int(t)
+
+            def bump(c):
+                d = (q - c) / 0.42
+                return math.exp(-d * d * 2.4)
+            ph = t * 2 * math.pi
+            base = 195 - float(self.cfg.get("wave_arm_deg", 0) or 0)
+            self._g_hands = {"wavy": True, "hide_pen": True, "sh_dy": -4.0,
+                             "ang_r": base + 12 * bump(0.1), "ang_l": base + 12 * bump(0.9),
+                             "ph_r": ph, "ph_l": -ph, "amp": 0.22 * ease}
+            self._g_tilt = -tm * 0.9 * math.sin(ph) * ease
+            mid = bump(0.5)
+            self._g_dy = mid * 7 * ease
+            self._g_hdy = mid * 5 * s * ease
+            self._g_smile = True
+            return
+        if g == "eyerub":
+            # 눈 비비기 — 화면 왼쪽 눈 한가운데에 손을 대고 눈을 감은 채 좌우로
+            # 비빈다. 어깨를 올리고 → 머리를 내리고 → 그래도 모자라면(팔 짧은
+            # 캐릭터 — 하독·농담곰·성실이) 팔을 늘인다. 상한 1.9배 (요청).
+            u = self._hold(p, 0.25, 0.75)
+            rub = math.sin(p * math.pi * 12) * 7 * (1.0 if 0.3 < p < 0.7 else 0.0)
+            SH = -12.0
+            sx, sy = self._gest_shoulder(self.arm_top, SH)
+            ex, ey = self._gest_eye_pt()
+            ey -= 6.0                          # 손끝이 눈 위쪽에 닿아야 손 덩어리가 눈을 덮는다
+            L0 = math.hypot(*self._arm_nat)
+            dx = ex - sx
+            need = max(1.0, sy - ey)
+            drop = min(28.0, max(0.0, need - math.sqrt(max((L0 * self.GEST_REACH) ** 2 - dx * dx, 1.0))))
+            L = min(L0 * 1.9, max(L0 * 1.05, math.hypot(dx, need - drop)))
+            dxc = max(-L * 0.95, min(L * 0.95, dx))
+            dyr = -math.sqrt(max(L * L - dxc * dxc, 1.0))
+            hx = sx + dxc - self.arm_bottom[0]
+            hy = sy + dyr - self.arm_bottom[1]
+            self._g_hands = {"r": (hx * u + rub * u, hy * u), "sh_dy": SH, "hide_pen": True}
+            self._g_tilt = tm * 0.5 * u
+            self._g_hdy = min(26.0, drop) * u
+            self._g_eyes_shut = u > 0.5
+            return
+
     def _gest_shoulder(self, top, dy=16.0):
         """제스처용 어깨 — 원래 접합점보다 몸 안쪽으로 묻어 둔 자리.
 
@@ -18021,6 +18235,71 @@ class Mascot:
         inset = 34.0 - float((self._g_hands or {}).get("sh_out", 0.0))
         return (top[0] + inset * s * d, top[1] + dy * s)
 
+    WAVY_CACHE_MAX = 160         # 파도타기 팔 그림 (작은 팔이라 장수로 잡아도 된다)
+    WAVY_STEPS = 12              # 파도 위상을 몇 칸으로 끊어 캐시하나
+
+    def _wavy_arm(self, which, ang, phase, amp_k, klen=1.0):
+        """팔 그림을 길이 방향 '~' 로 구부려 어깨에서 각도 ang 으로 뻗은 그림 —
+        (PhotoImage, 어깨 접합점의 그림 안 좌표). 위상은 12칸으로 끊어 캐시.
+        klen 은 팔 짧은 캐릭터용 세로 늘이기(굵기는 그대로)."""
+        e = self._arm_src.get(which)
+        if e is None:
+            return None
+        src, (nx, ny), atop, abot = e
+        w, h = src.size
+        amp = max(1.0, w * amp_k)
+        step = int(round(phase / (2 * math.pi) * self.WAVY_STEPS)) % self.WAVY_STEPS
+        ar = math.radians(ang)
+        deg = math.degrees(math.atan2(math.cos(ar), math.sin(ar)) - math.atan2(nx, ny))
+        key = (which, step, round(deg), round(amp), round(klen * 20))
+        hit = self._wavy_cache.get(key)
+        if hit is not None:
+            return hit
+        if len(self._wavy_cache) > self.WAVY_CACHE_MAX:
+            for k9 in list(self._wavy_cache)[:self.WAVY_CACHE_MAX // 2]:
+                del self._wavy_cache[k9]              # 오래된 절반만 (지뢰 18)
+        pad = int(amp) + 2
+        if klen > 1.01:
+            h = max(8, round(h * klen))
+            src = src.resize((w, h), Image.LANCZOS)
+        bent = Image.new("RGBA", (w + pad * 2, h), (0, 0, 0, 0))
+        y0, y1 = atop[1] * klen, abot[1] * klen
+        span = max(1.0, y1 - y0)
+        ph = step / float(self.WAVY_STEPS) * 2 * math.pi
+        for y in range(h):
+            t = (y - y0) / span                       # 0 어깨 · 1 손끝
+            env = 0.0 if t < 0.12 else min(1.0, (t - 0.12) / 0.35)   # 어깨는 몸에 붙어 있어야
+            off = amp * math.sin(2 * math.pi * t * 0.8 - ph) * env
+            row = src.crop((0, y, w, y + 1))
+            bent.paste(row, (pad + int(round(off)), y), row)
+        im = bent.rotate(deg, expand=True, resample=self._resample())
+        a = math.radians(deg)
+        ox_ = atop[0] + pad - bent.width / 2.0
+        oy_ = atop[1] * klen - bent.height / 2.0
+        rx = ox_ * math.cos(a) + oy_ * math.sin(a) + im.width / 2.0
+        ry = -ox_ * math.sin(a) + oy_ * math.cos(a) + im.height / 2.0
+        hit = (self._pic(im), (rx, ry))
+        self._wavy_cache[key] = hit
+        return hit
+
+    def _draw_wavy_arms(self, yo):
+        """파도타기의 두 팔 — 구부린 그림을 어깨에 붙인다. 팔이 머리 폭의 0.3배도
+        안 되는 캐릭터는 1.45배까지 늘인다 (요청 — 팔 짧은 캐릭터는 약간 늘려도 됨)."""
+        g = self._g_hands or {}
+        c = self.canvas
+        d4 = yo * 0.25
+        L0 = math.hypot(*self._arm_nat)
+        hw = self._head_box[2] - self._head_box[0]
+        klen = max(1.0, min(1.45, hw * 0.3 / max(L0, 1.0)))
+        for which, top, ang, ph in (("r", self.arm_top, g["ang_r"], g["ph_r"]),
+                                    ("l", self.armk_top, 180 - g["ang_l"], g["ph_l"])):
+            if which not in self._arm_src:
+                continue
+            sx, sy = self._gest_shoulder(top, g.get("sh_dy", 16.0))
+            arm = self._wavy_arm(which, ang, ph, g.get("amp", 0.22), klen)
+            if arm is not None:
+                c.create_image(sx - arm[1][0], sy - arm[1][1] + d4, image=arm[0], anchor="nw")
+
     def _draw_gesture_arms(self, yo):
         """제스처 중의 두 팔. 어깨는 그대로 두고 손끝만 원하는 자리로 보낸다.
 
@@ -18030,6 +18309,9 @@ class Mascot:
         """
         c = self.canvas
         g = self._g_hands or {}
+        if g.get("wavy"):
+            self._draw_wavy_arms(yo)          # 파도타기 — 구부린 팔
+            return
         d4 = yo * 0.25
         ddx, ddy = g.get("r", (0.0, 0.0))
         sx, sy = self._gest_shoulder(self.arm_top, g.get("sh_dy", 16.0))
@@ -21064,33 +21346,12 @@ class Mascot:
             except Exception:
                 pass
             return
-        if self._glass:
-            return                    # 색상키 창에 영역까지 얹지 않는다
-        try:
-            w, h = win.winfo_width(), win.winfo_height()
-            if w < 8 or h < 8:
-                return
-            key = (hwnd, w, h)
-            if getattr(win, "_chrome_rounded", None) == key:
-                return
-            u9 = ctypes.WinDLL("user32")
-            g9 = ctypes.WinDLL("gdi32")
-            g9.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
-            g9.CreateRoundRectRgn.restype = ctypes.c_void_p
-            u9.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
-            try:
-                dpi = float(win.winfo_fpixels("1i"))
-            except Exception:
-                dpi = 96.0
-            d = int(round(24.0 * dpi / 96.0))
-            u9.SetWindowRgn(hwnd, g9.CreateRoundRectRgn(0, 0, w + 1, h + 1, d, d), 1)
-            win._chrome_rounded = key
-            if not getattr(win, "_chrome_rgn_bound", False):
-                win._chrome_rgn_bound = True
-                win.bind("<Configure>", lambda e, w9=win: (
-                    self._chrome_round(w9) if e.widget is w9 else None), add="+")
-        except Exception:
-            pass
+        # 윈도우 10 — **각진 채로 둔다** (요청 2026-09-20). 예전에는 둥근 영역
+        # (SetWindowRgn)으로 잘랐는데, 계단이 지고 테두리 선이 모서리에서 얇아져
+        # '둥글지도 각지지도 않은' 애매한 모양이었다. 유리 테마의 판도 윈도우
+        # 10 에서는 각지므로(아크릴은 잘라 낼 수 없다) 창마다 모양이 같아진다.
+        # 매끈하게 둥글리려면 색상키 + 판 방식으로 넓혀야 한다 (지뢰 193).
+        return
 
     def _chrome_draw(self, win, cv, x, y, dir=-1, tags="dyn", r=None):
         """– □ × 단추 (dir=-1 이면 x 에서 왼쪽으로, 1 이면 오른쪽으로).
@@ -23473,7 +23734,11 @@ class Mascot:
             cv._pm_keep = set()
             st["band_items"] = {}
             if pal["ring"]:
-                r9 = max(4, int(self._glass_r()) + 1)
+                # 테두리 반지름은 창 모서리(DWM)와 같게 — 윈도우 10 은 창이
+                # 각지므로 테두리도 각지게 (둥근 테두리를 각진 창에 그리면
+                # 모서리에 바탕이 삐죽 남는다).
+                gr9 = int(self._glass_r())
+                r9 = gr9 + 1 if gr9 > 0 else 1
                 put(self._pm_ring(W, H, r9, pal["ring"], max(1, u(1))), 0, 0,
                     tags=("pm", "pm_ring"))
             dsz = u(21)
@@ -38038,7 +38303,80 @@ class Mascot:
         else:
             self.canvas.create_image(x, y, image=tk_im, anchor="nw")
 
+    PROP_ROT_MAX = 60            # 기울여 돌린 소품 그림 캐시 상한
+
+    def _follow_head(self, fn, yo, rotate_pil=False):
+        """fn(yo) 이 그리는 것을 머리에 붙인다 — 끄덕임(_g_hdy)만큼 같이 내려가고
+        고개를 기울이면 목을 축으로 같은 각도만큼 돈다 (제보: 고개를 숙이는데
+        소품·양갈래는 제자리). 그리는 동안 canvas.create_image 를 감싸 자리를
+        돌리고, rotate_pil 이면 _put 으로 오는 소품 그림도 1도 단위로 돌려 캐시한다.
+        움직이는 조각(_back_anim)은 프레임 그림이라 자리만 돌린다 (6도 안이라 티가
+        안 난다). 실측: 머리 20px 내림에 양갈래 20px, 기울임 5도에 15px."""
+        hyo = yo + self._g_hdy
+        tilt = 0.0
+        if abs(self._g_tilt) >= 0.5 and self._tilt_max >= 2:
+            tilt = max(-self._tilt_max, min(self._tilt_max, self._g_tilt))
+        if abs(tilt) < 0.5:
+            return fn(hyo)
+        # self.canvas 는 매끈 경로에서는 시트(_CharSheet)다 — create_image 가
+        # PIL 을 받으므로 같은 감싸기가 양쪽에 통한다 (지뢰 119: 캐시 형식만 가른다).
+        cv = self.canvas
+        sheet = self._sheet is not None
+        real_ci = cv.create_image
+        nx, ny = self._neck[0], self._neck[1] + self.oy + hyo
+        a = math.radians(tilt)
+
+        def rot_pt(cx, cy):
+            dx, dy = cx - nx, cy - ny
+            return (nx + dx * math.cos(a) + dy * math.sin(a),
+                    ny - dx * math.sin(a) + dy * math.cos(a))
+
+        def ci_rot(x, y, image=None, anchor="nw", **kw):
+            if image is None or anchor != "nw":
+                return real_ci(x, y, image=image, anchor=anchor, **kw)
+            try:
+                if isinstance(image, Image.Image):
+                    w9, h9 = image.size
+                else:
+                    w9, h9 = image.width(), image.height()
+            except Exception:
+                return real_ci(x, y, image=image, anchor=anchor, **kw)
+            rcx, rcy = rot_pt(x + w9 / 2.0, y + h9 / 2.0)
+            return real_ci(rcx - w9 / 2.0, rcy - h9 / 2.0, image=image, anchor="nw", **kw)
+
+        real_put = self._put
+
+        def put_rot(name, x, y, anchor="nw"):
+            pil = self._pil_cache.get(name)
+            if pil is None or anchor != "nw" or not str(name).startswith("prop"):
+                return real_put(name, x, y, anchor)
+            key = (name, round(tilt), self.parts_dir, sheet)
+            ph = self._prop_rot_cache.get(key)
+            if ph is None:
+                if len(self._prop_rot_cache) > self.PROP_ROT_MAX:
+                    for k9 in list(self._prop_rot_cache)[:self.PROP_ROT_MAX // 2]:
+                        del self._prop_rot_cache[k9]
+                rot = pil.rotate(tilt, expand=True, resample=self._resample())
+                ph = self._prop_rot_cache[key] = rot if sheet else self._pic(rot)
+            w9, h9 = (ph.size if sheet else (ph.width(), ph.height()))
+            rcx, rcy = rot_pt(x + pil.width / 2.0, y + pil.height / 2.0)
+            real_ci(rcx - w9 / 2.0, rcy - h9 / 2.0, image=ph, anchor="nw")
+            return True
+        cv.create_image = ci_rot
+        if rotate_pil:
+            self._put = put_rot
+        try:
+            return fn(hyo)
+        finally:
+            del cv.create_image
+            if rotate_pil:
+                del self._put
+
     def _draw_prop_top(self, yo):
+        """팔 위 소품 — 머리를 따라간다 (_follow_head). 본체는 _draw_prop_top_raw."""
+        return self._follow_head(self._draw_prop_top_raw, yo, rotate_pil=True)
+
+    def _draw_prop_top_raw(self, yo):
         """소품을 팔·머리보다 위에 그린다 (config 의 prop_over_arms).
 
         **조각(prop_bit)까지 함께 올려야 한다** — 소품만 올리면 조각이
