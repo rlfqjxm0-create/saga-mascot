@@ -1610,6 +1610,11 @@ DEFAULT_SETTINGS = {
     "g2_bgm_vol": 9,         # 2048 브금 볼륨 (0~100)
     "room_msg": "",          # 홈에 보일 오늘 한 줄 (목표·상태)
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
+    "room_msg_keep": False,  # 문구 저장 — 켜면 날이 바뀌어도 고칠 때까지 남는다
+    "board_seen": False,     # 우클릭 메뉴의 '마이 보드'를 눌러 봤나 (새로움 점)
+    "mag_seen": False,       # 우클릭 메뉴의 '자석 모드'를 눌러 봤나 (새로움 점)
+    "magnet": False,         # 자석 모드 — 화면 가장자리에 붙어 벽 너머에서 내다본다
+    "mag_side": "",          # 지금 붙어 있는 벽 (l r t b · 빈 값이면 안 붙음)
     "room_goal": "",         # 홈에 보일 '오늘 목표' (있으면 말풍선을 차지)
     "room_goal_day": "",     # 그 목표를 쓴 작업일 — 체크도 이 도장을 쓴다
     "room_goal_done": False,  # 목표를 해냈는가 (본인이 동그라미를 눌러 켠다)
@@ -1975,6 +1980,20 @@ def _pm_glyph(d, kind, cx, cy, g, c, hole):
         d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], outline=c, width=w)
         d.line([(cx, cy), (cx, cy - 0.48 * g)], fill=c, width=w)
         d.line([(cx, cy), (cx + 0.36 * g, cy + 0.2 * g)], fill=c, width=w)
+    elif kind == "board":
+        # 핀으로 꽂은 쪽지 둘이 붙은 판
+        d.rounded_rectangle([cx - 0.92 * g, cy - 0.82 * g, cx + 0.92 * g, cy + 0.82 * g], radius=0.26 * g, fill=c)
+        d.rounded_rectangle([cx - 0.56 * g, cy - 0.46 * g, cx - 0.04 * g, cy + 0.14 * g], radius=0.08 * g, fill=hole)
+        d.rounded_rectangle([cx + 0.10 * g, cy - 0.20 * g, cx + 0.58 * g, cy + 0.46 * g], radius=0.08 * g, fill=hole)
+    elif kind == "magnet":
+        # 말굽자석 — 아래가 둥근 U, 두 끝에 흰 띠
+        d.pieslice([cx - 0.9 * g, cy - 0.7 * g, cx + 0.9 * g, cy + 1.1 * g], 0, 180, fill=c)
+        d.rectangle([cx - 0.9 * g, cy - 0.9 * g, cx - 0.36 * g, cy + 0.22 * g], fill=c)
+        d.rectangle([cx + 0.36 * g, cy - 0.9 * g, cx + 0.9 * g, cy + 0.22 * g], fill=c)
+        d.pieslice([cx - 0.36 * g, cy - 0.16 * g, cx + 0.36 * g, cy + 0.56 * g], 0, 180, fill=hole)
+        d.rectangle([cx - 0.36 * g, cy - 0.95 * g, cx + 0.36 * g, cy + 0.21 * g], fill=hole)
+        for x0, x1 in ((cx - 0.92 * g, cx - 0.34 * g), (cx + 0.34 * g, cx + 0.92 * g)):
+            d.rectangle([x0, cy - 0.56 * g, x1, cy - 0.40 * g], fill=hole)
     elif kind == "folder":
         d.rounded_rectangle([cx - 0.92 * g, cy - 0.62 * g, cx - 0.02 * g, cy - 0.12 * g], radius=0.16 * g, fill=c)
         d.rounded_rectangle([cx - 0.92 * g, cy - 0.38 * g, cx + 0.92 * g, cy + 0.82 * g], radius=0.24 * g, fill=c)
@@ -4056,6 +4075,32 @@ class _CharSheet:
             self.dr.line(list(pts) + [pts[0]], fill=o, width=w,
                          joint="curve" if w > 2 else None)
         return 0
+
+
+class _LazySheet(_CharSheet):
+    """무엇이 그려질 때에야 그림을 만드는 시트 (자석 모드의 묶음 장).
+
+    말풍선·간식이 없는 프레임이 대부분인데, 그때마다 창 크기의 빈 그림을 만들고
+    얹으면 프레임마다 헛되이 몇 MB 를 쓰고 버린다. `used` 가 거짓이면 아무것도
+    안 그려진 것이다."""
+
+    def __init__(self, real, w, h, owner=None):
+        self.real = real
+        self.owner = owner
+        self._size = (max(1, int(w)), max(1, int(h)))
+        self._im = None
+        self.spill = 0
+        self._dr = None
+
+    @property
+    def used(self):
+        return self._im is not None
+
+    @property
+    def im(self):
+        if self._im is None:
+            self._im = Image.new("RGBA", self._size, (0, 0, 0, 0))
+        return self._im
 
 
 def _off_line(p, q, toward, dist):
@@ -8732,6 +8777,19 @@ class Mascot:
         # 상태 칩 — 지금 무엇을 하는 중인지 홈에 알린다 (요청).
         # 맨 위에 두고(요청: 상태 칩 → 소품 새로고침 → BGM → 슬라임),
         # 커서를 올리면 목록이 옆으로 나온다.
+        # 마이 보드 — 상태 칩 바로 위 (요청). 홈 내 칸의 집 아이콘과 같은 창을 연다.
+        self._new_menu_idx = {}
+        if self.cfg.get("myhome") and IS_WIN:
+            _nb9 = self._menu_new("board")
+            menu.add_command(label="마이 보드  ●" if _nb9 else "마이 보드",
+                             command=lambda: self._safe("board_open",
+                                                        self._board_open_menu))
+            self._new_menu_idx["board"] = (menu.index("end"), "마이 보드")
+            if _nb9:
+                try:
+                    menu.entryconfig(menu.index("end"), foreground="#e0525c")
+                except Exception:
+                    pass
         if self.cfg.get("chips"):
             sub9 = tk.Menu(menu, tearoff=0, font=self._uf(9),
                            bg=self.card["panel"], fg=self.card["text"],
@@ -8810,11 +8868,22 @@ class Mascot:
             menu.add_command(label="타이머 복구",
                              command=lambda: self._safe(
                                  "unreset", self._timer_unreset))
-        # 뭔가 안 될 때 보내 줄 파일이 있는 폴더. 경로를 말로 알려 주면
-        # 못 찾는다 — 눌러서 열게 한다.
-        menu.add_command(label="오류 기록 폴더 열기",
-                         command=lambda: self._safe(
-                             "open_state", self._open_state_dir))
+        # 자석 모드 — 켜고 화면 끝으로 끌고 가면 붙는다 (요청: 이 자리에).
+        # '오류 기록 폴더 열기'는 환경설정 아래쪽으로 옮겼다 (요청).
+        if self.cfg.get("magnet") and IS_WIN:
+            self._mag_var = tk.BooleanVar(master=self.root,
+                                          value=bool(self.us.get("magnet")))
+            _nm9 = self._menu_new("mag")
+            menu.add_checkbutton(label="자석 모드  ●" if _nm9 else "자석 모드",
+                                 variable=self._mag_var,
+                                 command=lambda: self._safe(
+                                     "mag_toggle", self._mag_toggle))
+            self._new_menu_idx["mag"] = (menu.index("end"), "자석 모드")
+            if _nm9:
+                try:
+                    menu.entryconfig(menu.index("end"), foreground="#e0525c")
+                except Exception:
+                    pass
         menu.add_separator()
         # 작업 종료는 카드에서 뺐으므로 여기가 유일한 통로다. 맨 위에 두고
         # 색과 굵기로 다른 항목과 구분한다 — 하루를 끝내는, 되돌릴 수 없는
@@ -8896,6 +8965,26 @@ class Mascot:
         self._chip_note_side = 1     # 음표가 뜨는 쪽
         self._chip_z_until = 0.0     # 이때까지 z순서를 다시 못박는다
         self._chip_hide = False      # 자리비움 — 캐릭터를 숨겼나
+        self._mag = None             # 자석 모드 — 붙은 벽 (l r t b)
+        self._mag_boot = True        # 켠 뒤 저장해 둔 벽을 한 번 되살린다
+        self._mag_peek = 0.0         # 벽에서 내민 정도 (부드럽게 따라간다)
+        self._mag_off = (0, 0)       # 몸 레이어가 본체 창에서 비켜 선 만큼
+        self._mag_head = None        # 머리 한가운데 (본체 창 좌표)
+        self._mag_ang = 0.0          # 지금 기울기 (도 · 반시계)
+        self._mag_grab = None        # 붙은 채로 잡았을 때의 끌기 기준
+        self._mag_keep_at = 0.0
+        self._mag_hands = {}         # 돌려 둔 손 그림 (벽·손·각도)
+        self._mag_now = None         # 이번 프레임에 실제로 그린 벽
+        self._mag_ex = 0.0           # 머리 위로 솟은 소품 높이 (카드에 안 닿게)
+        self._mag_fitv = None        # 이 캐릭터·소품에 맞춰 잰 자세 (_mag_fit)
+        self._mag_out = None         # 직전에 만든 그림 (같은 프레임이면 그대로 쓴다)
+        self._mag_sig = None         # 그 그림을 정한 것 전부 (자세·몸 장·덧장·묶음)
+        self._mag_same = False       # 이번 프레임이 직전과 같았나 (올리기를 건너뛴다)
+        self._mag_push = None        # 마지막으로 올린 (자리, 시각)
+        self._mag_groups = None      # 옮겨 얹을 묶음 [(그림, dx, dy)]
+        self._mag_ex_key = None
+        self._mag_fig = None
+        self._mag_dirty = False
         self._pl_ctl = []            # 플레이리스트 이전/다음 단추 자리
         self._amb_btn = None         # 환경음 알약 자리 (x0,y0,x1,y1)
         self._yt_note = None         # 지금 떠 있는 음악 음표 (하나만 띄운다)
@@ -9361,6 +9450,9 @@ class Mascot:
         # 창 스티커 — 홈·뽀모도로 창 안에 붙인다 (바탕화면 스티커와 별개)
         self._stk_mem = None       # 읽어 둔 목록
         self._stk_cache = {}       # (id, 폭, 각도) → 그린 판
+        self._stk_xf = {}          # 모션·반응 프레임 그림 (id, 폭, 각도, 가로, 세로) → (그림, 바이트)
+        self._stk_xf_bytes = 0     # 그 캐시가 든 용량
+        self._stk_xbase = {}       # 모션용 밑그림 (id, 폭) → 줄인 PIL
         self._stk_srcs = {}        # id → 원본 PIL (몇 장만)
         self._stk_edit = None      # 'room' / 'pomo' — 정리 중인 창
         self._stk_pick = None      # 고른 스티커 id
@@ -9373,6 +9465,64 @@ class Mascot:
         self._stk_cv = {}          # 창 → (캔버스, 그릴 때의 tags) — 끌 때 그 항목만 옮긴다
         self._stk_drag = None      # 잡고 있는 것
         self._stk_winref = None    # 스티커 정리 창
+        # 마이 보드 (마이홈 1차 · 지뢰 13 — 전부 여기서 초기화)
+        self._board_win = self._board_cv = self._board_bcv = None
+        self._board_pick = None
+        self._board_edit = False
+        self._board_mem = None
+        self._board_ph = {}
+        self._board_mat_cache = {}
+        self._board_job = None
+        self._board_hit = []
+        self._board_ui_hit = []
+        self._board_drag = None
+        self._board_toast_v = None
+        self._board_size = None
+        self._board_uiph = {}      # 보드 UI 조각 그림 캐시
+        self._board_twc = {}       # 글자 폭 캐시
+        self._board_rz_job = None
+        self._board_face_ok = None    # 보드 본문 글꼴 판이 실렸나
+        self._room_poke = None        # 홈 — 누른 반응 (내 캐릭터 통통 · 스티커 톡)
+        self._room_pfx = []           # 홈 — 떠오르는 하트
+        self._room_heart_ph = None
+        self._board_matadj = False    # 내 이미지 바탕 자리 조절 중
+        self._board_cover = None      # (열쇠, 덮개 크기로 늘린 바탕 그림) — 한 장만
+        self._board_poke = None       # 누르면 나오는 반응 (캐릭터 통통 · 스티커 톡)
+        self._board_fx = []           # 떠오르는 하트들
+        self._board_say = None        # (반응 한마디, 끝나는 시각)
+        self._board_char_xy = None    # 캐릭터가 놓인 자리 (x, 바닥 y, 폭, 높이)
+        self._board_grips = []        # 고른 것의 손잡이 (x, y, 반지름, 종류, 주인)
+        self._board_stk_last = {}     # 모션 스티커가 지금 얹고 있는 그림
+        self._board_bgm_last = None   # 보드에 적힌 곡 이름 (바뀌면 다시 그린다)
+        self._board_bgm_at = 0.0
+        self._board_rows = {}         # 체크리스트 줄 자리 (id → (위, 줄높이, 개수, 폭, 높이) · 2배 좌표)
+        self._board_undo_stack = []   # 되돌리기 (상태 json 문자열)
+        self._board_last_snap = None
+        self._board_reel = None       # 카세트 릴 항목 둘 (오노추 재생 연출)
+        self._board_note_at = 0.0
+        self._board_day = ""
+        self._board_tool_h = 58
+        self._board_tips = []         # 머리 아이콘 단추 이름표 (x0, y0, x1, y1, 글)
+        self._board_tab = "board"     # 보드 | 달력 (cal)
+        self._cal_hit = []            # 달력의 누르는 자리
+        self._cal_mem = None          # .calendar.json (한 번 읽고 들고 있는다)
+        self._cal_ym = None           # 보고 있는 (해, 달)
+        self._cal_sel = None          # 고른 날 (날 수)
+        self._cal_ev = None           # 고른 일정
+        self._cal_flt = ""            # 분류로 거르기 ("" = 전체)
+        self._cal_edit_win = None
+        self._cal_edit_st = None
+        self._board_ask_w = None
+        self._cal_edit_save = None
+        self._cal_edit_w = None
+        self._cal_touch_job = None
+        self._todo_refs = None        # 할 일 말풍선의 줄마다 무엇인지 (달력에서 온 줄 포함)
+        self._due_refs = None
+        self._cal_day = ""            # 마지막으로 본 날짜 (바뀌면 말풍선을 다시 그린다)
+        self._cal_day_at = 0.0
+        self._cal_todo_txt = []       # 달력에 그려 둔 할 일 글 (누를 때 같은 것인지 본다)
+        self._board_set_win = self._board_set_cv = None    # 보드 환경설정 창
+        self._board_set_hit = []
         self._stk_wipe = False     # 배경 지우기 모드
         self._stk_tol = self.STK_TOL
         self._room_body = []
@@ -10147,6 +10297,13 @@ class Mascot:
         self._prop_rot_cache = {}
         self._wavy_cache = {}
         self._eye_pt_cache = None
+        # 자석 모드의 손 그림·잰 자세도 파츠(팔·몸·머리)에서 나온다 — 옷을 갈아입거나
+        # 소품을 바꾸면 옛 팔·옛 자세가 남는다 (열쇠가 그림 크기뿐이라 크기가 같으면 못 가른다)
+        self._mag_hands = {}
+        self._mag_fitv = None
+        self._mag_ex_key = None
+        self._mag_out = self._mag_sig = None
+        self._mag_tilt_keep = None
         self._tilt_max = 0.0
         self._tilt_base = self._tilt_base_awake = None
         self._tilt_base_smile = None
@@ -10731,6 +10888,10 @@ class Mascot:
         x0 = getattr(self, "card_cx", self.W / 2) - w / 2
         # 창 밖으로 나가지 않게 — 책상이 한쪽으로 치우친 캐릭터도 안 잘리게
         x0 = max(3.0, min(x0, self.W - w - 3.0)) if self.W >= w + 6 else x0
+        # 자석 모드 — 옆 벽에 붙었으면 카드도 그 벽 쪽으로 붙인다 (요청)
+        mg9 = getattr(self, "_mag", None)
+        if mg9 in ("l", "r") and self.W >= w + 6 and self._mag_side():
+            x0 = (self.W - w - 3.0) if mg9 == "r" else 3.0
         # 음악 버튼이 있으면 카드를 그만큼 아래로 밀어 버튼 자리를 낸다
         y0 = float(self.cfg.get("card_top", 22)) + self._yt_bar()
         return {"x0": x0, "y0": y0, "x1": x0 + w, "y1": y0 + h, "w": w, "h": h}
@@ -11583,6 +11744,19 @@ class Mascot:
         # 고양이 소품의 **머리**를 잡았다 — 쓰다듬기다. 창을 옮기면 안
         # 된다 (요청) — 슬라임 잡기와 같은 길로 _on_drag 가 가로챈다.
         hb9 = self._safe_str(self._cat_box, True) or None
+        self._mag_grab = None
+        if self._mag_side():
+            # 자석 모드 — 소품·슬라임 자리는 평소 모습 기준이라 안 본다.
+            # 끌기 기준은 '평소 모습으로 그 벽에 닿은 자리'로 잡는다 — 몸이
+            # 창 밖(위쪽 벽)에 있어도 조금 끌었다고 바로 떨어지지 않게.
+            hb9 = None
+            try:
+                x9, y9 = self.root.winfo_x(), self.root.winfo_y()
+                mon9 = monitor_work(e.x_root, e.y_root)
+                fx9, fy9 = self._mag_flush(self._mag, x9, y9, mon9)
+                self._mag_grab = (e.x_root - fx9, e.y_root - fy9)
+            except Exception:
+                self._mag_grab = None
         # 눌러서 끄는 말풍선(운세)이 머리 위에 떠 있으면 그쪽이 먼저다 —
         # 쓰다듬기가 가로채면 말풍선을 끌 수 없게 된다.
         bb9 = getattr(self, "_bubble_box", None)
@@ -11598,7 +11772,7 @@ class Mascot:
         #  맨 앞으로 옮겼다.)
         self._dragged = False
         self._slime_grab = None
-        if self.slime is not None:
+        if self.slime is not None and not self._mag_side():
             self._safe("slime_press", self._slime_press, e.x, e.y)
 
     def _on_drag(self, e):
@@ -11651,7 +11825,21 @@ class Mascot:
                 except Exception:
                     pass
         self._dragged = True
-        self.root.geometry(f"+{e.x_root - px}+{e.y_root - py}")
+        nx9, ny9 = e.x_root - px, e.y_root - py
+        if self._mag_ok():
+            # 자석 모드 — 벽에 가까우면 '착' 붙고, 붙은 채로는 벽을 탄다
+            if self._mag_grab is not None:
+                nx9 = e.x_root - self._mag_grab[0]
+                ny9 = e.y_root - self._mag_grab[1]
+            try:
+                nx9, ny9, sd9 = self._mag_snap(nx9, ny9, e.x_root, e.y_root)
+                if self._mag_set(sd9):
+                    self._mag_dirty = True
+                    if sd9:
+                        self._safe("ui_click", self._ui_click)
+            except Exception:
+                self._log_error("mag_snap")
+        self.root.geometry(f"+{nx9}+{ny9}")
 
     def _on_release(self, e):
         # 여백 직접 조정 — **끌었을 때만** 저장하고 끝낸다. 클릭 한 번으로
@@ -11689,6 +11877,9 @@ class Mascot:
             return
         if self._dragged:
             self._safe("win_pos", self._save_win_pos)
+            if getattr(self, "_mag_dirty", False):
+                self._mag_dirty = False
+                self._safe("mag_save", self._save_settings)
             if self._pane_ok():
                 try:
                     self._pane.unfreeze()
@@ -11826,6 +12017,11 @@ class Mascot:
                 # 앞이어야 한다** — 책상 클릭이라 슬라임 꺼내기가 가로챈다.
                 self._safe("ui_click", self._ui_click)
                 self._safe("chip", self._chip_set, "online")
+            elif self._mag_side() and not on_card:
+                # 자석 모드 — 책상이 없으니 어디를 눌러도 콕 찌르기다
+                if self.can_talk:
+                    self._safe("ui_click", self._ui_click)
+                    self._on_poke()
             elif self.cfg.get("slime") and not on_card and self._on_desk(px, py):
                 # 책상을 누르면 슬라임을 꺼냈다 치웠다 한다. 슬라임 위를
                 # 눌렀으면 이미 _on_press가 붙잡았으므로 여기까지 안 온다.
@@ -11934,7 +12130,7 @@ class Mascot:
         else:
             d[str(key)] = [int(xy[0]), int(xy[1])]
         live = set()
-        for t in (self.todos or []):
+        for t in (self._todo_rows() or []):      # 달력에서 온 줄의 자리도 남긴다
             live.add(TodoPanel._spot_key(t))
         d = dict((k, v) for k, v in d.items() if k in live)
         self.us["todo_spots"] = d
@@ -11967,27 +12163,70 @@ class Mascot:
             return
         self.due_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
 
+    def _todo_rows(self):
+        """말풍선에 그릴 할 일 — 내가 적은 것 + 달력에서 '할 일 말풍선에 띄우기'를 켠 일정.
+
+        달력 몫은 **저장하지 않고 그릴 때마다 계산한다** (지뢰 30) — 베껴 두면 한쪽만
+        고쳤을 때 어긋난다. 일정마다 '다음 단계' 하나(단계가 없으면 일정 이름)만 띄운다.
+        refs 는 줄마다 그것이 무엇인지 — ("todo", 번호) 또는 ("ev", 일정, 단계 번호)."""
+        rows = list(self.todos)
+        refs = [("todo", i) for i in range(len(rows))]
+        try:
+            pins = self._cal_pins("t")
+        except Exception:
+            pins = []
+            self._log_error("cal_pins_t")
+        for e in pins:
+            if len(rows) >= 24:
+                break
+            nxt = next((i for i, st in enumerate(e["steps"]) if not st["ok"]), None)
+            if nxt is None:
+                rows.append(todo_pack(e["name"], False, False, 0))
+                refs.append(("ev", e["id"], -1))
+            else:
+                t9 = e["steps"][nxt]["t"]
+                rows.append(todo_pack(t9 + "\n" + e["name"], False, False, 0,
+                                      [[len(t9), 1], [1 + len(e["name"]), 0]]))
+                refs.append(("ev", e["id"], nxt))
+        self._todo_refs = refs
+        return rows
+
+    def _todo_ref(self, idx):
+        self._todo_rows()                 # 그 자리에서 다시 센다 (들고 있던 표는 낡을 수 있다)
+        refs = self._todo_refs or []
+        return refs[idx] if 0 <= idx < len(refs) else None
+
     def _todo_refresh(self):
-        if self.todo_panel is None:
-            return
-        self.todo_panel.render(self.todos)
-        self.todo_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
+        if self.todo_panel is not None:
+            self.todo_panel.render(self._todo_rows())
+            self.todo_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
+        self._cal_touch()
 
     def _todo_done(self, idx):
         """우클릭 > 완료 — 그 할 일이 사라지고 캐릭터가 축하해 준다."""
-        if not (0 <= idx < len(self.todos)):
+        ref = self._todo_ref(idx)
+        if ref is None:
             return
-        done_text = todo_text(self.todos[idx])
-        del self.todos[idx]
-        self._todo_save()
-        self._safe("todo_up", self._todo_upload, done_text)
-        self._todo_refresh()
+        if ref[0] == "ev":
+            # 달력에서 온 줄 — 그 단계를 끝낸 것으로 (단계가 없으면 일정을 끝냄으로)
+            left = max(0, len(getattr(self, "_todo_refs", [])) - 1)
+            self._cal_pin_done(ref[1], ref[2])
+            done_text = None
+        else:
+            idx = ref[1]
+            if not (0 <= idx < len(self.todos)):
+                return
+            done_text = todo_text(self.todos[idx])
+            del self.todos[idx]
+            self._todo_save()
+            self._safe("todo_up", self._todo_upload, done_text)
+            self._todo_refresh()
         now = time.time()
         self.smile_until = now + 4.0        # 웃는 표정 (파츠 없으면 그냥 넘어감)
         self.click_bounce = now + 0.45      # 콩 하고 튐
         self.squash_until = now + 0.12
         self._gest_start("clap", force=True)
-        left = len(self.todos)
+        left = len(getattr(self, "_todo_refs", None) or self.todos)
         msg = ("할 일 다 끝냈어요!" if left == 0
                else random.choice(["하나 끝!", "잘했어요!", "좋아요!",
                                    f"{left}개 남았어요!"]))
@@ -12002,6 +12241,15 @@ class Mascot:
         '완료'와 다르다. 축하도 없고 끝낸 일로 기록에도 올리지 않는다
         (잘못 적었거나 안 하기로 한 일을 지우는 용도).
         """
+        ref = self._todo_ref(idx)
+        if ref is None:
+            return
+        if ref[0] == "ev":
+            # 달력에서 온 줄 — 일정은 그대로 두고 말풍선에서만 내린다
+            self._cal_pin_set(ref[1], "pt", False)
+            self._say("말풍선에서 내렸어요 · 달력에는 그대로 있어요", 3.0)
+            return
+        idx = ref[1]
         if not (0 <= idx < len(self.todos)):
             return
         del self.todos[idx]
@@ -12010,8 +12258,14 @@ class Mascot:
 
     def _todo_edit(self, idx):
         """우클릭 > 수정 — 그 할 일의 글을 고친다."""
-        if 0 <= idx < len(self.todos):
-            self.add_todo(edit=idx)
+        ref = self._todo_ref(idx)
+        if ref is None:
+            return
+        if ref[0] == "ev":
+            self._safe("cal_edit", self._cal_edit, ref[1])
+            return
+        if 0 <= ref[1] < len(self.todos):
+            self.add_todo(edit=ref[1])
 
     def add_todo(self, edit=None):
         """할 일 입력 창 — 엔터로 추가, Esc로 닫기. 연달아 여러 개 적을 수 있다.
@@ -12350,6 +12604,11 @@ class Mascot:
         x = self.root.winfo_x()
         self.us["card_gap"] = new_gap
         self._relayout_card()          # 아래 고정 — 창이 위로 자란다
+        if self._mag_side():
+            # 자석 모드 — 벽에 붙은 채로 여백만 바뀐다. 창 자리는 벽이 정한다.
+            self._mag_ex_key = None
+            self._mag_keep(time.time(), force=True)
+            return
         # 위 고정으로 되돌린다 — 캐릭터가 커서 따라 내려가며 여백이 벌어진다
         self.root.geometry("+%d+%d" % (x, top))
 
@@ -12928,14 +13187,23 @@ class Mascot:
         return int(round((t - today) / 86400))
 
     def _due_lines(self):
-        """말풍선에 넣을 글과 색 — 가까운 마감부터 위로."""
+        """말풍선에 넣을 글과 색 — 가까운 마감부터 위로.
+
+        달력에서 '마감 말풍선에 띄우기'를 켠 일정도 같이 나온다 (끝나는 날 기준).
+        베껴 두지 않고 그릴 때마다 계산한다 — `_due_refs` 가 줄마다 무엇인지 들고 있다."""
         rows = []
-        for d in self.dues:
-            n = self._days_to(d.get("date"))
+        src = [(d.get("date"), (d.get("name") or "").strip(), ("due", i))
+               for i, d in enumerate(self.dues)]
+        try:
+            for e in self._cal_pins("d"):
+                src.append((self._cal_s(e["e"]), e["name"], ("ev", e["id"])))
+        except Exception:
+            self._log_error("cal_pins_d")
+        for date9, name, ref9 in src:
+            n = self._days_to(date9)
             if n is None:
                 continue
             tag = "D-DAY" if n == 0 else (f"D-{n}" if n > 0 else f"D+{-n}")
-            name = (d.get("name") or "").strip()
             # 남은 날짜를 윗줄에 굵게, 마감 이름을 아랫줄에. 먼저 눈에 들어와야
             # 하는 것은 '며칠 남았나'다.
             if name:
@@ -12943,20 +13211,30 @@ class Mascot:
                                  [[len(tag), 1], [1 + len(name), 0]])
             else:
                 item = todo_pack(tag, True, False, 0)
-            rows.append((n, item))
+            rows.append((n, item, ref9))
         rows.sort(key=lambda r: r[0])
-        texts = [t for _, t in rows]
+        del rows[24:]
+        texts = [t for _, t, _r in rows]
         tints = ["#d64a63" if n <= self.DUE_NEAR else
-                 "#e08a3c" if n <= self.DUE_SOON else None for n, _ in rows]
+                 "#e08a3c" if n <= self.DUE_SOON else None for n, _t, _r in rows]
+        self._due_refs = [r for _n, _t, r in rows]
         return texts, tints
 
+    def _due_ref(self, idx):
+        """말풍선의 그 줄이 무엇인가 — ("due", 목록 번호) 또는 ("ev", 일정)."""
+        # **그 자리에서 다시 센다** — 들고 있던 표는 목록이 바뀌면 낡는다
+        # (그린 뒤 목록을 바꾸고 안 그린 채로 누르는 길이 있다 — 검사가 잡았다)
+        self._due_lines()
+        refs = self._due_refs or []
+        return refs[idx] if 0 <= idx < len(refs) else None
+
     def _due_refresh(self):
-        if self.due_panel is None:
-            return
-        texts, tints = self._due_lines()
-        self.due_panel.render(texts, tints)
-        self.due_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
-        self._due_shown = time.strftime("%Y-%m-%d")
+        if self.due_panel is not None:
+            texts, tints = self._due_lines()
+            self.due_panel.render(texts, tints)
+            self.due_panel.place(self.root.winfo_rootx(), self.root.winfo_rooty())
+            self._due_shown = time.strftime("%Y-%m-%d")
+        self._cal_touch()
 
     def _due_moved(self, x, y):
         self.due_pos = (int(x - self.root.winfo_rootx()),
@@ -13012,38 +13290,45 @@ class Mascot:
         """말풍선 우클릭 > 삭제 — 축하 없이 목록에서만 뺀다.
 
         완료(_due_remove)와 다르다. 잘못 넣었거나 없어진 마감을 조용히
-        치우는 길이다.
+        치우는 길이다. 달력에서 온 줄이면 말풍선에서만 내린다 (일정은 남는다).
         """
-        order = sorted(range(len(self.dues)),
-                       key=lambda i: (self._days_to(self.dues[i]["date"])
-                                      if self._days_to(self.dues[i]["date"])
-                                      is not None else 99999))
-        if not (0 <= idx < len(order)):
+        ref = self._due_ref(idx)
+        if ref is None:
             return
-        self.dues.pop(order[idx])
+        if ref[0] == "ev":
+            self._cal_pin_set(ref[1], "pd", False)
+            self._say("말풍선에서 내렸어요 · 달력에는 그대로 있어요", 3.0)
+            return
+        if not (0 <= ref[1] < len(self.dues)):
+            return
+        self.dues.pop(ref[1])
         self._due_save()
         self._due_refresh()
 
     def _due_remove(self, idx):
-        """말풍선 우클릭 > 완료 — 그 마감을 목록에서 지운다."""
-        order = sorted(range(len(self.dues)),
-                       key=lambda i: (self._days_to(self.dues[i]["date"])
-                                      if self._days_to(self.dues[i]["date"])
-                                      is not None else 99999))
-        if not (0 <= idx < len(order)):
+        """말풍선 우클릭 > 완료 — 그 마감을 목록에서 지운다.
+        달력에서 온 줄이면 그 일정을 끝냄으로 바꾼다."""
+        ref = self._due_ref(idx)
+        if ref is None:
             return
-        self.dues.pop(order[idx])
-        self._due_save()
-        self._due_refresh()
+        if ref[0] == "ev":
+            self._cal_pin_done(ref[1], -1)
+        else:
+            if not (0 <= ref[1] < len(self.dues)):
+                return
+            self.dues.pop(ref[1])
+            self._due_save()
+            self._due_refresh()
         self._say("하나 끝났네!", 3.0)
 
     def _due_edit(self, idx):
-        order = sorted(range(len(self.dues)),
-                       key=lambda i: (self._days_to(self.dues[i]["date"])
-                                      if self._days_to(self.dues[i]["date"])
-                                      is not None else 99999))
-        if 0 <= idx < len(order):
-            self.add_due(edit=order[idx])
+        ref = self._due_ref(idx)
+        if ref is None:
+            return
+        if ref[0] == "ev":
+            self._safe("cal_edit", self._cal_edit, ref[1])
+        elif 0 <= ref[1] < len(self.dues):
+            self.add_due(edit=ref[1])
 
     def add_due(self, edit=None):
         """마감 입력 창 — 이름과 날짜. 엔터로 저장, Esc로 닫기."""
@@ -19991,7 +20276,7 @@ class Mascot:
         hard9 = self._pomo_hard_active()
         if hard9:
             # 불타는 시계 — 불꽃을 시계 뒤에 먼저 (위로 솟아 보인다)
-            fl9 = self._flame_img(int(r * 2.4))
+            fl9 = self._flame_img(int(r * 2.4), keyed=self._cv_keyed(c))
             if fl9 is not None:
                 # 창 위로 넘치면 그만큼만 내린다 (윗부분 잘림 방지 — 제보)
                 fy9 = max(fl9.height() / 2 + 1, by - r * 0.95)
@@ -20668,16 +20953,713 @@ class Mascot:
         """
         w = lay.top
         w.bind("<Button-1>", self._on_press_layer)
-        w.bind("<B1-Motion>", self._on_drag)
-        w.bind("<ButtonRelease-1>", self._on_release)
-        w.bind("<Button-3>", self._menu_pop)
+        w.bind("<B1-Motion>", lambda e: self._on_drag(self._lay_ev(e)))
+        w.bind("<ButtonRelease-1>", lambda e: self._on_release(self._lay_ev(e)))
+        w.bind("<Button-3>", lambda e: self._menu_pop(self._lay_ev(e)))
+
+    def _lay_ev(self, e):
+        """몸 레이어의 좌표를 본체 창 좌표로. 평소에는 두 창이 같은 자리라
+        그대로지만, 자석 모드(위쪽 벽)에서는 레이어가 위로 더 길다."""
+        off = getattr(self, "_mag_off", None) or (0, 0)
+        if off[0] or off[1]:
+            try:
+                e.x += int(off[0])
+                e.y += int(off[1])
+            except Exception:
+                pass
+        return e
 
     def _on_press_layer(self, e):
         """몸 레이어를 누른 것 — 눌러서 앞으로 나왔을 수 있으니 되돌린다."""
         lay = self._char_lay
         if lay is not None:
             lay.place_above(self._main_hwnd)
-        return self._on_press(e)
+        return self._on_press(self._lay_ev(e))
+
+    # ── 자석 모드 (요청) ─────────────────────────────────────────────
+    # 캐릭터를 화면 가장자리로 끌고 가면 그 벽에 붙는다. 몸(머리+몸+소품)을
+    # 기울여 벽 너머에서 기웃 내다보고, 제 팔 파츠로 벽을 잡는다. 카드와
+    # 말풍선은 늘 똑바로다. 몸 레이어가 있어야 한다(기울인 그림은 반투명
+    # 가장자리가 필요하다) — 윈도우 + 부드러운 가장자리가 켜진 때만.
+    MAG_SNAP = 36                # 벽에 이만큼 다가가면 붙는다 (px)
+    MAG_LEAN = 40.0              # 옆 벽에서 기울이는 각도
+    MAG_CUT = 0.76               # 몸 그림에서 선이 끝나는 높이 (그 아래는 열린 끝)
+    MAG_SIDES = ("l", "r", "t", "b")
+
+    def _menu_new(self, key):
+        """우클릭 메뉴의 그 항목 옆에 새로움 점을 띄울까 — 아직 한 번도 안 눌렀으면.
+        저장하는 것은 '눌러 봤나' 하나뿐이다 (지뢰 30 — 플레이리스트 항목과 같은 짜임)."""
+        return not bool(self.us.get(key + "_seen"))
+
+    def _menu_seen(self, key):
+        """눌렀다 = 봤다. 그 자리에서 점을 끈다. 저장이 실패해도 메모리 값은 올린다."""
+        if not self._menu_new(key):
+            return
+        self.us[key + "_seen"] = True
+        self._safe("menu_seen", self._save_settings)
+        m = getattr(self, "_menu", None)
+        got = (getattr(self, "_new_menu_idx", None) or {}).get(key)
+        if m is not None and got is not None:
+            try:
+                m.entryconfig(got[0], label=got[1], foreground="")
+            except Exception:
+                pass
+
+    def _board_open_menu(self):
+        """메뉴에서 마이 보드를 연다 — 새로움 점을 끄고 창을 띄운다."""
+        self._safe("menu_seen", self._menu_seen, "board")
+        return self._board_open()
+
+    def _mag_toggle(self):
+        """우클릭 메뉴의 '자석 모드' — 켜고 끈다. 끄면 _mag_keep 이 화면 안에 세운다."""
+        self._safe("menu_seen", self._menu_seen, "mag")
+        on = bool(self._mag_var.get())
+        self.us["magnet"] = on
+        self._mag_keep_at = 0.0
+        self._safe("mag_save", self._save_settings)
+        if on and not self._smooth_on:
+            self._say("환경설정의 '부드러운 가장자리'를 켜야 붙을 수 있어요", 4.0)
+        elif on:
+            self._say("화면 끝으로 끌고 가면 착 붙어요", 3.0)
+
+    def _mag_ok(self):
+        return bool(IS_WIN and self.cfg.get("magnet") and self.us.get("magnet")
+                    and self._smooth_on)
+
+    def _mag_side(self):
+        m = self._mag
+        return m if (m in self.MAG_SIDES and self._mag_ok()) else None
+
+    def _mag_dims(self):
+        """머리 폭·높이와 한가운데 (시트 좌표 — _head_box 에는 oy 가 없다 · 지뢰 43)."""
+        hx0, hy0, hx1, hy1 = self._head_box
+        return (float(hx1 - hx0), float(hy1 - hy0), (hx0 + hx1) / 2.0,
+                (hy0 + hy1) / 2.0 + self.oy)
+
+    def _mag_wall(self, side):
+        """벽이 놓이는 자리 (본체 창 좌표). 옆은 x, 위아래는 y.
+
+        위쪽 벽은 창보다 위(음수)다 — 거꾸로 매달린 몸이 카드 위에 온다.
+        아래쪽 벽은 창 안쪽일 수 있다 — 창의 남는 아래쪽은 벽 너머로 나간다.
+        기운 그림이 벽에서 얼마나 나오는지는 `_mag_fit` 이 실제 그림으로 잰 값이다
+        (아직 못 쟀으면 머리 크기로 어림한다)."""
+        hh = self._mag_dims()[1]
+        if side == "l":
+            return 0
+        if side == "r":
+            return int(self.W)
+        fit = self._mag_fitv or {}
+        see = fit.get("see_" + side)
+        if see is None:
+            see = self._mag_body()[4] - (self._mag_dims()[3] - hh / 2.0) + float(self._mag_ex)
+        if side == "t":
+            # 위쪽 벽 — 카드가 머리 **아래**다. 환경설정의 '타이머와 머리 사이 여백'이
+            # 여기서도 듣게 그만큼 카드를 더 내린다 (다른 벽은 oy 에 이미 들어 있다).
+            try:
+                gap = max(CARD_GAP_MIN, min(CARD_GAP_MAX, int(self.us.get("card_gap") or 0)))
+            except Exception:
+                gap = 0
+            return -int(see + 16 + max(-12, gap))
+        return int(self._mag_under() + 10 + see)
+
+    def _mag_under(self):
+        """카드 아래끝 — 몸이 이보다 위로 올라오면 카드를 덮는다.
+        **oy 만 보면 안 된다**: 그림 위쪽 여백이 큰 캐릭터(char_lift)나 여백을 줄여 둔
+        사람은 oy 가 카드 아래끝보다 위다 (전 캐릭터 검사에서 여섯이 카드를 덮었다)."""
+        if not self.timer_on:
+            return float(self.oy)
+        try:
+            y1 = float(self._card_geom()["y1"]) + 4
+            gap = max(CARD_GAP_MIN, min(CARD_GAP_MAX, int(self.us.get("card_gap") or 0)))
+        except Exception:
+            return float(self.oy)
+        # 카드 아래끝에서 '여백' 만큼 — 환경설정의 '타이머와 머리 사이 여백'이 그대로 듣는다.
+        # oy 에 기대면 카드 아래끝보다 위인 구간에서 여백을 바꿔도 안 움직인다.
+        return y1 + max(0.0, gap + 8.0)
+
+    MAG_SEE = 0.5                # 옆 벽에서 머리가 이만큼은 보여야 한다 (폭의 비율)
+    MAG_FACE = 0.10              # 얼굴 한가운데가 벽에서 이만큼은 들어와야 한다 (머리 폭의 비율)
+    MAG_BODY = 0.10              # 위·아래 벽에서 머리 아래로 보이는 몸 (머리 높이의 비율)
+    MAG_LEAN_MAX = 80.0
+
+    def _mag_measure(self, fig, ang, hcx, hcy):
+        """몸 장을 그 각도로 기울였을 때의 실루엣 상자 — 머리 한가운데 기준 (x0, y0, x1, y1).
+        그림에서 직접 잰다: 머리 상자만으로 어림하면 긴 머리·날개·소품이 빠진다."""
+        bb9 = fig.getbbox() or (0, 0) + fig.size
+        R = int(max(math.hypot(x9 - hcx, y9 - hcy)
+                    for x9 in (bb9[0], bb9[2]) for y9 in (bb9[1], bb9[3]))) + 8
+        a = -math.radians(ang)
+        m00, m01, m10, m11 = math.cos(a), math.sin(a), -math.sin(a), math.cos(a)
+        data = (m00, m01, hcx - m00 * R - m01 * R, m10, m11, hcy - m10 * R - m11 * R)
+        al = fig.split()[3].transform((R * 2, R * 2), Image.AFFINE, data,
+                                      resample=Image.BILINEAR)
+        return al.point(lambda v: 255 if v > 48 else 0), R
+
+    def _mag_fit(self, fig):
+        """이 캐릭터·소품·크기에 맞는 자세 — 소품이나 크기가 바뀔 때만 다시 잰다.
+
+        옆 벽: 몸의 열린 끝을 벽 뒤에 둔 채 머리가 절반(MAG_SEE)은 보이는 **가장 작은
+        기울기**를 고른다 (몸이 넓거나 머리 밑으로 치우친 캐릭터는 더 기울여야 한다).
+        그리고 기운 그림의 위끝을 재서 카드 바로 아래에 오게 한다.
+        위·아래 벽: 기운 그림이 벽에서 나오는 길이를 재서 카드가 그만큼 비켜 서게 한다."""
+        hw, hh, hcx, hcy = self._mag_dims()
+        bx, by, bw, bh, cut = self._mag_body()
+        key = (self.prop_name, fig.size, int(self.oy), round(self.s, 4), int(bw), int(bh),
+               str(self.us.get("skin") or ""), int(self._mag_under()))
+        if self._mag_fitv is not None and self._mag_fitv.get("key") == key:
+            return self._mag_fitv
+        W = self.W
+        low = ((bx, cut), (bx + bw, cut), (bx, by + bh), (bx + bw, by + bh))
+
+        def rel(ang, px, py):
+            ar = math.radians(ang)
+            dx, dy = px - hcx, py - hcy
+            return (dx * math.cos(ar) + dy * math.sin(ar), -dx * math.sin(ar) + dy * math.cos(ar))
+        fit = {"key": key, "stick": self._mag_stick()}
+        deep = 8.0
+        # 얼굴 한가운데 — 두 눈 높이의 머리 가운데. 옆 벽에서는 이 점이 화면 안에 있어야
+        # 누구인지 보인다 (제보: 하독·햄북이는 얼굴이 아래쪽에 있어 머리 절반으로는 안 보였다)
+        try:
+            face = (hcx, float(self._gest_eye_pt()[1]))
+        except Exception:
+            face = (hcx, hcy)
+        cap = hh * 0.5 + hh * self.MAG_BODY          # 위·아래 벽 — 머리 한가운데가 벽에서 이만큼까지
+        # 옆 벽 — 오른쪽 벽 기준으로 재고 왼쪽은 거울
+        for side, sg in (("r", 1.0), ("l", -1.0)):
+            best = None
+            lean = self.MAG_LEAN
+            while lean <= self.MAG_LEAN_MAX + 0.1:
+                ang = sg * lean
+                pts = [rel(ang, *p) for p in low]
+                # 머리 한가운데에서 벽까지 — 열린 끝이 벽 뒤 deep 만큼 들어가게
+                if sg > 0:
+                    dwall = min(p[0] for p in pts) - deep
+                else:
+                    dwall = -(max(p[0] for p in pts) + deep)
+                hwr = hw * abs(math.cos(math.radians(lean))) + hh * abs(math.sin(math.radians(lean)))
+                see = (hwr / 2.0 + dwall) / max(1.0, hwr)
+                fx = rel(ang, *face)[0]
+                fin = (dwall - fx) if sg > 0 else (dwall + fx)      # 얼굴이 벽 안쪽으로 들어온 만큼
+                score = min(see / self.MAG_SEE, fin / max(1.0, hw * self.MAG_FACE))
+                if best is None or score > best[1]:
+                    best = (lean, score, dwall)
+                if score >= 1.0:
+                    break
+                lean += 4.0
+            lean, see, dwall = best
+            al, R = self._mag_measure(fig, sg * lean, hcx, hcy)
+            # 보이는 쪽만 (벽 너머는 어차피 안 보인다)
+            if sg > 0:
+                vis = al.crop((0, 0, max(1, min(R * 2, int(R + dwall))), R * 2))
+            else:
+                x9 = max(0, int(R - dwall))
+                vis = al.crop((x9, 0, R * 2, R * 2))
+            bb = vis.getbbox()
+            top = (bb[1] - R) if bb else -hh / 2.0
+            bot = (bb[3] - R) if bb else hh / 2.0
+            fit["lean_" + side] = lean
+            fit["dw_" + side] = dwall
+            fit["top_" + side] = top
+            fit["bot_" + side] = bot
+        for side, ang in (("b", 8.0), ("t", 172.0)):
+            al, R = self._mag_measure(fig, ang, hcx, hcy)
+            pts = [rel(ang, *p) for p in low]
+            if side == "b":
+                yc = deep - min(p[1] for p in pts)          # 벽(0)에서 머리 한가운데까지 (음수 = 위)
+                yc = max(yc, -cap)                          # 몸은 머리 아래로 조금만 (요청)
+                vis = al.crop((0, 0, R * 2, max(1, min(R * 2, int(R - yc)))))
+                bb = vis.getbbox()
+                topr = (bb[1] - R) if bb else -hh / 2.0
+                fit["see_b"] = max(hh * 0.4, -(yc + topr)) + 10
+            else:
+                yc = min(-(max(p[1] for p in pts) + deep), cap)
+                y9 = max(0, int(R - yc))
+                vis = al.crop((0, y9, R * 2, R * 2))
+                bb = vis.getbbox()
+                botr = (bb[3] + y9 - R) if bb else hh / 2.0
+                fit["see_t"] = max(hh * 0.4, yc + botr) + 10
+        self._mag_fitv = fit
+        self._mag_keep_at = 0.0          # 벽 자리가 달라졌을 수 있다 — 곧바로 다시 붙인다
+        return fit
+
+    def _mag_body(self):
+        """몸 그림의 자리 (시트 좌표) — x, y, 폭, 높이, 선이 끝나는 높이."""
+        hw, hh = self._mag_dims()[:2]
+        bx, by = self._pos("body_open")
+        bp = self._pil_cache.get("body_open")
+        bw, bh = (bp.size if bp is not None else (hw * 0.32, hh * 0.48))
+        return bx, by, bw, bh, by + bh * self.MAG_CUT
+
+    def _mag_place(self, side, x, y, mon):
+        """그 벽에 붙었을 때 창이 설 자리. 벽을 따라서는 화면 안에 둔다."""
+        l, t, r, b = mon
+        wall = self._mag_wall(side)
+        if side == "l":
+            x = l
+        elif side == "r":
+            x = r - wall
+        elif side == "t":
+            y = t - wall
+        else:
+            y = b - wall
+        if side in ("l", "r"):
+            y = max(t - int(self.oy * 0.5), min(int(y), b - self.H))
+        else:
+            ml = self._mag_ml(side)       # 옆으로 늘린 그림이 옆 화면에 안 넘어가게
+            x = max(l + ml, min(int(x), r - self.W - ml))
+        return int(x), int(y)
+
+    def _mag_ml(self, side):
+        """위·아래 벽에서 그림을 양옆으로 늘리는 폭 — 기울인 머리가 창보다 넓다."""
+        if side not in ("t", "b"):
+            return 0
+        return int(self._mag_dims()[1] * 0.25)
+
+    def _mag_flush(self, side, x, y, mon):
+        """그 벽에 '평소 모습으로' 딱 닿은 자리 — 붙고 떨어지는 거리의 기준."""
+        l, t, r, b = mon
+        if side == "l":
+            return l, y
+        if side == "r":
+            return r - self.W, y
+        if side == "t":
+            return x, t
+        return x, b - self.H
+
+    def _mag_snap(self, x, y, cx, cy):
+        """끌어 놓으려는 자리 → (x, y, 벽). 벽에 가까우면 그 벽에 붙인다.
+
+        한 번 붙으면 두 배 거리까지는 안 떨어진다 (경계에서 떨지 않게)."""
+        if not self._mag_ok():
+            return int(x), int(y), None
+        mon = monitor_work(int(cx), int(cy))
+        l, t, r, b = mon
+        d = {"l": x - l, "r": r - (x + self.W), "t": y - t,
+             "b": b - (y + self.H)}
+        cur = self._mag
+        side = None
+        if cur in d and d[cur] < self.MAG_SNAP * 2:
+            side = cur
+        else:
+            near = sorted((v, k) for k, v in d.items() if v < self.MAG_SNAP)
+            if near:
+                side = near[0][1]
+        if side is None:
+            return int(x), int(y), None
+        nx, ny = self._mag_place(side, x, y, mon)
+        return nx, ny, side
+
+    def _mag_set(self, side):
+        side = side if side in self.MAG_SIDES else None
+        if side == self._mag:
+            return False
+        self._mag = side
+        self.us["mag_side"] = side or ""
+        self._mag_peek = -18.0 if side else 0.0     # 붙는 순간 쏙 들어갔다 나온다
+        self._last_pos = None
+        self._chip_z_until = time.time() + 2.5
+        if not side:
+            self._mag_off = (0, 0)
+            self._mag_head = None
+            # 떼면 자석 모드가 들고 있던 것을 내려놓는다 (다시 붙으면 다시 만든다)
+            self._mag_hands = {}
+            self._mag_groups = None
+            self._mag_fig = None
+            self._mag_out = self._mag_sig = None
+            self._mag_same = False
+        return True
+
+    def _mag_keep(self, now, force=False):
+        """붙은 자리를 지킨다 — 카드 높이·크기가 바뀌면 벽 자리도 달라진다.
+        켠 직후에는 저장해 둔 벽을 되살린다. 1초에 한 번.
+        force — 여백을 끌어 맞추는 중에는 누른 채로도 그 자리에서 다시 붙인다."""
+        if not force and now - self._mag_keep_at < 1.0:
+            return
+        self._mag_keep_at = now
+        if self._mag_boot:
+            self._mag_boot = False
+            sd = str(self.us.get("mag_side") or "")
+            if sd in self.MAG_SIDES and self._mag_ok():
+                self._mag = sd
+        if self._mag and not self._mag_ok():
+            # 자석 모드를 껐다 — 평소 모습으로 화면 안에 세운다
+            side = self._mag
+            self._mag_set(None)
+            x, y = self.root.winfo_x(), self.root.winfo_y()
+            mon = monitor_work(x + self.W // 2, y + self.H // 2)
+            fx, fy = self._mag_flush(side, x, y, mon)
+            fx = max(mon[0], min(fx, mon[2] - self.W))
+            fy = max(mon[1], min(fy, mon[3] - self.H))
+            self.root.geometry("+%d+%d" % (fx, fy))
+            self._safe("win_pos", self._save_win_pos)
+            self._safe("mag_save", self._save_settings)
+            return
+        side = self._mag_side()
+        if not side or (self._press is not None and not force) or self._fs_hidden:
+            return
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        cx9 = x + self.W // 2
+        cy9 = y + self.H // 2
+        if side == "t":
+            cy9 = y - self._mag_wall("t") + 4
+        elif side == "b":
+            cy9 = y + self._mag_wall("b") - 4
+        elif side == "l":
+            cx9 = x + 4
+        else:
+            cx9 = x + self.W - 4
+        nx, ny = self._mag_place(side, x, y, monitor_work(cx9, cy9))
+        if abs(nx - x) > 1 or abs(ny - y) > 1:
+            self.root.geometry("+%d+%d" % (nx, ny))
+            try:
+                self.root.update_idletasks()      # 미뤄 둔 이동을 그 자리에서 (지뢰 15)
+            except Exception:
+                pass
+            self._last_pos = None
+
+    def _mag_grp(self, to=None):
+        """덧장을 갈아 끼운다 — to 가 없으면 새 장을 만들어 거기에 그리게 한다."""
+        if to is None:
+            to = _CharSheet(self._real_canvas, self.W, self.H, self)
+        self._sheet = to
+        self.canvas = to
+        return to
+
+    @staticmethod
+    def _mag_box(box, dx, dy):
+        if not box:
+            return box
+        return (box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy) + tuple(box[4:])
+
+    def _mag_groups_done(self, gh, gd, side):
+        """머리 묶음(말풍선·반응)과 책상 묶음(간식·봉투·초대 토마토)을 기운 몸에
+        맞춰 옮긴다. 누르는 자리도 같이 옮긴다 — 안 옮기면 허공이 눌린다."""
+        self._mag_groups = None
+        if not (gh.used or gd.used):
+            return                          # 아무것도 안 그려졌다 (대부분의 프레임)
+        mh = self._mag_head
+        if not mh:
+            self._mag_groups = [(g9.im, 0, 0) for g9 in (gd, gh) if g9.used]
+            return
+        hw, hh, hcx, hcy = self._mag_dims()
+        W, H = self.W, self.H
+        ml = self._mag_ml(side)
+        wall = self._mag_wall(side)
+        x_lo, x_hi = -ml + 2, W + ml - 2
+        y_lo = (wall if side == "t" else 0) + 2
+        y_hi = (wall if side == "b" else (H + int(hh * 0.7) if side in ("l", "r") else H)) - 2
+
+        def fit(sh, dx, dy):
+            """그 묶음을 옮길 만큼 (화면 안에 들게) 과, 그려진 자리만 오린 그림."""
+            if not sh.used:
+                return None
+            bb = sh.im.getbbox()
+            if not bb:
+                return None
+            dx = max(x_lo - bb[0], min(dx, x_hi - bb[2]))
+            dy = max(y_lo - bb[1], min(dy, y_hi - bb[3]))
+            return dx, dy, sh.im.crop(bb), bb
+
+        out = []
+        # 책상 묶음 — 손 곁(아래쪽 벽이면 벽 턱 위)
+        k = max(1.0, self.cw_px / 260.0)
+        cx, land, r = self._desk_spot(k, self.oy + self.ch_px * 0.13,
+                                      self.oy + self.ch_px * 0.44)
+        if cx is None:
+            cx, land, r = self.ox + self.cw_px / 2, self.oy + self.ch_px * 0.7, 20 * k
+        base_y = land + r * 1.16
+        if side == "b":
+            tgt = (mh[0] - hw * 0.66, wall - 3)
+        elif side == "r":
+            tgt = (mh[0] - hw * 0.66, mh[1] + hh * 0.55)
+        elif side == "l":
+            tgt = (mh[0] + hw * 0.66, mh[1] + hh * 0.55)
+        else:
+            tgt = (mh[0] + hw * 0.66, mh[1] + hh * 0.25)
+        got = fit(gd, tgt[0] - cx, tgt[1] - base_y)
+        if got:
+            dx, dy, cut9, bb9 = got
+            out.append((cut9, dx + bb9[0], dy + bb9[1]))     # 그려진 자리만 얹는다
+            self._snack_box = self._mag_box(self._snack_box, dx, dy)
+            self._mail_box = self._mag_box(self._mail_box, dx, dy)
+            self._tm_box = self._mag_box(self._tm_box, dx, dy)
+            self._tm_btn = [self._mag_box(b9, dx, dy) for b9 in (self._tm_btn or [])]
+        # 머리 묶음 — 기운 머리 위(거꾸로 매달렸으면 머리 아래)
+        dx, dy = mh[0] - hcx, mh[1] - hcy
+        bb = self._bubble_box
+        if side == "t" and bb:
+            dy = (mh[1] + hh * 0.5 + 8) - bb[1]
+        elif side == "t":
+            dy = (mh[1] + hh * 0.5) - (hcy - hh * 0.5)
+        got = fit(gh, dx, dy)
+        if got:
+            dx, dy, cut9, bb9 = got
+            out.append((cut9, dx + bb9[0], dy + bb9[1]))
+            self._bubble_box = self._mag_box(self._bubble_box, dx, dy)
+            self._bubble_btn = self._mag_box(self._bubble_btn, dx, dy)
+        self._mag_groups = out
+
+    def _mag_pen(self, now, f, cx, cy):
+        """팔을 안 그리는 동안에도 그린 획 수·펜 소리는 센다 (몸짓 중과 같다)."""
+        self._track_pen(now, f, cx, cy)
+        if self.pensnd is not None and self._pen_grain and "pen" not in f:
+            self.pensnd.tick(now, enabled=True)
+
+    def _mag_hand(self, idx, deg):
+        """벽을 잡는 손 — 제 팔 파츠를 그 방향으로 돌린 것. (그림, 손끝 자리)
+
+        deg 는 팔이 뻗는 방향(화면 기준 · 0=오른쪽 · 90=위). 어깨 쪽(열린
+        끝)은 벽 뒤에 숨고 손끝만 벽을 넘어온다."""
+        src = self.arm_pil if idx == 0 else (self.arm_key_pil or self.arm_pil_m)
+        if src is None:
+            src = self.arm_pil
+        if src is None:
+            return None
+        key = (idx, (int(round(deg / 2.0)) * 2) % 360, src.size)
+        got = self._mag_hands.get(key)
+        if got is not None:
+            return got
+        top, bot = _end_anchors(src)
+        vx, vy = bot[0] - top[0], bot[1] - top[1]
+        # **보이는 끝 토막의 방향**으로 돌린다. 팔 그림은 휘어 있어서 어깨→손끝 방향으로
+        # 맞추면 벽 밖으로 나온 토막이 비스듬해진다 — 두 팔을 나란히 세우면 ')(' 가 된다
+        # (제보: 작대기 팔은 일자로 보여야 한다). 벽을 넘어오는 것은 손 쪽 절반뿐이다.
+        ex9, ey9 = self._mag_arm_end(src, top, bot)
+        have = math.degrees(math.atan2(-ey9, ex9))
+        a = key[1] - have
+        rot = src.rotate(a, resample=Image.BICUBIC, expand=True)
+        ar = math.radians(a)
+        dx, dy = bot[0] - src.width / 2.0, bot[1] - src.height / 2.0
+        hx = rot.width / 2.0 + dx * math.cos(ar) + dy * math.sin(ar)
+        hy = rot.height / 2.0 - dx * math.sin(ar) + dy * math.cos(ar)
+        got = (rot, (hx, hy), math.hypot(vx, vy))
+        if len(self._mag_hands) > 24:
+            for old in list(self._mag_hands)[:12]:
+                self._mag_hands.pop(old, None)
+        self._mag_hands[key] = got
+        return got
+
+    def _mag_arm_end(self, src, top, bot):
+        """팔 그림에서 손 쪽 토막이 뻗는 방향 (dx, dy). 어깨→손끝 축을 따라 가운데 언저리와
+        끝 언저리의 무게중심을 이은 것이다. 못 재면 어깨→손끝 그대로."""
+        vx, vy = bot[0] - top[0], bot[1] - top[1]
+        L = math.hypot(vx, vy)
+        if L < 8:
+            return vx, vy
+        try:
+            ux, uy = vx / L, vy / L
+            a = src.split()[3]
+            k = max(1, int(max(a.size) / 96))          # 큰 그림은 성기게 훑는다
+            px = a.load()
+            acc = {"m": [0.0, 0.0, 0], "e": [0.0, 0.0, 0]}
+            for y in range(0, a.height, k):
+                for x in range(0, a.width, k):
+                    if px[x, y] < 90:
+                        continue
+                    t = ((x - top[0]) * ux + (y - top[1]) * uy) / L
+                    if 0.45 <= t <= 0.60:
+                        b9 = acc["m"]
+                    elif t >= 0.86:
+                        b9 = acc["e"]
+                    else:
+                        continue
+                    b9[0] += x
+                    b9[1] += y
+                    b9[2] += 1
+            if acc["m"][2] and acc["e"][2]:
+                dx = acc["e"][0] / acc["e"][2] - acc["m"][0] / acc["m"][2]
+                dy = acc["e"][1] / acc["e"][2] - acc["m"][1] / acc["m"][2]
+                if math.hypot(dx, dy) > L * 0.12:
+                    return dx, dy
+        except Exception:
+            self._log_error("mag_arm_end")
+        return vx, vy
+
+    def _mag_stick(self):
+        """팔이 작대기인가 — 굵기가 길이의 1/5 도 안 되는 가는 팔. 작대기 팔은 벌리지 않고
+        벽에 곧게 세운다 (벌리면 어색하다)."""
+        src = self.arm_pil
+        if src is None:
+            return False
+        try:
+            top, bot = _end_anchors(src)
+            L = math.hypot(bot[0] - top[0], bot[1] - top[1])
+            area = src.split()[3].point(lambda v: 255 if v > 90 else 0).histogram()[255]
+            return L > 8 and (area / L) < L * 0.2
+        except Exception:
+            return False
+
+    def _mag_compose(self, over, fig, side, now):
+        """몸을 기울여 벽에 붙인 한 장을 만든다. → (그림, 본체 창에서 비켜 선 만큼)
+
+        over 는 똑바로 선 덧장(말풍선·반응), fig 는 몸만 모은 장이다. 둘 다
+        본체 창 크기다. 위쪽 벽에서는 그림이 창보다 위로 더 길다."""
+        W, H = over.size
+        hw, hh, hcx, hcy = self._mag_dims()
+        fit = self._mag_fit(fig)
+        wall = self._mag_wall(side)
+        mt = -wall if side == "t" else 0
+        ml = self._mag_ml(side)
+        FW, FH = W + ml * 2, max(H, wall + 2 if side == "b" else 0) + mt
+        # 기웃 — 커서가 곁에 오면 더 기울이고, 자는 동안은 조금 물러난다.
+        # 몸의 열린 끝은 늘 벽 뒤라, 내미는 대신 **기울기**로 움직인다.
+        want = 1.0 if self._cur_near else 0.0
+        if getattr(self, "_sleeping", False):
+            want = -1.0
+        self._mag_peek += (want - self._mag_peek) * 0.08
+        pk = max(-1.5, min(1.0, self._mag_peek))
+        sway = 2.2 * math.sin(now * 0.7 + 1.0)
+        # 팔 몸짓(춤·기지개) 중 — 팔은 벽 뒤라 못 흔든다. 대신 벽을 잡은 손을
+        # 까딱이고 몸을 같이 흔든다 (자석 모드 전용 몸짓은 이것 하나다).
+        wig = math.sin(now * 9.0) if self._g_hands is not None else 0.0
+        sway += 3.0 * wig
+        deep = 5.0 + 3.0 * (1.0 + math.sin(now * 0.9)) + 16.0 * max(0.0, -pk)
+        tx, ty = W / 2.0 + ml, H / 2.0
+        if side in ("l", "r"):
+            lean = fit["lean_" + side] + 5.0 * max(0.0, pk)
+            ang = (lean + sway) if side == "r" else -(lean + sway)
+            # 기운 그림의 위끝이 카드 바로 아래에 오게 (잰 값) — 움직임 몫으로 조금 더 띄운다
+            ty = self._mag_under() + 12 - fit["top_" + side]
+            # 기운 그림은 창보다 아래로 내려온다 — 그림을 그만큼 늘린다
+            # (안 늘리면 창 아래끝에서 턱이 일자로 잘린다)
+            FH = max(H, int(ty + fit["bot_" + side] + 24))
+        elif side == "b":
+            ang = 8.0 + 4.0 * max(0.0, pk) + sway * 1.5
+            tx = W / 2.0 + ml + hw * 0.04
+        else:
+            ang = 180.0 - 8.0 - 4.0 * max(0.0, pk) + sway * 1.5
+            tx = W / 2.0 + ml - hw * 0.04
+        ty_f = ty + mt
+        # 자세를 눈금에 맞춘다 (각도 0.25도 · 깊이 1px) — 천천히 기웃거리는 움직임이라 눈에는
+        # 안 띄고, 그 사이 프레임은 직전과 **똑같은 그림**이 되어 다시 만들 필요가 없다.
+        ang = round(ang * 4.0) / 4.0
+        deep = float(round(deep))
+        bob = float(round(1.5 * math.sin(now * 0.9 + 0.6)))
+        groups9 = list(self._mag_groups or ())
+        ob9 = over.getbbox()                     # 덧장은 비어 있는 프레임이 대부분이다
+        if ob9:
+            ob9 = (ob9[0], ob9[1], ob9[2], min(ob9[3], FH - mt))
+            if ob9[3] <= ob9[1]:
+                ob9 = None
+        # 이 프레임을 정하는 것 전부 — 하나라도 다르면 새로 만든다. 그림은 바이트째 견준다
+        # (몸 장 680KB 를 견주는 값이 기울이기 1.7ms 보다 훨씬 싸다).
+        sig = (side, ang, deep, bob, round(wig, 2), FW, FH, mt, ml, round(tx, 1), round(ty_f, 1),
+               wall, fit["key"], fig.tobytes(),
+               (ob9, over.crop(ob9).tobytes()) if ob9 else None,
+               tuple((round(dx9, 1), round(dy9, 1), g9.size, g9.tobytes())
+                     for g9, dx9, dy9 in groups9))
+        if self._mag_out is not None and sig == self._mag_sig:
+            self._mag_groups = None
+            self._mag_same = True
+            return self._mag_out, (-ml, -mt)
+        self._mag_same = False
+        self._mag_sig = sig
+        ar9 = math.radians(ang)
+        ca9, sa9 = math.cos(ar9), math.sin(ar9)
+
+        def fwd(px_, py_):
+            """몸 장의 점이 기울인 그림에서 놓이는 자리 (머리 한가운데가 축)."""
+            dx_, dy_ = px_ - hcx, py_ - hcy
+            return (tx + dx_ * ca9 + dy_ * sa9, ty_f - dx_ * sa9 + dy_ * ca9)
+
+        # 몸 — 아래쪽은 선이 없는 열린 끝이라(책상에 가려지던 자리) **반드시
+        # 벽 뒤로** 보낸다 (요청). 선이 끝나는 자리를 벽에 걸어 둔다 — 그
+        # 위(머리·어깨)는 보이고 아래는 안 보인다.
+        bx9, by9, bw9, bh9, cut9 = self._mag_body()
+        low9 = [fwd(bx9, cut9), fwd(bx9 + bw9, cut9),
+                fwd(bx9, by9 + bh9), fwd(bx9 + bw9, by9 + bh9)]
+        wy9 = wall + mt                              # 아래쪽 벽의 그림 좌표
+        if side == "r":
+            tx += (W + deep) - min(p[0] for p in low9)
+        elif side == "l":
+            tx -= max(p[0] for p in low9) + deep
+        elif side == "b":
+            ty_f += (wy9 + deep) - min(p[1] for p in low9)
+            ty_f = max(ty_f, wy9 - (hh * 0.5 + hh * self.MAG_BODY))     # 몸은 조금만 (요청)
+        else:
+            ty_f -= max(p[1] for p in low9) + deep
+            ty_f = min(ty_f, hh * 0.5 + hh * self.MAG_BODY)
+        a = -math.radians(ang)
+        m00, m01 = math.cos(a), math.sin(a)
+        m10, m11 = -math.sin(a), math.cos(a)
+        # **보이는 자리만** 기울인다 — 그림 전체를 돌리면 대부분이 빈 자리다
+        # (실측 한 프레임 2.2ms). 몸 상자의 네 귀를 옮겨 그 범위만 만든다.
+        fb9 = fig.getbbox() or (0, 0, W, H)
+        cs9 = [fwd(fb9[0], fb9[1]), fwd(fb9[2], fb9[1]),
+               fwd(fb9[0], fb9[3]), fwd(fb9[2], fb9[3])]
+        rx0 = max(0, int(min(p[0] for p in cs9)) - 2)
+        ry0 = max(0, int(min(p[1] for p in cs9)) - 2)
+        rx1 = min(FW, int(max(p[0] for p in cs9)) + 3)
+        ry1 = min(FH, int(max(p[1] for p in cs9)) + 3)
+        out_im = Image.new("RGBA", (FW, FH), (0, 0, 0, 0))
+        if rx1 > rx0 and ry1 > ry0:
+            data = (m00, m01, hcx - m00 * (tx - rx0) - m01 * (ty_f - ry0),
+                    m10, m11, hcy - m10 * (tx - rx0) - m11 * (ty_f - ry0))
+            out_im.paste(fig.transform((rx1 - rx0, ry1 - ry0), Image.AFFINE,
+                                       data, resample=Image.BILINEAR),
+                         (rx0, ry0))
+        # 손 — 제 팔 파츠로 벽을 잡는다. **몸 곁에** 둔다 (요청 — 몸에서
+        # 떨어지면 남의 손 같다). 어깨 높이의 몸 옆구리가 벽과 만나는 자리.
+        hands = []
+        ln0 = (self._mag_hand(0, 0) or (None, None, hh * 0.3))[2]
+        if side in ("l", "r"):
+            base = 180.0 if side == "r" else 0.0
+            wx = W if side == "r" else 0
+            sg = -1.0 if side == "r" else 1.0
+            # 화면 쪽 어깨 — 오른쪽 벽이면 몸의 왼쪽 옆구리
+            sh9 = fwd(bx9 + (bw9 * 0.18 if side == "r" else bw9 * 0.82),
+                      by9 + bh9 * 0.30)
+            far9 = abs(wx - sh9[0])                  # 어깨가 벽에서 나온 만큼
+            reach = max(ln0 * 0.45, min(ln0 * 0.85, far9 + ln0 * 0.25))
+            hands.append((0 if side == "r" else 1, base - sg * (0.0 if fit["stick"] else 16.0),
+                          wx, sh9[1] + ln0 * 0.50, sg, 0.0, reach))
+        else:
+            base = 90.0 if side == "b" else 270.0
+            wy = wy9 if side == "b" else 0
+            sg = -1.0 if side == "b" else 1.0
+            mid9 = fwd(bx9 + bw9 * 0.5, by9 + bh9 * 0.30)[0]
+            for i9, kx in ((0, -1.0), (1, 1.0)):
+                kk = kx if side == "b" else -kx
+                hands.append((i9, base - kx * (0.0 if fit["stick"] else 14.0)
+                              * (1 if side == "b" else -1),
+                              min(FW - 14.0, max(14.0, mid9 + kk * (bw9 * 0.5 + ln0 * 0.22))),
+                              wy, 0.0, sg, ln0 * 0.44))
+        for idx, deg, gx, gy, nx9, ny9, reach in hands:
+            if wig:
+                deg = deg + 10.0 * wig * (1 if idx == 0 else -1)
+            got = self._mag_hand(idx, deg)
+            if got is None:
+                continue
+            rot, (hx, hy), ln = got
+            reach = reach + bob + 4.0 * wig * (1 if idx == 0 else -1)
+            px9 = gx + nx9 * reach - hx
+            py9 = gy + ny9 * reach - hy
+            ix9, iy9 = int(round(px9)), int(round(py9))
+            cx0, cy0 = max(0, -ix9), max(0, -iy9)     # 그림 밖으로 나간 쪽은 자른다
+            if cx0 >= rot.width or cy0 >= rot.height:
+                continue
+            if cx0 or cy0:
+                rot = rot.crop((cx0, cy0, rot.width, rot.height))
+            out_im.alpha_composite(rot, (max(0, ix9), max(0, iy9)))
+        if ob9:
+            out_im.alpha_composite(over.crop(ob9), (ml + ob9[0], mt + ob9[1]))
+        for gim, gdx, gdy in groups9:
+            # 말풍선·반응(머리 묶음)과 간식·봉투(책상 묶음) — 옮겨 둔 만큼 비켜 얹는다
+            ix9, iy9 = int(round(ml + gdx)), int(round(mt + gdy))
+            cx0, cy0 = max(0, -ix9), max(0, -iy9)
+            if cx0 >= gim.width or cy0 >= gim.height:
+                continue
+            if cx0 or cy0:
+                gim = gim.crop((cx0, cy0, gim.width, gim.height))
+            out_im.alpha_composite(gim, (max(0, ix9), max(0, iy9)))
+        self._mag_groups = None
+        if side == "b" and wall + mt < FH:
+            # 벽 아래는 화면 밖이다 — 아래에 다른 화면이 있어도 안 보이게
+            out_im.paste((0, 0, 0, 0), (0, int(wall + mt), FW, FH))
+        self._mag_head = (tx - ml, ty_f - mt)
+        self._mag_ang = ang
+        self._mag_out = out_im
+        return out_im, (-ml, -mt)
 
     def _smooth_begin(self):
         """캐릭터를 시트에 모으기 시작한다. 매끈 경로가 아니면 None.
@@ -20722,12 +21704,34 @@ class Mascot:
             # 올리면 오류 87 로 실패하므로(지뢰 23) 그냥 건너뛴다 —
             # 켜진 상태는 그대로 두어야 되돌아올 때 다시 그려진다.
             return
+        im9, off9 = sheet.im, (0, 0)
+        fig9, self._mag_fig = getattr(self, "_mag_fig", None), None
+        if self._mag_now and fig9 is not None:
+            # 자석 모드 — 몸을 기울여 벽에 붙이고 덧장을 그 위에 얹는다.
+            # 터지면 덧장만 올린다 (몸이 한 프레임 안 보이는 쪽이 낫다).
+            try:
+                im9, off9 = self._mag_compose(sheet.im, fig9, self._mag_now,
+                                              time.time())
+            except Exception:
+                self._log_error("mag_compose")
+                im9, off9 = sheet.im, (0, 0)
+        self._mag_off = off9
         try:
             if IS_MAC:
-                ok = lay.push(sheet.im)
+                ok = lay.push(im9)
             else:
-                ok = lay.push(sheet.im, self.root.winfo_rootx(),
-                              self.root.winfo_rooty())
+                x9 = self.root.winfo_rootx() + off9[0]
+                y9 = self.root.winfo_rooty() + off9[1]
+                lp9 = self._mag_push
+                if (self._mag_now and self._mag_same and lp9 is not None
+                        and lp9[0] == (x9, y9) and time.time() - lp9[1] < 0.5
+                        and not getattr(lay, "fail", 0) and getattr(lay, "_shown", True)):
+                    # 직전과 같은 그림·같은 자리 — 올리지 않는다. 다만 반 초에 한 번은
+                    # 올린다 (창이 숨었다 되살아난 경우를 스스로 고치게 · 지뢰 178)
+                    ok = True
+                else:
+                    ok = lay.push(im9, x9, y9)
+                    self._mag_push = ((x9, y9), time.time()) if self._mag_now else None
             if ok and self._smooth_try_path:
                 # 한 프레임 올라갔다 = 이 컴퓨터에서 되는 길이다.
                 # **무엇이 켜졌는지 기록에 남긴다** — 맥은 눈으로 못 봐서
@@ -21576,6 +22580,11 @@ class Mascot:
         pr = ch.get("press")
         if mv is None and pr is not None and (abs(e.x_root - pr[0]) > 4
                                               or abs(e.y_root - pr[1]) > 4):
+            if ch.get("native") and self._chrome_native_move(win):
+                # OS 가 옮겼다 (놓을 때까지 안에서 돈다) — 끌기는 이미 끝났다
+                ch["press"] = ch["move"] = ch["target"] = None
+                ch["maxed"] = None
+                return True
             ch["move"] = mv = (pr[0] - pr[2], pr[1] - pr[3])
             ch["maxed"] = None            # 끌기 시작하면 '꽉 채움'은 풀린 것
             # 유리 판은 끄는 동안 굳힌다 — 아크릴을 옮길 때마다 다시 흐리면
@@ -21618,6 +22627,35 @@ class Mascot:
             win.geometry("%dx%d+%d+%d" % to)
         except Exception:
             pass
+
+    def _chrome_native_move(self, win):
+        """창 옮기기를 OS 에 맡긴다 — 제목 표시줄을 잡고 끄는 것과 같은 길이라 다른
+        프로그램 창처럼 부드럽게 움직인다 (요청). Tk 의 geometry 로 따라가면 사건마다
+        한 박자 늦고 12ms 로 묶여 있어 끊겨 보였다.
+
+        마우스 왼쪽 단추가 **실제로 눌려 있을 때만** 한다 — 아니면(검사의 가짜 사건)
+        OS 의 옮기기 고리에 들어가 멈춘다. 그때는 False 를 돌려 예전 길로 간다."""
+        if not IS_WIN:
+            return False
+        try:
+            u = ctypes.WinDLL("user32")                      # 지뢰 21·23 — 제 손잡이
+            u.GetAsyncKeyState.argtypes = [ctypes.c_int]
+            u.GetAsyncKeyState.restype = ctypes.c_short
+            u.GetSystemMetrics.argtypes = [ctypes.c_int]
+            vk = 0x02 if u.GetSystemMetrics(23) else 0x01    # 단추를 바꿔 쓰는 사람
+            if not (u.GetAsyncKeyState(vk) & 0x8000):
+                return False
+            hwnd = int(win.wm_frame(), 16)
+            u.ReleaseCapture.restype = ctypes.c_int
+            u.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+                                       ctypes.c_void_p]
+            u.SendMessageW.restype = ctypes.c_void_p
+            u.ReleaseCapture()
+            u.SendMessageW(hwnd, 0x00A1, 2, 0)               # WM_NCLBUTTONDOWN · HTCAPTION
+            return True
+        except Exception:
+            self._log_error("chrome_native")
+            return False
 
     def _chrome_release(self, win):
         ch = getattr(win, "_chrome", None)
@@ -23132,6 +24170,8 @@ class Mascot:
             except Exception:
                 continue
             for c in kids:
+                if getattr(c, "_no_dark", False):     # 마이 보드 — 제 빛깔
+                    continue
                 stack.append(c)
                 self._dark_widget(c)
 
@@ -23325,6 +24365,10 @@ class Mascot:
         사람이 보고 있거나 뭔가 벌어지는 동안만 올린다 — 그때가 부드러움이
         눈에 띄는 유일한 순간이기도 하다.
         """
+        if self._mag_now:
+            # 자석 모드 — 기울인 그림을 매 프레임 새로 만든다. 천천히 기웃거리는
+            # 움직임이라 30fps 로 충분하다 (60fps 면 한 코어의 값이 두 배).
+            return False
         if self._cur_near or self.gest is not None:
             return True
         if self.bubble is not None or self.particles:
@@ -23471,10 +24515,11 @@ class Mascot:
     PM_CACHE_MAX = 160        # 아이콘·알약 그림 캐시 (지뢰 18)
     PM_ICON = {"홈": "home", "할 일 추가": "check", "마감 추가": "cal",
                "뽀모도로 타이머": "tomato", "플레이리스트": "note",
-               "상태 칩": "dot_on", "소품 새로고침": "refresh", "슬라임": "slime",
+               "마이 보드": "board", "상태 칩": "dot_on", "소품 새로고침": "refresh",
+               "슬라임": "slime",
                "꺼내 놓기": "slime", "환경설정": "gear", "업데이트 소식": "star",
                "시계 펼치기 / 접기": "clock", "타이머 초기화": "refresh",
-               "타이머 복구": "clock", "오류 기록 폴더 열기": "folder",
+               "타이머 복구": "clock", "자석 모드": "magnet",
                "작업 종료": "moon", "종료": "power"}
     PM_CHIP_ICON = {"online": "dot_on", "away": "dot_off", "game": "game",
                     "movie": "movie", "food": "bowl"}
@@ -24185,6 +25230,10 @@ class Mascot:
             except Exception:
                 pass
         self._safe("z_pin", self._z_pin, now)
+        if self.cfg.get("magnet"):
+            self._safe("mag_keep", self._mag_keep, now)
+        if self.cfg.get("myhome"):
+            self._safe("cal_day", self._cal_day_tick, now)
         if self._glass:
             self._safe("glass", self._glass_tick, now)
             self._safe("pane", self._pane_tick, now)
@@ -31844,7 +32893,7 @@ class Mascot:
         if got is not None:
             self._safe("pomo_draw", got)
 
-    def _flame_img(self, h, lit=True):
+    def _flame_img(self, h, lit=True, keyed=False):
         """불꽃 그림 한 장 (캐시) — 4배로 그려 줄인다. 실패하면 None.
 
         폴리곤 두 장짜리 옛 판은 '못생겼다'(피드백). 베지어 실루엣으로
@@ -31852,7 +32901,7 @@ class Mascot:
         BMP 밖이라 맥 Tk 가 죽으니 (지뢰 4) 그림으로만 만든다.
         """
         h = max(8, int(round(h)))
-        ck = ("flame", h, bool(lit))
+        ck = ("flame", h, bool(lit), bool(keyed))
         got = self._soft_cache.get(ck)
         if got is not None:
             return got
@@ -31907,7 +32956,21 @@ class Mascot:
             d.polygon(sil(cx0, HS * 0.02, WS * 0.94, HS * 0.96), fill=col)
             d.polygon(sil(cx0, HS * 0.36, WS * 0.58, HS * 0.62), fill=core)
             d.polygon(sil(cx0, HS * 0.64, WS * 0.30, HS * 0.34), fill=hot)
-            got = ImageTk.PhotoImage(im.resize((W2, h), Image.LANCZOS))
+            # **알파를 미리 곱해서 줄인다.** 그냥 줄이면 투명한 자리(0,0,0,0)의
+            # 검정이 가장자리 색에 섞여 불꽃 둘레에 까만 선이 두른다 (제보).
+            sm = im.convert("RGBa").resize((W2, h), Image.LANCZOS).convert("RGBA")
+            if keyed:
+                # 색상키 창은 반투명을 못 담는다 — 남은 반투명은 키 색(검정)과
+                # 섞여 또 까맣게 보인다. 가장자리를 제 색 그대로 켜거나 끈다.
+                a9 = sm.split()[3].point(lambda v: 255 if v >= 96 else 0)
+                flat = Image.new("RGB", sm.size, self._hex_rgb(col))
+                flat.paste(sm.convert("RGB"), (0, 0), sm.split()[3])
+                hard = Image.merge("RGBA", (*flat.split(), a9))
+                got = ImageTk.PhotoImage(hard)
+                got._pil_src = sm
+            else:
+                got = ImageTk.PhotoImage(sm)
+                got._pil_src = sm
         except Exception:
             return None
         if len(self._soft_cache) > self.SOFT_MAX:   # 지뢰 18·42
@@ -34454,6 +35517,13 @@ class Mascot:
 
     @staticmethod
     def _hex_rgb(h):
+        """'#rrggbb' → (r, g, b). 이미 튜플이면 앞 셋. 못 읽으면 옅은 분홍으로 물러난다.
+        (마이 보드가 같은 이름을 하나 더 만들어 이쪽을 덮고 있었다 — 지뢰 85. 하나로 모았다.)"""
+        if isinstance(h, (tuple, list)):
+            try:
+                return tuple(int(v) for v in h[:3])
+            except (TypeError, ValueError):
+                return (251, 243, 247)
         h = str(h).lstrip("#")
         try:
             return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
@@ -37503,6 +38573,14 @@ class Mascot:
         # 몸짓 중에는 눈동자를 가운데로 모은다. 고개를 기울이면 미리 합쳐 둔
         # 머리(눈동자가 가운데에 구워져 있다)로 그려지는데, 기울기가 0 근처를
         # 오갈 때마다 두 방식이 번갈아 쓰여 눈동자가 대각선으로 튄다.
+        if self._mag and self._mag_head and self._mag_now:
+            # 자석 모드 — 머리가 기울어 있으니 화면에서의 방향을 그림 안의
+            # 방향으로 되돌려 준다 (안 하면 거꾸로 매달렸을 때 반대쪽을 본다)
+            sx9 = (cx - (self.root.winfo_rootx() + self._mag_head[0])) / 60.0 * em
+            sy9 = (cy - (self.root.winfo_rooty() + self._mag_head[1])) / 90.0 * em
+            a9 = math.radians(self._mag_ang)
+            pdx = max(-5 * em, min(5 * em, sx9 * math.cos(a9) - sy9 * math.sin(a9)))
+            pdy = max(-3 * em, min(4 * em, sx9 * math.sin(a9) + sy9 * math.cos(a9)))
         if self.gest is not None:
             pdx = pdy = 0.0
 
@@ -37615,6 +38693,22 @@ class Mascot:
         # 상태 칩 '자리비움' — 캐릭터와 소품이 사라지고 책상만 남는다.
         # 책상·상태 그림은 아래에서 따로 그리므로 여기만 건너뛰면 된다.
         chip_away = self._chip() == "away" if self.cfg.get("chips") else False
+        # 자석 모드 — 몸(뒤 파츠·몸·머리·소품)만 따로 한 장에 모아 두었다가
+        # 기울여 벽에 붙인다. 책상·팔·펫은 벽 뒤에 있는 셈이라 안 그린다.
+        mag = None
+        _fig = None
+        if _sheet is not None and not chip_away and self.slime is None:
+            mag = self._mag_side()
+        if mag:
+            try:
+                _fig = _CharSheet(self._real_canvas, self.W, self.H, self)
+                self._sheet = _fig
+                self.canvas = c = _fig
+            except Exception:
+                mag, _fig = None, None
+                self._sheet = _sheet
+                self.canvas = c = _sheet
+        self._mag_now = mag
         if chip_away:
             self._chip_hide = True
             # **그 자리에서 감춘다.** 틱에 맡기면 한 프레임 늦게 사라지고,
@@ -37622,7 +38716,7 @@ class Mascot:
             self._safe("chip_shadow", self._chip_shadow_sync, True)
         else:
             self._chip_hide = False
-            self._safe("chip_shadow", self._chip_shadow_sync, False)
+            self._safe("chip_shadow", self._chip_shadow_sync, bool(mag))
             if self.has.get("back"):
                 self._safe("back", self._draw_back, now, yo)
             if self.has.get("prop_back"):
@@ -37644,13 +38738,14 @@ class Mascot:
         # 반려동물은 책상 바로 앞(=책상에 가려지게) 그린다.
         # 자리비움이면 펫도 함께 숨는다 — 캐릭터만 없고 펫이 남으면
         # 반쪽으로 보이고, 안 보이는 소품 상자가 클릭까지 가로챈다 (지뢰 147)
-        if not self.cfg.get("pet_front") and not chip_away:
+        if not self.cfg.get("pet_front") and not chip_away and not mag:
             self._safe("pet", self._draw_pet, now)
 
         # ── 책상 (+옵션: 화면 낙서) ──────────────────────────────────────
         dx_, dy_ = self._pos("desk")
-        self._safe("desk", self._put, "desk", dx_, dy_)
-        if self.cfg.get("chips"):
+        if not mag:
+            self._safe("desk", self._put, "desk", dx_, dy_)
+        if self.cfg.get("chips") and not mag:
             self._safe("chip_img", self._draw_chip_img)
         if chip_away:
             # 자리비움은 캐릭터가 통째로 사라지는 상태라, 아무 표시가 없으면
@@ -37669,7 +38764,7 @@ class Mascot:
                 self._slime_grab = None
                 self._log_error("slime")
         # 슬라임을 꺼내 놓은 동안에는 타블렛이 매트에 덮여 있으니 낙서도 없다
-        if self.us.get("trail") and self.slime is None:
+        if self.us.get("trail") and self.slime is None and not mag:
             if self.strokes and now - self.last_drag > 12:
                 self.strokes = []
             for st in self.strokes:
@@ -37686,12 +38781,15 @@ class Mascot:
             self.strokes = []
 
         # 앞으로 나오는 반려동물: 얼굴 위 · 팔 아래 (책상선 마스크는 그대로)
-        if self.cfg.get("pet_front") and not chip_away:
+        if self.cfg.get("pet_front") and not chip_away and not mag:
             self._safe("pet", self._draw_pet, now)
 
-        if not chip_away:
+        if mag:
+            # 팔은 안 그리지만 그린 획 수와 펜 소리는 그대로 센다
+            self._safe("mag_pen", self._mag_pen, now, f, cx, cy)
+        elif not chip_away:
             self._safe("arms", self._draw_arms, now, f, yo, pen_typing, cx, cy)
-        if self.cfg.get("chips"):
+        if self.cfg.get("chips") and not mag:
             # 팝콘통·밥그릇은 팔보다 앞 — 손이 통 안으로 들어가 보인다
             self._safe("chip_front", self._draw_chip_img, True)
 
@@ -37716,14 +38814,22 @@ class Mascot:
         # 자리비움이면 몸에 딸린 것은 하나도 그리지 않는다. 이 둘이 가드
         # 밖에 있어서, 캐릭터가 사라진 자리에 **기지개 팔만 둥둥 떠 보였다**
         # (제보: "손도 사라졌는데 기지개 켜는 것만 보임"). 펜 손도 같은 몸이다.
-        if self.cfg.get("pen_over_head") and not chip_away:   # 깃펜이 맨 위
+        if self.cfg.get("pen_over_head") and not chip_away and not mag:   # 깃펜이 맨 위
             self._safe("pen_hand", self._draw_pen_hand)
-        if self._g_hands is not None and not chip_away:   # 제스처 손
+        if self._g_hands is not None and not chip_away and not mag:   # 제스처 손
             self._safe("gesture_arms", self._draw_gesture_arms, yo)
         # 손끝의 팝콘 한 알·밥숟가락 — **모든 파츠보다 위** (요청).
         # 몸짓 팔까지 그린 뒤여야 손에 가려지지 않는다.
-        if self.cfg.get("chips") and getattr(self, "_chip_kernel", None):
+        if self.cfg.get("chips") and getattr(self, "_chip_kernel", None) and not mag:
             self._safe("chip_kernel", self._draw_chip_kernel)
+        if _fig is not None:
+            # 고깔은 머리에 붙은 것이라 몸과 같이 기운다. 여기까지가 몸이다 —
+            # 이 뒤(말풍선·반응)는 똑바로 선 덧장에 그린다.
+            if self.fun:
+                self._safe("hat", self._draw_hat, yo)
+            self._sheet = _sheet
+            self.canvas = c = _sheet
+            self._mag_fig = _fig.im
         # 고양이를 쓰다듬는 손 — 숨긴 커서 자리에 그린다 (크기는 고양이
         # 머리 폭의 1/4, 요청). 시트 경로에서도 _hand_img 가 _tkimg 를
         # 쓰므로 안 샌다 (지뢰 128).
@@ -37731,7 +38837,7 @@ class Mascot:
             self._safe("cat_hand", self._draw_cat_hand)
 
         # 수면 모드: 머리 위쪽에 둥실거리는 zzZ (머리보다 위에 그린다)
-        if sleeping:
+        if sleeping and not mag:
             fs = self._fx_scale          # 앉은 모습을 구울 때는 크게 (홈 카드용)
             hx0, hy0, hx1, hy1 = self._head_box
             zx = min(hx1 - 14 * fs, self.W - 42 * fs)
@@ -37753,13 +38859,26 @@ class Mascot:
             self._safe("notes", self._fx.hide)
 
         # ── 귀여운 연출: 고깔모자 → 폭죽 → 말풍선 (맨 위) ────────────────
-        if self.fun:
+        if self.fun and not mag:
             self._safe("hat", self._draw_hat, yo)
+        # 자석 모드 — 머리에 딸린 것(말풍선·반응)과 책상에 놓이는 것(간식·
+        # 봉투·초대 토마토)을 따로 모아, 기운 몸에 맞는 자리로 옮겨 얹는다.
+        _gh = _gd = None
+        if mag:
+            try:
+                _gh = _LazySheet(self._real_canvas, self.W, self.H, self)
+                _gd = _LazySheet(self._real_canvas, self.W, self.H, self)
+            except Exception:
+                _gh = _gd = None
+        if _gh is not None:
+            self._mag_grp(_gh)
         if self.stretch_pending:
             self._safe("tap_ring", self._draw_tap_ring, now)
         if self.can_talk:
             self._safe("particles", self._draw_particles)
             self._safe("bubble", self._draw_bubble, yo)
+        if _gd is not None:
+            self._mag_grp(_gd)
         # 남이 눌러 준 연출은 캐릭터 위에 얹는다. draw() 안에서 그려야 한다 —
         # 밖에서 그리면 다음 draw() 의 delete("all") 에 바로 지워진다.
         self._snack_box = None      # 구역 밖에서 지운다 (지뢰 14)
@@ -37767,7 +38886,18 @@ class Mascot:
         self._safe("fortune_open", self._draw_fortune_open, now)
         self._safe("mail_desk", self._draw_mail_desk, now)
         self._safe("tomato", self._draw_tomato, now)
+        if _gh is not None:
+            self._mag_grp(_gh)
         self._safe("char_fx", self._draw_char_fx, now)
+        if _gh is not None:
+            self._mag_grp(_sheet)
+            c = _sheet
+            # _safe 로 감싸지 않는다 — 꺼지면 말풍선이 통째로 안 보인다
+            try:
+                self._mag_groups_done(_gh, _gd, mag)
+            except Exception:
+                self._log_error("mag_groups")
+                self._mag_groups = [(g9.im, 0, 0) for g9 in (_gd, _gh) if g9.used]
         # 여기까지가 시트다 — 캐릭터와 **그 위에 얹는 것들**(zzZ·모자·간식·
         # 말풍선·반응)을 한 장에 모아 레이어 창에 올린다. 레이어는 본체 창
         # **위**에 있으므로, 위로 솟는 소품이 타이머 카드에 안 가린다(제보).
@@ -38380,6 +39510,5819 @@ class Mascot:
             del cv.create_image
             if rotate_pil:
                 del self._put
+
+    # ── 마이 보드 (마이홈 · 1차 — 내 컴퓨터 안에서만, config `myhome`) ──────
+    # 방 대신 '코르크보드 + 선반'. 벽에 붙는 것은 전부 사용자 재료다 — 자기
+    # 그림(폴라로이드)·메모지·마스킹테이프·텍스트·티켓·스티커. 장식 틀은 전부
+    # 코드가 그린다(그림 파일 없음). 스티커는 홈·뽀모도로와 같은 시스템의
+    # 세 번째 창("board")이다. 아직 서버에는 안 올린다 — 방명록도 내 것만.
+    #
+    # **도형은 전부 PIL 로 4배에 그려 줄인다** (`_bd_*`) — Tk 의 원·다각형·
+    # 굵은 선은 가장자리가 계단져 '픽셀이 깨진다'(제보 2026-09-24). 캔버스에는
+    # 그림과 글자(Tk 글자는 원래 매끈하다)와 1px 가는 선만 얹는다.
+    # 보드는 제 빛깔(템플릿 넷 + 구역별 색)을 가지므로 다크 테마가 뒤집지
+    # 않게 창에 `_no_dark` 를 달고 캔버스의 다크 도우미를 걷는다(`_bd_undark`).
+    BOARD_TPL = {
+        "cream": {"bg": "#f3f1ef", "card": "#ffffff", "accent": "#ee5a8b",
+                  "soft": "#ffeaf1", "ink": "#1e1c21", "sub": "#8d888f",
+                  "line": "#ebe7e9", "ledge": "#f1ece6"},
+        "blue": {"bg": "#eef3fa", "card": "#ffffff", "accent": "#4a86d8",
+                 "soft": "#dce8fa", "ink": "#26364d", "sub": "#7f8fa6",
+                 "line": "#dde5f0", "ledge": "#eef1f6"},
+        "white": {"bg": "#f4f4f6", "card": "#ffffff", "accent": "#3b3238",
+                  "soft": "#ececee", "ink": "#2b2a2e", "sub": "#8f8d93",
+                  "line": "#e6e5e8", "ledge": "#f1f0f2"},
+        "night": {"bg": "#26222b", "card": "#322c38", "accent": "#f4b6c8",
+                  "soft": "#463b4a", "ink": "#f3edf0", "sub": "#a89ca4",
+                  "line": "#433b49", "ledge": "#3a333f"},
+    }
+    BOARD_TPL_ORDER = ("cream", "blue", "white", "night")
+    BOARD_TPL_NAME = {"cream": "크림", "blue": "블루", "white": "화이트", "night": "밤"}
+    BOARD_REGION = (("bg", "바탕"), ("card", "카드"), ("accent", "강조"),
+                    ("soft", "연한"), ("ink", "글자"), ("ledge", "선반"))
+    BOARD_MATS = ("cork", "linen", "kraft", "chalk", "felt", "grid", "dot", "wood",
+                  "white", "custom")
+    BOARD_MAT_NAME = {"cork": "코르크", "linen": "리넨", "kraft": "크라프트지",
+                      "chalk": "칠판", "felt": "펠트", "grid": "모눈 노트",
+                      "dot": "도트 노트", "wood": "나무판", "white": "흰색 판",
+                      "custom": "내 이미지"}
+    BOARD_MAT_FRAME = {"cork": "#c9a37e", "linen": "#c2b9ad", "kraft": "#a88a68",
+                       "chalk": "#6b5a48", "felt": "#d9a3b5", "grid": "#cdd1e0",
+                       "dot": "#dcc8b6", "wood": "#9a7656", "white": "#e6e2e4",
+                       "custom": "#d6cfc9"}
+    BOARD_LEDGE = 100          # 아래 선반 높이(px)
+    BOARD_TAPES = ("#ffd6a5", "#c9d8ff", "#b9f4c7", "#f4b6c8", "#f4e3a7", "#d7b9f4")
+    BOARD_NOTES = ("#fff1a8", "#cfe6ff", "#ffd9e6", "#d9f5df")
+    BOARD_MOODS = ("졸림", "신남", "집중", "멍", "행복", "피곤")
+    BOARD_MOTIONS = (("", "없음"), ("sway", "살랑"), ("float", "둥실"), ("bounce", "통통"),
+                     ("wiggle", "흔들흔들"), ("pulse", "두근두근"), ("jelly", "말랑"),
+                     ("orbit", "동글동글"), ("spin", "빙글"))
+    BOARD_TAPE_STY = (("stripe", "사선 줄무늬"), ("dot", "물방울"), ("check", "깅엄 체크"),
+                      ("heart", "하트"), ("star", "별"), ("lace", "레이스"), ("plain", "무지"))
+    BOARD_TICKET_STY = (("classic", "기본 티켓"), ("admit", "입장권"), ("coupon", "쿠폰"),
+                        ("tag", "네임택"))
+    BOARD_TICKET_COL = {"classic": "#ffffff", "admit": "#ffd6e3", "coupon": "#fff1a8",
+                        "tag": "#cfe6ff"}
+    BOARD_ITEM_MAX = 40
+    BOARD_UI_MAX = 260         # 보드 UI 그림 캐시 상한 (지뢰 18) — 한 장이 작다
+
+    def _board_on(self):
+        return bool(self.cfg.get("myhome")) and IS_WIN
+
+    def _board_file(self):
+        return os.path.join(self.state_dir, ".myhome.json")
+
+    def _board_dir(self):
+        return os.path.join(self.state_dir, ".board")
+
+    def _board_data(self):
+        """보드 상태 — 한 번 읽고 들고 있는다. 없는 열쇠는 기본값으로 채운다."""
+        d = getattr(self, "_board_mem", None)
+        if d is not None:
+            return d
+        d = {}
+        try:
+            raw = _load_json(self._board_file())
+            if isinstance(raw, dict):
+                d = raw
+        except Exception:
+            d = {}
+        d.setdefault("mat", "grid")
+        d.setdefault("tpl", "cream")
+        th = d.get("theme")
+        if not isinstance(th, dict):
+            d["theme"] = {}
+        d.setdefault("motto", "마감 중이지만 놀러와")
+        d.setdefault("mood", "집중")
+        if not isinstance(d.get("items"), list):
+            d["items"] = []
+        if not isinstance(d.get("guest"), list):
+            d["guest"] = []
+        if not isinstance(d.get("presets"), list):
+            d["presets"] = []
+        self._board_mem = d
+        return d
+
+    BOARD_UNDO_MAX = 40
+    BOARD_SNAP_KEYS = ("mat", "mat_img", "mat_pos", "tpl", "theme", "motto", "mood", "items", "shelf", "bubble")
+
+    def _board_snapshot(self):
+        """되돌리기·프리셋용 상태 — 보드에 보이는 것만 (프리셋 목록·방명록은 뺀다)."""
+        d = self._board_data()
+        return {k: d.get(k) for k in self.BOARD_SNAP_KEYS if k in d}
+
+    def _board_apply(self, snap):
+        d = self._board_data()
+        for k in self.BOARD_SNAP_KEYS:
+            if k in snap:
+                d[k] = json.loads(json.dumps(snap[k]))
+            else:
+                d.pop(k, None)
+        if not isinstance(d.get("items"), list):
+            d["items"] = []
+        if not isinstance(d.get("shelf"), list):
+            d["shelf"] = []
+        self._board_pick = None
+        self._board_ph = {}
+        self._board_cover = None
+
+    def _board_save(self, undo=True):
+        if _load_failed(self._board_file()):
+            self._log_error("board_locked")
+            return
+        try:
+            snap = json.dumps(self._board_snapshot(), ensure_ascii=False, sort_keys=True)
+            if undo and self._board_last_snap is not None and snap != self._board_last_snap:
+                self._board_undo_stack.append(self._board_last_snap)
+                del self._board_undo_stack[:-self.BOARD_UNDO_MAX]
+            self._board_last_snap = snap
+        except Exception:
+            self._log_error("board_snap")
+        try:
+            _save_json(self._board_file(), self._board_data())    # 지뢰 35
+        except Exception:
+            self._log_error("board_save")
+
+    def _board_undo(self):
+        """Ctrl+Z — 저장 단위로 한 걸음 되돌린다 (끌기 한 번 = 한 걸음)."""
+        if not self._board_undo_stack:
+            self._board_toast("되돌릴 것이 없어요")
+            return False
+        snap = self._board_undo_stack.pop()
+        try:
+            self._board_apply(json.loads(snap))
+        except Exception:
+            self._log_error("board_undo")
+            return False
+        self._board_last_snap = snap
+        self._board_save(undo=False)
+        self._board_toast("되돌렸어요")
+        self._board_draw()
+        return True
+
+    def _board_files_used(self):
+        """지금 보드·프리셋이 쓰는 그림 파일 이름들."""
+        d = self._board_data()
+        used = set()
+
+        def walk(st):
+            for it in st.get("items") or []:
+                if it.get("f"):
+                    used.add(str(it["f"]))
+            for p in st.get("shelf") or []:
+                if p.get("f"):
+                    used.add(str(p["f"]))
+            if st.get("mat_img"):
+                used.add(str(st["mat_img"]))
+        walk(d)
+        for pr in d.get("presets") or []:
+            if isinstance(pr.get("state"), dict):
+                walk(pr["state"])
+        for snap in self._board_undo_stack:
+            try:
+                walk(json.loads(snap))
+            except Exception:
+                pass
+        return used
+
+    def _board_gc(self):
+        """아무도 안 쓰는 그림 파일 정리 — 지울 때 바로 안 지우는 이유는 되돌리기·프리셋이
+        그 파일을 다시 쓸 수 있어서다. 창을 닫을 때 한 번 훑는다."""
+        try:
+            used = self._board_files_used()
+            for name in os.listdir(self._board_dir()):
+                if name.endswith(".png") and name not in used:
+                    os.remove(os.path.join(self._board_dir(), name))
+        except Exception:
+            pass
+
+    def _board_pal(self):
+        """템플릿 위에 사용자가 고른 구역 색을 덮는다 — 구역마다 따로 바꿀 수 있다."""
+        d = self._board_data()
+        base = dict(self.BOARD_TPL.get(d.get("tpl") or "cream", self.BOARD_TPL["cream"]))
+        for k, v in (d.get("theme") or {}).items():
+            if isinstance(v, str) and len(v) == 7 and v.startswith("#"):
+                base[k] = v
+        # 글자·바탕을 직접 바꾸면 보조 글자·선이 따라와야 한다 (한쪽만 남으면 튄다)
+        th = d.get("theme") or {}
+        if "ink" in th or "card" in th:
+            base["sub"] = self._mix(base["ink"], base["card"], 0.45)
+        if "bg" in th or "card" in th:
+            base["line"] = self._mix(base["bg"], base["ink"], 0.08)
+        # 카드 안의 옅은 칸(타일·입력 칸)과 한 단계 옅은 글자 — 바탕·글자에서 뽑는다
+        base["fill"] = self._mix(base["card"], base["bg"], 0.72)
+        base["ink2"] = self._mix(base["ink"], base["card"], 0.22)
+        base["seg"] = self._mix(base["bg"], base["ink"], 0.06)
+        return base
+
+    # ── 매끈한 그림 도우미 (4배로 그려 줄인다) ─────────────────────────────
+    @staticmethod
+    def _bd_c(col, a=255):
+        """'#rrggbb' 또는 (r,g,b[,a]) → RGBA."""
+        if isinstance(col, (tuple, list)):
+            t = tuple(int(v) for v in col)
+            return t if len(t) == 4 else t[:3] + (a,)
+        c = str(col).lstrip("#")
+        return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4)) + (a,)
+
+    @staticmethod
+    def _bd_on(col):
+        """그 바탕 위에 올릴 글자색 — 밝은 바탕이면 짙게, 아니면 흰색."""
+        try:
+            c = str(col).lstrip("#")
+            r, g, b = (int(c[i:i + 2], 16) for i in (0, 2, 4))
+            return "#2b2a2e" if (0.299 * r + 0.587 * g + 0.114 * b) > 170 else "#ffffff"
+        except Exception:
+            return "#ffffff"
+
+    def _bd_undark(self, cv):
+        """보드는 제 빛깔을 가진다 — 다크 테마 캔버스 도우미(지뢰 213)를 걷는다.
+        도우미는 인스턴스 속성으로 메서드를 덮어 두므로 지우면 원래대로다."""
+        if not getattr(cv, "_dark_cv", False):
+            return
+        for nm in ("create_text", "create_line", "create_polygon",
+                   "create_rectangle", "create_oval", "create_arc",
+                   "itemconfigure", "itemconfig", "configure", "config"):
+            cv.__dict__.pop(nm, None)
+
+    def _bd_rr(self, w, h, r, fill, outline=None, lw=1.0, S=4):
+        """둥근 사각형 한 장. fill 이 None 이면 속이 빈 테두리만."""
+        w, h = max(1, int(round(w))), max(1, int(round(h)))
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        r = max(0.0, min(float(r), w / 2.0, h / 2.0))
+        box = [0, 0, w * S - 1, h * S - 1]
+        if outline:
+            L = max(1, int(round(lw * S)))
+            dr.rounded_rectangle(box, radius=r * S, fill=self._bd_c(outline))
+            dr.rounded_rectangle([L, L, w * S - 1 - L, h * S - 1 - L],
+                                 radius=max(0.0, r * S - L),
+                                 fill=self._bd_c(fill) if fill else (0, 0, 0, 0))
+        elif fill:
+            dr.rounded_rectangle(box, radius=r * S, fill=self._bd_c(fill))
+        return im.resize((w, h), Image.LANCZOS)
+
+    def _bd_shadow(self, im, blur, alpha, dy):
+        """그림 모양 그대로의 부드러운 그림자를 깐 새 그림과 여백(M)."""
+        M = int(blur * 2 + abs(dy)) + 2
+        W2, H2 = im.width + M * 2, im.height + M * 2
+        m = Image.new("L", (W2, H2), 0)
+        m.paste(im.split()[3].point(lambda v: int(v * alpha)), (M, M + int(dy)))
+        m = m.filter(ImageFilter.GaussianBlur(blur))
+        out = Image.new("RGBA", (W2, H2), (40, 28, 34, 0))
+        out.putalpha(m)
+        out.alpha_composite(im, (M, M))
+        return out, M
+
+    def _bd_put(self, cv, key, make, x, y, anchor="nw", tags=()):
+        """구운 그림을 캐시해 얹는다. make() 는 그림 또는 (그림, 여백)."""
+        cache = self._board_uiph
+        got = cache.get(key)
+        if got is None:
+            im = make()
+            m = 0
+            if isinstance(im, tuple):
+                im, m = im
+            if im is None:
+                return None
+            got = (self._tkimg(im), m)
+            if len(cache) > self.BOARD_UI_MAX:         # 오래된 절반만 (지뢰 18)
+                for old in list(cache)[:self.BOARD_UI_MAX // 2]:
+                    cache.pop(old, None)
+            cache[key] = got
+        ph, m = got
+        if anchor == "nw":
+            x, y = x - m, y - m
+        return cv.create_image(int(round(x)), int(round(y)), image=ph,
+                               anchor=anchor, tags=tags)
+
+    def _bd_box(self, cv, x0, y0, x1, y1, r, fill, outline=None, lw=1.0,
+                shadow=None, tags=()):
+        w, h = int(round(x1 - x0)), int(round(y1 - y0))
+        if w < 2 or h < 2:
+            return None
+        key = ("box", w, h, float(r), fill, outline, float(lw), shadow)
+
+        def mk():
+            im = self._bd_rr(w, h, r, fill, outline, lw)
+            return self._bd_shadow(im, *shadow) if shadow else im
+        return self._bd_put(cv, key, mk, x0, y0, tags=tags)
+
+    BD_LINE = {
+        # 24칸 눈금. ("p", 점들, 닫힘) · ("r", x0, y0, x1, y1, 반지름) · ("c", cx, cy, r) · ("f", 점들) 채운 다각형
+        "home": (("p", ((4, 11), (12, 4), (20, 11), (20, 20), (4, 20)), True),
+                 ("p", ((10, 20), (10, 14.5), (14, 14.5), (14, 20)), False)),
+        "board": (("r", 4, 4, 20, 20, 3), ("p", ((9.5, 4), (9.5, 20)), False)),
+        "cal": (("r", 4, 5, 20, 20, 3), ("p", ((4, 10), (20, 10)), False),
+                ("p", ((9, 3), (9, 7)), False), ("p", ((15, 3), (15, 7)), False)),
+        "grid": (("r", 4, 4, 11, 11, 2), ("r", 13, 4, 20, 11, 2),
+                 ("r", 4, 13, 11, 20, 2), ("r", 13, 13, 20, 20, 2)),
+        "pen": (("p", ((4, 20), (5, 16), (16, 5), (19, 8), (8, 19)), True),
+                ("p", ((14, 7), (17, 10)), False)),
+        "minus": (("p", ((6, 12), (18, 12)), False),),
+        "max": (("r", 6, 6, 18, 18, 2),),
+        "max2": (("r", 5, 8, 16, 19, 2), ("p", ((9, 5), (19, 5), (19, 15)), False)),
+        "x": (("p", ((7, 7), (17, 17)), False), ("p", ((17, 7), (7, 17)), False)),
+        "plus": (("p", ((12, 5), (12, 19)), False), ("p", ((5, 12), (19, 12)), False)),
+        "left": (("p", ((14, 6), (8, 12), (14, 18)), False),),
+        "right": (("p", ((10, 6), (16, 12), (10, 18)), False),),
+        "arrow": (("p", ((5, 12), (18, 12)), False), ("p", ((13, 6), (19, 12), (13, 18)), False)),
+        "check": (("p", ((5, 12.5), (10, 17.5), (19, 7)), False),),
+        "play": (("f", ((8, 5), (19, 12), (8, 19))),),
+        "stop": (("f", ((7, 7), (17, 7), (17, 17), (7, 17))),),
+        "chat": (("r", 4, 5, 20, 17, 5), ("p", ((8, 17), (8, 21), (12.5, 17)), False)),
+        "list": (("p", ((9, 7), (20, 7)), False), ("p", ((9, 12), (20, 12)), False),
+                 ("p", ((9, 17), (20, 17)), False), ("c", 5, 7, .6), ("c", 5, 12, .6),
+                 ("c", 5, 17, .6)),
+    }
+
+    def _bd_line_icon(self, kind, d, col, lw=1.8):
+        """선 아이콘 — 굵기가 같은 둥근 선 (4배 → 줄임). 없는 모양이면 None."""
+        S = 4
+        n = int(d) * S
+        k = n / 24.0
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        c = self._bd_c(col)
+        w = max(1, int(round(lw * k * (24.0 / max(14.0, float(d))) ** 0.35)))
+
+        def dot(x, y):
+            dr.ellipse([x - w / 2.0, y - w / 2.0, x + w / 2.0, y + w / 2.0], fill=c)
+        if kind == "star":
+            pts = []
+            for i in range(10):
+                r9 = 9.2 if i % 2 == 0 else 4.1
+                a = math.radians(-90 + i * 36)
+                pts.append((12 + r9 * math.cos(a), 12.6 + r9 * math.sin(a)))
+            ops = (("p", tuple(pts), True),)
+        elif kind == "gear":
+            # 톱니 — 이가 굵고 짧아야 해(☀)처럼 안 보인다: 이 여섯을 다각형 둘레로 잇는다
+            pts = []
+            for i in range(6):
+                a0 = math.radians(i * 60)
+                for da, rr9 in ((-19, 6.9), (-11, 9.4), (11, 9.4), (19, 6.9)):
+                    a = a0 + math.radians(da)
+                    pts.append((12 + rr9 * math.cos(a), 12 + rr9 * math.sin(a)))
+            ops = [("p", tuple(pts), True), ("c", 12, 12, 2.7)]
+        else:
+            ops = self.BD_LINE.get(kind)
+        if not ops:
+            return None
+        for op in ops:
+            if op[0] == "p":
+                pts = [(x * k, y * k) for x, y in op[1]]
+                if op[2]:
+                    pts = pts + [pts[0], pts[1]]
+                dr.line(pts, fill=c, width=w, joint="curve")
+                for x, y in pts:
+                    dot(x, y)
+            elif op[0] == "r":
+                dr.rounded_rectangle([op[1] * k, op[2] * k, op[3] * k, op[4] * k],
+                                     radius=op[5] * k, outline=c, width=w)
+            elif op[0] == "c":
+                r9 = op[3] * k
+                dr.ellipse([op[1] * k - r9 - w / 2.0, op[2] * k - r9 - w / 2.0,
+                            op[1] * k + r9 + w / 2.0, op[2] * k + r9 + w / 2.0],
+                           outline=c, width=w)
+            else:
+                pts = [(x * k, y * k) for x, y in op[1]]
+                dr.polygon(pts, fill=c)
+                dr.line(pts + [pts[0], pts[1]], fill=c, width=max(1, w), joint="curve")
+        return im.resize((int(d), int(d)), Image.LANCZOS)
+
+    def _bd_icon(self, kind, d, col):
+        """한 톤 아이콘 (4배 → 줄임). 메뉴 아이콘(_pm_glyph)도 여기로 빌린다.
+        'l_' 로 시작하면 선 아이콘이다 (새 디자인의 머리·단추)."""
+        if str(kind).startswith("l_"):
+            return self._bd_line_icon(kind[2:], d, col)
+        S = 4
+        n = int(d) * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        c = self._bd_c(col)
+        hole = (0, 0, 0, 0)
+        w = max(1, int(round(n * 0.1)))
+
+        def P(*v):
+            return [(v[i] * n, v[i + 1] * n) for i in range(0, len(v), 2)]
+
+        def B(a, b, c2, d2):
+            return [a * n, b * n, c2 * n, d2 * n]
+        if kind in ("home", "gear", "star", "tick", "note9", "tomato", "chev", "cal", "check"):
+            _pm_glyph(dr, {"note9": "note"}.get(kind, kind), n / 2.0, n / 2.0,
+                      n * 0.42, c, hole)
+        elif kind == "board":
+            dr.rounded_rectangle(B(.08, .12, .92, .88), radius=.14 * n, outline=c, width=w)
+            dr.rounded_rectangle(B(.24, .3, .52, .58), radius=.04 * n, fill=c)
+            dr.rounded_rectangle(B(.5, .44, .78, .72), radius=.04 * n, fill=c)
+            dr.ellipse(B(.34, .2, .44, .3), fill=c)
+        elif kind == "photo":
+            dr.rounded_rectangle(B(.08, .16, .92, .84), radius=.14 * n, outline=c, width=w)
+            dr.polygon(P(.2, .72, .42, .44, .58, .62, .68, .52, .82, .72), fill=c)
+            dr.ellipse(B(.6, .27, .75, .42), fill=c)
+        elif kind == "smile":
+            dr.ellipse(B(.08, .08, .92, .92), outline=c, width=w)
+            dr.ellipse(B(.32, .34, .42, .46), fill=c)
+            dr.ellipse(B(.58, .34, .68, .46), fill=c)
+            dr.arc(B(.28, .36, .72, .74), 20, 160, fill=c, width=w)
+        elif kind == "memo":
+            dr.rounded_rectangle(B(.12, .1, .88, .9), radius=.14 * n, outline=c, width=w)
+            for yy in (.38, .56):
+                dr.line([(.3 * n, yy * n), (.7 * n, yy * n)], fill=c, width=w)
+            dr.line([(.3 * n, .72 * n), (.54 * n, .72 * n)], fill=c, width=w)
+        elif kind == "tape":
+            dr.polygon(P(.08, .42, .76, .12, .92, .5, .24, .8), fill=c)
+            for t in (.34, .56):
+                dr.line([(t * n, .32 * n), ((t + .14) * n, .66 * n)], fill=hole, width=w)
+        elif kind == "pen":
+            dr.polygon(P(.66, .1, .9, .34, .38, .86, .14, .62), fill=c)
+            dr.polygon(P(.14, .62, .38, .86, .08, .94), fill=c)
+            dr.line([(.58 * n, .18 * n), (.82 * n, .42 * n)], fill=hole, width=max(1, w // 2))
+        elif kind == "ticket":
+            dr.rounded_rectangle(B(.06, .22, .94, .78), radius=.1 * n, fill=c)
+            dr.ellipse(B(-.06, .38, .14, .62), fill=hole)
+            dr.ellipse(B(.86, .38, 1.06, .62), fill=hole)
+            for yy in (.3, .44, .58):
+                dr.rectangle(B(.6, yy, .66, yy + .08), fill=hole)
+        elif kind == "bulb":
+            dr.ellipse(B(.2, .06, .8, .66), fill=c)
+            dr.rounded_rectangle(B(.34, .6, .66, .84), radius=.06 * n, fill=c)
+            dr.line([(.38 * n, .72 * n), (.62 * n, .72 * n)], fill=hole, width=max(1, w // 2))
+            dr.rounded_rectangle(B(.4, .86, .6, .94), radius=.04 * n, fill=c)
+        elif kind == "chat":
+            dr.rounded_rectangle(B(.06, .12, .94, .72), radius=.24 * n, fill=c)
+            dr.polygon(P(.24, .6, .46, .66, .2, .9), fill=c)
+            for xx in (.32, .5, .68):
+                dr.ellipse(B(xx - .055, .37, xx + .055, .48), fill=hole)
+        elif kind == "x":
+            for a, b, c2, d2 in ((.26, .26, .74, .74), (.26, .74, .74, .26)):
+                dr.line([(a * n, b * n), (c2 * n, d2 * n)], fill=c, width=w)
+            for (px, py) in ((.26, .26), (.74, .74), (.26, .74), (.74, .26)):
+                dr.ellipse([px * n - w / 2, py * n - w / 2, px * n + w / 2, py * n + w / 2], fill=c)
+        elif kind == "minus":
+            dr.rounded_rectangle(B(.24, .46, .76, .56), radius=.05 * n, fill=c)
+        elif kind == "max":
+            dr.rounded_rectangle(B(.26, .26, .74, .74), radius=.1 * n, outline=c, width=w)
+        elif kind == "max2":
+            dr.rounded_rectangle(B(.22, .36, .64, .78), radius=.08 * n, outline=c, width=w)
+            dr.line([(.38 * n, .3 * n), (.7 * n, .3 * n), (.7 * n, .62 * n)], fill=c, width=w)
+        elif kind == "music":
+            dr.ellipse(B(.12, .6, .44, .88), fill=c)
+            dr.ellipse(B(.56, .5, .88, .78), fill=c)
+            dr.rectangle(B(.36, .16, .44, .74), fill=c)
+            dr.rectangle(B(.8, .08, .88, .64), fill=c)
+            dr.polygon(P(.36, .16, .88, .06, .88, .24, .36, .34), fill=c)
+        elif kind == "size":
+            for a0, b0, a1, b1 in ((.24, .24, .76, .76),):
+                dr.line([(a0 * n, b0 * n), (a1 * n, b1 * n)], fill=c, width=w)
+            dr.polygon(P(.18, .18, .52, .18, .18, .52), fill=c)
+            dr.polygon(P(.82, .82, .48, .82, .82, .48), fill=c)
+        elif kind == "turn":
+            _pm_glyph(dr, "refresh", n / 2.0, n / 2.0, n * 0.44, c, hole)
+        elif kind == "text":
+            dr.rounded_rectangle(B(.14, .14, .86, .32), radius=.05 * n, fill=c)
+            dr.rounded_rectangle(B(.41, .14, .59, .88), radius=.05 * n, fill=c)
+        elif kind == "heart":
+            dr.ellipse(B(.08, .16, .52, .58), fill=c)
+            dr.ellipse(B(.48, .16, .92, .58), fill=c)
+            dr.polygon(P(.1, .44, .9, .44, .5, .9), fill=c)
+        else:
+            return None
+        return im.resize((int(d), int(d)), Image.LANCZOS)
+
+    def _bd_ic(self, cv, kind, cx, cy, d, col, tags=()):
+        return self._bd_put(cv, ("ic", kind, int(d), col),
+                            lambda: self._bd_icon(kind, int(d), col),
+                            cx, cy, anchor="center", tags=tags)
+
+    def _bd_round_mask(self, w, h, r, top=True, bottom=True):
+        """둥근 모서리 가림판 (L). 모서리 넷만 4배로 그려 줄인다 — 큰 판도 싸다."""
+        m = Image.new("L", (w, h), 255)
+        r = int(max(1, min(r, w // 2, h // 2)))
+        S = 4
+        q = Image.new("L", (2 * r * S, 2 * r * S), 0)
+        ImageDraw.Draw(q).ellipse([0, 0, 2 * r * S - 1, 2 * r * S - 1], fill=255)
+        q = q.resize((2 * r, 2 * r), Image.LANCZOS)
+        if top:
+            m.paste(q.crop((0, 0, r, r)), (0, 0))
+            m.paste(q.crop((r, 0, 2 * r, r)), (w - r, 0))
+        if bottom:
+            m.paste(q.crop((0, r, r, 2 * r)), (0, h - r))
+            m.paste(q.crop((r, r, 2 * r, 2 * r)), (w - r, h - r))
+        return m
+
+    def _bd_bubble(self, w, h, r, fill, outline, lw=1.5, tail=(14, 30, 16, 9), S=4):
+        """말풍선 — 몸통과 꼬리를 한 실루엣으로 (지뢰 123). 다크 변환 없이."""
+        ta, tb, tt, th = tail
+        W2, H2 = int(w) + 2, int(h + th) + 2
+        im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        L = lw * S
+        x1, y1 = w * S - 1, h * S - 1
+        oc, fc = self._bd_c(outline), self._bd_c(fill)
+        dr.rounded_rectangle([0, 0, x1, y1], radius=r * S, fill=oc)
+        dr.polygon([(ta * S, y1 - 2), (tt * S, y1 + th * S), (tb * S, y1 - 2)], fill=oc)
+        dr.rounded_rectangle([L, L, x1 - L, y1 - L], radius=max(0, r * S - L), fill=fc)
+        dr.polygon([(ta * S + L * 1.3, y1 - L * 2), (tt * S + L * 0.2, y1 + th * S - L * 2.6),
+                    (tb * S - L * 1.3, y1 - L * 2)], fill=fc)
+        return im.resize((W2, H2), Image.LANCZOS)
+
+    def _bd_own(self, win, parent):
+        """주인 창을 직접 건다 — 표시줄 없는 창(overrideredirect)은 transient 가
+        주인을 못 걸어, 환경설정이 보드 **뒤**에 떴다 (실측 z 314 대 66).
+        주인이 있는 창은 늘 주인 위에 뜨고 같이 최소화된다."""
+        try:
+            win.update_idletasks()
+            u9 = ctypes.WinDLL("user32")                     # 지뢰 21·23
+            u9.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            u9.SetWindowLongPtrW.restype = ctypes.c_void_p
+            u9.SetWindowLongPtrW(int(win.wm_frame(), 16), -8, int(parent.wm_frame(), 16))
+        except Exception:
+            self._log_error("board_own")
+        try:
+            win.lift()
+        except Exception:
+            pass
+
+    def _tw(self, text, font):
+        """글자 폭(px) — 글꼴·글자별 캐시 (지뢰 18 — 상한)."""
+        key = (str(text), tuple(font) if isinstance(font, (tuple, list)) else font)
+        c = self._board_twc
+        got = c.get(key)
+        if got is None:
+            try:
+                import tkinter.font as tkf
+                got = tkf.Font(font=font).measure(text)
+            except Exception:
+                got = len(text) * 8
+            if len(c) > 400:
+                for old in list(c)[:200]:
+                    c.pop(old, None)
+            c[key] = got
+        return got
+
+    BOARD_BODY_FACE = "SemiBold"      # 본문 굵기 — Regular 는 얇아 안 예쁘다 (요청)
+    BOARD_FACES = (("SUIT", ("SUIT SemiBold", "SUIT", "SUIT ExtraBold"),
+                    ("SUIT-SemiBold.otf", "SUIT-Bold.otf", "SUIT-ExtraBold.otf")),
+                   ("Pretendard", ("Pretendard SemiBold", "Pretendard", "Pretendard"),
+                    ("Pretendard-SemiBold.otf", "Pretendard-Bold.otf", "Pretendard-Bold.otf")))
+
+    def _board_face(self):
+        """보드 글꼴 묶음 — 파츠 fonts 에 SUIT 가 있으면 SUIT, 없으면 프리텐다드,
+        그것도 없으면(다른 캐릭터) None. 한 번만 알아본다."""
+        got = self._board_face_ok
+        if got is None:
+            got = False
+            try:
+                import tkinter.font as tkf
+                fams = set(tkf.families(self.root))
+                for _nm, tk3, pil3 in self.BOARD_FACES:
+                    if tk3[0] in fams and os.path.exists(
+                            os.path.join(self.dir, "fonts", pil3[0])):
+                        got = (tk3, pil3)
+                        break
+            except Exception:
+                got = False
+            self._board_face_ok = got
+        return got or None
+
+    def _bf(self, size, bold=False):
+        """보드 글꼴. bold — False 본문(SemiBold) · True 굵게(Bold) · 2 제목(ExtraBold).
+        얇은 굵기는 쓰지 않는다 (요청)."""
+        fc = self._board_face()
+        if fc is None:
+            return self._uf(size, bool(bold))
+        k = 2 if bold == 2 else (1 if bold else 0)
+        sz = max(7, round(size * getattr(self, "ui_k", 1.0)))
+        if k == 1:
+            return (fc[0][1], sz, "bold")
+        return (fc[0][k], sz)
+
+    def _bd_pil_font(self, px, bold=False):
+        """항목(메모지·사진 글) PIL 글꼴 — Tk 쪽과 같은 판·같은 굵기."""
+        fc = self._board_face()
+        k = 2 if bold == 2 else (1 if bold else 0)
+        if fc is None:
+            return self._pil_font(px, bool(bold))
+        key = (int(px), "board", fc[1][k])
+        got = self._pilfont_cache.get(key)
+        if got is None:
+            try:
+                got = ImageFont.truetype(os.path.join(self.dir, "fonts", fc[1][k]), int(px))
+            except Exception:
+                got = self._pil_font(px, bool(bold)) or False
+            self._pilfont_cache[key] = got
+        return got or None
+
+    def _bd_ls(self, font):
+        """글꼴의 줄 높이(px) — 줄 사이를 짐작한 숫자가 아니라 이 값으로 띄운다
+        (글자가 위아래 글자·아이콘에 닿는다는 요청)."""
+        key = ("ls", tuple(font) if isinstance(font, (tuple, list)) else font)
+        c = self._board_twc
+        got = c.get(key)
+        if got is None:
+            try:
+                import tkinter.font as tkf
+                got = int(tkf.Font(font=font).metrics("linespace"))
+            except Exception:
+                got = 18
+            c[key] = got
+        return got
+
+    def _bd_fit(self, text, font, maxw):
+        """폭 안에 들어가게 뒤를 자른다 (…)."""
+        t = str(text)
+        if self._tw(t, font) <= maxw:
+            return t
+        while t and self._tw(t + "…", font) > maxw:
+            t = t[:-1]
+        return t + "…"
+
+    # ── 창 ─────────────────────────────────────────────────────────────
+    def _board_open(self):
+        w0 = getattr(self, "_board_win", None)
+        if w0 is not None:
+            try:
+                if w0.winfo_exists():
+                    w0.deiconify()
+                    w0.lift()
+                    return
+            except Exception:
+                pass
+        pal = self._board_pal()
+        W, H = 1200, 780
+        win = tk.Toplevel(self.root)
+        win._no_dark = True                 # 제 빛깔을 가진다 (다크가 안 뒤집는다)
+        win.title("마이 보드")
+        win.resizable(True, True)
+        win.minsize(980, 640)
+        win.configure(bg=pal["bg"])
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry("%dx%d+%d+%d" % (W, H, max(0, (sw - W) // 2), max(0, (sh - H) // 2)))
+        self._chrome_setup(win, None, band=64, on_close=self._board_close)
+        if getattr(win, "_chrome", None):
+            win._chrome["native"] = True       # 끌기는 OS 에 맡긴다 (부드럽게 · 요청)
+        cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["bg"])
+        self._bd_undark(cv)
+        cv.pack(fill="both", expand=True)
+        # 보드 무대는 캔버스를 따로 둔다 — 스티커 시스템이 '창 크기 비율'로
+        # 자리를 잡으므로, 무대 캔버스 하나가 곧 스티커의 창이 된다.
+        bcv = tk.Canvas(cv, highlightthickness=0, bd=0, bg=pal["bg"])
+        self._bd_undark(bcv)
+        bcv._no_img_keep = False
+        self._board_win, self._board_cv, self._board_bcv = win, cv, bcv
+        self._board_edit = False
+        self._board_drag = None
+        self._board_hit = []
+        self._board_ui_hit = []
+        self._board_ph = {}            # 항목 그림 캐시 (id, 열쇠) → PhotoImage
+        self._board_uiph = {}          # UI 조각 그림 캐시
+        self._board_mat_cache = {}
+        self._board_toast_v = None
+        self._board_job = None
+        self._board_size = None
+        for w9, tag in ((cv, "main"), (bcv, "stage")):
+            w9.bind("<Button-1>", lambda e, t=tag: self._safe("board_press", self._board_press, e, t))
+            w9.bind("<B1-Motion>", lambda e, t=tag: self._safe("board_drag", self._board_drag_ev, e, t))
+            w9.bind("<ButtonRelease-1>", lambda e, t=tag: self._safe("board_release", self._board_release, e, t))
+            w9.bind("<Button-3>", lambda e, t=tag: self._safe("board_rclick", self._board_rclick, e, t))
+            w9.bind("<Motion>", lambda e, t=tag: self._safe("board_motion", self._board_motion, e, t))
+            w9.bind("<MouseWheel>", lambda e, t=tag: self._safe("board_wheel", self._board_wheel, e, t))
+        cv.bind("<Leave>", lambda e: self._tip_hide())
+        win.bind("<Configure>", lambda e: self._safe("board_size", self._board_resized, e), add="+")
+        win.bind("<Escape>", lambda e: self._board_close())
+        win.bind("<Control-z>", lambda e: self._safe("board_undo", self._board_undo))
+        win.bind("<Control-v>", lambda e: self._safe("board_paste", self._board_paste))
+        win.protocol("WM_DELETE_WINDOW", self._board_close)
+        self._win_place(win, "마이 보드")
+        self._board_undo_stack = []
+        self._board_last_snap = None
+        self._safe("board_draw", self._board_draw)
+        self._board_loop()
+
+    def _board_close(self):
+        self._board_set_close()
+        self._board_undo_stack = []       # 되돌리기는 창과 함께 끝난다 — 그 다음에 파일 정리
+        self._board_last_snap = None
+        self._board_gc()
+        self._board_reel = None
+        for nm in ("_board_job", "_board_rz_job"):
+            job = getattr(self, nm, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)          # 지뢰 20
+                except Exception:
+                    pass
+                setattr(self, nm, None)
+        if self._stk_edit == "board":
+            self._stk_edit = None
+            self._stk_pick = None
+        w = getattr(self, "_board_win", None)
+        self._board_win = self._board_cv = self._board_bcv = None
+        self._board_ph = {}
+        self._board_uiph = {}
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+    def _board_alive(self):
+        w = getattr(self, "_board_win", None)
+        try:
+            return w is not None and w.winfo_exists()
+        except Exception:
+            return False
+
+    def _board_resized(self, e):
+        """크기가 바뀌면 조금 모았다가 한 번 그린다 — 끄는 동안 사건이 수십 번
+        오는데 판 그림(재질·둥근 모서리)을 매번 새로 구우면 끌기가 끊긴다."""
+        if not self._board_alive() or e.widget is not self._board_win:
+            return
+        sz = (e.width, e.height)
+        if sz == self._board_size:
+            return
+        self._board_size = sz
+        if self._board_rz_job is not None:
+            try:
+                self.root.after_cancel(self._board_rz_job)
+            except Exception:
+                pass
+
+        def go():
+            self._board_rz_job = None
+            self._safe("board_draw", self._board_draw)
+        self._board_rz_job = self.root.after(60, go)
+
+    def _board_loop(self):
+        """80ms — 스티커 모션(살랑·둥실·깜빡·빙글)과 토스트 만료."""
+        self._board_job = None
+        if not self._board_alive():
+            return
+        busy = (self._board_poke is not None or bool(self._board_fx) or self._board_say is not None
+                or self._board_playing()
+                or any(self._stk_motion_pose(str(m9.get("m") or ""), 0.0, 0.0) is not None
+                       for m9 in self._stk_list("board")))
+        # 움직이는 것이 있으면 30fps 남짓 — 80ms(12fps)는 뚝뚝 끊겨 보였다 (요청)
+        self._board_job = self.root.after(33 if busy else 80, self._board_loop)
+        self._safe("board_anim", self._board_anim)
+
+    # ── 그리기 ──────────────────────────────────────────────────────────
+    def _board_layout(self):
+        win = self._board_win
+        W, H = max(1, win.winfo_width()), max(1, win.winfo_height())
+        band, gap, L, R = 64, 14, 268, 292
+        top = band
+        bot = H - 16
+        if W < 1120:                       # 좁은 창 — 옆 칸을 조금 줄인다
+            L, R = 248, 264
+        sx0 = gap + L + gap
+        sx1 = W - gap - R - gap
+        return {"W": W, "H": H, "band": band, "gap": gap,
+                "left": (gap, top, gap + L, bot),
+                "stage": (sx0, top, sx1, bot),
+                "right": (sx1 + gap, top, W - gap, bot)}
+
+    def _board_draw(self):
+        if not self._board_alive():
+            return
+        pal, d = self._board_pal(), self._board_data()
+        win, cv, bcv = self._board_win, self._board_cv, self._board_bcv
+        lay = self._board_layout()
+        win.configure(bg=pal["bg"])
+        cv.configure(bg=pal["bg"])
+        cv.delete("all")
+        self._board_ui_hit = []
+        self._cal_hit = []
+        self._board_draw_head(cv, lay, pal, d)
+        if self._board_tab == "cal":
+            # 달력 탭 — 무대 캔버스를 치우고 본 캔버스에 달력을 그린다
+            try:
+                bcv.place_forget()
+            except Exception:
+                pass
+            self._cal_draw(cv, lay, pal)
+            if self._board_set_alive():
+                self._safe("board_set_draw", self._board_set_draw)
+            return
+        self._board_draw_left(cv, lay["left"], pal, d)
+        self._board_draw_right(cv, lay["right"], pal, d)
+        x0, y0, x1, y1 = lay["stage"]
+        # 무대 카드의 그림자 — 무대는 캔버스가 따로라 그림자는 본 캔버스에 깐다
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        bcv.place(x=x0, y=y0, width=x1 - x0, height=y1 - y0)
+        bcv.configure(bg=pal["bg"])
+        self._board_draw_stage()
+        if self._board_set_alive():
+            self._safe("board_set_draw", self._board_set_draw)
+
+    def _board_chrome(self, win, cv, xr, cy, pal):
+        """– □ × 를 매끈하게 (Tk 선은 계단진다). 누르는 자리는 _chrome_press 가 본다."""
+        ch = getattr(win, "_chrome", None)
+        if not ch:
+            return xr
+        acts = ("close", "min") if ch.get("fixed") else ("close", "max", "min")
+        r, gap = 15, 2
+        hits = []
+        for i, act in enumerate(acts):
+            bx = xr - r - i * (2 * r + gap)
+            kind = {"close": "l_x", "min": "l_minus",
+                    "max": "l_max2" if ch.get("maxed") else "l_max"}[act]
+            self._bd_ic(cv, kind, bx, cy, 16, pal["sub"])
+            hits.append((bx - r, cy - r, bx + r, cy + r, act))
+        ch["hits"] = hits
+        ch["hits_w"] = cv
+        xl = xr - len(acts) * (2 * r + gap) - 8
+        cv.create_rectangle(xl, cy - 13, xl + 1, cy + 13, fill=pal["line"], outline="")
+        return xl
+
+    def _bd_icon_btn(self, cv, x1, cy, icon, tip, primary, pal, hit, r=18):
+        """아이콘만 있는 단추 (오른쪽 끝 x1 기준) — 테두리 없이 아이콘만 둔다. 이름표는
+        _board_tips 에 적어 두고 커서가 머물면 _tip_track 이 띄운다 (지뢰 199).
+        왼쪽 끝 x 를 돌려준다."""
+        cx = x1 - r
+        if primary:
+            self._bd_box(cv, cx - r, cy - r, cx + r, cy + r, 11, primary)
+            col = self._bd_on(primary)
+        else:
+            col = pal["ink2"]
+        self._bd_ic(cv, icon, cx, cy, 20, col)
+        box = (cx - r, cy - r, cx + r, cy + r)
+        self._board_ui_hit.append(box + (hit,))
+        self._board_tips.append(box + (tip,))
+        return cx - r
+
+    def _bd_button(self, cv, x1, cy, label, icon, primary, pal, hit, h=36):
+        """오른쪽 끝(x1)에 맞춘 단추 (모서리 11). 왼쪽 끝 x 를 돌려준다."""
+        f = self._bf(10, True)
+        w = int(self._tw(label, f)) + (50 if icon else 32)
+        x0 = x1 - w
+        if primary:
+            self._bd_box(cv, x0, cy - h / 2, x1, cy + h / 2, 11, primary)
+            fg = self._bd_on(primary)
+        else:
+            self._bd_box(cv, x0, cy - h / 2, x1, cy + h / 2, 11, pal["fill"])
+            fg = pal["ink"]
+        tx = x0 + 16
+        if icon:
+            self._bd_ic(cv, icon, x0 + 23, cy, 16, fg)
+            tx = x0 + 38
+        cv.create_text(tx, cy, text=label, font=f, fill=fg, anchor="w")
+        self._board_ui_hit.append((x0, cy - h / 2, x1, cy + h / 2, hit))
+        return x0
+
+    def _bd_seg(self, cv, x0, cy, items, cur, pal, pre, h=36, f=None, icon=True):
+        """알약 묶음 전환 단추 — items: (열쇠, 글, 아이콘). 오른쪽 끝 x 를 돌려준다."""
+        f = f or self._bf(10, True)
+        ws = [int(self._tw(t, f)) + (30 if (ic and icon) else 0) + 28 for _k, t, ic in items]
+        tot = sum(ws) + 6 + 2 * (len(items) - 1)
+        self._bd_box(cv, x0, cy - h / 2, x0 + tot, cy + h / 2, 11, pal["seg"])
+        x = x0 + 3
+        for (k, t, ic), w in zip(items, ws):
+            on = (k == cur)
+            if on:
+                self._bd_box(cv, x, cy - h / 2 + 3, x + w, cy + h / 2 - 3, 9, pal["card"],
+                             shadow=(2, .10, 1))
+            col = pal["ink"] if on else pal["sub"]
+            tx = x + 14
+            if ic and icon:
+                self._bd_ic(cv, ic, x + 22, cy, 16, col)
+                tx = x + 36
+            cv.create_text(tx, cy, text=t, font=f, fill=col, anchor="w")
+            self._board_ui_hit.append((x, cy - h / 2, x + w, cy + h / 2, pre + k))
+            x += w + 2
+        return x0 + tot
+
+    def _board_draw_head(self, cv, lay, pal, d):
+        W, band = lay["W"], lay["band"]
+        cy = band // 2
+        self._bd_box(cv, 22, cy - 17, 56, cy + 17, 11, pal["ink"])
+        self._bd_ic(cv, "l_home", 39, cy, 20, self._bd_on(pal["ink"]))
+        name = str(self.cfg.get("name") or self.char)
+        ft = self._bf(13, 2)
+        cv.create_text(70, cy, text=name, font=ft, fill=pal["ink"], anchor="w")
+        x = 70 + int(self._tw(name, ft))
+        ft2 = self._bf(13, True)
+        cv.create_text(x, cy, text="의 마이 보드", font=ft2, fill=pal["sub"], anchor="w")
+        x += int(self._tw("의 마이 보드", ft2)) + 18
+        x = self._bd_seg(cv, x, cy, (("board", "보드", "l_board"), ("cal", "달력", "l_cal")),
+                         self._board_tab, pal, "tab:")
+        # 오른쪽 — 창 단추 · 꾸미기 · 아이콘 단추 (글자 없이, 커서를 올리면 이름표 · 요청)
+        self._board_tips = []
+        xl = self._board_chrome(self._board_win, cv, W - 16, cy, pal)
+        xs = xl - 12
+        if self._board_tab == "board":
+            ed = getattr(self, "_board_edit", False)
+            xs = self._bd_button(cv, xs, cy, "완료" if ed else "꾸미기",
+                                 "l_check" if ed else "l_pen",
+                                 pal["accent"] if ed else pal["ink"], pal, "edit") - 6
+            self._board_tips.append((xs + 6, cy - 18, xl - 12, cy + 18,
+                                     "꾸미기 끝내기 (저장)" if ed else "내 보드 꾸미기"))
+        xs = self._bd_icon_btn(cv, xs, cy, "l_gear", "환경설정", None, pal, "settings")
+        xs = self._bd_icon_btn(cv, xs - 2, cy, "l_star", "도장판", None, pal, "stamp")
+        if self._board_tab == "board":
+            cur9 = str(d.get("cur_preset") or "")
+            xs = self._bd_icon_btn(cv, xs - 2, cy, "l_grid",
+                                   "보드 프리셋" + (" · " + cur9 if cur9 else ""),
+                                   None, pal, "presets")
+        # 대문 문구 — 탭 옆 (누르면 고친다)
+        mx = x + 16
+        fm = self._bf(10)
+        room = xs - 16 - mx - 18
+        if room > 60:
+            motto = self._bd_fit(str(d.get("motto") or "대문 문구를 적어 보세요"), fm, room)
+            mw = int(self._tw(motto, fm)) + 18
+            self._bd_box(cv, mx, cy - 3, mx + 6, cy + 3, 3, pal["accent"])
+            cv.create_text(mx + 14, cy, text=motto, font=fm, fill=pal["ink2"], anchor="w")
+            self._board_ui_hit.append((mx - 4, cy - 16, mx + mw, cy + 16, "motto"))
+
+    def _bd_banner(self, w, h, r, pal):
+        S = 3
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.rounded_rectangle([0, 0, w * S - 1, (h + r) * S], radius=r * S,
+                             fill=self._bd_c(pal["soft"]))
+        acc = self._bd_c(pal["accent"], 46)
+        for row, yy in enumerate(range(12, h - 4, 14)):
+            for xx in range(10 + (row % 2) * 7, w, 14):
+                dr.ellipse([(xx - 1.4) * S, (yy - 1.4) * S, (xx + 1.4) * S, (yy + 1.4) * S], fill=acc)
+        wh = self._bd_c(pal["card"], 70)
+        dr.ellipse([(w - 70) * S, -30 * S, (w + 30) * S, 70 * S], fill=wh)
+        dr.ellipse([-24 * S, (h - 30) * S, 40 * S, (h + 34) * S], fill=wh)
+        im = im.resize((w, h), Image.LANCZOS)
+        return im
+
+    def _bd_avatar(self, R, pal):
+        """동그란 얼굴 — 흰 테 + 강조색 테 + 부드러운 그림자."""
+        S = 4
+        D = 2 * R
+        im = Image.new("RGBA", (D * S, D * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.ellipse([0, 0, D * S - 1, D * S - 1], fill=self._bd_c(pal["accent"]))
+        b = int(2.5 * S)
+        dr.ellipse([b, b, D * S - 1 - b, D * S - 1 - b], fill=self._bd_c(pal["card"]))
+        f = self._board_face_pil((D - 11) * S, pal["soft"])
+        if f is not None:
+            im.alpha_composite(f, (int(5.5 * S), int(5.5 * S)))
+        im = im.resize((D, D), Image.LANCZOS)
+        return self._bd_shadow(im, 6, .20, 3)
+
+    def _board_face_pil(self, sz, bg):
+        """seat.png 에서 얼굴 쪽을 잘라 동그랗게 (sz 크기, 가장자리 매끈)."""
+        try:
+            s9 = self._board_seat_pil()
+            if s9 is None:
+                return None
+            w9, h9 = s9.size
+            f9 = s9.crop((int(w9 * .05), int(h9 * .06), int(w9 * .84), int(h9 * .72)))
+            k = sz * 1.06 / f9.height
+            f9 = f9.resize((max(1, int(f9.width * k)), max(1, int(f9.height * k))), Image.LANCZOS)
+            c9 = Image.new("RGBA", (sz, sz), self._bd_c(bg))
+            c9.alpha_composite(f9, ((sz - f9.width) // 2, (sz - f9.height) // 2 + sz // 20))
+            S = 1 if sz >= 200 else 4
+            m9 = Image.new("L", (sz * S, sz * S), 0)
+            ImageDraw.Draw(m9).ellipse((0, 0, sz * S - 1, sz * S - 1), fill=255)
+            if S > 1:
+                m9 = m9.resize((sz, sz), Image.LANCZOS)
+            o = Image.new("RGBA", (sz, sz), (0, 0, 0, 0))
+            o.paste(c9, (0, 0), m9)
+            return o
+        except Exception:
+            return None
+
+    def _board_seat_pil(self):
+        got = self._board_uiph.get("seat_pil")
+        if got is None:
+            try:
+                got = (Image.open(os.path.join(self.dir, "seat.png")).convert("RGBA"), 0)
+            except Exception:
+                got = (None, 0)
+            self._board_uiph["seat_pil"] = got
+        return got[0]
+
+    def _board_face_ph(self, sz, bg):
+        """방명록 얼굴 — 매끈한 동그라미 PhotoImage."""
+        key = ("face", sz, bg)
+        got = self._board_uiph.get(key)
+        if got is not None:
+            return got[0]
+        im = self._board_face_pil(sz * 3, bg)
+        if im is None:
+            return None
+        im = im.resize((sz, sz), Image.LANCZOS)
+        ph = self._tkimg(im)
+        self._board_uiph[key] = (ph, 0)
+        return ph
+
+    def _bd_label(self, cv, x, y, text, pal):
+        cv.create_text(x, y, text=text, font=self._bf(9, True), fill=pal["sub"], anchor="w")
+
+    def _bd_bar(self, cv, x0, y, w, frac, pal, col=None, h=6):
+        """얇은 진행 막대."""
+        self._bd_box(cv, x0, y, x0 + w, y + h, h / 2.0, pal["fill"])
+        frac = max(0.0, min(1.0, float(frac)))
+        if frac > 0:
+            self._bd_box(cv, x0, y, x0 + max(h, int(w * frac)), y + h, h / 2.0,
+                         col or pal["accent"])
+
+    def _bd_tile(self, cv, x0, y0, x1, y1, cap, val, pal, hit=None):
+        """옅은 칸 — 작은 설명 위에 굵은 값."""
+        self._bd_box(cv, x0, y0, x1, y1, 13, pal["fill"])
+        fc, fv = self._bf(8, True), self._bf(12, 2)
+        lc, lv = self._bd_ls(fc), self._bd_ls(fv)
+        ty = (y0 + y1) / 2.0 - (lc + lv + 2) / 2.0
+        cv.create_text(x0 + 12, ty + lc / 2.0, text=cap, font=fc, fill=pal["sub"], anchor="w")
+        cv.create_text(x0 + 12, ty + lc + 2 + lv / 2.0,
+                       text=self._bd_fit(val, fv, x1 - x0 - 22), font=fv, fill=pal["ink"],
+                       anchor="w")
+        if hit:
+            self._board_ui_hit.append((x0, y0, x1, y1, hit))
+
+    def _bd_bignum(self, cv, x, y, parts, pal, size=22):
+        """큰 숫자 + 작은 단위를 한 줄로 — parts: (글, 큰가). 아래 끝을 맞춘다."""
+        fb, fs = self._bf(size, 2), self._bf(max(8, int(size * 0.5)), True)
+        hb, hs = self._bd_ls(fb), self._bd_ls(fs)
+        for t, big in parts:
+            if big:
+                cv.create_text(x, y, text=t, font=fb, fill=pal["ink"], anchor="w")
+                x += int(self._tw(t, fb)) + 2
+            else:
+                cv.create_text(x, y + (hb - hs) / 2.0 - hb * 0.08, text=t, font=fs,
+                               fill=pal["sub"], anchor="w")
+                x += int(self._tw(t, fs)) + 7
+        return hb
+
+    def _board_draw_left(self, cv, box, pal, d):
+        x0, y0, x1, y1 = box
+        cw = x1 - x0
+        cx = (x0 + x1) // 2
+        pad = 20
+        gap = 14
+        # ── 프로필 ──
+        R = 42
+        fnm, fbd, fl = self._bf(15, 2), self._bf(9, True), self._bf(9, True)
+        ti = ""
+        try:
+            ti = str(self._title() or "")
+        except Exception:
+            pass
+        bh9 = self._bd_ls(fbd) + 10
+        h1 = 22 + R * 2 + 14 + self._bd_ls(fnm) + (8 + bh9 if ti else 0) + 16 \
+            + self._bd_ls(fl) + 8 + 6 + 20
+        # ── 노래 ──
+        fb, fs8 = self._bf(10, True), self._bf(8, True)
+        h3 = max(72, self._bd_ls(fb) + self._bd_ls(fs8) + 4 + 30)
+        # ── 오늘 ── (자리가 모자라면 칸 줄 수를 줄인다)
+        flab = self._bf(9, True)
+        hbig = self._bd_ls(self._bf(22, 2))
+        th9 = self._bd_ls(self._bf(8, True)) + self._bd_ls(self._bf(12, 2)) + 22
+        room = (y1 - y0) - h1 - h3 - gap * 2
+        base2 = 18 + self._bd_ls(flab) + 8 + hbig + 12 + 6 + 18
+        rows = 2
+        while rows > 0 and base2 + rows * th9 + (rows - 1) * 8 + (14 if rows else 0) > room:
+            rows -= 1
+        h2 = base2 + (rows * th9 + (rows - 1) * 8 + 14 if rows else 0)
+        show3 = h1 + h2 + h3 + gap * 2 <= (y1 - y0) + 1
+        show2 = h1 + h2 + gap <= (y1 - y0) + 1
+
+        # 프로필 카드
+        self._bd_box(cv, x0, y0, x1, y0 + h1, 20, pal["card"], shadow=(10, .06, 4))
+        y = y0 + 22 + R
+        self._bd_put(cv, ("avatar", R, pal["card"], pal["soft"], pal["accent"]),
+                     lambda: self._bd_avatar(R, pal), cx, y, anchor="center")
+        y += R + 14 + self._bd_ls(fnm) // 2
+        cv.create_text(cx, y, text=str(self.cfg.get("name") or self.char), font=fnm,
+                       fill=pal["ink"])
+        y += self._bd_ls(fnm) // 2
+        if ti:
+            tw = int(self._tw(ti, fbd)) + 24
+            y += 8
+            self._bd_box(cv, cx - tw / 2, y, cx + tw / 2, y + bh9, bh9 / 2.0, pal["soft"])
+            cv.create_text(cx, y + bh9 / 2.0, text=ti, font=fbd,
+                           fill=self._mix(pal["accent"], pal["ink"], 0.18))
+            y += bh9
+        y += 16 + self._bd_ls(fl) // 2
+        try:
+            lvn, lsec = int(self._level()), float(self.lv_secs)
+        except Exception:
+            lvn, lsec = 1, 0.0
+        cv.create_text(x0 + pad, y, text="Lv. %d" % lvn, font=fl, fill=pal["ink2"], anchor="w")
+        left9 = max(1, int((3600 - (lsec % 3600)) // 60))
+        cv.create_text(x1 - pad, y, text="다음 레벨까지 %d분" % left9, font=self._bf(8, True),
+                       fill=pal["sub"], anchor="e")
+        y += self._bd_ls(fl) // 2 + 8
+        self._bd_bar(cv, x0 + pad, y, cw - pad * 2, (lsec % 3600) / 3600.0, pal)
+
+        # 오늘의 작업 카드
+        if show2:
+            ty0 = y0 + h1 + gap
+            self._bd_box(cv, x0, ty0, x1, ty0 + h2, 20, pal["card"], shadow=(10, .06, 4))
+            y = ty0 + 18 + self._bd_ls(flab) // 2
+            cv.create_text(x0 + pad, y, text="오늘의 작업", font=flab, fill=pal["sub"], anchor="w")
+            try:
+                secs = float(self._today_secs())
+            except Exception:
+                secs = 0.0
+            try:
+                goal = max(0.5, float(self.us.get("goal_hours") or 8))
+            except Exception:
+                goal = 8.0
+            y += self._bd_ls(flab) // 2 + 8 + hbig // 2
+            hh9, mm9 = int(secs // 3600), int(secs % 3600 // 60)
+            parts = ([("%d" % hh9, True), ("시간", False)] if hh9 else []) \
+                + [("%d" % mm9, True), ("분", False)]
+            self._bd_bignum(cv, x0 + pad, y, parts, pal)
+            frac = max(0.0, min(1.0, secs / (goal * 3600.0)))
+            cv.create_text(x1 - pad, y + hbig * 0.16, text="%d%%" % int(frac * 100),
+                           font=self._bf(10, 2), fill=pal["accent"], anchor="e")
+            y += hbig // 2 + 12
+            self._bd_bar(cv, x0 + pad, y, cw - pad * 2, frac, pal)
+            y += 6 + 14
+            tiles = (("목표", ("%g시간" % goal), None),
+                     ("토마토", "%d개" % self._board_tomato_n(), None),
+                     ("오늘 기분", str(d.get("mood") or "—"), "settings"),
+                     ("누적", "%d시간" % self._lv_hours(), None))
+            tw9 = (cw - pad * 2 - 8) / 2.0
+            for i9, (cap, val, hit) in enumerate(tiles[:rows * 2]):
+                tx0 = x0 + pad + (i9 % 2) * (tw9 + 8)
+                ty9 = y + (i9 // 2) * (th9 + 8)
+                self._bd_tile(cv, tx0, ty9, tx0 + tw9, ty9 + th9, cap, val, pal, hit)
+
+        # 오늘의 노래 카드 — 홈의 오노추와 같은 값 (요청: 자동으로 연동)
+        if show3:
+            sy0 = y0 + h1 + gap + h2 + gap
+            su9, _st9 = self._room_song()
+            self._bd_box(cv, x0, sy0, x1, sy0 + h3, 20, pal["card"], shadow=(10, .06, 4))
+            my = sy0 + h3 / 2.0
+            self._bd_put(cv, ("vinyl", 44, pal["accent"], pal["ink"]),
+                         lambda: self._bd_vinyl(44, pal), x0 + 16 + 22, my, anchor="center")
+            l1, l2 = self._bd_ls(fb), self._bd_ls(fs8)
+            tx = x0 + 16 + 44 + 12
+            tw0 = (x1 - 16 - 36 - 10) - tx
+            ty9 = my - (l1 + l2 + 3) / 2.0
+            cv.create_text(tx, ty9 + l1 / 2.0, text=self._bd_fit(self._board_bgm_title(), fb, tw0),
+                           font=fb, fill=pal["ink"], anchor="w")
+            if su9:
+                n9 = self._song_like_n(self.char, {"u": su9, "lk": int(
+                    (self.us.get("room_song_likes") or {}).get("n") or 0)})
+                sub9 = "오늘의 노래" + (" · ♥ %d" % n9 if n9 else "") + " · 바꾸기"
+            else:
+                sub9 = "눌러서 노래 걸기"
+            sub9 = self._bd_fit(sub9, fs8, tw0)
+            cv.create_text(tx, ty9 + l1 + 3 + l2 / 2.0, text=sub9, font=fs8, fill=pal["sub"],
+                           anchor="w")
+            bx = x1 - 16 - 18
+            self._bd_box(cv, bx - 18, my - 18, bx + 18, my + 18, 18, pal["ink"])
+            self._bd_ic(cv, "l_stop" if self._board_playing() else "l_play", bx + (0 if self._board_playing() else 1),
+                        my, 16, self._bd_on(pal["ink"]))
+            self._board_ui_hit.append((x0, sy0, x1, sy0 + h3, "bgm"))
+            if su9:          # 아랫줄(… · 바꾸기)을 누르면 곡을 바꾼다
+                self._board_ui_hit.append((tx, ty9 + l1 + 1, tx + int(self._tw(sub9, fs8)),
+                                           ty9 + l1 + 5 + l2, "song_set"))
+
+    def _bd_vinyl(self, D, pal):
+        S = 4
+        n = D * S
+        im = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.ellipse([0, 0, n - 1, n - 1], fill=(38, 32, 36, 255))
+        for k in (0.86, 0.72, 0.6):
+            o = n * (1 - k) / 2
+            dr.ellipse([o, o, n - 1 - o, n - 1 - o], outline=(70, 62, 68, 255), width=S)
+        o = n * 0.31
+        dr.ellipse([o, o, n - 1 - o, n - 1 - o], fill=self._bd_c(pal["accent"]))
+        o = n * 0.45
+        dr.ellipse([o, o, n - 1 - o, n - 1 - o], fill=(38, 32, 36, 255))
+        dr.arc([n * .1, n * .1, n * .9, n * .9], 200, 250, fill=(255, 255, 255, 70), width=2 * S)
+        return im.resize((D, D), Image.LANCZOS)
+
+    def _board_draw_right(self, cv, box, pal, d):
+        x0, y0, x1, y1 = box
+        cx = (x0 + x1) // 2
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        fh = self._bf(12, 2)
+        hy = y0 + 20 + self._bd_ls(fh) // 2
+        cv.create_text(x0 + 20, hy, text="방명록", font=fh, fill=pal["ink"], anchor="w")
+        gl = list(d.get("guest") or [])
+        fn = self._bf(9, 2)
+        cnt = "%d" % len(gl)
+        cw9 = max(24, int(self._tw(cnt, fn)) + 16)
+        tx = x0 + 20 + int(self._tw("방명록", fh)) + 8
+        self._bd_box(cv, tx, hy - 10, tx + cw9, hy + 10, 10, pal["soft"])
+        cv.create_text(tx + cw9 / 2, hy, text=cnt, font=fn,
+                       fill=self._mix(pal["accent"], pal["ink"], 0.18))
+        ly0, ly1 = hy + self._bd_ls(fh) // 2 + 14, y1 - 74
+        if not gl:
+            my = (ly0 + ly1) // 2 - 30
+            self._bd_box(cv, cx - 30, my - 30, cx + 30, my + 30, 30, pal["fill"])
+            self._bd_ic(cv, "l_chat", cx, my + 1, 26, pal["sub"])
+            fe = self._bf(11, 2)
+            cv.create_text(cx, my + 52, text="아직 남긴 글이 없어요", font=fe, fill=pal["ink"])
+            cv.create_text(cx, my + 58 + self._bd_ls(fe), text="아래에 오늘의 한 줄을 남겨 보세요",
+                           font=self._bf(9), fill=pal["sub"])
+        else:
+            y = ly0
+            face = self._board_face_ph(36, pal["soft"])
+            fn9, ft9, fa9 = self._bf(10, 2), self._bf(10), self._bf(8, True)
+            ln9 = self._bd_ls(fn9)
+            maxw = (x1 - 20) - (x0 + 67)
+            for g in reversed(gl[-12:]):
+                tid = cv.create_text(x0 + 67, y + 10 + ln9 + 3, text=str(g.get("t") or "")[:80],
+                                     font=ft9, fill=pal["ink2"], anchor="nw", width=maxw)
+                bb = cv.bbox(tid) or (0, 0, 0, y + 50)
+                bot = max(bb[3], y + 10 + 36) + 10
+                if bot > ly1:
+                    cv.delete(tid)
+                    break
+                if face is not None:
+                    cv.create_image(x0 + 20 + 18, y + 10 + 18, image=face)
+                nm9 = str(g.get("n") or "나")
+                cv.create_text(x0 + 67, y + 10 + ln9 // 2, text=nm9, font=fn9, fill=pal["ink"],
+                               anchor="w")
+                cv.create_text(x0 + 67 + int(self._tw(nm9, fn9)) + 7, y + 10 + ln9 // 2 + 1,
+                               text=self._board_ago(g.get("at")), font=fa9,
+                               fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+                y = bot
+        # 입력 칸
+        yy = y1 - 14 - 23
+        self._bd_box(cv, x0 + 14, yy - 23, x1 - 14, yy + 23, 14, pal["fill"])
+        cv.create_text(x0 + 30, yy, text="한 줄 남기기", font=self._bf(10),
+                       fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+        self._bd_box(cv, x1 - 14 - 6 - 34, yy - 17, x1 - 14 - 6, yy + 17, 11, pal["accent"])
+        self._bd_ic(cv, "l_arrow", x1 - 14 - 6 - 17, yy, 17, self._bd_on(pal["accent"]))
+        self._board_ui_hit.append((x0 + 14, yy - 23, x1 - 14, yy + 23, "guest"))
+
+    def _board_ago(self, at):
+        try:
+            s = time.time() - float(at)
+        except Exception:
+            return ""
+        if s < 60:
+            return "방금"
+        if s < 3600:
+            return "%d분 전" % int(s // 60)
+        if s < 86400:
+            return "%d시간 전" % int(s // 3600)
+        return "%d일 전" % int(s // 86400)
+
+    def _board_bgm_title(self):
+        """보드의 노래 = 내 오노추 (홈에서 걸든 보드에서 걸든 같은 값)."""
+        su9, st9 = self._room_song()
+        if not su9:
+            return "오늘의 노래 없음"
+        st9 = str(st9 or "").strip()
+        return st9 if st9 and st9 != "…" else "제목 받는 중…"
+
+    def _board_song_play(self):
+        """오노추를 튼다 — 홈의 '모두의 노래' 목록에서 내 곡을 찾아 (홈과 같은 길).
+        재생기가 없으면(맥) 브라우저로 연다."""
+        su9, _t = self._room_song()
+        if not su9:
+            return False
+        if not self._yt_on():
+            if self._song_ok(su9):
+                self._open_url(su9)
+            return True
+        songs = self._room_pl_songs()
+        for i9, sg9 in enumerate(songs):
+            if str(sg9.get("u") or "") == su9:
+                self._room_pl_src()
+                self._pl_play(i9)
+                self._board_toast("오늘의 노래를 틀었어요")
+                return True
+        self._board_toast("노래를 찾지 못했어요")
+        return False
+
+    def _board_song_ask(self):
+        su9, _t = self._room_song()
+
+        def done(v):
+            if self._room_song_set(v):
+                self._board_toast("오늘의 노래를 걸었어요 — 홈 오노추에도 떠요")
+            self._board_draw()
+        self._board_ask("오늘의 노래 (유튜브 주소) — 홈 오노추와 같아요", su9, done)
+
+    def _board_tomato_n(self):
+        try:
+            return int(self._pomo_sets())
+        except Exception:
+            return 0
+
+    def _lv_hours(self):
+        try:
+            return int(float(self.lv_secs) // 3600)
+        except Exception:
+            return 0
+
+    # ── 무대 ────────────────────────────────────────────────────────────
+    def _bd_mat_tile(self, mat, pal):
+        """재질 무늬 한 칸(192px) — 평평하게, 규칙 격자가 아니라 흩뿌린 결로.
+        같은 씨앗이라 켤 때마다 같은 무늬다. 칸을 이어 붙여 판을 채운다."""
+        key = ("tile", mat, pal["accent"])
+        got = self._board_mat_cache.get(key)
+        if got is not None:
+            return got
+        N = 192
+        rnd = random.Random(sum(ord(c) for c in mat) * 7 + 3)
+
+        def speck(im, n, tones, big=0):
+            px = im.load()
+            for _ in range(n):
+                x, y = rnd.randrange(N), rnd.randrange(N)
+                c = tones[rnd.randrange(len(tones))]
+                px[x, y] = c
+                if big and rnd.random() < big:
+                    px[(x + 1) % N, y] = c
+                    px[x, (y + 1) % N] = c
+        if mat == "cork":
+            im = Image.new("RGB", (N, N), (221, 192, 158))
+            speck(im, N * N // 5, ((232, 207, 176), (209, 178, 142), (214, 184, 149),
+                                   (227, 200, 167), (200, 167, 130)), big=0.25)
+        elif mat == "linen":
+            im = Image.new("RGB", (N, N), (229, 222, 211))
+            dr = ImageDraw.Draw(im)
+            for yy in range(0, N, 3):
+                dr.line((0, yy, N, yy), fill=(235, 229, 219))
+            for xx in range(0, N, 3):
+                dr.line((xx, 0, xx, N), fill=(222, 214, 202))
+            speck(im, N * N // 14, ((238, 233, 225), (216, 208, 195)))
+        elif mat == "kraft":
+            im = Image.new("RGB", (N, N), (211, 183, 146))
+            speck(im, N * N // 6, ((219, 193, 158), (202, 172, 134), (224, 199, 165)))
+            dr = ImageDraw.Draw(im)
+            for _ in range(60):
+                x, y = rnd.randrange(N), rnd.randrange(N)
+                a = rnd.random() * math.pi
+                L = rnd.randrange(4, 10)
+                dr.line((x, y, x + L * math.cos(a), y + L * math.sin(a)), fill=(199, 168, 128))
+        elif mat == "chalk":
+            im = Image.new("RGB", (N, N), (55, 66, 60))
+            speck(im, N * N // 7, ((61, 73, 66), (50, 60, 55), (66, 78, 71)))
+        elif mat == "felt":
+            base = self._hex_rgb(self._mix(pal["accent"], "#ffffff", 0.58))
+            im = Image.new("RGB", (N, N), base)
+            lt = tuple(min(255, c + 9) for c in base)
+            dk = tuple(max(0, c - 8) for c in base)
+            speck(im, N * N // 4, (lt, dk, lt))
+        elif mat == "grid":
+            S = 3
+            im = Image.new("RGB", (N * S, N * S), (251, 250, 248))
+            dr = ImageDraw.Draw(im)
+            for v in range(0, N, 24):
+                dr.line((0, v * S, N * S, v * S), fill=(238, 235, 231), width=S)
+                dr.line((v * S, 0, v * S, N * S), fill=(238, 235, 231), width=S)
+            im = im.resize((N, N), Image.LANCZOS)
+        elif mat == "dot":
+            S = 4
+            im = Image.new("RGB", (N * S, N * S), (252, 248, 242))
+            dr = ImageDraw.Draw(im)
+            for yy in range(12, N, 24):
+                for xx in range(12, N, 24):
+                    dr.ellipse(((xx - 1.6) * S, (yy - 1.6) * S, (xx + 1.6) * S, (yy + 1.6) * S),
+                               fill=(206, 196, 204))
+            im = im.resize((N, N), Image.LANCZOS)
+        else:   # wood — 널빤지 셋, 결은 느린 물결
+            im = Image.new("RGB", (N, N), (228, 204, 170))
+            dr = ImageDraw.Draw(im)
+            for p in range(3):
+                x0 = p * 64
+                sh = rnd.randrange(-6, 7)
+                im.paste((228 + sh, 204 + sh, 170 + sh), (x0, 0, x0 + 64, N))
+                for k in range(9):
+                    ph = rnd.random() * 6.28
+                    xx = x0 + 4 + k * 7
+                    pts = [(xx + 2.2 * math.sin(yy / 23.0 + ph), yy) for yy in range(0, N + 1, 4)]
+                    dr.line(pts, fill=(219 + sh, 193 + sh, 157 + sh))
+                dr.line((x0, 0, x0, N), fill=(199, 170, 133), width=2)
+        if len(self._board_mat_cache) > 24:
+            for old in list(self._board_mat_cache)[:12]:
+                self._board_mat_cache.pop(old, None)
+        self._board_mat_cache[key] = im
+        return im
+
+    def _board_mat_src(self):
+        """'내 이미지' 원본 (PIL) — 파일 이름별로 한 장만 들고 있는다."""
+        fn = str(self._board_data().get("mat_img") or "")
+        if not fn:
+            return None
+        got = self._board_uiph.get(("matsrc", fn))
+        if got is None:
+            try:
+                got = (Image.open(os.path.join(self._board_dir(), fn)).convert("RGB"), 0)
+            except Exception:
+                self._log_error("board_mat_img")
+                got = (None, 0)
+            self._board_uiph[("matsrc", fn)] = got
+        return got[0]
+
+    BOARD_MAT_ZMAX = 3.0
+
+    def _board_mat_posv(self):
+        """내 이미지 바탕의 (가운데 x, 가운데 y — 그림 안 비율, 확대)."""
+        mp = self._board_data().get("mat_pos") or {}
+        try:
+            cx = min(1.0, max(0.0, float(mp.get("cx", .5))))
+            cy = min(1.0, max(0.0, float(mp.get("cy", .5))))
+            z = min(self.BOARD_MAT_ZMAX, max(1.0, float(mp.get("z", 1.0))))
+        except Exception:
+            cx, cy, z = .5, .5, 1.0
+        return cx, cy, z
+
+    def _bd_mat_cover(self, src, w, h, z):
+        """판을 덮는 크기(×확대)로 늘린 그림 — 끄는 동안 자르기만 하게 한 장 들고 있는다
+        (크게 늘린 그림이 수십 MB 라 여러 장 두지 않는다 · 지뢰 42)."""
+        key = (id(src), w, h, round(z, 3))
+        got = self._board_cover
+        if got is not None and got[0] == key:
+            return got[1]
+        k = max(w / float(src.width), h / float(src.height)) * z
+        im = src.resize((max(w, int(src.width * k + 0.5)), max(h, int(src.height * k + 0.5))),
+                        Image.LANCZOS)
+        self._board_cover = (key, im)
+        return im
+
+    def _bd_mat_fill(self, mat, w, h, pal):
+        w, h = max(1, w), max(1, h)
+        if mat == "white":
+            return Image.new("RGB", (w, h), (255, 255, 255))
+        if mat == "custom":
+            src = self._board_mat_src()
+            if src is None:                  # 그림이 없으면 빈 흰 판
+                return Image.new("RGB", (w, h), (255, 255, 255))
+            cx, cy, z = self._board_mat_posv()
+            im = self._bd_mat_cover(src, w, h, z)
+            x9 = int(round(min(max(cx * im.width - w / 2.0, 0), im.width - w)))
+            y9 = int(round(min(max(cy * im.height - h / 2.0, 0), im.height - h)))
+            return im.crop((x9, y9, x9 + w, y9 + h))
+        t = self._bd_mat_tile(mat, pal)
+        im = Image.new("RGB", (max(1, w), max(1, h)))
+        for yy in range(0, h, t.height):
+            for xx in range(0, w, t.width):
+                im.paste(t, (xx, yy))
+        return im
+
+    def _bd_board_pil(self, mat, w, h, pal, frame=10, r_in=13):
+        """카드 빛 틀 + 재질. 안쪽 모서리는 둥글고 매끈하게, 가장자리에 옅은 선 한 줄."""
+        im = Image.new("RGB", (w, h), self._hex_rgb(pal["card"]))
+        iw, ih = max(1, w - frame * 2), max(1, h - frame * 2)
+        inner = self._bd_mat_fill(mat, iw, ih, pal).convert("RGBA")
+        edge = self._bd_rr(iw, ih, r_in, None, self._mix(pal["line"], pal["ink"], 0.04), 1.0)
+        inner.alpha_composite(edge)
+        im.paste(inner, (frame, frame), self._bd_round_mask(iw, ih, r_in))
+        return im
+
+    def _board_mat_img(self, mat, W, H, pal):
+        """재질 판(틀 포함) PhotoImage — 크기·재질별 캐시."""
+        key = ("matimg", mat, W, H, pal["accent"])
+        got = self._board_mat_cache.get(key)
+        if got is None:
+            got = self._tkimg(self._bd_board_pil(mat, W, H, pal).convert("RGBA"))
+            self._board_mat_cache[key] = got
+        return got
+
+    def _bd_stage_pil(self, W, H, pal, d):
+        """무대 바탕 한 장 — 둥근 흰 카드 · 들여 앉힌 판 · 선반."""
+        BH = max(40, H - self.BOARD_LEDGE)
+        mat = str(d.get("mat") or "grid")
+        body = Image.new("RGBA", (W, H), self._bd_c(pal["ledge"]))
+        body.paste(self._bd_board_pil(mat, W, BH + 10, pal), (0, 0))
+        led = Image.new("RGB", (W, H - BH), self._hex_rgb(pal["ledge"]))
+        body.paste(led, (0, BH))
+        lip = self._hex_rgb(self._mix(pal["ledge"], "#000000", 0.06))
+        body.paste(lip, (0, BH, W, BH + 1))
+        g = Image.new("L", (1, 14))
+        for i in range(14):
+            g.putpixel((0, i), int(22 * (1 - i / 14.0) ** 2))
+        g = g.resize((W, 14))
+        sh = Image.new("RGBA", (W, 14), (70, 50, 40, 0))
+        sh.putalpha(g)
+        body.alpha_composite(sh, (0, BH + 1))
+        out = Image.new("RGB", (W, H), self._hex_rgb(pal["card"]))
+        out.paste(body, (0, 0), self._bd_round_mask(W, H, 20))
+        # 네 귀는 본 캔버스(바탕색 + 카드 그림자)와 이어져야 한다
+        cor = Image.new("RGB", (W, H), self._hex_rgb(pal["bg"]))
+        cor.paste(out, (0, 0), self._bd_round_mask(W, H, 20))
+        return cor
+
+    def _board_draw_stage(self):
+        if not self._board_alive():
+            return
+        bcv, pal, d = self._board_bcv, self._board_pal(), self._board_data()
+        bcv.update_idletasks()
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        if W < 10 or H < 10:
+            lay = self._board_layout()
+            x0, y0, x1, y1 = lay["stage"]
+            W, H = x1 - x0, y1 - y0
+        BH = H - self.BOARD_LEDGE
+        bcv.delete("all")
+        self._board_hit = []
+        self._board_grips = []
+        self._board_stk_last = {}
+        key = ("stage", W, H, str(d.get("mat")), str(d.get("mat_img") or ""),
+               self._board_mat_posv() if d.get("mat") == "custom" else None,
+               tuple(sorted(pal.items())))
+        self._bd_put(bcv, key, lambda: self._bd_stage_pil(W, H, pal, d).convert("RGBA"), 0, 0)
+        for it in list(d.get("items") or []):
+            self._board_draw_item(bcv, it, W, BH)
+        # 스티커 (홈·뽀모도로와 같은 시스템의 세 번째 창)
+        self._stk_draw(bcv, "board", W, H, tags="dyn")
+        # 캐릭터 — 선반 위, 발밑에 옅은 그늘 (누르면 통통 — bchar 태그만 옮긴다)
+        seat = self._board_seat_pil()
+        self._board_char_xy = None
+        if seat is not None:
+            self._bd_put(bcv, ("seatsh", seat.width), lambda: self._bd_floor_shadow(seat.width),
+                         W // 2, BH + 12, anchor="center")
+            self._bd_put(bcv, ("seat",), lambda: seat, W // 2, BH + 14, anchor="s", tags=("dyn", "bchar"))
+            self._board_char_xy = (W // 2, BH + 14, seat.width, seat.height)
+            if not getattr(self, "_board_edit", False):
+                self._board_hit.append((W // 2 - seat.width * .4, BH + 14 - seat.height,
+                                        W // 2 + seat.width * .4, BH + 14, "char"))
+        self._board_ledge_items(bcv, W, H, BH, pal)
+        self._board_draw_bubble(bcv, W, H, BH, pal)
+        if self._board_matadj:
+            self._board_adj_bar(bcv, W)
+        elif getattr(self, "_board_edit", False):
+            self._board_toolbar(bcv, W)
+            self._board_edit_hint(bcv, W)
+        tv = getattr(self, "_board_toast_v", None)
+        if tv and time.time() - tv[1] < 3.0:
+            ft = self._bf(9, True)
+            tw = int(self._tw(tv[0], ft)) + 36
+            self._bd_box(bcv, W // 2 - tw / 2, H - 50, W // 2 + tw / 2, H - 16, 17, pal["ink"],
+                         shadow=(5, .22, 2))
+            bcv.create_text(W // 2, H - 33, text=tv[0], font=ft, fill=self._bd_on(pal["ink"]))
+
+    BOARD_POKE_SAY = ("헤헤", "간지러워!", "불렀어?", "히히, 좋아", "집중하는 중이야!", "응?")
+
+    def _board_bub(self):
+        b = self._board_data().get("bubble")
+        if not isinstance(b, dict):
+            b = self._board_data()["bubble"] = {}
+        return b
+
+    def _board_bubble_text(self):
+        say = self._board_say
+        if say and time.time() < say[1]:
+            return say[0]
+        t = str(self._board_bub().get("t") or "").strip()
+        if t:
+            return t
+        return "지금 그리는 중" if self._working() else "잠깐 쉬는 중"
+
+    def _bd_wrap_tk(self, text, font, maxw):
+        out = []
+        for para in str(text).split("\n"):
+            line = ""
+            for ch in para:
+                if line and self._tw(line + ch, font) > maxw:
+                    out.append(line)
+                    line = ch
+                else:
+                    line += ch
+            out.append(line)
+        return out[:4] or [""]
+
+    def _bd_bubble2(self, w, h, r, fill, outline, lw, tail, bwid, S=4):
+        """말풍선 v2 — 아주 둥근 몸통 + 안으로 살짝 휜 꼬리를 **한 실루엣**으로.
+        테두리는 실루엣을 lw 만큼 부풀린 것이라 몸통·꼬리·끝이 한 굵기로 이어지고,
+        두 실루엣을 조금 흐렸다 다시 자르면 꼬리가 몸통에 붙는 오목한 자리까지 둥글어진다
+        (지뢰 123 — 선을 따로 그으면 이음매가 남는다).
+        tail = (밑변 가운데 x, 끝 x, 끝 y) — 몸통 왼쪽 위 기준. 끝 y 가 h 보다 크면 아래 꼬리.
+        돌려주는 것: (그림, (몸통 왼쪽 위가 그림 안에서 놓인 x, y))."""
+        tbx, tipx, tipy = tail
+        down = tipy > h / 2.0
+        M = int(lw + 10)
+        ext_l, ext_r = max(0.0, -tipx), max(0.0, tipx - w)
+        ext_t, ext_b = max(0.0, -tipy), max(0.0, tipy - h)
+        ox, oy = M + ext_l, M + ext_t
+        W2, H2 = int(w + ext_l + ext_r + 2 * M + 1), int(h + ext_t + ext_b + 2 * M + 1)
+
+        def body(dr, grow):
+            dr.rounded_rectangle([(ox - grow) * S, (oy - grow) * S, (ox + w + grow) * S, (oy + h + grow) * S],
+                                 radius=(r + grow) * S, fill=255)
+        yb = oy + (h - r * 0.45 if down else r * 0.45)
+        pl, pr = (ox + tbx - bwid, yb), (ox + tbx + bwid, yb)
+        tp = (ox + tipx, oy + tipy)
+        mid_axis = ((ox + tbx + tp[0]) / 2.0, (yb + tp[1]) / 2.0)
+
+        def quad(p0, c, p1, n=14):
+            return [((1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0],
+                     (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1])
+                    for t in (i / float(n) for i in range(n + 1))]
+
+        def pull(p):          # 옆선 가운데를 꼬리 축 쪽으로 — 안으로 살짝 휘게
+            m9 = ((p[0] + tp[0]) / 2.0, (p[1] + tp[1]) / 2.0)
+            return (m9[0] + (mid_axis[0] - m9[0]) * 0.32, m9[1] + (mid_axis[1] - m9[1]) * 0.32)
+        pts = quad(pl, pull(pl), tp) + quad(tp, pull(pr), pr)[1:]
+        ptsS = [(x * S, y * S) for x, y in pts]
+        outer = Image.new("L", (W2 * S, H2 * S), 0)
+        do = ImageDraw.Draw(outer)
+        body(do, lw)
+        do.polygon(ptsS, fill=255)
+        do.line(ptsS + [ptsS[0]], fill=255, width=int(lw * 2 * S), joint="curve")
+        do.ellipse([(tp[0] - lw) * S, (tp[1] - lw) * S, (tp[0] + lw) * S, (tp[1] + lw) * S], fill=255)
+        inner = Image.new("L", (W2 * S, H2 * S), 0)
+        di = ImageDraw.Draw(inner)
+        body(di, 0)
+        di.polygon(ptsS, fill=255)
+        cut = lambda v: 255 if v >= 128 else 0
+        outer = outer.filter(ImageFilter.GaussianBlur(S * 1.8)).point(cut)
+        inner = inner.filter(ImageFilter.GaussianBlur(S * 1.8)).point(cut)
+        im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
+        im.paste(self._bd_c(outline), (0, 0), outer)
+        im.paste(self._bd_c(fill), (0, 0), inner)
+        im = im.resize((W2, H2), Image.LANCZOS)
+        im, M2 = self._bd_shadow(im, 3, .12, 2)
+        return im, (ox + M2, oy + M2)
+
+    def _board_draw_bubble(self, bcv, W, H, BH, pal):
+        """캐릭터 말풍선 — 글·자리·크기를 사용자가 정한다 (d["bubble"]: t·pos·k).
+        자리를 안 정했으면 머리 곁에서 붙인 항목과 덜 겹치는 곳을 고른다."""
+        for tg in ("bb",):
+            bcv.delete(tg)
+        self._board_hit = [h9 for h9 in self._board_hit if h9[4] != "bubble"]
+        self._board_grips = [g9 for g9 in self._board_grips if g9[4][0] != "bub"]
+        b = self._board_bub()
+        if b.get("off"):
+            self._board_bub_box = None
+            return
+        try:
+            k = min(2.2, max(0.7, float(b.get("k") or 1.0)))
+        except Exception:
+            k = 1.0
+        text = self._board_bubble_text()
+        f = self._bf(max(7, int(round(10 * k))), True)
+        lines = self._bd_wrap_tk(text, f, int(230 * k))
+        lh = self._bd_ls(f)
+        tw = max(int(self._tw(l9, f)) for l9 in lines)
+        padx, pady = int(round(16 * k)), int(round(8 * k)) + 1
+        bw, bh = tw + padx * 2, lh * len(lines) + pady * 2
+        cxy = self._board_char_xy
+        sh9 = cxy[3] if cxy else 250
+        head = (W / 2.0 + 6, BH + 14 - sh9 + 36)
+        pos = b.get("pos")
+        if isinstance(pos, (list, tuple)) and len(pos) == 2:
+            cx, cy = float(pos[0]) * W, float(pos[1]) * BH
+        else:
+            by = max(70, BH + 14 - sh9 - 14 - bh)
+            best = None
+            for up in (0, 40, 80):
+                by9 = by - up
+                if by9 < 64 and up:
+                    continue
+                for side in (1, -1):
+                    bx9 = W / 2.0 + 30 if side > 0 else W / 2.0 - 30 - bw
+                    ov = up * 2.0
+                    for x0, y0, x1, y1, w9 in self._board_hit:
+                        if w9.startswith("item:"):
+                            ov += (max(0.0, min(x1, bx9 + bw + 6) - max(x0, bx9 - 6))
+                                   * max(0.0, min(y1, by9 + bh + 14) - max(y0, by9 - 6)))
+                    if best is None or ov < best[0]:
+                        best = (ov, bx9, by9)
+            cx, cy = best[1] + bw / 2.0, best[2] + bh / 2.0
+        cx = min(max(cx, bw / 2.0 + 6), W - bw / 2.0 - 6)
+        cy = min(max(cy, bh / 2.0 + 6), H - bh / 2.0 - 6)
+        x0, y0 = cx - bw / 2.0, cy - bh / 2.0
+        r = bh / 2.0 if len(lines) == 1 else min(bh / 2.0, 20 * k)
+        L = 12 * k
+        bwid = 7 * k
+        lo, hi = r * 0.85 + bwid, bw - r * 0.85 - bwid
+        tbx = bw / 2.0 if lo > hi else min(max(head[0] - x0, lo), hi)
+        lean = min(max((head[0] - (x0 + tbx)) * 0.3, -L * 0.9), L * 0.9)
+        down = head[1] > cy
+        tail = (round(tbx), round(tbx + lean), round(bh + L if down else -L))
+        lw = round(max(1.4, 1.5 * k), 1)
+        key = ("bub2", bw, bh, round(r, 1), pal["card"], pal["ink"], lw, tail, round(bwid, 1))
+        cache = self._board_uiph
+        got = cache.get(key)
+        if got is None:
+            im, (ox, oy) = self._bd_bubble2(bw, bh, r, pal["card"], pal["ink"], lw, tail, bwid)
+            got = (self._tkimg(im), ox, oy)
+            if len(cache) > self.BOARD_UI_MAX:
+                for old in list(cache)[:self.BOARD_UI_MAX // 2]:
+                    cache.pop(old, None)
+            cache[key] = got
+        ph, ox, oy = got
+        bcv.create_image(int(round(x0 - ox)), int(round(y0 - oy)), image=ph, anchor="nw",
+                         tags=("dyn", "bb"))
+        bcv.create_text(cx, cy, text="\n".join(lines), font=f, fill=pal["ink"], justify="center",
+                        tags=("dyn", "bb"))
+        self._board_bub_box = (x0, y0, x0 + bw, y0 + bh)
+        if getattr(self, "_board_edit", False):
+            self._board_hit.append((x0, y0, x0 + bw, y0 + bh, "bubble"))
+            if self._board_pick == "__bubble":
+                self._board_marks(bcv, cx, cy, bw / 2.0, bh / 2.0, ("size",), ("bub", ""),
+                                  ("dyn", "bb"))
+
+    def _board_bub_drag(self, st, e):
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        BH = max(1, H - self.BOARD_LEDGE)
+        b = self._board_bub()
+        b["pos"] = [(st["cx0"] + e.x - st["x"]) / float(W), (st["cy0"] + e.y - st["y"]) / float(BH)]
+        now = time.time()
+        if now - st["at"] > 0.03:
+            st["at"] = now
+            self._board_draw_bubble(bcv, W, H, BH, self._board_pal())
+
+    def _board_bub_menu(self, e):
+        b = self._board_bub()
+        self._board_pick = "__bubble"
+        self._board_draw_stage()
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+
+        def settext():
+            def done(v):
+                b["t"] = v[:60]
+                self._board_save()
+                self._board_draw_stage()
+            self._board_ask("말풍선 글", str(b.get("t") or self._board_bubble_text()), done, True)
+
+        def reset(**kw):
+            for k9, v9 in kw.items():
+                if v9 is None:
+                    b.pop(k9, None)
+                else:
+                    b[k9] = v9
+            self._board_save()
+            self._board_draw_stage()
+        m.add_command(label="글 바꾸기…", command=settext)
+        m.add_command(label="상태 글로 (그리는 중 · 쉬는 중)", command=lambda: reset(t=None))
+        m.add_separator()
+        m.add_command(label="크게", command=lambda: reset(k=min(2.2, float(b.get("k") or 1) * 1.15)))
+        m.add_command(label="작게", command=lambda: reset(k=max(0.7, float(b.get("k") or 1) / 1.15)))
+        m.add_command(label="자리·크기 처음대로", command=lambda: reset(pos=None, k=None))
+        m.add_separator()
+        m.add_command(label="말풍선 끄기 (환경설정에서 다시 켜요)", command=lambda: reset(off=True))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    BOARD_EDIT_HINT = "붙인 것을 누르면 손잡이로 크기·회전 · 우클릭하면 메뉴(색·글·모양·모션·지우기)"
+
+    def _board_edit_hint(self, bcv, W):
+        """꾸미기 중 — 도구 띠 아래에 조작 안내 한 줄 (요청: 우클릭 메뉴가 있다는 것)."""
+        pal = self._board_pal()
+        f = self._bf(8, True)
+        d = self._board_data()
+        chips = (("undo", "↶ 되돌리기"), ("snap", "격자 " + ("켬" if d.get("snap") else "끔")))
+        cw9 = [int(self._tw(c9, f)) + 22 for _k, c9 in chips]
+        for t in (self.BOARD_EDIT_HINT, "누르면 손잡이 · 우클릭하면 메뉴", "우클릭 → 메뉴"):
+            tw = int(self._tw(t, f)) + 36
+            if tw + sum(cw9) + 6 * len(chips) <= W - 24:
+                break
+        y0 = getattr(self, "_board_tool_h", 58) + 8
+        x = W / 2.0 - (tw + sum(cw9) + 6 * len(chips)) / 2.0
+        self._bd_box(bcv, x, y0, x + tw, y0 + 26, 13, self._bd_c(pal["ink"], 200))
+        self._bd_ic(bcv, "chat", x + 16, y0 + 13, 12, "#ffffff")
+        bcv.create_text(x + 28, y0 + 13, text=t, font=f, fill="#ffffff", anchor="w")
+        x += tw + 6
+        for (k9, c9), w9 in zip(chips, cw9):
+            on = (k9 == "snap" and d.get("snap"))
+            self._bd_box(bcv, x, y0, x + w9, y0 + 26, 13, pal["accent"] if on else pal["card"],
+                         None if on else pal["line"], 1.2)
+            bcv.create_text(x + w9 / 2.0, y0 + 13, text=c9, font=f,
+                            fill=self._bd_on(pal["accent"]) if on else pal["ink"])
+            self._board_hit.append((x, y0, x + w9, y0 + 26, "tool:" + k9))
+            x += w9 + 6
+
+    def _board_adj_bar(self, bcv, W):
+        """내 이미지 바탕 자리 조절 띠 — 끌어서 옮기고 휠로 크기."""
+        pal = self._board_pal()
+        f = self._bf(9, True)
+        msg = "바탕을 끌어서 옮기고, 휠로 크게·작게"
+        fr = self._bf(9, True)
+        rw = int(self._tw("처음대로", fr)) + 28
+        dw = int(self._tw("완료", fr)) + 48
+        tot = int(self._tw(msg, f)) + 40 + rw + dw + 16
+        x = W // 2 - tot // 2
+        y0, y1 = 14, 58
+        cy = (y0 + y1) // 2
+        self._bd_box(bcv, x, y0, x + tot, y1, 22, pal["card"], pal["line"], 1, shadow=(8, .16, 4))
+        self._bd_ic(bcv, "photo", x + 24, cy, 16, pal["accent"])
+        bcv.create_text(x + 40, cy, text=msg, font=f, fill=pal["ink"], anchor="w")
+        bx = x + tot - 8 - dw - 6 - rw
+        self._bd_box(bcv, bx, cy - 16, bx + rw, cy + 16, 16, pal["bg"])
+        bcv.create_text(bx + rw / 2, cy, text="처음대로", font=fr, fill=pal["ink"])
+        self._board_hit.append((bx, cy - 17, bx + rw, cy + 17, "adj:reset"))
+        bx += rw + 6
+        self._bd_box(bcv, bx, cy - 16, bx + dw, cy + 16, 16, pal["ink"])
+        on9 = self._bd_on(pal["ink"])
+        self._bd_ic(bcv, "tick", bx + 19, cy, 14, on9)
+        bcv.create_text(bx + 34, cy, text="완료", font=fr, fill=on9, anchor="w")
+        self._board_hit.append((bx, cy - 17, bx + dw, cy + 17, "adj:done"))
+
+    def _board_adj_drag(self, st, e):
+        d = self._board_data()
+        src = self._board_mat_src()
+        if src is None:
+            return
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        w, h = max(1, W - 20), max(1, H - self.BOARD_LEDGE - 20)
+        cx0, cy0, z = st["pos"]
+        im = self._bd_mat_cover(src, w, h, z)
+        # 끈 쪽으로 그림이 따라온다 — 가운데는 반대로 간다. 판 밖이 안 보이게 가둔다.
+        hx, hy = w / 2.0 / im.width, h / 2.0 / im.height
+        cx = min(max(cx0 - (e.x - st["x"]) / float(im.width), hx), 1 - hx)
+        cy = min(max(cy0 - (e.y - st["y"]) / float(im.height), hy), 1 - hy)
+        d["mat_pos"] = {"cx": cx, "cy": cy, "z": z}
+        now = time.time()
+        if now - st["at"] > 0.045:
+            st["at"] = now
+            self._board_draw_stage()
+
+    def _board_poke_start(self, kind, sid=None):
+        """누르면 반응 — 캐릭터는 두 번 통통 + 하트 + 한마디, 스티커는 톡 커졌다 돌아온다."""
+        self._safe("ui_click", self._ui_click)
+        now = time.time()
+        self._board_poke = {"kind": kind, "id": sid, "t0": now}
+        bcv = self._board_bcv
+        if kind == "char":
+            self._board_say = (random.choice(self.BOARD_POKE_SAY), now + 1.8)
+            self._board_draw_stage()
+            cxy = self._board_char_xy
+            if cxy is not None:
+                pal = self._board_pal()
+                hx, hy = cxy[0], cxy[1] - cxy[3] + 30
+                for i in range(3):
+                    it = self._bd_put(bcv, ("ic", "heart", 18, pal["accent"]),
+                                      lambda: self._bd_icon("heart", 18, pal["accent"]),
+                                      hx, hy, anchor="center", tags=("dyn", "bfx"))
+                    if it is not None:
+                        self._board_fx.append((it, hx + (i - 1) * 22, hy, now + i * 0.08, (i - 1) * 18.0))
+        if self._board_job is not None:           # 반응 동안은 촘촘히 (30ms)
+            try:
+                self.root.after_cancel(self._board_job)
+            except Exception:
+                pass
+            self._board_job = None
+        self._board_loop()
+
+    def _board_poke_tick(self, now):
+        bcv = self._board_bcv
+        pk = self._board_poke
+        if pk is not None:
+            t = now - pk["t0"]
+            if pk["kind"] == "char":
+                cxy = self._board_char_xy
+                items = bcv.find_withtag("bchar")
+                if t >= 0.72 or not items or cxy is None:
+                    if items and cxy is not None:
+                        bcv.coords(items[-1], cxy[0], cxy[1])
+                    self._board_poke = None
+                else:
+                    if t < 0.42:
+                        dy = -24 * math.sin(math.pi * t / 0.42)
+                    else:
+                        dy = -9 * math.sin(math.pi * min(1.0, (t - 0.42) / 0.3))
+                    bcv.coords(items[-1], cxy[0], cxy[1] + dy)
+            else:
+                sid = str(pk.get("id") or "")
+                meta = self._stk_meta("board", sid)
+                items = bcv.find_withtag("stk_" + sid)
+                W, H = self._stk_wh.get("board") or (1, 1)
+                if meta is None or not items:
+                    self._board_poke = None
+                else:
+                    cx, cy = float(meta.get("x", .5)) * W, float(meta.get("y", .5)) * H
+                    if t >= self.STK_POKE_T:
+                        ph2, dy = self._stk_photo(meta, self._stk_wpx(meta, W)), 0.0
+                        self._board_poke = None
+                        self._board_stk_last.pop(sid, None)
+                    else:
+                        dy, a9, sx9, sy9 = self._stk_poke_pose(t)
+                        ph2 = self._stk_xform(meta, W, a9, sx9, sy9, pil=False)
+                    if ph2 is not None:
+                        bcv.itemconfigure(items[-1], image=ph2)
+                    bcv.coords(items[-1], cx, cy + dy)
+        keep = []
+        for it, x0, y0, t0, vx in self._board_fx:
+            tt = now - t0
+            if tt > 0.95:
+                try:
+                    bcv.delete(it)
+                except Exception:
+                    pass
+                continue
+            try:
+                bcv.coords(it, x0 + vx * max(0.0, tt), y0 - 70 * max(0.0, tt))
+            except Exception:
+                continue
+            keep.append((it, x0, y0, t0, vx))
+        self._board_fx = keep
+        say = self._board_say
+        if say and now >= say[1]:
+            self._board_say = None
+            self._board_draw_stage()
+
+    def _bd_floor_shadow(self, w):
+        W2 = int(w * 0.9)
+        im = Image.new("RGBA", (W2, 30), (0, 0, 0, 0))
+        m = Image.new("L", (W2, 30), 0)
+        ImageDraw.Draw(m).ellipse((W2 * 0.12, 9, W2 * 0.88, 21), fill=70)
+        m = m.filter(ImageFilter.GaussianBlur(4))
+        im = Image.new("RGBA", (W2, 30), (60, 40, 36, 0))
+        im.putalpha(m)
+        return im
+
+    def _bd_cassette(self, pal):
+        S = 4
+        w, h = 118, 70
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=10 * S, fill=(62, 52, 58, 255))
+        dr.rounded_rectangle((2 * S, 2 * S, (w - 2) * S, 5 * S), radius=2 * S, fill=(84, 72, 80, 255))
+        dr.rounded_rectangle((8 * S, 8 * S, (w - 8) * S, 28 * S), radius=5 * S,
+                             fill=self._bd_c(pal["soft"]))
+        dr.rounded_rectangle((22 * S, 34 * S, (w - 22) * S, 58 * S), radius=10 * S, fill=(40, 33, 38, 255))
+        for rx in (38, w - 38):          # 릴은 따로 얹는다 (_bd_reel — 재생 중 돈다)
+            dr.ellipse(((rx - 9) * S, 37 * S, (rx + 9) * S, 55 * S), fill=(236, 228, 232, 255))
+        dr.polygon(((30 * S, (h - 1) * S), (36 * S, 62 * S), ((w - 36) * S, 62 * S), ((w - 30) * S, (h - 1) * S)),
+                   fill=(84, 72, 80, 255))
+        im = im.resize((w, h), Image.LANCZOS)
+        return self._bd_shadow(im, 4, .25, 3)
+
+    def _bd_reel(self, ang):
+        """카세트 릴 한 장 — 살 셋이 ang 만큼 돌아 있다 (12장이 한 바퀴)."""
+        S = 4
+        D = 18
+        im = Image.new("RGBA", (D * S, D * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        c = D * S / 2.0
+        dr.ellipse((c - 9 * S, c - 9 * S, c + 9 * S, c + 9 * S), fill=(236, 228, 232, 255))
+        dr.ellipse((c - 4 * S, c - 4 * S, c + 4 * S, c + 4 * S), fill=(40, 33, 38, 255))
+        for a in range(3):
+            t = math.radians(a * 120 + 90 + ang)
+            dr.line((c + 3.5 * S * math.cos(t), c + 3.5 * S * math.sin(t),
+                     c + 7.5 * S * math.cos(t), c + 7.5 * S * math.sin(t)),
+                    fill=(200, 190, 196, 255), width=S * 2)
+        return im.resize((D, D), Image.LANCZOS)
+
+    def _bd_cached(self, key, make):
+        got = self._board_uiph.get(key)
+        if got is None:
+            im = make()
+            if im is None:
+                return None
+            got = (self._tkimg(im), 0)
+            self._board_uiph[key] = got
+        return got[0]
+
+    def _board_playing(self):
+        try:
+            return bool((getattr(self, "_yt", None) or {}).get("playing"))
+        except Exception:
+            return False
+
+    def _board_ledge_items(self, bcv, W, H, BH, pal):
+        base = H - 14                      # 선반 위 물건들이 딛는 줄
+        # 카세트 — BGM (누르면 플레이리스트)
+        x = 22
+        self._bd_put(bcv, ("cassette", pal["soft"]), lambda: self._bd_cassette(pal), x, base - 70)
+        reels = []
+        for rx in (x + 38, x + 118 - 38):
+            it9 = self._bd_put(bcv, ("reel", 0), lambda: self._bd_reel(0), rx, base - 70 + 46,
+                               anchor="center", tags=("dyn", "creel"))
+            reels.append(it9)
+        self._board_reel = (reels, x + 59, base - 76)
+        bcv.create_text(x + 59, base - 52, text=self._bd_fit("♪ " + self._board_bgm_title(),
+                                                                self._bf(8, True), 96),
+                        font=self._bf(8, True), fill=pal["ink"])
+        self._board_hit.append((x, base - 70, x + 118, base, "ledge:bgm"))
+        self._board_draw_shelf(bcv, W, H, BH, pal)
+
+    # ── 선반 소품 (내 그림을 선반에 세워 전시 · 요청) ─────────────────────────
+    BOARD_SHELF_MAX = 20
+
+    def _board_shelf(self, pid):
+        for p in self._board_data().get("shelf") or []:
+            if str(p.get("id")) == str(pid):
+                return p
+        return None
+
+    def _bd_prop_pil(self, p):
+        """소품 한 장 — 높이 h 로 줄이고(좌우 뒤집기), 발밑 그늘 + 얇은 그림자.
+        돌려주는 것: (그림, 소품 폭, 소품 높이, 그림 안에서 소품 왼쪽 위 자리)."""
+        src = Image.open(os.path.join(self._board_dir(), str(p.get("f")))).convert("RGBA")
+        h = max(20, int(p.get("h") or 84))
+        w = max(1, int(src.width * h / float(max(1, src.height))))
+        im = src.resize((w, h), Image.LANCZOS)
+        if p.get("flip"):
+            im = im.transpose(Image.FLIP_LEFT_RIGHT)
+        M = 12
+        out = Image.new("RGBA", (w + M * 2, h + M * 2), (0, 0, 0, 0))
+        m = Image.new("L", out.size, 0)
+        ImageDraw.Draw(m).ellipse((M + w * 0.1, M + h - 5, M + w * 0.9, M + h + 6), fill=80)
+        m = m.filter(ImageFilter.GaussianBlur(4))
+        sh = Image.new("RGBA", out.size, (60, 40, 36, 0))
+        sh.putalpha(m)
+        out.alpha_composite(sh)
+        a = Image.new("L", out.size, 0)
+        a.paste(im.split()[3].point(lambda v: int(v * .22)), (M + 1, M + 2))
+        a = a.filter(ImageFilter.GaussianBlur(1.3))
+        sh2 = Image.new("RGBA", out.size, (60, 40, 36, 0))
+        sh2.putalpha(a)
+        out.alpha_composite(sh2)
+        out.alpha_composite(im, (M, M))
+        return out, w, h, M
+
+    def _board_draw_shelf(self, bcv, W, H, BH, pal):
+        d = self._board_data()
+        props = list(d.get("shelf") or [])
+        ed = getattr(self, "_board_edit", False)
+        if ed and not props:
+            f = self._bf(9, True)
+            x9 = 22 + 118 + 24                    # 카세트 오른쪽부터
+            bcv.create_text((x9 + W - 20) / 2.0, H - 50,
+                            text=self._bd_fit("도구 띠의 '선반 소품'으로 좋아하는 물건을 올려 보세요", f, W - 20 - x9),
+                            font=f, fill=pal["sub"])
+        for p in props:
+            pid = str(p.get("id"))
+            key = ("prop", pid, str(p.get("f")), int(p.get("h") or 84), bool(p.get("flip")))
+            got = self._board_ph.get(key)
+            if got is None:
+                try:
+                    im, w, h, M = self._bd_prop_pil(p)
+                except Exception:
+                    self._log_error("board_prop")
+                    continue
+                got = (self._tkimg(im), w, h, M)
+                if len(self._board_ph) > 80:
+                    for old in list(self._board_ph)[:30]:
+                        self._board_ph.pop(old, None)
+                self._board_ph[key] = got
+            ph, w, h, M = got
+            cx = float(p.get("x", .5)) * W
+            by = H - float(p.get("b", 14))
+            bcv.create_image(int(cx - w / 2 - M), int(by - h - M), image=ph, anchor="nw",
+                             tags=("dyn", "bp_" + pid))
+            self._board_hit.append((cx - w / 2, by - h, cx + w / 2, by, "prop:" + pid))
+            if ed and self._board_pick == pid:
+                self._board_marks(bcv, cx, by - h / 2.0, w / 2.0, h / 2.0, ("size", "del"),
+                                  ("prop", pid), ("dyn", "bp_" + pid))
+
+    def _board_shelf_add(self, path=None):
+        """선반에 소품을 올린다 — 그림 파일을 고르고, 투명한 둘레는 잘라 둔다."""
+        d = self._board_data()
+        shelf = d.setdefault("shelf", [])
+        if len(shelf) >= self.BOARD_SHELF_MAX:
+            self._board_toast("선반에는 %d개까지 올릴 수 있어요" % self.BOARD_SHELF_MAX)
+            return None
+        q = path or self._pick_image_file()
+        if not q:
+            return None
+        try:
+            im = Image.open(q).convert("RGBA")
+            bb = im.split()[3].getbbox()
+            if bb:
+                im = im.crop(bb)
+            if max(im.size) > 700:
+                kk = 700.0 / max(im.size)
+                im = im.resize((max(1, int(im.width * kk)), max(1, int(im.height * kk))), Image.LANCZOS)
+            os.makedirs(self._board_dir(), exist_ok=True)
+            pid = "p%d" % int(time.time() * 1000)
+            fn = pid + ".png"
+            fp9 = os.path.join(self._board_dir(), fn)
+            im.save(fp9 + ".tmp", "PNG")
+            os.replace(fp9 + ".tmp", fp9)
+        except Exception:
+            self._log_error("board_shelf_add")
+            self._board_toast("그림을 읽지 못했어요")
+            return None
+        n = len(shelf)
+        shelf.append({"id": pid, "f": fn, "x": 0.3 + (n % 5) * 0.1, "b": 14, "h": 84})
+        self._board_pick = pid
+        self._board_save()
+        self._board_draw_stage()
+        return pid
+
+    def _board_shelf_del(self, pid):
+        d = self._board_data()
+        p = self._board_shelf(pid)
+        if p is None:
+            return
+        d["shelf"] = [q for q in d.get("shelf") or [] if q is not p]
+        self._board_pick = None
+        self._board_save()
+        self._board_draw_stage()
+
+    def _board_shelf_set(self, pid, **kw):
+        p = self._board_shelf(pid)
+        if p is None:
+            return
+        for k, v in kw.items():
+            if k == "front":
+                d = self._board_data()
+                d["shelf"] = [q for q in d["shelf"] if q is not p] + [p]
+            else:
+                p[k] = v
+        self._board_save()
+        self._board_draw_stage()
+
+    BOARD_TOOLS = (("photo", "이미지", "photo"), ("stk", "스티커", "smile"),
+                   ("note", "메모지", "memo"), ("tape", "테이프", "tape"),
+                   ("doodle", "텍스트", "text"), ("ticket", "티켓", "ticket"),
+                   ("dday", "D-day", "cal"), ("check", "체크리스트", "check"),
+                   ("shelf", "선반 소품", "star"))      # 조명은 환경설정에
+
+    def _board_toolbar(self, bcv, W):
+        """꾸미기 도구 띠 — 무대 폭에 안 들어가면 아이콘·여백을 줄이고, 그래도 넘치면 두 줄."""
+        pal, d = self._board_pal(), self._board_data()
+        f = self._bf(9)
+        fb = self._bf(9, True)
+        items = [(k, t, ic) for k, t, ic in self.BOARD_TOOLS]
+        done_w = int(self._tw("완료", fb)) + 50
+        gap = 2
+        lim = W - 24
+
+        def measure(icon, pad):
+            ws = [int(self._tw(t, f)) + pad * 2 + (24 if icon else 0) for _k, t, _i in items]
+            return ws, sum(ws) + gap * len(items) + done_w + 16
+        icon, pad = True, 12
+        widths, tot = measure(icon, pad)
+        for ic9, pad9 in ((True, 8), (False, 8), (False, 5)):
+            if tot <= lim:
+                break
+            icon, pad = ic9, pad9
+            widths, tot = measure(icon, pad)
+        rows = [list(zip(items, widths))]
+        if tot > lim:                              # 두 줄 — 앞 반은 첫 줄(완료와 함께), 뒤 반은 둘째 줄
+            icon, pad = True, 10
+            widths, _t = measure(icon, pad)
+            half = (len(items) + 1) // 2
+            pairs = list(zip(items, widths))
+            rows = [pairs[:half], pairs[half:]]
+        rh = 44
+        y0 = 14
+        row_w = [sum(w for _p, w in r) + gap * len(r) + 16 + (done_w if i == 0 else 0) for i, r in enumerate(rows)]
+        tot = max(row_w)
+        x0 = W // 2 - tot // 2
+        self._bd_box(bcv, x0, y0, x0 + tot, y0 + rh * len(rows), 22, pal["card"], pal["line"], 1,
+                     shadow=(8, .16, 4))
+        for ri, r in enumerate(rows):
+            cy = y0 + rh * ri + rh // 2
+            x = x0 + 8
+            for (k, t, ic), w in r:
+                tx = x + pad
+                if icon:
+                    self._bd_ic(bcv, ic, tx + 8, cy, 16, pal["sub"])
+                    tx += 24
+                bcv.create_text(tx, cy, text=t, font=f, fill=pal["ink"], anchor="w")
+                self._board_hit.append((x, cy - 17, x + w, cy + 17, "tool:" + k))
+                x += w + gap
+            if ri == 0:
+                x = x0 + tot - 8 - done_w
+                self._bd_box(bcv, x, cy - 16, x + done_w, cy + 16, 16, pal["ink"])
+                on9 = self._bd_on(pal["ink"])
+                self._bd_ic(bcv, "tick", x + 19, cy, 14, on9)
+                bcv.create_text(x + 34, cy, text="완료", font=fb, fill=on9, anchor="w")
+                self._board_hit.append((x, cy - 17, x + done_w, cy + 17, "tool:done"))
+        self._board_tool_h = y0 + rh * len(rows)
+
+    # ── 항목 그림 ────────────────────────────────────────────────────────
+    BOARD_SS = 2               # 항목은 두 배로 그려 돌리고 줄인다 (가장자리 매끈)
+
+    def _board_item_img(self, it, W):
+        """항목 하나를 PIL 로 그려 돌린 PhotoImage. 열쇠에 모양을 정하는 값만."""
+        it = self._board_item_live(it)
+        kind = str(it.get("kind") or "")
+        wpx = max(40, int(float(it.get("w") or 0.2) * W))
+        ang = int(float(it.get("a") or 0)) % 360
+        key = (str(it.get("id")), kind, wpx, ang, str(it.get("text") or ""),
+               str(it.get("cap") or ""), str(it.get("col") or ""), str(it.get("f") or ""),
+               str(it.get("fix") or ""), str(it.get("sty") or ""),
+               str(it.get("items") or ""))
+        ph = self._board_ph.get(key)
+        if ph is not None and kind == "check" and \
+                self._board_rows.get(str(it.get("id")), (0, 0, 0, -1, 0))[3] != wpx * self.BOARD_SS:
+            ph = None                      # 줄 자리 표가 다른 크기 것이면 다시 굽는다
+        if ph is not None:
+            return ph
+        try:
+            S = self.BOARD_SS
+            im = self._board_item_pil(it, kind, wpx * S)
+            if im is None:
+                return None
+            if ang:
+                # 알파를 미리 곱해 돌린다 — 안 그러면 가장자리에 검은 테가 진다
+                im = im.convert("RGBa").rotate(-ang, expand=True,
+                                                resample=Image.BICUBIC).convert("RGBA")
+            im = im.resize((max(1, im.width // S), max(1, im.height // S)), Image.LANCZOS)
+            # 얇은 그림자 (요청 — 두꺼운 그림자는 뺀다)
+            sh, M = self._bd_shadow(im, 1.3, .24, 2)
+            ph = self._tkimg(sh.crop((M, M, M + im.width + 4, M + im.height + 5)))
+        except Exception:
+            self._log_error("board_item_img")
+            return None
+        if len(self._board_ph) > 80:
+            for old in list(self._board_ph)[:30]:
+                self._board_ph.pop(old, None)
+        self._board_ph[key] = ph
+        return ph
+
+    def _board_wrap(self, dr, text, font, maxw):
+        out = []
+        for para in str(text).split("\n"):
+            line = ""
+            for ch in para:
+                if dr.textlength(line + ch, font=font) > maxw and line:
+                    out.append(line)
+                    line = ch
+                else:
+                    line += ch
+            out.append(line)
+        return out
+
+    def _board_item_pil(self, it, kind, wpx):
+        """항목 그림 (wpx 는 이미 두 배 크기 — 선·글자도 그 비율로)."""
+        pal = self._board_pal()
+        k = wpx / 200.0                        # 두께·여백의 눈금
+        if kind == "photo":
+            try:
+                src = Image.open(os.path.join(self._board_dir(), str(it.get("f")))).convert("RGBA")
+            except Exception:
+                return None
+            pad, capH = max(8, wpx // 18), max(26, wpx // 6)
+            iw = wpx - pad * 2
+            ih = max(1, int(iw * src.height / float(src.width)))
+            src = src.resize((iw, ih), Image.LANCZOS)
+            top = int(14 * k) + 6
+            im = Image.new("RGBA", (wpx, ih + pad + capH + top), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle((0, top, wpx - 1, top + ih + pad + capH - 1), radius=max(2, int(4 * k)),
+                                 fill=(255, 255, 255, 255))
+            im.alpha_composite(src, (pad, top + pad))
+            cap = str(it.get("cap") or "")
+            if cap:
+                f = self._bd_pil_font(max(14, wpx // 11))
+                if f is not None:
+                    dr.text((wpx // 2, top + ih + pad + capH // 2), cap, font=f,
+                            fill=(107, 94, 99), anchor="mm")
+            if it.get("fix") == "pin":
+                col = self._hex_rgb(str(it.get("col") or pal["accent"]))
+                r = max(8, int(9 * k))
+                cx, cy = wpx // 2, top + r // 2
+                dr.ellipse((cx - r, cy - r, cx + r, cy + r), fill=col + (255,))
+                dr.ellipse((cx - r * .5, cy - r * .55, cx - r * .05, cy - r * .1), fill=(255, 255, 255, 200))
+            else:
+                tape = self._board_tape_pil(max(60, wpx // 3), str(it.get("col") or self.BOARD_TAPES[0]))
+                tape = tape.convert("RGBa").rotate(-6, expand=True, resample=Image.BICUBIC).convert("RGBA")
+                im.alpha_composite(tape, (wpx // 2 - tape.width // 2, max(0, top - tape.height // 2)))
+            return im
+        if kind == "note":
+            col = self._hex_rgb(str(it.get("col") or self.BOARD_NOTES[0]))
+            f = self._bd_pil_font(max(15, wpx // 10))
+            h = int(wpx * 0.9)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle((0, 0, wpx - 1, h - 1), radius=max(2, int(3 * k)), fill=col + (255,))
+            dr.rectangle((0, int(4 * k), wpx - 1, int(16 * k)), fill=tuple(max(0, c - 14) for c in col) + (255,))
+            dr.rounded_rectangle((0, 0, wpx - 1, int(16 * k)), radius=max(2, int(3 * k)),
+                                 fill=tuple(max(0, c - 14) for c in col) + (255,))
+            if f is not None:
+                lines = self._board_wrap(dr, str(it.get("text") or ""), f, wpx - int(36 * k))
+                y = int(30 * k)
+                ink = (90, 74, 50) if sum(col) > 500 else (40, 30, 40)
+                for ln in lines[:8]:
+                    dr.text((int(18 * k), y), ln, font=f, fill=ink)
+                    y += int(f.size * 1.5)
+            return im
+        if kind == "check":
+            col = self._hex_rgb(str(it.get("col") or self.BOARD_NOTES[0]))
+            f = self._bd_pil_font(max(15, wpx // 10))
+            fb = self._bd_pil_font(max(15, wpx // 10), True)
+            if f is None or fb is None:
+                return None
+            items = list(it.get("items") or [])[:self.BOARD_CHECK_MAX]
+            title = str(it.get("text") or "")
+            rowh = int(f.size * 1.75)
+            top = int(30 * k) + (int(f.size * 1.7) if title else 0)
+            h = top + rowh * max(1, len(items)) + int(14 * k)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dark = tuple(max(0, c - 14) for c in col) + (255,)
+            dr.rounded_rectangle((0, 0, wpx - 1, h - 1), radius=max(2, int(3 * k)), fill=col + (255,))
+            dr.rectangle((0, int(4 * k), wpx - 1, int(16 * k)), fill=dark)
+            dr.rounded_rectangle((0, 0, wpx - 1, int(16 * k)), radius=max(2, int(3 * k)), fill=dark)
+            ink = (90, 74, 50) if sum(col) > 500 else (40, 30, 40)
+            dim = tuple(int(v * 0.55 + 255 * 0.45 * 0.6 + c9 * 0.45 * 0.4) for v, c9 in zip(ink, col))
+            acc = self._hex_rgb(pal["accent"])
+            if title:
+                dr.text((int(18 * k), int(30 * k)), title, font=fb, fill=ink + (255,))
+            bs = int(f.size * 0.95)
+            lw = max(2, int(2 * k))
+            for i, ci in enumerate(items):
+                y = top + i * rowh
+                bx, by = int(18 * k), int(y + (rowh - bs) / 2)
+                done = bool(ci.get("d"))
+                if done:
+                    dr.rounded_rectangle((bx, by, bx + bs, by + bs), radius=max(2, bs // 4), fill=acc + (255,))
+                    dr.line([(bx + bs * .24, by + bs * .52), (bx + bs * .44, by + bs * .72),
+                             (bx + bs * .78, by + bs * .3)], fill=(255, 255, 255, 255), width=lw + 1,
+                            joint="curve")
+                else:
+                    dr.rounded_rectangle((bx, by, bx + bs, by + bs), radius=max(2, bs // 4),
+                                         outline=ink + (170,), width=lw)
+                tx = bx + bs + int(10 * k)
+                t9 = str(ci.get("t") or "")
+                while t9 and dr.textlength(t9, font=f) > wpx - tx - int(12 * k):
+                    t9 = t9[:-1]
+                dr.text((tx, y + rowh / 2.0), t9, font=f, fill=(dim if done else ink) + (255,), anchor="lm")
+                if done and t9:
+                    tw9 = dr.textlength(t9, font=f)
+                    dr.line([(tx, y + rowh / 2.0), (tx + tw9, y + rowh / 2.0)], fill=dim + (255,), width=lw)
+            self._board_rows[str(it.get("id"))] = (top, rowh, len(items), wpx, h)
+            return im
+        if kind == "tape":
+            return self._board_tape_pil(wpx, str(it.get("col") or self.BOARD_TAPES[0]),
+                                        str(it.get("sty") or "stripe"))
+        if kind == "doodle":
+            f = self._bd_pil_font(max(20, wpx // 6), True)
+            if f is None:
+                return None
+            t = str(it.get("text") or "")
+            sw = max(3, int(wpx / 70))
+            d0 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+            tw = int(d0.textlength(t, font=f)) + sw * 4 + 8
+            im = Image.new("RGBA", (max(8, tw), int(f.size * 1.6) + sw * 2), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            col = self._hex_rgb(str(it.get("col") or pal["accent"]))
+            dr.text((sw * 2 + 4, sw + 4), t, font=f, fill=col + (255,),
+                    stroke_width=sw, stroke_fill=(255, 255, 255, 255))
+            return im
+        if kind == "ticket":
+            return self._board_ticket_pil(it, wpx)
+        return None
+
+    def _board_tape_pil(self, wpx, col, sty="stripe"):
+        """마스킹테이프 — 반투명 몸통 + 무늬 + 톱니처럼 뜯긴 두 끝. 무늬 7종."""
+        h = max(18, wpx // 4)
+        c = self._hex_rgb(col)
+        im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        z = max(3, h // 6)
+        pts = [(z, 0), (wpx - z, 0)]
+        for i in range(0, 7):
+            pts.append((wpx - z + (z if i % 2 == 0 else 0), h * i / 6.0))
+        pts += [(wpx - z, h), (z, h)]
+        for i in range(6, -1, -1):
+            pts.append(((z if i % 2 == 0 else 0), h * i / 6.0))
+        dr.polygon(pts, fill=c + (228,))
+        st = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+        ds = ImageDraw.Draw(st)
+        W9 = (255, 255, 255)
+        if sty == "dot":
+            r = h * 0.12
+            for row, yy in enumerate((h * 0.3, h * 0.72)):
+                for xx in range(int(-h), wpx + h, max(6, int(h * 0.55))):
+                    x9 = xx + (h * 0.27 if row else 0)
+                    ds.ellipse((x9 - r, yy - r, x9 + r, yy + r), fill=W9 + (190,))
+        elif sty == "check":
+            b = max(3, int(h / 4))
+            for xx in range(0, wpx, b * 2):
+                ds.rectangle((xx, 0, xx + b - 1, h), fill=W9 + (80,))
+            for yy in range(0, h, b * 2):
+                ds.rectangle((0, yy, wpx, yy + b - 1), fill=W9 + (80,))
+        elif sty == "heart":
+            g = h * 0.17
+            for i, xx in enumerate(range(int(h * 0.4), wpx, max(8, int(h * 0.75)))):
+                yy = h * (0.36 if i % 2 else 0.64)
+                ds.ellipse((xx - g, yy - g * .8, xx, yy + g * .2), fill=W9 + (205,))
+                ds.ellipse((xx, yy - g * .8, xx + g, yy + g * .2), fill=W9 + (205,))
+                ds.polygon([(xx - g * .95, yy - g * .1), (xx + g * .95, yy - g * .1), (xx, yy + g)],
+                           fill=W9 + (205,))
+        elif sty == "star":
+            g = h * 0.2
+            for i, xx in enumerate(range(int(h * 0.4), wpx, max(8, int(h * 0.7)))):
+                yy = h * (0.35 if i % 2 else 0.65)
+                p9 = []
+                for j in range(10):
+                    rr = g if j % 2 == 0 else g * 0.45
+                    a = math.radians(-90 + j * 36)
+                    p9.append((xx + rr * math.cos(a), yy + rr * math.sin(a)))
+                ds.polygon(p9, fill=W9 + (210,))
+        elif sty == "lace":
+            r = h * 0.16
+            for xx in range(0, wpx + int(r * 2), max(4, int(r * 2))):
+                ds.ellipse((xx - r, -r, xx + r, r), fill=W9 + (215,))
+                ds.ellipse((xx - r, h - r, xx + r, h + r), fill=W9 + (215,))
+            for xx in range(int(r), wpx, max(4, int(r * 2))):
+                ds.ellipse((xx - r * .35, r * 1.35 - r * .35, xx + r * .35, r * 1.35 + r * .35), fill=W9 + (160,))
+                ds.ellipse((xx - r * .35, h - r * 1.35 - r * .35, xx + r * .35, h - r * 1.35 + r * .35),
+                           fill=W9 + (160,))
+        elif sty == "plain":
+            rnd = random.Random(wpx * 7 + sum(c))
+            for _ in range(max(6, wpx // 6)):
+                x9, y9 = rnd.random() * wpx, rnd.random() * h
+                ds.line((x9, y9, x9 + rnd.random() * h * .6, y9 + (rnd.random() - .5) * 3),
+                        fill=W9 + (60,), width=1)
+        else:                                  # stripe
+            step = max(10, h // 2)
+            for i in range(-h, wpx + h, step):
+                ds.polygon([(i, 0), (i + step // 2, 0), (i + step // 2 - h, h), (i - h, h)],
+                           fill=W9 + (105,))
+        mask = im.split()[3].point(lambda v: 255 if v else 0)
+        blank = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+        im.alpha_composite(Image.composite(st, blank, mask))
+        return im
+
+    def _board_ticket_pil(self, it, wpx):
+        """티켓 4종 — 기본 · 입장권(떼는 쪽 + 구멍 줄) · 쿠폰(물결 테) · 네임택. wpx 는 두 배 크기."""
+        pal = self._board_pal()
+        sty = str(it.get("sty") or "classic")
+        if sty not in self.BOARD_TICKET_COL:
+            sty = "classic"
+        col = self._hex_rgb(str(it.get("col") or self.BOARD_TICKET_COL[sty]))
+        k = wpx / 200.0
+        f1 = self._bd_pil_font(max(18, wpx // 7), True)
+        f2 = self._bd_pil_font(max(12, wpx // 11))
+        acc = self._hex_rgb(pal["accent"])
+        ink = (106, 47, 68) if sum(col) > 520 else (255, 255, 255)
+        # 큰 글자 — 그 티켓 색의 진한 판 (같은 색상, 밝기 0.42 · 선명도 올림).
+        # 검정을 섞으면 잿빛이 된다 (지뢰 79 와 같은 이야기)
+        h9, l9, s9 = _rgb_to_hls(*(v / 255.0 for v in col))
+        big = tuple(int(round(v * 255)) for v in _hls_to_rgb(h9, 0.46, min(0.5, max(0.38, s9 * 0.6))))
+        if sum(col) <= 520:
+            big = (255, 255, 255)
+        t1, t2 = str(it.get("text") or "D-3"), str(it.get("cap") or "")
+        H0 = (lambda a: (0, 0, 0, 0))
+        if sty == "admit":
+            h = int(wpx * 0.5)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle((0, 0, wpx - 1, h - 1), radius=max(4, int(12 * k)), fill=col + (255,))
+            sx = int(wpx * 0.3)
+            stub = self._hex_rgb(self._mix("#%02x%02x%02x" % col, pal["accent"], 0.45))
+            dr.rounded_rectangle((0, 0, sx + 12, h - 1), radius=max(4, int(12 * k)), fill=stub + (255,))
+            dr.rectangle((sx, 0, sx + 12, h - 1), fill=col + (255,))
+            nr = max(5, int(9 * k))
+            dr.ellipse((sx - nr, -nr, sx + nr, nr), fill=H0(0))
+            dr.ellipse((sx - nr, h - 1 - nr, sx + nr, h - 1 + nr), fill=H0(0))
+            pr = max(2, int(2.4 * k))
+            for yy in range(nr + int(8 * k), h - nr - int(4 * k), max(6, int(10 * k))):
+                dr.ellipse((sx - pr, yy - pr, sx + pr, yy + pr), fill=H0(0))
+            g, cx9, cy9 = h * 0.2, sx / 2.0, h / 2.0
+            p9 = []
+            for j in range(10):
+                rr = g if j % 2 == 0 else g * 0.45
+                a = math.radians(-90 + j * 36)
+                p9.append((cx9 + rr * math.cos(a), cy9 + rr * math.sin(a)))
+            dr.polygon(p9, fill=(255, 255, 255, 235))
+            m = int(7 * k)
+            dr.rounded_rectangle((sx + m + 6, m, wpx - 1 - m, h - 1 - m), radius=max(3, int(8 * k)),
+                                 outline=(255, 255, 255, 190), width=max(2, int(2 * k)))
+            mx = sx + (wpx - sx) / 2.0
+        elif sty == "coupon":
+            h = int(wpx * 0.55)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rectangle((0, 0, wpx - 1, h - 1), fill=col + (255,))
+            rr = max(4, int(7 * k))
+            step = rr * 2.6
+            n9 = max(3, int(wpx / step))
+            for i in range(n9 + 1):
+                x9 = i * (wpx - 1) / float(n9)
+                dr.ellipse((x9 - rr, -rr, x9 + rr, rr), fill=H0(0))
+                dr.ellipse((x9 - rr, h - 1 - rr, x9 + rr, h - 1 + rr), fill=H0(0))
+            n9 = max(2, int(h / step))
+            for i in range(n9 + 1):
+                y9 = i * (h - 1) / float(n9)
+                dr.ellipse((-rr, y9 - rr, rr, y9 + rr), fill=H0(0))
+                dr.ellipse((wpx - 1 - rr, y9 - rr, wpx - 1 + rr, y9 + rr), fill=H0(0))
+            m = int(16 * k)
+            lw = max(2, int(2 * k))
+            for i in range(m, wpx - m, int(12 * k) + 4):
+                dr.line((i, m, min(wpx - m, i + int(6 * k) + 2), m), fill=(255, 255, 255, 220), width=lw)
+                dr.line((i, h - 1 - m, min(wpx - m, i + int(6 * k) + 2), h - 1 - m), fill=(255, 255, 255, 220),
+                        width=lw)
+            g = h * 0.09
+            hx, hy = m + g * 2.2, m + g * 2.4
+            dr.ellipse((hx - g, hy - g * .8, hx, hy + g * .2), fill=acc + (255,))
+            dr.ellipse((hx, hy - g * .8, hx + g, hy + g * .2), fill=acc + (255,))
+            dr.polygon([(hx - g * .95, hy - g * .1), (hx + g * .95, hy - g * .1), (hx, hy + g)], fill=acc + (255,))
+            mx = wpx / 2.0
+        elif sty == "tag":
+            h = int(wpx * 0.5)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            tip = h * 0.32
+            dr.polygon([(tip, 0), (wpx - 1, 0), (wpx - 1, h - 1), (tip, h - 1), (0, h * 0.66), (0, h * 0.34)],
+                       fill=col + (255,))
+            hr, hx = h * 0.09, h * 0.24
+            dr.ellipse((hx - hr * 1.7, h / 2 - hr * 1.7, hx + hr * 1.7, h / 2 + hr * 1.7), fill=(255, 255, 255, 235))
+            dr.ellipse((hx - hr, h / 2 - hr, hx + hr, h / 2 + hr), fill=H0(0))
+            m = int(7 * k)
+            dr.line(((tip + m, m), (wpx - 1 - m, m)), fill=(255, 255, 255, 200), width=max(2, int(2 * k)))
+            dr.line(((tip + m, h - 1 - m), (wpx - 1 - m, h - 1 - m)), fill=(255, 255, 255, 200),
+                    width=max(2, int(2 * k)))
+            mx = tip + (wpx - tip) / 2.0 + h * 0.08
+        else:                                   # classic
+            h = int(wpx * 0.55)
+            im = Image.new("RGBA", (wpx, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(im)
+            dr.rounded_rectangle((0, 0, wpx - 1, h - 1), radius=max(4, int(12 * k)), fill=col + (255,))
+            nr = max(5, int(10 * k))
+            for cx in (0, wpx - 1):
+                dr.ellipse((cx - nr, h // 2 - nr, cx + nr, h // 2 + nr), fill=H0(0))
+            lw = max(2, int(2 * k))
+            m = int(8 * k) + lw
+            for i in range(m + nr, wpx - m - nr, int(14 * k) + 4):
+                dr.line((i, m, i + int(7 * k) + 2, m), fill=acc + (160,), width=lw)
+                dr.line((i, h - 1 - m, i + int(7 * k) + 2, h - 1 - m), fill=acc + (160,), width=lw)
+            mx = wpx / 2.0
+            big = acc
+            ink = (106, 47, 68)
+        if f1 is not None:
+            dr.text((mx, h * 0.42), t1, font=f1, fill=big + (255,), anchor="mm")
+        if f2 is not None and t2:
+            dr.text((mx, h * 0.73), t2, font=f2, fill=ink + (255,), anchor="mm")
+        return im
+
+    def _board_style_prev(self, kind, sty):
+        """도구 메뉴에 붙일 작은 미리보기 (96px)."""
+        key = ("sprev", kind, sty)
+        got = self._board_uiph.get(key)
+        if got is not None:
+            return got[0]
+        try:
+            if kind == "tape":
+                im = self._board_tape_pil(220, self.BOARD_TAPES[1], sty)
+                im = im.convert("RGBa").rotate(8, expand=True, resample=Image.BICUBIC).convert("RGBA")
+            else:
+                im = self._board_ticket_pil({"sty": sty, "text": "D-3", "cap": "마감"}, 220)
+            im = im.resize((96, max(1, int(im.height * 96 / float(im.width)))), Image.LANCZOS)
+            ph = self._tkimg(im)
+        except Exception:
+            self._log_error("board_style_prev")
+            return None
+        self._board_uiph[key] = (ph, 0)
+        return ph
+
+    def _board_style_fill(self, menu, kind, cb):
+        """메뉴에 무늬 미리보기 항목들을 채운다 (그림 참조는 메뉴가 붙든다)."""
+        imgs = getattr(menu, "_bd_imgs", None)
+        if imgs is None:
+            imgs = menu._bd_imgs = []
+        for sty, nm in (self.BOARD_TAPE_STY if kind == "tape" else self.BOARD_TICKET_STY):
+            ph = self._board_style_prev(kind, sty)
+            if ph is not None:
+                imgs.append(ph)
+                menu.add_command(label="   " + nm, image=ph, compound="left",
+                                 command=lambda s9=sty: cb(s9))
+            else:
+                menu.add_command(label=nm, command=lambda s9=sty: cb(s9))
+
+    def _board_style_menu(self, kind, cb):
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+        self._board_style_fill(m, kind, cb)
+        try:
+            x, y = self._board_win.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    def _board_draw_item(self, bcv, it, W, BH):
+        ph = self._board_item_img(it, W)
+        if ph is None:
+            return
+        cx = int(float(it.get("x", 0.5)) * W)
+        cy = int(float(it.get("y", 0.5)) * BH)
+        iid = str(it.get("id"))
+        bcv.create_image(cx, cy, image=ph, anchor="center", tags=("dyn", "bi_" + iid))
+        hw, hh = ph.width() / 2.0, ph.height() / 2.0
+        self._board_hit.append((cx - hw, cy - hh, cx + hw, cy + hh, "item:" + iid))
+        if getattr(self, "_board_edit", False) and self._board_pick == iid:
+            self._board_marks(bcv, cx, cy, hw, hh, ("size", "turn", "del"), ("item", iid),
+                              ("dyn", "bs_" + iid))
+
+    BOARD_GRIP = 11
+    BOARD_GRIP_COL = {"size": "#8892b5", "turn": "#f0a0be", "del": "#dc6262"}
+
+    def _bd_marks_pil(self, w, h, turn, col):
+        """고른 것의 점선 테 (+ 회전 손잡이까지 잇는 선) — 4배로 그려 매끈하게."""
+        S = 4
+        up = 24 if turn else 0
+        W2, H2 = w + 4, h + 4 + up
+        im = Image.new("RGBA", (W2 * S, H2 * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        c = self._bd_c(col, 230)
+        L = 2 * S
+        x0, y0, x1, y1 = 2 * S, (2 + up) * S, (w + 2) * S, (h + 2 + up) * S
+        r = 7 * S
+        dash, gap = 7 * S, 5 * S
+        for (ax, ay, bx, by) in ((x0 + r, y0, x1 - r, y0), (x0 + r, y1, x1 - r, y1),
+                                 (x0, y0 + r, x0, y1 - r), (x1, y0 + r, x1, y1 - r)):
+            ln = math.hypot(bx - ax, by - ay)
+            t = 0.0
+            while t < ln:
+                t2 = min(ln, t + dash)
+                dr.line((ax + (bx - ax) * t / ln, ay + (by - ay) * t / ln,
+                         ax + (bx - ax) * t2 / ln, ay + (by - ay) * t2 / ln), fill=c, width=L)
+                t = t2 + gap
+        for (ex, ey, a0) in ((x0, y0, 180), (x1 - 2 * r, y0, 270), (x0, y1 - 2 * r, 90),
+                             (x1 - 2 * r, y1 - 2 * r, 0)):
+            dr.arc((ex, ey, ex + 2 * r, ey + 2 * r), a0, a0 + 90, fill=c, width=L)
+        if turn:
+            cx = (x0 + x1) / 2.0
+            dr.line((cx, y0, cx, 2 * S + 4 * S), fill=c, width=L)
+        return im.resize((W2, H2), Image.LANCZOS)
+
+    def _board_marks(self, bcv, cx, cy, hw, hh, kinds, owner, tags):
+        """스티커와 같은 손잡이 — 크기(오른쪽 아래)·회전(위)·지우기(왼쪽 위)."""
+        pal = self._board_pal()
+        w9, h9 = int(hw * 2) + 10, int(hh * 2) + 10
+        turn = "turn" in kinds
+        self._bd_put(bcv, ("marks", w9, h9, turn, pal["accent"]),
+                     lambda: self._bd_marks_pil(w9, h9, turn, pal["accent"]),
+                     cx, cy - (12 if turn else 0), anchor="center", tags=tags)
+        r = self.BOARD_GRIP
+        spots = {"size": (cx + hw + 5, cy + hh + 5), "turn": (cx, cy - hh - 5 - 22),
+                 "del": (cx - hw - 5, cy - hh - 5)}
+        ic = {"size": "size", "turn": "turn", "del": "x"}
+        for kind in kinds:
+            gx, gy = spots[kind]
+            col = self.BOARD_GRIP_COL[kind]
+            self._bd_box(bcv, gx - r - 2, gy - r - 2, gx + r + 2, gy + r + 2, r + 2, "#ffffff",
+                         shadow=(3, .2, 1), tags=tags)
+            self._bd_box(bcv, gx - r, gy - r, gx + r, gy + r, r, col, tags=tags)
+            self._bd_ic(bcv, ic[kind], gx, gy, 14, "#ffffff", tags=tags)
+            self._board_grips.append((gx, gy, r + 5, kind, owner))
+
+    def _board_grip_at(self, x, y):
+        for gx, gy, r, kind, owner in reversed(self._board_grips):
+            if (x - gx) ** 2 + (y - gy) ** 2 <= r * r:
+                return kind, owner
+        return None
+
+    def _board_owner_center(self, owner):
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        BH = max(1, H - self.BOARD_LEDGE)
+        kind, oid = owner
+        if kind == "item":
+            it = self._board_item(oid)
+            return None if it is None else (float(it.get("x", .5)) * W, float(it.get("y", .5)) * BH)
+        if kind == "prop":
+            p = self._board_shelf(oid)
+            if p is None:
+                return None
+            return float(p.get("x", .5)) * W, H - float(p.get("b", 14)) - float(p.get("h") or 84) / 2.0
+        bx = getattr(self, "_board_bub_box", None)
+        return None if not bx else ((bx[0] + bx[2]) / 2.0, (bx[1] + bx[3]) / 2.0)
+
+    def _board_grip_press(self, e):
+        """손잡이를 눌렀으면 처리하고 True (크기·회전은 끌기 시작, 지우기는 바로)."""
+        g = self._board_grip_at(e.x, e.y)
+        if g is None:
+            return False
+        kind, owner = g
+        self._safe("ui_click", self._ui_click)
+        if kind == "del":
+            if owner[0] == "item":
+                self._board_item_del(owner[1])
+            elif owner[0] == "prop":
+                self._board_shelf_del(owner[1])
+            return True
+        c = self._board_owner_center(owner)
+        if c is None:
+            return True
+        st = {"grip": kind, "owner": owner, "x": e.x, "y": e.y, "at": 0.0, "cx": c[0], "cy": c[1],
+              "r0": max(1.0, math.hypot(e.x - c[0], e.y - c[1])),
+              "g0": math.degrees(math.atan2(e.y - c[1], e.x - c[0]))}
+        if owner[0] == "item":
+            it = self._board_item(owner[1])
+            st["v0"] = float(it.get("w") or 0.2)
+            st["a0"] = float(it.get("a") or 0)
+        elif owner[0] == "prop":
+            st["v0"] = float(self._board_shelf(owner[1]).get("h") or 84)
+        else:
+            st["v0"] = float(self._board_bub().get("k") or 1.0)
+        self._board_drag = st
+        return True
+
+    def _board_grip_drag(self, st, e):
+        owner = st["owner"]
+        q = math.hypot(e.x - st["cx"], e.y - st["cy"]) / st["r0"]
+        if owner[0] == "item":
+            it = self._board_item(owner[1])
+            if it is None:
+                return
+            if st["grip"] == "size":
+                it["w"] = max(0.05, min(0.8, st["v0"] * q))
+            else:
+                g = math.degrees(math.atan2(e.y - st["cy"], e.x - st["cx"]))
+                it["a"] = round((st["a0"] + g - st["g0"]) % 360)
+        elif owner[0] == "prop":
+            p = self._board_shelf(owner[1])
+            if p is None:
+                return
+            p["h"] = int(max(30, min(320, st["v0"] * q)))
+        else:
+            self._board_bub()["k"] = max(0.7, min(2.2, st["v0"] * q))
+        now = time.time()
+        if now - st["at"] > 0.04:
+            st["at"] = now
+            self._board_draw_stage()
+
+    # ── 조작 ────────────────────────────────────────────────────────────
+    def _board_hit_at(self, x, y, lst):
+        for x0, y0, x1, y1, what in reversed(lst):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return what
+        return None
+
+    def _board_press(self, e, which):
+        win = self._board_win
+        if self._chrome_press(win, e):
+            return
+        if which == "main":
+            what = self._board_hit_at(e.x, e.y, self._board_ui_hit)
+            if what:
+                self._safe("ui_click", self._ui_click)
+                self._board_ui_act(what)
+            return
+        # 무대
+        what = self._board_hit_at(e.x, e.y, self._board_hit)
+        if what and what.startswith("tool:"):
+            self._safe("ui_click", self._ui_click)
+            self._board_tool(what[5:])
+            return
+        if self._board_matadj:
+            if what == "adj:done":
+                self._safe("ui_click", self._ui_click)
+                self._board_matadj = False
+                self._board_save()
+                self._board_draw_stage()
+            elif what == "adj:reset":
+                self._safe("ui_click", self._ui_click)
+                self._board_data()["mat_pos"] = {"cx": .5, "cy": .5, "z": 1.0}
+                self._board_save()
+                self._board_draw_stage()
+            else:
+                self._board_drag = {"adj": True, "x": e.x, "y": e.y, "at": 0.0,
+                                    "pos": self._board_mat_posv()}
+            return
+        if what == "ledge:bgm" and not getattr(self, "_board_edit", False):
+            self._safe("ui_click", self._ui_click)
+            self._board_ui_act("bgm")
+            return
+        if not getattr(self, "_board_edit", False):
+            sid = self._stk_at("board", e.x, e.y)
+            if sid is not None:
+                self._board_poke_start("stk", sid)
+            elif what == "char":
+                self._board_poke_start("char")
+            elif what and what.startswith("item:"):
+                it9 = self._board_item(what[5:])
+                if it9 is not None and it9.get("kind") == "check":
+                    self._board_check_toggle(it9, self._board_check_row_at(it9, e.x, e.y))
+            return
+        if self._board_grip_press(e):
+            return
+        if what == "bubble":
+            bx = self._board_bub_box
+            self._board_pick = "__bubble"
+            self._board_drag = {"bub": True, "x": e.x, "y": e.y, "at": 0.0,
+                                "cx0": (bx[0] + bx[2]) / 2.0, "cy0": (bx[1] + bx[3]) / 2.0}
+            self._board_draw_stage()
+            return
+        if self._stk_press("board", e.x, e.y):
+            return
+        if what and what.startswith("prop:"):
+            pid = what[5:]
+            p = self._board_shelf(pid)
+            if p is None:
+                return
+            self._board_pick = pid
+            self._board_drag = {"id": pid, "shelf": True, "x": e.x, "y": e.y,
+                                "cx": float(p.get("x", .5)), "b0": float(p.get("b", 14)), "at": 0.0}
+            self._board_draw_stage()
+            return
+        if what and what.startswith("item:"):
+            iid = what[5:]
+            it = self._board_item(iid)
+            if it is None:
+                return
+            if it.get("kind") == "check" and self._board_pick == iid:
+                r9 = self._board_check_row_at(it, e.x, e.y)
+                if r9 >= 0 and self._board_check_toggle(it, r9):      # 고른 채로 다시 누르면 체크
+                    return
+            self._board_pick = iid
+            self._board_drag = {"id": iid, "x": e.x, "y": e.y,
+                                "cx": float(it.get("x", .5)), "cy": float(it.get("y", .5)), "at": 0.0}
+            self._board_draw_stage()
+            return
+        if self._board_pick is not None:
+            self._board_pick = None
+            self._board_draw_stage()
+
+    def _board_item(self, iid):
+        for it in self._board_data().get("items") or []:
+            if str(it.get("id")) == str(iid):
+                return it
+        return None
+
+    def _board_drag_ev(self, e, which):
+        win = self._board_win
+        if self._chrome_drag(win, e):
+            return
+        if which != "stage":
+            return
+        if self._stk_move("board", e.x, e.y):
+            return
+        st = self._board_drag
+        if st is None:
+            return
+        if st.get("shelf"):
+            self._board_shelf_drag(st, e)
+            return
+        if st.get("bub"):
+            self._board_bub_drag(st, e)
+            return
+        if st.get("grip"):
+            self._board_grip_drag(st, e)
+            return
+        if st.get("adj"):
+            self._board_adj_drag(st, e)
+            return
+        it = self._board_item(st["id"])
+        if it is None:
+            self._board_drag = None
+            return
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        BH = max(1, H - self.BOARD_LEDGE)
+        nx = st["cx"] * W + (e.x - st["x"])
+        ny = st["cy"] * BH + (e.y - st["y"])
+        if self._board_data().get("snap"):
+            g = self.BOARD_GRID
+            nx, ny = round(nx / g) * g, round(ny / g) * g
+        it["x"] = max(0.03, min(0.97, nx / float(W)))
+        it["y"] = max(0.03, min(0.97, ny / float(BH)))
+        now = time.time()
+        if now - st["at"] > 0.016:
+            st["at"] = now
+            items = bcv.find_withtag("bi_" + str(st["id"]))
+            if items:
+                p = (int(it["x"] * W), int(it["y"] * BH))
+                bcv.coords(items[-1], *p)
+                bcv.delete("bs_" + str(st["id"]))
+            else:
+                self._board_draw_stage()
+
+    def _board_shelf_drag(self, st, e):
+        """선반 소품 끌기 — 선반 안에서 자유롭게 (발 딛는 줄이 선반 턱 아래·바닥 위)."""
+        p = self._board_shelf(st["id"])
+        if p is None:
+            self._board_drag = None
+            return
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        nx = st["cx"] * W + (e.x - st["x"])
+        if self._board_data().get("snap"):
+            nx = round(nx / self.BOARD_GRID) * self.BOARD_GRID
+        p["x"] = max(0.02, min(0.98, nx / float(W)))
+        p["b"] = max(4.0, min(self.BOARD_LEDGE - 12.0, st["b0"] - (e.y - st["y"])))
+        now = time.time()
+        if now - st["at"] > 0.016:
+            st["at"] = now
+            # 그림 항목은 그대로 두고 옮긴 만큼만 민다 (mx·my = 지금까지 민 양)
+            dx = p["x"] * W - (st["cx"] * W + st.get("mx", 0.0))
+            dy = (H - p["b"]) - (H - st["b0"] + st.get("my", 0.0))
+            if bcv.find_withtag("bp_" + str(st["id"])):
+                self._board_grips = [g9 for g9 in self._board_grips if g9[4] != ("prop", str(st["id"]))]
+                bcv.move("bp_" + str(st["id"]), dx, dy)
+                st["mx"] = st.get("mx", 0.0) + dx
+                st["my"] = st.get("my", 0.0) + dy
+            else:
+                self._board_draw_stage()
+
+    def _board_release(self, e, which):
+        if self._chrome_release(self._board_win):
+            self._board_draw()
+            return
+        if which != "stage":
+            return
+        if self._board_drag is None and self._stk_drop("board"):
+            return
+        if self._board_drag is not None:
+            self._board_drag = None
+            self._board_save()
+            self._board_draw_stage()
+
+    def _board_motion(self, e, which):
+        win = self._board_win
+        self._chrome_motion(win, e)
+        if which == "main":
+            self._tip_track(win, e, self._board_tips)
+        ch = getattr(win, "_chrome", None) or {}
+        lst = self._board_ui_hit if which == "main" else self._board_hit
+        cur = ""
+        if not ch.get("cur"):
+            what = self._board_hit_at(e.x, e.y, lst)
+            if what and (which == "main" or not what.startswith(("item:", "prop:", "bubble"))):
+                cur = "hand2"
+            if not cur and which == "main":
+                for x0, y0, x1, y1, _a in ch.get("hits") or []:
+                    if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                        cur = "hand2"
+        try:
+            if str(e.widget.cget("cursor")) != cur:
+                e.widget.configure(cursor=cur)
+        except Exception:
+            pass
+
+    def _board_wheel(self, e, which):
+        if which == "main" and self._board_tab == "cal":
+            lay = self._board_layout()
+            x0, y0, x1, y1 = lay["stage"]
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:      # 달력 위에서 휠 — 달을 넘긴다
+                self._cal_act("prev" if e.delta > 0 else "next")
+            return
+        step = 1.1 if e.delta > 0 else 1 / 1.1
+        if which == "stage" and self._board_matadj:
+            cx, cy, z = self._board_mat_posv()
+            self._board_data()["mat_pos"] = {"cx": cx, "cy": cy,
+                                             "z": min(self.BOARD_MAT_ZMAX, max(1.0, z * step))}
+            self._board_save()
+            self._board_draw_stage()
+            return
+        if which != "stage" or not getattr(self, "_board_edit", False):
+            return
+        if self._board_pick == "__bubble":
+            b = self._board_bub()
+            b["k"] = min(2.2, max(0.7, float(b.get("k") or 1.0) * step))
+            self._board_save()
+            self._board_draw_stage()
+            return
+        if self._stk_wheel("board", e.delta):
+            return
+        p = self._board_shelf(self._board_pick) if self._board_pick else None
+        if p is not None:
+            p["h"] = int(max(30, min(320, float(p.get("h") or 84) * step)))
+            self._board_save()
+            self._board_draw_stage()
+            return
+        it = self._board_item(self._board_pick) if self._board_pick else None
+        if it is None:
+            return
+        it["w"] = max(0.05, min(0.8, float(it.get("w") or 0.2) * step))
+        self._board_save()
+        self._board_draw_stage()
+
+    def _board_rclick(self, e, which):
+        """우클릭 — 항목이면 회전·색·글·지우기, 스티커면 모션·지우기 (꾸미기 중)."""
+        if which == "main" and self._board_tab == "cal":
+            self._cal_rclick(e)
+            return
+        if which != "stage" or self._board_matadj:
+            return
+        if not getattr(self, "_board_edit", False):
+            # 꾸미기가 아닐 때 우클릭 — 붙인 것 위라면 꾸미기로 들어가 메뉴를 띄운다
+            w9 = self._board_hit_at(e.x, e.y, self._board_hit) or ""
+            if self._stk_at("board", e.x, e.y) is None and not w9.startswith(("item:", "prop:")):
+                return
+            self._board_toggle_edit()
+        if self._board_hit_at(e.x, e.y, self._board_hit) == "bubble":
+            self._board_bub_menu(e)
+            return
+        sid = self._stk_at("board", e.x, e.y)
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+        if sid is not None:
+            meta = self._stk_meta("board", sid)
+            self._stk_pick = sid
+            self._stk_redraw("board")
+            for key, nm in self.BOARD_MOTIONS:
+                m.add_radiobutton(label="모션: " + nm, value=key,
+                                  variable=tk.StringVar(value=str((meta or {}).get("m") or "")),
+                                  command=lambda k=key, s=sid: self._board_stk_motion(s, k))
+            m.add_separator()
+            m.add_command(label="지우기", command=lambda s=sid: self._stk_remove("board", s))
+        else:
+            what = self._board_hit_at(e.x, e.y, self._board_hit)
+            if what and what.startswith("prop:"):
+                pid = what[5:]
+                p = self._board_shelf(pid)
+                if p is None:
+                    return
+                self._board_pick = pid
+                self._board_draw_stage()
+                h9 = int(p.get("h") or 84)
+                m.add_command(label="좌우 뒤집기", command=lambda: self._board_shelf_set(pid, flip=not p.get("flip")))
+                m.add_command(label="크게", command=lambda: self._board_shelf_set(pid, h=min(320, int(h9 * 1.2))))
+                m.add_command(label="작게", command=lambda: self._board_shelf_set(pid, h=max(30, int(h9 / 1.2))))
+                m.add_command(label="맨 앞으로", command=lambda: self._board_shelf_set(pid, front=True))
+                m.add_separator()
+                m.add_command(label="지우기", command=lambda: self._board_shelf_del(pid))
+                try:
+                    m.tk_popup(e.x_root, e.y_root)
+                finally:
+                    try:
+                        m.grab_release()
+                    except Exception:
+                        pass
+                return
+            if not (what and what.startswith("item:")):
+                return
+            iid = what[5:]
+            it = self._board_item(iid)
+            if it is None:
+                return
+            self._board_pick = iid
+            self._board_draw_stage()
+            m.add_command(label="↻ 오른쪽으로 돌리기", command=lambda: self._board_item_rot(iid, 8))
+            m.add_command(label="↺ 왼쪽으로 돌리기", command=lambda: self._board_item_rot(iid, -8))
+            m.add_command(label="바로 세우기", command=lambda: self._board_item_rot(iid, None))
+            m.add_separator()
+            if it.get("due"):
+                m.add_command(label="마감: " + str(it.get("due"))[:20] + " (마감 목록과 연동)", state="disabled")
+            elif it.get("kind") == "check":
+                m.add_command(label="항목 고치기…", command=lambda: self._board_check_ask(iid))
+                m.add_command(label="제목 고치기", command=lambda: self._board_item_text(iid))
+                m.add_command(label="모두 체크 해제", command=lambda: (
+                    [c9.__setitem__("d", 0) for c9 in it.get("items") or []], self._board_save(),
+                    self._board_draw_stage()))
+            elif it.get("kind") in ("note", "doodle", "ticket", "photo"):
+                m.add_command(label="글 고치기", command=lambda: self._board_item_text(iid))
+            if it.get("kind") in ("note", "tape", "doodle", "photo", "ticket", "check"):
+                m.add_command(label="색 바꾸기", command=lambda: self._board_item_color(iid))
+            if it.get("kind") in ("tape", "ticket"):
+                sub = tk.Menu(m, tearoff=0, font=self._bf(9))
+
+                def set_sty(sty9, it9=it):
+                    it9["sty"] = sty9
+                    if it9.get("kind") == "ticket":
+                        it9.pop("col", None)          # 무늬마다 어울리는 기본 색으로
+                    self._board_save()
+                    self._board_draw_stage()
+                self._board_style_fill(sub, it.get("kind"), set_sty)
+                m.add_cascade(label="모양 바꾸기", menu=sub)
+            if it.get("kind") == "photo":
+                m.add_command(label="고정: 테이프 ↔ 핀",
+                              command=lambda: (it.__setitem__("fix", "pin" if it.get("fix") != "pin" else "tape"),
+                                               self._board_save(), self._board_draw_stage()))
+            m.add_command(label="맨 앞으로", command=lambda: self._board_item_front(iid))
+            m.add_command(label="맨 뒤로", command=lambda: self._board_item_front(iid, back=True))
+            m.add_separator()
+            m.add_command(label="지우기", command=lambda: self._board_item_del(iid))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    STK_XF_MB = 64             # 모션 프레임 그림 상한 (용량 — 큰 스티커는 한 장이 0.7MB · 지뢰 42)
+    STK_XF_BUDGET = 0.006      # 한 프레임에 새 그림을 굽는 데 쓰는 시간 상한(초)
+
+    def _stk_spin_step(self, meta, W):
+        """빙글 눈금(도) — 한 바퀴가 캐시 용량의 절반 안에 들어가게 스티커 크기로 정한다."""
+        wpx = self._stk_wpx(meta, W)
+        for st9 in (3, 4, 5, 6, 8):
+            if (360 // st9) * (wpx * 1.42) ** 2 * 4 <= self.STK_XF_MB * 0.5 * 1048576:
+                return st9
+        return 10
+
+    SPIN_STEP = 3              # 빙글이 실제로 보여 주는 눈금(도) — 30fps 에 80도/초면 한 프레임 2.7도
+
+    def _board_spin_img(self, meta, W, ang, budget):
+        """빙글 한 프레임 — 3도 눈금으로 부드럽게. 캐시에는 '크기에 맞춘 굵은 눈금' 각도만
+        남기고(한 바퀴가 용량 안에 들게 · 큰 스티커는 10도), 그 사이 각도는 시간 예산 안에서
+        그 자리에서 굽는다. 예산이 넘치면 가까운 굵은 눈금 그림으로 — 멈칫할지언정 막히지 않는다."""
+        st = self.SPIN_STEP
+        coarse = self._stk_spin_step(meta, W)
+        a = int(round(ang / float(st))) * st
+        if a % coarse == 0:
+            got = self._stk_xform(meta, W, a, step=st, pil=False, budget=budget)
+        else:
+            got = self._stk_xform(meta, W, a, step=st, pil=False, budget=budget, keep=False)
+        if got is None:
+            b0 = {"end": 0.0}                  # 굽지 말고 캐시에 있는 것만
+            got = self._stk_xform(meta, W, int(round(ang / float(coarse))) * coarse, step=coarse,
+                                  pil=False, budget=b0)
+        return got
+
+    def _stk_xform(self, meta, W, ang=0.0, sx=1.0, sy=1.0, step=1, pil=True, budget=None, keep=True):
+        """스티커를 돌리고 늘인 그림 — 모션·반응이 프레임마다 쓴다.
+        각도는 step 도, 배율은 2% 눈금. 같은 모양은 캐시(용량 LRU)에서 다시 쓴다.
+        budget={"end": perf_counter 마감} 이 있고 시간이 넘쳤으면 새로 굽지 않고 None
+        (부르는 쪽이 앞 그림을 그대로 둔다). pil=False 면 PIL 원본을 안 달아 둔다(유리 아닌 창).
+        keep=False 면 굽기만 하고 캐시에 안 넣는다 (빙글의 사이 각도 — 아래 _board_spin_img)."""
+        wpx = self._stk_wpx(meta, W)
+        a0 = int(meta.get("a") or 0) % 360
+        step = max(1, int(step))
+        a = int(round((a0 + ang) / float(step)) * step) % 360
+        qx, qy = round(sx / .02) * .02, round(sy / .02) * .02
+        if a == a0 and abs(qx - 1) < 1e-6 and abs(qy - 1) < 1e-6:
+            return self._stk_photo(meta, wpx)
+        sid = str(meta.get("id") or "")
+        key = (sid, wpx, a, round(qx, 2), round(qy, 2), bool(pil))
+        c = self._stk_xf
+        got = c.pop(key, None)
+        if got is not None:
+            c[key] = got                      # 맨 뒤로 — 최근에 쓴 것
+            return got[0]
+        if budget is not None and time.perf_counter() > budget["end"]:
+            return None
+        base = self._stk_xbase.get((sid, wpx))
+        if base is None:
+            src = self._stk_src(meta)
+            if src is None:
+                return None
+            h = max(1, int(round(wpx * src.height / float(src.width))))
+            base = src.resize((wpx, h), Image.LANCZOS).convert("RGBa")   # 알파를 미리 곱해 둔다
+            if len(self._stk_xbase) > 24:
+                for old in list(self._stk_xbase)[:12]:
+                    self._stk_xbase.pop(old, None)
+            self._stk_xbase[(sid, wpx)] = base
+        try:
+            im = base
+            if abs(qx - 1) > 1e-6 or abs(qy - 1) > 1e-6:
+                im = im.resize((max(1, int(round(base.width * qx))), max(1, int(round(base.height * qy)))),
+                               Image.BILINEAR)
+            if a:
+                im = im.rotate(-a, expand=True, resample=Image.BILINEAR)
+            im = im.convert("RGBA")
+            ph = ImageTk.PhotoImage(im)
+            if pil:
+                ph._pil_src = im
+        except Exception:
+            return None
+        if not keep:
+            return ph
+        nb = im.width * im.height * 4 * (2 if pil else 1)
+        c[key] = (ph, nb)
+        self._stk_xf_bytes += nb
+        cap = self.STK_XF_MB * 1048576
+        while self._stk_xf_bytes > cap and len(c) > 1:
+            k9 = next(iter(c))
+            self._stk_xf_bytes -= c.pop(k9)[1]
+        return ph
+
+    @staticmethod
+    def _stk_motion_pose(mo, t, ph):
+        """모션 한 프레임 — (dx, dy, 각도, 가로 배율, 세로 배율). 모르는 모션이면 None."""
+        sn = math.sin
+        if mo == "sway":
+            return 6 * sn(2.2 * t + ph), 0.0, 5 * sn(2.2 * t + ph + 0.6), 1.0, 1.0
+        if mo == "float":
+            return 0.0, 7 * sn(1.8 * t + ph), 0.0, 1.0, 1.0
+        if mo == "bounce":
+            u = abs(sn(2.6 * t + ph))
+            q = 0.1 * (1 - u) ** 6
+            return 0.0, -12 * u, 0.0, 1 + q, 1 - q
+        if mo == "wiggle":
+            return 0.0, 0.0, 10 * sn(7 * t + ph) * (0.55 + 0.45 * sn(1.1 * t + ph)), 1.0, 1.0
+        if mo == "pulse":
+            v = 0.5 + 0.5 * sn(3.2 * t + ph)
+            q = 1 + 0.09 * v * v
+            return 0.0, 0.0, 0.0, q, q
+        if mo == "jelly":
+            v = sn(4.5 * t + ph)
+            return 0.0, 0.0, 0.0, 1 + 0.07 * v, 1 - 0.07 * v
+        if mo == "orbit":
+            return 6 * math.cos(2 * t + ph), 6 * sn(2 * t + ph), 0.0, 1.0, 1.0
+        if mo == "spin":
+            return 0.0, 0.0, (t * 80 + ph * 40) % 360, 1.0, 1.0
+        return None
+
+    @staticmethod
+    def _stk_poke_pose(t):
+        """누름 반응 '말랑 톡' — 살짝 눌렸다가 튀어 오르며 흔들리다 멎는다.
+        (dy, 각도, 가로, 세로). 0.75초. 예전 '커졌다 작아지기'는 어색하다는 요청."""
+        if t < 0.12:
+            q = t / 0.12
+            return 0.0, 0.0, 1 + 0.12 * q, 1 - 0.14 * q
+        u = t - 0.12
+        e = math.exp(-5.5 * u)
+        sq = -0.14 * e * math.cos(14 * u)
+        dy = -14 * math.sin(math.pi * min(1.0, u / 0.32)) if u < 0.32 else 0.0
+        return dy, 9 * e * math.sin(11 * u), 1 - sq * 0.85, 1 + sq
+
+    STK_POKE_T = 0.75
+
+    def _board_stk_motion(self, sid, key):
+        meta = self._stk_meta("board", sid)
+        if meta is None:
+            return
+        self._board_stk_last.pop(str(sid), None)
+        if key:
+            meta["m"] = key
+        else:
+            meta.pop("m", None)
+        self._stk_save()
+        self._stk_redraw("board")
+
+    def _board_item_rot(self, iid, d):
+        it = self._board_item(iid)
+        if it is None:
+            return
+        it["a"] = 0 if d is None else (float(it.get("a") or 0) + d) % 360
+        self._board_save()
+        self._board_draw_stage()
+
+    BOARD_GRID = 24            # 격자 맞춤 칸 (px)
+
+    def _board_item_front(self, iid, back=False):
+        d = self._board_data()
+        it = self._board_item(iid)
+        if it is None:
+            return
+        rest = [q for q in d["items"] if q is not it]
+        d["items"] = ([it] + rest) if back else (rest + [it])
+        self._board_save()
+        self._board_draw_stage()
+
+    def _board_item_del(self, iid):
+        d = self._board_data()
+        it = self._board_item(iid)
+        if it is None:
+            return
+        d["items"] = [q for q in d["items"] if q is not it]
+        self._board_rows.pop(str(iid), None)
+        self._board_pick = None
+        self._board_save()          # 파일은 안 지운다 — 되돌리기·프리셋이 쓴다 (_board_gc)
+        self._board_draw()
+
+    def _board_item_text(self, iid):
+        it = self._board_item(iid)
+        if it is None:
+            return
+        key = "cap" if it.get("kind") == "photo" else "text"
+        multi = it.get("kind") == "note"
+        if it.get("kind") == "check":
+            def done9(v):
+                it["text"] = v.strip()[:24]
+                self._board_save()
+                self._board_draw_stage()
+            self._board_ask("체크리스트 제목 (비우면 없음)", str(it.get("text") or ""), done9, empty=True)
+            return
+
+        def done(v):
+            it[key] = v
+            self._board_save()
+            self._board_draw_stage()
+        self._board_ask("글 고치기", str(it.get(key) or ""), done, multi)
+
+    def _board_item_color(self, iid):
+        it = self._board_item(iid)
+        if it is None:
+            return
+        c = self._pick_color(str(it.get("col") or self.BOARD_TAPES[0]))
+        if c:
+            it["col"] = c
+            self._board_save()
+            self._board_draw_stage()
+
+    # ── 작은 창 틀 (새 디자인) ─────────────────────────────────────────────
+    def _bd_dlg(self, title, W, H, on_close=None):
+        """표시줄 없는 둥근 카드 창. (win, cv, st) 를 돌려준다.
+
+        st["hits"] 에 (x0, y0, x1, y1, 함수) 를 적으면 누를 때 불린다 (뒤에 적은 것이 먼저).
+        입력 칸은 st["field"] 로 만든다 — Entry 의 부모는 캔버스다 (지뢰 22)."""
+        pal = self._board_pal()
+        parent = self._board_win if self._board_alive() else self.root
+        win = tk.Toplevel(parent)
+        win._no_dark = True
+        win.title(title)
+        win.resizable(False, False)
+        win.configure(bg=pal["card"])
+        win.geometry("%dx%d" % (W, H))
+        if parent is self.root:
+            try:
+                win.attributes("-topmost", True)     # 캐릭터(항상 위) 뒤로 숨지 않게
+            except Exception:
+                pass
+        st = {"hits": [], "pal": pal, "W": W, "H": H, "ents": [], "closed": False, "title": title}
+
+        def close(_e=None):
+            if st["closed"]:
+                return
+            st["closed"] = True
+            try:
+                if on_close:
+                    on_close()
+            finally:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+        st["close"] = close
+        self._chrome_setup(win, None, band=52, on_close=close)
+        ch = getattr(win, "_chrome", None)
+        if ch:
+            ch["fixed"] = True
+            ch["native"] = True
+        cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["card"], width=W, height=H)
+        self._bd_undark(cv)
+        cv.pack(fill="both", expand=True)
+
+        def press(e):
+            if self._chrome_press(win, e):
+                return
+            for x0, y0, x1, y1, fn in reversed(st["hits"]):
+                if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                    self._safe("ui_click", self._ui_click)
+                    fn()
+                    return
+            try:
+                cv.focus_set()
+            except Exception:
+                pass
+
+        def motion(e):
+            self._chrome_motion(win, e)
+            if (getattr(win, "_chrome", None) or {}).get("cur"):
+                return
+            cur = "hand2" if any(x0 <= e.x <= x1 and y0 <= e.y <= y1
+                                 for x0, y0, x1, y1, _f in st["hits"]) else ""
+            try:
+                if str(cv.cget("cursor")) != cur:
+                    cv.configure(cursor=cur)
+            except Exception:
+                pass
+        cv.bind("<Button-1>", lambda e: self._safe("dlg_press", press, e))
+        cv.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+        cv.bind("<ButtonRelease-1>", lambda e: self._chrome_release(win))
+        cv.bind("<Motion>", lambda e: self._safe("dlg_motion", motion, e))
+        win.bind("<Escape>", close)
+        win.protocol("WM_DELETE_WINDOW", close)
+
+        def field(x0, y0, x1, h, init="", font=None, multi=False, hint=""):
+            """옅은 입력 칸 — 눌러 들어가면 테두리가 강조색이 된다. Entry(또는 Text)를 돌려준다."""
+            font = font or self._bf(10)
+            a = self._bd_box(cv, x0, y0, x1, y0 + h, 12, pal["fill"])
+            b = self._bd_box(cv, x0, y0, x1, y0 + h, 12, pal["fill"], pal["accent"], 1.6)
+            if b is not None:
+                cv.itemconfigure(b, state="hidden")
+            if multi:
+                w9 = tk.Text(cv, font=font, relief="flat", bd=0, bg=pal["fill"], fg=pal["ink"],
+                             insertbackground=pal["ink"], highlightthickness=0, wrap="word",
+                             undo=True)
+                w9.insert("1.0", init)
+                cv.create_window(x0 + 14, y0 + 10, anchor="nw", window=w9, width=x1 - x0 - 28,
+                                 height=h - 20)
+            else:
+                w9 = tk.Entry(cv, font=font, relief="flat", bd=0, bg=pal["fill"], fg=pal["ink"],
+                              insertbackground=pal["ink"], highlightthickness=0,
+                              selectbackground=pal["soft"], selectforeground=pal["ink"])
+                w9.insert(0, init)
+                cv.create_window(x0 + 14, y0 + h / 2.0, anchor="w", window=w9,
+                                 width=x1 - x0 - 28, height=min(h - 8, self._bd_ls(font) + 6))
+            if hint and not multi:
+                hid = cv.create_text(x1 - 14, y0 + h / 2.0, text=hint, font=self._bf(8, True),
+                                     fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="e")
+                w9._hint = hid
+
+            def foc(on):
+                try:
+                    if b is not None:
+                        cv.itemconfigure(b, state="normal" if on else "hidden")
+                except Exception:
+                    pass
+            w9.bind("<FocusIn>", lambda _e: foc(True), add="+")
+            w9.bind("<FocusOut>", lambda _e: foc(False), add="+")
+            w9.bind("<Escape>", close, add="+")
+            st["ents"].append(w9)
+            return w9
+        st["field"] = field
+
+        def head(sub=""):
+            """머리 — 제목(굵게) · 작은 설명 · 닫기."""
+            ft = self._bf(13, 2)
+            cv.create_text(24, 30, text=st["title"], font=ft, fill=pal["ink"], anchor="w")
+            if sub:
+                cv.create_text(24 + int(self._tw(st["title"], ft)) + 10, 31, text=sub,
+                               font=self._bf(8, True), fill=pal["sub"], anchor="w")
+            self._bd_ic(cv, "l_x", W - 30, 30, 16, pal["sub"])
+            st["hits"].append((W - 46, 14, W - 14, 46, close))
+        st["head"] = head
+
+        def button(x1, cy, label, fn, kind="fill", h=38):
+            """오른쪽 끝 x1 에 맞춘 단추 — kind: ink(주요) · fill(보조) · text(글자만) · danger."""
+            f = self._bf(10, True)
+            w9 = int(self._tw(label, f)) + (12 if kind in ("text", "danger") else 36)
+            x0 = x1 - w9
+            if kind == "ink":
+                self._bd_box(cv, x0, cy - h / 2, x1, cy + h / 2, 12, pal["ink"])
+                fg = self._bd_on(pal["ink"])
+            elif kind == "fill":
+                self._bd_box(cv, x0, cy - h / 2, x1, cy + h / 2, 12, pal["fill"])
+                fg = pal["ink"]
+            else:
+                fg = self.CAL_DUE if kind == "danger" else pal["sub"]
+            cv.create_text((x0 + x1) / 2.0, cy, text=label, font=f, fill=fg)
+            st["hits"].append((x0, cy - h / 2, x1, cy + h / 2, fn))
+            return x0
+        st["button"] = button
+
+        def clear():
+            for w9 in st["ents"]:
+                try:
+                    w9.destroy()
+                except Exception:
+                    pass
+            st["ents"] = []
+            st["hits"] = []
+            cv.delete("all")
+        st["clear"] = clear
+
+        def place():
+            try:
+                if parent is not self.root:
+                    self._place_near_win(win, parent)
+                else:
+                    self._place_near(win)
+            except Exception:
+                pass
+            if parent is not self.root:
+                self._bd_own(win, parent)
+        st["place"] = place
+        return win, cv, st
+
+    def _board_ask(self, title, init, cb, multi=False, empty=False):
+        """짧은 글 입력 창 — 새 디자인의 작은 카드 (윈도우 전용 기능이라 Entry 를 그대로 쓴다)."""
+        W = 420
+        fh = 110 if multi else 46
+        # 제목이 길면(설명이 붙은 제목) ' — ' 뒤는 작은 설명으로 내린다
+        sub = ""
+        if " — " in title:
+            title, sub = title.split(" — ", 1)
+        H = 62 + (22 if sub else 0) + fh + 22 + 38 + 22
+        win, cv, st = self._bd_dlg(title, W, H)
+        pal = st["pal"]
+        st["head"]()
+        y = 62
+        if sub:
+            cv.create_text(24, y + 4, text=self._bd_fit(sub, self._bf(9), W - 48), font=self._bf(9),
+                           fill=pal["sub"], anchor="w")
+            y += 22
+        ent = st["field"](24, y, W - 24, fh, init, multi=multi)
+        get = (lambda: ent.get("1.0", "end").strip()) if multi else (lambda: ent.get().strip())
+
+        def ok(_e=None):
+            v = get()
+            st["close"]()
+            if v or empty:
+                cb(v)
+            return "break"
+        by = y + fh + 22 + 19
+        x = st["button"](W - 24, by, "확인", ok, "ink")
+        st["button"](x - 8, by, "취소", st["close"], "fill")
+        if multi:
+            cv.create_text(24, by, text="Ctrl+Enter 로 확인", font=self._bf(8, True),
+                           fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+            ent.bind("<Control-Return>", ok)
+        else:
+            ent.bind("<Return>", ok)
+        st["place"]()
+        try:
+            ent.focus_force()
+            if not multi:
+                ent.select_range(0, "end")
+                ent.icursor("end")
+        except Exception:
+            pass
+        self._board_ask_w = {"win": win, "ent": ent, "ok": ok, "st": st}
+
+    def _place_near_win(self, win, parent):
+        """주인 창 한가운데 — 주인보다 키가 크면 위끝을 주인 위끝에 맞춘다
+        (가운데로 두면 위가 화면 밖으로 나가 제목이 잘렸다 · 실측)."""
+        win.update_idletasks()
+        px, py = parent.winfo_rootx(), parent.winfo_rooty()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        win.geometry("+%d+%d" % (px + (pw - win.winfo_width()) // 2,
+                                 py + max(0, (ph - win.winfo_height()) // 2)))
+
+    def _board_new_id(self):
+        return "b%d" % int(time.time() * 1000)
+
+    def _board_add(self, it):
+        d = self._board_data()
+        if len(d["items"]) >= self.BOARD_ITEM_MAX:
+            self._board_toast("보드에는 %d개까지 붙일 수 있어요" % self.BOARD_ITEM_MAX)
+            return
+        n = len(d["items"])
+        it.setdefault("id", self._board_new_id())
+        it.setdefault("x", 0.3 + (n % 4) * 0.15)
+        it.setdefault("y", 0.3 + ((n // 4) % 3) * 0.2)
+        it.setdefault("a", (-5 + (n * 7) % 11))
+        d["items"].append(it)
+        self._board_pick = it["id"]
+        self._board_save()
+        self._board_draw()
+
+    def _board_tool(self, k):
+        d = self._board_data()
+        if k == "photo":
+            q = self._pick_image_file()
+            if not q:
+                return
+            try:
+                im = Image.open(q).convert("RGBA")
+            except Exception:
+                self._board_toast("그림을 읽지 못했어요")
+                return
+            self._board_photo_add(im)
+        elif k == "stk":
+            self._stk_win("board")
+        elif k == "note":
+            self._board_ask("메모지에 쓸 글", "", lambda v: self._board_add(
+                {"kind": "note", "text": v, "w": 0.2,
+                 "col": self.BOARD_NOTES[len(d["items"]) % len(self.BOARD_NOTES)]}), True)
+        elif k == "tape":
+            self._board_style_menu("tape", lambda sty: self._board_add(
+                {"kind": "tape", "w": 0.16, "a": -12, "sty": sty,
+                 "col": self.BOARD_TAPES[len(d["items"]) % len(self.BOARD_TAPES)]}))
+        elif k == "doodle":
+            self._board_ask("텍스트 (짧게)", "힘내자!", lambda v: self._board_add(
+                {"kind": "doodle", "text": v, "w": 0.2, "a": -8}))
+        elif k == "ticket":
+            self._board_style_menu("ticket", lambda sty: self._board_ask(
+                "티켓 큰 글자 (예: D-3)", "D-3", lambda v: self._board_ask(
+                    "티켓 작은 글자", "커미션 마감", lambda c: self._board_add(
+                        {"kind": "ticket", "sty": sty, "text": v, "cap": c, "w": 0.19, "a": 2}))))
+        elif k == "shelf":
+            self._board_shelf_add()
+        elif k == "dday":
+            self._board_dday_menu()
+        elif k == "check":
+            self._board_check_menu()
+        elif k == "undo":
+            self._board_undo()
+        elif k == "snap":
+            d["snap"] = not d.get("snap")
+            self._board_save(undo=False)
+            self._board_toast("격자 맞춤 " + ("켬" if d["snap"] else "끔"))
+            self._board_draw_stage()
+        elif k == "done":
+            self._board_toggle_edit()
+
+    # ── D-day 티켓 (마감 목록과 연동 — 날짜는 그릴 때 센다) ────────────────
+    def _board_due_find(self, name):
+        for d9 in getattr(self, "dues", None) or []:
+            if str(d9.get("name") or "") == str(name):
+                return d9
+        # 달력 일정도 본다 — 마감을 일정으로 바꿔도 붙여 둔 티켓이 계속 센다
+        try:
+            for e9 in self._cal_events():
+                if not e9["ro"] and not e9["done"] and e9["name"] == str(name):
+                    return {"name": e9["name"], "date": self._cal_s(e9["e"])}
+        except Exception:
+            self._log_error("board_due_cal")
+        return None
+
+    def _board_due_all(self):
+        """D-day 티켓으로 붙일 수 있는 것 — 마감 말풍선의 마감 + 달력의 안 끝난 일정."""
+        out = [d9 for d9 in (getattr(self, "dues", None) or []) if d9.get("date")]
+        seen = set(str(d9.get("name") or "") for d9 in out)
+        try:
+            td = self._cal_today()
+            for e9 in self._cal_events():
+                if (not e9["ro"] and not e9["done"] and e9["e"] >= td - self.CAL_PIN_PAST
+                        and e9["name"] not in seen):
+                    seen.add(e9["name"])
+                    out.append({"name": e9["name"], "date": self._cal_s(e9["e"])})
+        except Exception:
+            self._log_error("board_due_all")
+        out.sort(key=lambda d9: str(d9.get("date")))
+        return out[:24]
+
+    def _board_item_live(self, it):
+        """그릴 때 채우는 값 — D-day 티켓은 마감 목록에서 오늘 기준으로 센다."""
+        due = it.get("due")
+        if not due:
+            return it
+        it2 = dict(it)
+        d9 = self._board_due_find(due)
+        n = self._days_to(d9.get("date")) if d9 else None
+        if n is None:
+            it2["text"] = "끝!"
+        elif n == 0:
+            it2["text"] = "D-DAY"
+        elif n > 0:
+            it2["text"] = "D-%d" % n
+        else:
+            it2["text"] = "D+%d" % (-n)
+        it2["cap"] = str(due)[:24]
+        return it2
+
+    def _board_dday_menu(self):
+        dues = self._board_due_all()
+        if not dues:
+            self._board_toast("마감이 없어요 — 달력에 일정을 넣거나 '마감 추가'로 먼저 넣어 주세요")
+            return
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+        for d9 in dues:
+            n = self._days_to(d9.get("date"))
+            lb = "%s  (%s)" % (str(d9.get("name") or "")[:24],
+                                "D-DAY" if n == 0 else ("D-%d" % n if (n or 0) > 0 else "D+%d" % (-(n or 0))))
+            m.add_command(label=lb, command=lambda nm=str(d9.get("name") or ""): self._board_add(
+                {"kind": "ticket", "sty": "admit", "due": nm, "w": 0.21, "a": 2}))
+        try:
+            x, y = self._board_win.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    # ── 체크리스트 메모지 ───────────────────────────────────────────────────
+    BOARD_CHECK_MAX = 10
+
+    def _board_check_menu(self):
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+        m.add_command(label="직접 쓰기…", command=lambda: self._board_check_ask(None))
+        todos = [todo_text(t9) for t9 in (getattr(self, "todos", None) or []) if todo_text(t9).strip()]
+        m.add_command(label="할 일 패널에서 가져오기 (%d개)" % len(todos), state="normal" if todos else "disabled",
+                      command=lambda: self._board_check_new(todos, "할 일"))
+        try:
+            x, y = self._board_win.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    def _board_check_ask(self, iid):
+        it = self._board_item(iid) if iid else None
+        init = "\n".join(str(c9.get("t") or "") for c9 in (it.get("items") if it else []) or [])
+
+        def done(v):
+            lines = [ln.strip() for ln in str(v).split("\n") if ln.strip()][:self.BOARD_CHECK_MAX]
+            if it is None:
+                self._board_check_new(lines, "")
+            else:
+                old = {str(c9.get("t")): int(c9.get("d") or 0) for c9 in it.get("items") or []}
+                it["items"] = [{"t": ln[:40], "d": old.get(ln[:40], 0)} for ln in lines]
+                self._board_save()
+                self._board_draw_stage()
+        self._board_ask("체크리스트 — 한 줄에 하나", init, done, True)
+
+    def _board_check_new(self, lines, title):
+        lines = [str(ln)[:40] for ln in lines if str(ln).strip()][:self.BOARD_CHECK_MAX]
+        if not lines:
+            return
+        d = self._board_data()
+        self._board_add({"kind": "check", "text": title, "w": 0.22, "a": -2,
+                         "items": [{"t": ln, "d": 0} for ln in lines],
+                         "col": self.BOARD_NOTES[len(d["items"]) % len(self.BOARD_NOTES)]})
+
+    def _board_check_row_at(self, it, x, y):
+        """무대 좌표 (x, y) 가 체크리스트의 몇 째 줄인가 (없으면 -1). 회전을 되돌려 잰다."""
+        rows = self._board_rows.get(str(it.get("id")))
+        if not rows:
+            return -1
+        top, rowh, n, wpx, h = rows
+        bcv = self._board_bcv
+        W, H = max(1, bcv.winfo_width()), max(1, bcv.winfo_height())
+        BH = max(1, H - self.BOARD_LEDGE)
+        cx, cy = float(it.get("x", .5)) * W, float(it.get("y", .5)) * BH
+        S = self.BOARD_SS
+        dx, dy = (x - cx) * S, (y - cy) * S
+        a = math.radians(float(it.get("a") or 0))
+        lx = dx * math.cos(a) - dy * math.sin(a)
+        ly = dx * math.sin(a) + dy * math.cos(a)
+        if abs(lx) > wpx / 2.0:
+            return -1
+        r = int((ly + h / 2.0 - top) // rowh)
+        return r if 0 <= r < n else -1
+
+    def _board_check_toggle(self, it, r):
+        items = it.get("items") or []
+        if not (0 <= r < len(items)):
+            return False
+        items[r]["d"] = 0 if items[r].get("d") else 1
+        self._safe("ui_click", self._ui_click)
+        self._board_save()
+        self._board_draw_stage()
+        return True
+
+    # ── 붙여넣기 (Ctrl+V) ─────────────────────────────────────────────────
+    def _board_clip_img(self):
+        """클립보드의 그림 (PIL) — 없으면 None. 파일을 복사한 것이면 그 그림 파일."""
+        try:
+            from PIL import ImageGrab                        # 도장판이 이미 쓴다 (지뢰 21)
+            got = ImageGrab.grabclipboard()
+        except Exception:
+            return None
+        if isinstance(got, list):
+            for p9 in got:
+                if str(p9).lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp")):
+                    try:
+                        return Image.open(p9).convert("RGBA")
+                    except Exception:
+                        continue
+            return None
+        return got.convert("RGBA") if got is not None else None
+
+    def _board_photo_add(self, im):
+        """PIL 그림을 폴라로이드로 붙인다 (파일 고르기·붙여넣기가 같이 쓴다)."""
+        d = self._board_data()
+        try:
+            if max(im.size) > 900:
+                kk = 900.0 / max(im.size)
+                im = im.resize((max(1, int(im.width * kk)), max(1, int(im.height * kk))), Image.LANCZOS)
+            os.makedirs(self._board_dir(), exist_ok=True)
+            fn = self._board_new_id() + ".png"
+            p = os.path.join(self._board_dir(), fn)
+            im.save(p + ".tmp", "PNG")
+            os.replace(p + ".tmp", p)
+        except Exception:
+            self._board_toast("그림을 읽지 못했어요")
+            return None
+        self._board_add({"kind": "photo", "f": fn, "w": 0.22, "cap": "",
+                         "col": self.BOARD_TAPES[len(d["items"]) % len(self.BOARD_TAPES)]})
+        return fn
+
+    def _board_paste(self):
+        if not self._board_alive():
+            return False
+        im = self._board_clip_img()
+        if im is None:
+            self._board_toast("클립보드에 그림이 없어요")
+            return False
+        if not getattr(self, "_board_edit", False):
+            self._board_toggle_edit()
+        self._board_photo_add(im)
+        self._board_toast("붙여넣었어요 — 끌어서 자리를 잡아 주세요")
+        return True
+
+    # ── 보드 프리셋 (여러 벌 저장해 두고 바꿔 끼운다) ─────────────────────────
+    BOARD_PRESET_MAX = 12
+
+    def _board_preset_menu(self):
+        d = self._board_data()
+        m = tk.Menu(self._board_win, tearoff=0, font=self._bf(9))
+        prs = d.get("presets") or []
+        cur = str(d.get("cur_preset") or "")
+        for pr in prs:
+            nm = str(pr.get("name") or "")
+            m.add_command(label=("● " if nm == cur else "   ") + nm,
+                          command=lambda n9=nm: self._board_preset_load(n9))
+        if prs:
+            m.add_separator()
+        m.add_command(label="지금 보드를 새 프리셋으로 저장…", command=self._board_preset_save_new)
+        if cur:
+            m.add_command(label="'%s' 에 덮어쓰기" % cur, command=lambda: self._board_preset_save(cur))
+        if prs:
+            sub = tk.Menu(m, tearoff=0, font=self._bf(9))
+            for pr in prs:
+                nm = str(pr.get("name") or "")
+                sub.add_command(label=nm, command=lambda n9=nm: self._board_preset_del(n9))
+            m.add_cascade(label="프리셋 지우기", menu=sub)
+        try:
+            x, y = self._board_win.winfo_pointerxy()
+            m.tk_popup(x, y)
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
+    def _board_preset_save_new(self):
+        d = self._board_data()
+        if len(d.get("presets") or []) >= self.BOARD_PRESET_MAX:
+            self._board_toast("프리셋은 %d개까지예요" % self.BOARD_PRESET_MAX)
+            return
+        self._board_ask("프리셋 이름", "보드 %d" % (len(d.get("presets") or []) + 1),
+                        lambda v: self._board_preset_save(v[:24]))
+
+    def _board_preset_save(self, name):
+        name = str(name or "").strip()[:24]
+        if not name:
+            return False
+        d = self._board_data()
+        st = json.loads(json.dumps(self._board_snapshot()))
+        st["stk"] = json.loads(json.dumps(self._stk_list("board")))
+        prs = d.setdefault("presets", [])
+        for pr in prs:
+            if str(pr.get("name")) == name:
+                pr["state"] = st
+                pr["at"] = time.time()
+                break
+        else:
+            prs.append({"name": name, "at": time.time(), "state": st})
+        d["cur_preset"] = name
+        self._board_save(undo=False)
+        self._board_toast("'%s' 로 저장했어요" % name)
+        self._board_draw()
+        return True
+
+    def _board_preset_load(self, name):
+        d = self._board_data()
+        for pr in d.get("presets") or []:
+            if str(pr.get("name")) == name and isinstance(pr.get("state"), dict):
+                st = pr["state"]
+                break
+        else:
+            return False
+        self._board_apply(st)
+        lst = self._stk_list("board")
+        lst[:] = json.loads(json.dumps(st.get("stk") or []))
+        self._stk_save()
+        d["cur_preset"] = name
+        self._board_save()
+        self._board_toast("'%s' 보드를 꺼냈어요" % name)
+        self._board_draw()
+        return True
+
+    def _board_preset_del(self, name):
+        d = self._board_data()
+        d["presets"] = [pr for pr in d.get("presets") or [] if str(pr.get("name")) != name]
+        if str(d.get("cur_preset") or "") == name:
+            d.pop("cur_preset", None)
+        self._board_save(undo=False)
+        self._board_draw()
+
+    def _board_toggle_edit(self):
+        self._board_edit = not getattr(self, "_board_edit", False)
+        if self._board_edit:
+            self._stk_edit = "board"
+            self._stk_pick = None
+        else:
+            if self._stk_edit == "board":
+                self._stk_edit = None
+            self._stk_pick = None
+            self._board_pick = None
+            self._board_save()
+            self._board_toast("저장했어요")
+        self._board_draw()
+
+    def _board_ui_act(self, what):
+        d = self._board_data()
+        if what.startswith("tab:"):
+            tab = what[4:]
+            if tab in ("board", "cal") and tab != self._board_tab:
+                if tab == "cal" and getattr(self, "_board_edit", False):
+                    self._board_toggle_edit()        # 꾸미던 것은 저장하고 넘어간다
+                self._board_tab = tab
+                self._tip_hide()
+                self._board_draw()
+        elif what.startswith("cal:"):
+            self._cal_act(what[4:])
+        elif what == "edit":
+            self._board_toggle_edit()
+        elif what == "settings":
+            self._board_set_open()
+        elif what == "motto":
+            def done(v):
+                d["motto"] = v[:40]
+                self._board_save()
+                self._board_draw()
+            self._board_ask("대문 문구", str(d.get("motto") or ""), done)
+        elif what.startswith("mood:"):
+            d["mood"] = what[5:]
+            self._board_save()
+            self._board_draw()
+        elif what == "mat_adjust":
+            if d.get("mat") == "custom" and self._board_mat_src() is not None:
+                self._board_set_close()
+                self._board_matadj = True
+                self._board_toast("바탕을 끌어서 옮기고, 휠로 크게·작게")
+                self._board_draw_stage()
+        elif what == "mat:custom":
+            if d.get("mat") == "custom" or self._board_mat_src() is None:
+                if not self._board_mat_pick():
+                    return
+            d["mat"] = "custom"
+            self._board_save()
+            self._board_draw()
+        elif what.startswith("mat:"):
+            m9 = what[4:]
+            if m9 in self.BOARD_MATS:
+                d["mat"] = m9
+                self._board_save()
+                self._board_draw()
+        elif what.startswith("theme:"):
+            key = what[6:]
+            c = self._pick_color(self._board_pal().get(key, "#ffffff"))
+            if c:
+                d.setdefault("theme", {})[key] = c
+                self._board_save()
+                self._board_uiph = {}
+                self._board_draw()
+        elif what == "reset_theme":
+            d["theme"] = {}
+            self._board_save()
+            self._board_uiph = {}
+            self._board_draw()
+        elif what.startswith("tpl:"):
+            d["tpl"] = what[4:]
+            d["theme"] = {}                 # 템플릿을 고르면 구역 색은 초기화
+            self._board_save()
+            self._board_uiph = {}
+            self._board_draw()
+        elif what == "guest":
+            def done(v):
+                d["guest"].append({"n": str(self.cfg.get("name") or self.char), "t": v[:80],
+                                   "at": time.time()})
+                d["guest"] = d["guest"][-60:]
+                self._board_save()
+                self._board_draw()
+            self._board_ask("방명록 한 줄", "", done)
+        elif what == "bgm":
+            if self._room_song()[0]:
+                self._safe("board_song_play", self._board_song_play)
+            else:
+                self._board_song_ask()
+        elif what == "song_set":
+            self._board_song_ask()
+        elif what == "stamp":
+            self._safe("stamp_open", self._stamp_open)
+        elif what == "presets":
+            self._board_preset_menu()
+        elif what in ("bub_text", "bub_toggle"):
+            b9 = self._board_bub()
+            if what == "bub_text":
+                def done(v):
+                    if v:
+                        b9["t"] = v[:60]
+                    else:
+                        b9.pop("t", None)      # 비우면 상태 글 (그리는 중·쉬는 중)
+                    self._board_save()
+                    self._board_draw()
+                self._board_ask("말풍선 글 — 비우면 상태 글 (그리는 중·쉬는 중)", str(b9.get("t") or ""),
+                                done, True, empty=True)
+                return
+            b9["off"] = not b9.get("off")
+            if b9["off"] and self._board_pick == "__bubble":
+                self._board_pick = None
+            self._board_save()
+            self._board_draw()
+
+    def _board_mat_pick(self, path=None):
+        """보드 바탕 그림을 고른다 — .board/ 에 한 장만 둔다 (옛 것은 지운다)."""
+        q = path or self._pick_image_file()
+        if not q:
+            return False
+        d = self._board_data()
+        try:
+            im = Image.open(q).convert("RGB")
+            if max(im.size) > 2000:
+                kk = 2000.0 / max(im.size)
+                im = im.resize((max(1, int(im.width * kk)), max(1, int(im.height * kk))), Image.LANCZOS)
+            os.makedirs(self._board_dir(), exist_ok=True)
+            fn = "mat_" + self._board_new_id() + ".png"
+            p = os.path.join(self._board_dir(), fn)
+            im.save(p + ".tmp", "PNG")
+            os.replace(p + ".tmp", p)
+        except Exception:
+            self._log_error("board_mat_pick")
+            self._board_toast("그림을 읽지 못했어요")
+            return False
+        old = str(d.get("mat_img") or "")
+        d["mat_img"] = fn
+        if old and old != fn:
+            self._board_uiph.pop(("matsrc", old), None)
+        self._board_cover = None
+        return True
+
+    def _board_toast(self, msg):
+        self._board_toast_v = (str(msg), time.time())
+        if self._board_alive():
+            if self._board_tab == "cal":
+                self._board_draw()
+            else:
+                self._board_draw_stage()
+
+    # ── 보드 환경설정 (재질·테마·구역 색·기분·대문 문구·조명 — 요청) ─────────
+    BOARD_SET_W = 640
+
+    def _board_set_alive(self):
+        w = getattr(self, "_board_set_win", None)
+        try:
+            return w is not None and w.winfo_exists()
+        except Exception:
+            return False
+
+    def _board_set_open(self):
+        if self._board_set_alive():
+            try:
+                self._board_set_win.deiconify()
+                self._board_set_win.lift()
+            except Exception:
+                pass
+            self._board_set_draw()
+            return
+        pal = self._board_pal()
+        parent = self._board_win if self._board_alive() else self.root
+        win = tk.Toplevel(parent)
+        win._no_dark = True
+        win.title("마이 보드 환경설정")
+        win.resizable(False, False)
+        win.configure(bg=pal["card"])
+        W = self.BOARD_SET_W
+        win.geometry("%dx%d" % (W, 700))
+        self._chrome_setup(win, None, band=72, on_close=self._board_set_close)
+        ch = getattr(win, "_chrome", None)
+        if ch:
+            ch["fixed"] = True
+            ch["native"] = True
+        cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["card"], width=W, height=700)
+        self._bd_undark(cv)
+        cv.pack(fill="both", expand=True)
+        self._board_set_win, self._board_set_cv = win, cv
+        self._board_set_hit = []
+        cv.bind("<Button-1>", lambda e: self._safe("board_set_press", self._board_set_press, e))
+        cv.bind("<B1-Motion>", lambda e: self._chrome_drag(win, e))
+        cv.bind("<ButtonRelease-1>", lambda e: self._chrome_release(win))
+        cv.bind("<Motion>", lambda e: self._safe("board_set_motion", self._board_set_motion, e))
+        win.bind("<Escape>", lambda e: self._board_set_close())
+        win.protocol("WM_DELETE_WINDOW", self._board_set_close)
+        self._board_set_draw()
+        try:
+            if parent is not self.root:
+                self._place_near_win(win, parent)
+        except Exception:
+            pass
+        if parent is not self.root:
+            self._bd_own(win, parent)
+
+    def _board_set_close(self):
+        w = getattr(self, "_board_set_win", None)
+        self._board_set_win = self._board_set_cv = None
+        self._board_set_hit = []
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+    def _board_set_press(self, e):
+        win = self._board_set_win
+        if win is None or self._chrome_press(win, e):
+            return
+        what = self._board_hit_at(e.x, e.y, self._board_set_hit)
+        if what:
+            self._safe("ui_click", self._ui_click)
+            self._board_ui_act(what)
+            if self._board_set_alive():
+                self._board_set_draw()
+
+    def _board_set_motion(self, e):
+        win = self._board_set_win
+        if win is None:
+            return
+        cur = ""
+        if self._board_hit_at(e.x, e.y, self._board_set_hit):
+            cur = "hand2"
+        for x0, y0, x1, y1, _a in (getattr(win, "_chrome", None) or {}).get("hits") or []:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                cur = "hand2"
+        try:
+            if str(self._board_set_cv.cget("cursor")) != cur:
+                self._board_set_cv.configure(cursor=cur)
+        except Exception:
+            pass
+
+    def _bd_mat_thumb(self, mat, w, h, pal):
+        im = self._bd_board_pil(mat, w, h, pal, frame=6, r_in=6).convert("RGBA")
+        out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        out.paste(im, (0, 0), self._bd_round_mask(w, h, 12))
+        return self._bd_shadow(out, 3, .14, 2)
+
+    def _bd_tpl_prev(self, name, w, h):
+        """템플릿 미리보기 — 작은 창 한 장 (바탕·위 띠·카드 둘·강조 알약)."""
+        t = self.BOARD_TPL[name]
+        S = 4
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.rounded_rectangle((0, 0, w * S - 1, h * S - 1), radius=12 * S, fill=self._bd_c(t["bg"]))
+        dr.rounded_rectangle((0, 0, w * S - 1, 16 * S), radius=12 * S, fill=self._bd_c(t["card"]))
+        dr.rectangle((0, 8 * S, w * S - 1, 16 * S), fill=self._bd_c(t["card"]))
+        dr.rounded_rectangle((8 * S, 5 * S, 34 * S, 11 * S), radius=3 * S, fill=self._bd_c(t["ink"]))
+        cw = (w - 24) / 3.0
+        dr.rounded_rectangle((8 * S, 23 * S, (8 + cw) * S, (h - 8) * S), radius=6 * S, fill=self._bd_c(t["card"]))
+        dr.rounded_rectangle(((12 + cw) * S, 23 * S, (w - 8 - cw - 4) * S, (h - 8) * S), radius=6 * S,
+                             fill=self._bd_c(self.BOARD_MAT_FRAME["cork"]))
+        dr.rounded_rectangle(((w - 8 - cw) * S, 23 * S, (w - 8) * S, (h - 8) * S), radius=6 * S,
+                             fill=self._bd_c(t["card"]))
+        dr.ellipse(((8 + cw / 2 - 7) * S, 30 * S, (8 + cw / 2 + 7) * S, 44 * S), fill=self._bd_c(t["accent"]))
+        dr.rounded_rectangle(((w - 8 - cw + 5) * S, 31 * S, (w - 13) * S, 37 * S), radius=3 * S,
+                             fill=self._bd_c(t["soft"]))
+        dr.rounded_rectangle(((w - 8 - cw + 5) * S, 42 * S, (w - 20) * S, 48 * S), radius=3 * S,
+                             fill=self._bd_c(t["accent"]))
+        im = im.resize((w, h), Image.LANCZOS)
+        return self._bd_shadow(im, 3, .14, 2)
+
+    def _bd_ring_check(self, cv, x0, y0, x1, y1, r, pal):
+        """고른 것 — 강조색 테 + 오른쪽 위 체크 뱃지."""
+        self._bd_box(cv, x0 - 4, y0 - 4, x1 + 4, y1 + 4, r + 4, None, pal["accent"], 2.4)
+        self._bd_box(cv, x1 - 13, y0 - 9, x1 + 9, y0 + 13, 11, pal["accent"])
+        self._bd_ic(cv, "tick", x1 - 2, y0 + 2, 14, self._bd_on(pal["accent"]))
+
+    def _board_set_draw(self):
+        win, cv = self._board_set_win, self._board_set_cv
+        if win is None or cv is None:
+            return
+        pal, d = self._board_pal(), self._board_data()
+        W = self.BOARD_SET_W
+        cv.delete("all")
+        win.configure(bg=pal["card"])
+        cv.configure(bg=pal["card"])
+        hit = self._board_set_hit = []
+        # 머리
+        self._bd_box(cv, 24, 17, 62, 55, 12, pal["soft"])
+        self._bd_ic(cv, "gear", 43, 36, 20, pal["accent"])
+        ft9, fs9 = self._bf(13, True), self._bf(9)
+        la, lb = self._bd_ls(ft9), self._bd_ls(fs9)
+        t9 = 36 - (la + lb + 2) / 2
+        cv.create_text(76, t9 + la / 2, text="마이 보드 환경설정", font=ft9, fill=pal["ink"], anchor="w")
+        cv.create_text(76, t9 + la + 2 + lb / 2, text="고르면 바로 보드에 적용돼요", font=fs9,
+                       fill=pal["sub"], anchor="w")
+        self._board_chrome(win, cv, W - 20, 36, pal)
+        cv.create_rectangle(0, 72, W, 73, fill=pal["line"], outline="")
+        y = 100
+        P = 28                                   # 좌우 여백
+        fs = self._bf(11, True)
+
+        def section(title, yy, right=None, right_hit=None):
+            cv.create_text(P, yy, text=title, font=fs, fill=pal["ink"], anchor="w")
+            if right:
+                f9 = self._bf(9)
+                cv.create_text(W - P, yy, text=right, font=f9, fill=pal["accent"], anchor="e")
+                rw = self._tw(right, f9)
+                hit.append((W - P - rw - 6, yy - 12, W - P + 4, yy + 12, right_hit))
+        # 1) 보드 재질
+        adj9 = d.get("mat") == "custom" and self._board_mat_src() is not None
+        section("보드 재질", y, "내 이미지 자리 조절" if adj9 else None, "mat_adjust")
+        fh9 = self._bf(8)
+        cv.create_text(P + self._tw("보드 재질", fs) + 12, y, text="내 이미지는 다시 누르면 바꿀 수 있어요",
+                       font=fh9, fill=pal["sub"], anchor="w")
+        y += 24
+        cols, gap = 5, 14
+        tw = int((W - P * 2 - gap * (cols - 1)) / cols)
+        th = 60
+        cur = str(d.get("mat") or "cork")
+        for i, mat in enumerate(self.BOARD_MATS):
+            cx0 = P + (i % cols) * (tw + gap)
+            cy0 = y + (i // cols) * (th + 38)
+            if mat == "custom" and self._board_mat_src() is None:
+                self._bd_box(cv, cx0, cy0, cx0 + tw, cy0 + th, 12, pal["bg"], pal["line"], 1.4)
+                self._bd_ic(cv, "photo", cx0 + tw / 2 - 12, cy0 + th / 2, 20, pal["sub"])
+                cv.create_text(cx0 + tw / 2 + 8, cy0 + th / 2, text="+", font=self._bf(13, True),
+                               fill=pal["sub"], anchor="w")
+            else:
+                self._bd_put(cv, ("mthumb", mat, tw, th, pal["accent"],
+                                  str(d.get("mat_img") or "") if mat == "custom" else ""),
+                             lambda m9=mat: self._bd_mat_thumb(m9, tw, th, pal), cx0, cy0)
+            on = (mat == cur)
+            if on:
+                self._bd_ring_check(cv, cx0, cy0, cx0 + tw, cy0 + th, 12, pal)
+            cv.create_text(cx0 + tw / 2, cy0 + th + 18, text=self.BOARD_MAT_NAME[mat],
+                           font=self._bf(9, on), fill=pal["accent"] if on else pal["ink"])
+            hit.append((cx0 - 4, cy0 - 4, cx0 + tw + 4, cy0 + th + 28, "mat:" + mat))
+        y += 2 * (th + 38) + 10
+        cv.create_rectangle(P, y, W - P, y + 1, fill=pal["line"], outline="")
+        y += 26
+        # 2) 테마
+        section("테마", y)
+        y += 24
+        th2 = 56
+        tw4 = int((W - P * 2 - 16 * 3) / 4)
+        tpl = str(d.get("tpl") or "cream")
+        for i, nm in enumerate(self.BOARD_TPL_ORDER):
+            cx0 = P + i * (tw4 + 16)
+            self._bd_put(cv, ("tprev", nm, tw4, th2), lambda n9=nm: self._bd_tpl_prev(n9, tw4, th2), cx0, y)
+            on = (nm == tpl)
+            if on:
+                self._bd_ring_check(cv, cx0, y, cx0 + tw4, y + th2, 12, pal)
+            cv.create_text(cx0 + tw4 / 2, y + th2 + 18, text=self.BOARD_TPL_NAME[nm],
+                           font=self._bf(9, on), fill=pal["accent"] if on else pal["ink"])
+            hit.append((cx0 - 4, y - 4, cx0 + tw4 + 4, y + th2 + 28, "tpl:" + nm))
+        y += th2 + 38 + 8
+        cv.create_rectangle(P, y, W - P, y + 1, fill=pal["line"], outline="")
+        y += 26
+        # 3) 구역별 색
+        section("구역별 색", y, "템플릿 색으로 되돌리기" if d.get("theme") else None, "reset_theme")
+        y += 20
+        cw = (W - P * 2) / 6.0
+        for i, (key, nm) in enumerate(self.BOARD_REGION):
+            cx = P + cw * i + cw / 2
+            self._bd_box(cv, cx - 21, y + 4, cx + 21, y + 46, 21, pal.get(key, "#ffffff"),
+                         pal["line"], 1.2, shadow=(3, .12, 2))
+            if key in (d.get("theme") or {}):
+                self._bd_box(cv, cx + 12, y + 2, cx + 22, y + 12, 5, pal["accent"])
+            cv.create_text(cx, y + 64, text=nm, font=self._bf(9), fill=pal["ink"])
+            hit.append((cx - 26, y, cx + 26, y + 72, "theme:" + key))
+        y += 86
+        cv.create_rectangle(P, y, W - P, y + 1, fill=pal["line"], outline="")
+        y += 26
+        # 4) 오늘의 기분
+        section("오늘의 기분", y)
+        y += 26
+        xx = P
+        fm = self._bf(10)
+        fmb = self._bf(10, True)
+        for m9 in self.BOARD_MOODS:
+            on = (m9 == d.get("mood"))
+            f9 = fmb if on else fm
+            bw = int(self._tw(m9, f9)) + 30
+            if on:
+                self._bd_box(cv, xx, y, xx + bw, y + 32, 16, pal["accent"])
+            else:
+                self._bd_box(cv, xx, y, xx + bw, y + 32, 16, pal["bg"], pal["line"], 1)
+            cv.create_text(xx + bw / 2, y + 16, text=m9, font=f9,
+                           fill=self._bd_on(pal["accent"]) if on else pal["ink"])
+            hit.append((xx, y, xx + bw, y + 32, "mood:" + m9))
+            xx += bw + 8
+        y += 32 + 22
+        cv.create_rectangle(P, y, W - P, y + 1, fill=pal["line"], outline="")
+        y += 26
+        # 5) 대문 문구 · 캐릭터 말풍선 — 나란히 (한 줄씩 쌓으면 창이 화면보다 길어진다)
+        half = (W - P * 2 - 24) // 2
+        bx9 = P + half + 24
+        section("대문 문구", y)
+        cv.create_text(bx9, y, text="캐릭터 말풍선", font=fs, fill=pal["ink"], anchor="w")
+        b9 = self._board_bub()
+        on9 = not b9.get("off")
+        sx9 = W - P - 44
+        self._bd_box(cv, sx9, y - 11, sx9 + 44, y + 11, 11, pal["accent"] if on9 else pal["line"])
+        kx9 = sx9 + (33 if on9 else 11)
+        self._bd_box(cv, kx9 - 8, y - 8, kx9 + 8, y + 8, 8, "#ffffff", shadow=(2, .25, 1))
+        fo9 = self._bf(8, True)
+        lb9 = "보이기" if on9 else "꺼짐"
+        cv.create_text(sx9 - 8, y, text=lb9, font=fo9, fill=pal["sub"], anchor="e")
+        hit.append((sx9 - 12 - self._tw(lb9, fo9), y - 13, W - P, y + 13, "bub_toggle"))
+        y += 22
+        fmo = self._bf(10)
+        self._bd_box(cv, P, y, P + half, y + 42, 14, pal["bg"], pal["line"], 1)
+        cv.create_text(P + 14, y + 21, text=self._bd_fit(str(d.get("motto") or ""), fmo, half - 60),
+                       font=fmo, fill=pal["ink"], anchor="w")
+        self._bd_ic(cv, "pen", P + half - 22, y + 21, 16, pal["sub"])
+        hit.append((P, y, P + half, y + 42, "motto"))
+        t9 = str(b9.get("t") or "").strip()
+        self._bd_box(cv, bx9, y, W - P, y + 42, 14, pal["bg"], pal["line"], 1)
+        cv.create_text(bx9 + 14, y + 21, text=self._bd_fit(t9.replace("\n", " ") if t9
+                                                            else "상태 글 (그리는 중·쉬는 중)", fmo,
+                                                            W - P - bx9 - 60),
+                       font=fmo, fill=pal["ink"] if t9 else pal["sub"], anchor="w")
+        self._bd_ic(cv, "pen", W - P - 22, y + 21, 16, pal["sub"])
+        hit.append((bx9, y, W - P, y + 42, "bub_text"))
+        y += 42 + 24
+        # 창 높이를 내용에 맞춘다
+        try:
+            if abs(win.winfo_height() - y) > 2:
+                win.geometry("%dx%d" % (W, y))
+                cv.configure(height=y)
+        except Exception:
+            pass
+
+    # ── 모션 ────────────────────────────────────────────────────────────
+    # ── 달력 탭 (요청) ──────────────────────────────────────────────────
+    # 일정은 .calendar.json 에 둔다 (보드 꾸밈과 따로 — 되돌리기·프리셋에 안 섞인다).
+    # 날짜는 전부 '1970-01-01 부터의 날 수'(정수)로 셈하고, 파일에는 YYYY-MM-DD 로 적는다.
+    # 마감 목록(self.dues)과 할 일 패널(self.todos)은 읽기만 한다 — 고치는 곳은 그쪽이다.
+    CAL_CATS0 = ({"id": "c1", "name": "외주", "col": "#ee5a8b"},
+                 {"id": "c2", "name": "커미션", "col": "#f2a23c"},
+                 {"id": "c3", "name": "개인작", "col": "#8a73e0"})
+    CAL_COLS = ("#ee5a8b", "#f2a23c", "#8a73e0", "#3fa7d6", "#4bb98a", "#9aa1ad",
+                "#e07a3f", "#d45fb8")
+    CAL_DUE = "#e0526a"
+    CAL_NONE = "#9aa1ad"
+    CAL_EV_MAX = 300
+    CAL_STEP_MAX = 8
+    CAL_WD = ("일", "월", "화", "수", "목", "금", "토")
+
+    def _cal_file(self):
+        return os.path.join(self.state_dir, ".calendar.json")
+
+    def _cal_data(self):
+        d = getattr(self, "_cal_mem", None)
+        if d is not None:
+            return d
+        d = {}
+        try:
+            raw = _load_json(self._cal_file())
+            if isinstance(raw, dict):
+                d = raw
+        except Exception:
+            d = {}
+        if not isinstance(d.get("cats"), list) or not d.get("cats"):
+            d["cats"] = [dict(c) for c in self.CAL_CATS0]
+        if not isinstance(d.get("events"), list):
+            d["events"] = []
+        if d.get("view") not in ("month", "week", "list"):
+            d["view"] = "month"
+        self._cal_mem = d
+        return d
+
+    def _cal_save(self):
+        if _load_failed(self._cal_file()):
+            self._log_error("cal_locked")        # 못 읽은 파일은 안 덮는다 (지뢰 92)
+            return
+        try:
+            _save_json(self._cal_file(), self._cal_data())    # 지뢰 35
+        except Exception:
+            self._log_error("cal_save")
+        # 바탕화면 말풍선도 같이 — 일정이 바뀌면 띄워 둔 줄도 바뀐다
+        self._safe("due_refresh", self._due_refresh)
+        self._safe("todo_refresh", self._todo_refresh)
+
+    @staticmethod
+    def _cal_dn(y, m, d):
+        """그 날짜의 날 수 (1970-01-01 = 0). 달력 모듈 없이 정수 셈으로 (지뢰 21)."""
+        y -= 1 if m <= 2 else 0
+        era = (y if y >= 0 else y - 399) // 400
+        yoe = y - era * 400
+        doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+        doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+        return era * 146097 + doe - 719468
+
+    @staticmethod
+    def _cal_ymd(n):
+        n += 719468
+        era = (n if n >= 0 else n - 146096) // 146097
+        doe = n - era * 146097
+        yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+        y = yoe + era * 400
+        doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+        mp = (5 * doy + 2) // 153
+        d = doy - (153 * mp + 2) // 5 + 1
+        m = mp + (3 if mp < 10 else -9)
+        return (y + (1 if m <= 2 else 0), m, d)
+
+    @staticmethod
+    def _cal_wd(n):
+        """요일 — 0 = 일요일."""
+        return (n + 4) % 7
+
+    def _cal_p(self, ds):
+        try:
+            y, m, d = (int(v) for v in str(ds).split("-"))
+            if not (1 <= m <= 12 and 1 <= d <= 31):
+                return None
+            n = self._cal_dn(y, m, d)
+            return n if self._cal_ymd(n) == (y, m, d) else None     # 2월 30일 같은 것
+        except Exception:
+            return None
+
+    def _cal_s(self, n):
+        return "%04d-%02d-%02d" % self._cal_ymd(int(n))
+
+    def _cal_today(self):
+        t = time.localtime()
+        return self._cal_dn(t.tm_year, t.tm_mon, t.tm_mday)
+
+    def _cal_parse(self, text, y, m):
+        """사람이 쓴 날짜 → 날 수. 9-20 · 9/20 · 9.20 · 9월 20일 · 2026-9-20 · 20(보고 있는 달).
+        못 읽으면 None. 해를 안 쓰면 보고 있는 해다 (지난 날도 일정일 수 있다)."""
+        t = str(text or "").strip()
+        if not t:
+            return None
+        for ch in "/.년월":
+            t = t.replace(ch, "-")
+        t = t.replace("일", "").replace(" ", "").strip("-")
+        got = [x for x in t.split("-") if x != ""]
+        try:
+            v = [int(x) for x in got]
+        except Exception:
+            return None
+        if len(v) == 1:
+            v = [y, m, v[0]]
+        elif len(v) == 2:
+            v = [y, v[0], v[1]]
+        elif len(v) != 3:
+            return None
+        if v[0] < 100:
+            v[0] += 2000
+        return self._cal_p("%d-%d-%d" % tuple(v))
+
+    def _cal_fmt(self, n):
+        _y, m, d = self._cal_ymd(n)
+        return "%d/%d" % (m, d)
+
+    def _cal_span(self, a, b):
+        ya, ma, da = self._cal_ymd(a)
+        yb, mb, db = self._cal_ymd(b)
+        if a == b:
+            return "%d월 %d일" % (ma, da)
+        if (ya, ma) == (yb, mb):
+            return "%d월 %d일 – %d일" % (ma, da, db)
+        return "%d월 %d일 – %d월 %d일" % (ma, da, mb, db)
+
+    def _cal_cat(self, cid):
+        if cid == "__due":
+            return {"id": "__due", "name": "마감", "col": self.CAL_DUE}
+        for c in self._cal_data()["cats"]:
+            if str(c.get("id")) == str(cid):
+                return c
+        return {"id": "", "name": "분류 없음", "col": self.CAL_NONE}
+
+    def _cal_events(self):
+        """그릴 일정들 — 내 일정 + 마감 목록에서 온 것(읽기만). s·e 는 날 수."""
+        out = []
+        for ev in self._cal_data()["events"]:
+            a, b = self._cal_p(ev.get("s")), self._cal_p(ev.get("e"))
+            if a is None:
+                continue
+            if b is None or b < a:
+                b = a
+            c = self._cal_cat(ev.get("cat"))
+            steps = []
+            for st in (ev.get("steps") or [])[:self.CAL_STEP_MAX]:
+                if isinstance(st, dict) and str(st.get("t") or "").strip():
+                    steps.append({"t": str(st["t"]).strip()[:20], "d": self._cal_p(st.get("d")),
+                                  "ok": bool(st.get("ok"))})
+            out.append({"id": str(ev.get("id")), "name": str(ev.get("name") or "일정")[:40],
+                        "cat": c, "s": a, "e": b, "steps": steps, "done": bool(ev.get("done")),
+                        "memo": str(ev.get("memo") or ""), "ro": False,
+                        "pd": bool(ev.get("pd", True)), "pt": bool(ev.get("pt", False))})
+        for i9, d9 in enumerate(getattr(self, "dues", None) or []):
+            n = self._cal_p(d9.get("date"))
+            nm = str(d9.get("name") or "").strip()
+            if n is None:
+                continue
+            # 마감 말풍선에 직접 적은 마감 — 달력에도 보이고 달력에서 고칠 수 있다
+            out.append({"id": "due:" + self._cal_due_key(d9), "name": nm or "마감",
+                        "cat": self._cal_cat("__due"),
+                        "s": n, "e": n, "steps": [], "done": False, "memo": "", "ro": True,
+                        "pd": True, "pt": False})
+        out.sort(key=lambda e: (e["s"], -(e["e"] - e["s"]), e["name"]))
+        return out
+
+    CAL_PIN_PAST = 14          # 끝나는 날이 이만큼 지난 일정은 말풍선에서 내린다
+
+    @staticmethod
+    def _cal_due_key(d9):
+        """마감 말풍선의 마감을 가리키는 열쇠 — 날짜|이름. **번호로 가리키지 않는다**:
+        달력을 그린 뒤 말풍선에서 하나를 지우면 번호가 밀려 엉뚱한 마감이 고쳐진다 (지뢰 133)."""
+        return "%s|%s" % (str(d9.get("date") or "").strip(), str(d9.get("name") or "").strip())
+
+    def _cal_due_idx(self, key):
+        """그 열쇠의 마감이 지금 목록의 몇 번째인가. 없으면 None."""
+        for i9, d9 in enumerate(getattr(self, "dues", None) or []):
+            if self._cal_due_key(d9) == str(key):
+                return i9
+        return None
+
+    def _cal_day_tick(self, now):
+        """날이 바뀌면 말풍선과 달력을 다시 그린다 — '시작한 일정만 할 일에 띄우기'와
+        D-day 가 날짜에 기대기 때문이다. 30초에 한 번 날짜만 본다."""
+        if now - self._cal_day_at < 30.0:
+            return
+        self._cal_day_at = now
+        day = time.strftime("%Y-%m-%d")
+        if self._cal_day and day != self._cal_day:
+            self._safe("todo_refresh", self._todo_refresh)
+            self._safe("due_refresh", self._due_refresh)
+        self._cal_day = day
+
+    def _cal_pins(self, kind):
+        """바탕화면 말풍선에 띄울 일정들 — kind 'd' 마감 말풍선 · 't' 할 일 말풍선.
+        끝낸 것은 빼고, 할 일 쪽은 이미 시작한 일정만 (아직 먼 일정이 할 일로 뜨면 어수선하다)."""
+        if not self._board_on():
+            return []
+        td = self._cal_today()
+        out = []
+        for e in self._cal_events():
+            if e["ro"] or e["done"] or e["e"] < td - self.CAL_PIN_PAST:
+                continue
+            if kind == "d" and e["pd"]:
+                out.append(e)
+            elif kind == "t" and e["pt"] and e["s"] <= td:
+                out.append(e)
+        return out
+
+    def _cal_touch(self):
+        """말풍선 쪽에서 무언가 바뀌었다 — 달력이 떠 있으면 다시 그린다 (한 번만 예약)."""
+        if getattr(self, "_cal_touch_job", None) is not None:
+            return
+        try:
+            if not (self._board_alive() and self._board_tab == "cal"):
+                return
+        except Exception:
+            return
+
+        def go():
+            self._cal_touch_job = None
+            if self._board_alive() and self._board_tab == "cal":
+                self._safe("board_draw", self._board_draw)
+        self._cal_touch_job = self.root.after(30, go)
+
+    def _cal_pin_set(self, eid, key, on):
+        """일정을 말풍선에 띄우거나 내린다 — key 'pd' 마감 · 'pt' 할 일."""
+        ev = self._cal_raw(eid)
+        if ev is None:
+            return
+        ev[key] = bool(on)
+        self._cal_save()
+
+    def _cal_pin_done(self, eid, step):
+        """말풍선에서 '완료'를 눌렀다 — 그 단계를 끝낸 것으로 (step -1 이면 일정째)."""
+        ev = self._cal_raw(eid)
+        if ev is None:
+            return
+        sts = [x for x in (ev.get("steps") or []) if isinstance(x, dict)
+               and str(x.get("t") or "").strip()]
+        if step is not None and 0 <= step < len(sts):
+            sts[step]["ok"] = True
+            if all(x.get("ok") for x in sts):
+                ev["done"] = True
+        else:
+            ev["done"] = True
+            for x in sts:
+                x["ok"] = True
+        self._cal_save()
+
+    def _cal_due_to_event(self, key):
+        """마감 말풍선의 마감을 달력 일정으로 바꾼다 — 단계·기간을 붙일 수 있게.
+        말풍선에는 그대로 남는다 (일정의 '마감 말풍선에 띄우기'가 켜진다).
+        일정을 **먼저 만들고** 성공했을 때만 옛 마감을 지운다 — 거꾸로 하면 실패할 때 사라진다."""
+        i = self._cal_due_idx(key)
+        if i is None:
+            return None
+        d9 = self.dues[i]
+        n = self._cal_p(d9.get("date"))
+        if n is None:
+            return None
+        cats = self._cal_data()["cats"]
+        got = self._cal_put(None, str(d9.get("name") or "마감"), cats[0]["id"] if cats else "",
+                            min(n, self._cal_today()), n, [], pd=True, pt=False)
+        if got:
+            i = self._cal_due_idx(key)           # 그 사이 목록이 바뀌었을 수 있다 — 다시 찾는다
+            if i is not None:
+                self.dues.pop(i)
+                self._due_save()
+            self._due_refresh()
+        return got
+
+    def _cal_shown(self, evs=None):
+        """분류로 걸러 낸 일정들."""
+        evs = self._cal_events() if evs is None else evs
+        f = self._cal_flt
+        if not f:
+            return evs
+        return [e for e in evs if str(e["cat"].get("id")) == str(f)]
+
+    def _cal_raw(self, eid):
+        for ev in self._cal_data()["events"]:
+            if str(ev.get("id")) == str(eid):
+                return ev
+        return None
+
+    @staticmethod
+    def _cal_prog(ev):
+        """진행률 0~1 — 단계가 있으면 끝낸 단계의 비율, 없으면 끝냄 여부."""
+        if ev.get("done"):
+            return 1.0
+        st = ev.get("steps") or []
+        if not st:
+            return 0.0
+        return sum(1 for x in st if x.get("ok")) / float(len(st))
+
+    def _cal_view(self):
+        """(해, 달) — 보고 있는 달. 처음에는 오늘이 든 달."""
+        if self._cal_ym is None:
+            y, m, _d = self._cal_ymd(self._cal_today())
+            self._cal_ym = (y, m)
+        return self._cal_ym
+
+    def _cal_selday(self):
+        if self._cal_sel is None:
+            self._cal_sel = self._cal_today()
+        return self._cal_sel
+
+    def _cal_month_range(self, y, m):
+        a = self._cal_dn(y, m, 1)
+        b = self._cal_dn(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1) - 1
+        return a, b
+
+    @staticmethod
+    def _cal_dday(n):
+        if n == 0:
+            return "D-DAY"
+        return ("D-%d" % n) if n > 0 else ("D+%d" % -n)
+
+    # ── 그리기 ──
+    def _cal_draw(self, cv, lay, pal):
+        evs = self._cal_events()
+        self._cal_draw_left(cv, lay["left"], pal, evs)
+        x0, y0, x1, y1 = lay["stage"]
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        v = self._cal_data()["view"]
+        if v == "list":
+            self._cal_draw_list(cv, (x0, y0, x1, y1), pal, evs)
+        else:
+            self._cal_draw_grid(cv, (x0, y0, x1, y1), pal, evs, v == "week")
+        self._cal_draw_day(cv, lay["right"], pal, evs)
+        tv = getattr(self, "_board_toast_v", None)
+        if tv and time.time() - tv[1] < 3.0:
+            f = self._bf(9, True)
+            w9 = int(self._tw(tv[0], f)) + 36
+            cx = (x0 + x1) / 2.0
+            self._bd_box(cv, cx - w9 / 2, y1 - 58, cx + w9 / 2, y1 - 24, 17, pal["ink"],
+                         shadow=(6, .18, 3))
+            cv.create_text(cx, y1 - 41, text=tv[0], font=f, fill=self._bd_on(pal["ink"]))
+
+    def _cal_draw_left(self, cv, box, pal, evs):
+        x0, y0, x1, y1 = box
+        cw = x1 - x0
+        y, m = self._cal_view()
+        ma, mb = self._cal_month_range(y, m)
+        inm = [e for e in evs if e["e"] >= ma and e["s"] <= mb]
+        cats = [{"id": "", "name": "전체", "col": pal["ink"]}] + list(self._cal_data()["cats"])
+        if any(e["ro"] for e in evs):
+            cats.append(self._cal_cat("__due"))
+        fl, fr = self._bf(9, True), self._bf(10, True)
+        rh = self._bd_ls(fr) + 18
+        h1 = 18 + self._bd_ls(fl) + 10 + len(cats) * (rh + 2) + 8 + 36 + 16
+        hp = 72
+        hbig = self._bd_ls(self._bf(22, 2))
+        th9 = self._bd_ls(self._bf(8, True)) + self._bd_ls(self._bf(12, 2)) + 22
+        h2 = 18 + self._bd_ls(fl) + 8 + hbig + 12 + 6 + 14 + th9 + 18
+        room = y1 - y0
+        show2 = h1 + 14 + h2 + 14 + hp <= room
+        showp = h1 + 14 + hp <= room
+        # 분류
+        self._bd_box(cv, x0, y0, x1, min(y1, y0 + h1), 20, pal["card"], shadow=(10, .06, 4))
+        yy = y0 + 18 + self._bd_ls(fl) // 2
+        cv.create_text(x0 + 20, yy, text="분류", font=fl, fill=pal["sub"], anchor="w")
+        cv.create_text(x1 - 20, yy, text="우클릭으로 고치기", font=self._bf(8, True),
+                       fill=self._mix(pal["sub"], pal["card"], 0.35), anchor="e")
+        yy += self._bd_ls(fl) // 2 + 10
+        for c in cats:
+            if yy + rh > y1 - 60:
+                break
+            cid = str(c.get("id") or "")
+            on = (cid == str(self._cal_flt or ""))
+            if on:
+                self._bd_box(cv, x0 + 12, yy, x1 - 12, yy + rh, 11, pal["fill"])
+            self._bd_box(cv, x0 + 22, yy + rh / 2 - 5, x0 + 32, yy + rh / 2 + 5, 4, c["col"])
+            n9 = len(inm) if not cid else sum(1 for e in inm if str(e["cat"].get("id")) == cid)
+            cv.create_text(x0 + 42, yy + rh / 2, text=self._bd_fit(str(c["name"]), fr, cw - 100),
+                           font=fr, fill=pal["ink"], anchor="w")
+            cv.create_text(x1 - 24, yy + rh / 2, text="%d" % n9, font=self._bf(9, True),
+                           fill=pal["sub"], anchor="e")
+            self._board_ui_hit.append((x0 + 12, yy, x1 - 12, yy + rh, "cal:flt:" + cid))
+            yy += rh + 2
+        yy += 6
+        if yy + 36 <= y1 - 8:
+            self._bd_box(cv, x0 + 20, yy, x1 - 20, yy + 36, 11, pal["fill"])
+            cv.create_text((x0 + x1) / 2, yy + 18, text="+ 분류 추가", font=self._bf(9, True),
+                           fill=pal["sub"])
+            self._board_ui_hit.append((x0 + 20, yy, x1 - 20, yy + 36, "cal:catadd"))
+        # 이 달 진행
+        if show2:
+            ty0 = y0 + h1 + 14
+            mine = [e for e in inm if not e["ro"]]
+            dn = sum(1 for e in mine if e["done"])
+            frac = (sum(self._cal_prog(e) for e in mine) / float(len(mine))) if mine else 0.0
+            td = self._cal_today()
+            left9 = sum(1 for e in inm if not e["done"] and e["e"] >= td)
+            self._bd_box(cv, x0, ty0, x1, ty0 + h2, 20, pal["card"], shadow=(10, .06, 4))
+            yy = ty0 + 18 + self._bd_ls(fl) // 2
+            cv.create_text(x0 + 20, yy, text="%d월 진행" % m, font=fl, fill=pal["sub"], anchor="w")
+            yy += self._bd_ls(fl) // 2 + 8 + hbig // 2
+            self._bd_bignum(cv, x0 + 20, yy, (("%d" % int(round(frac * 100)), True), ("%", False)), pal)
+            yy += hbig // 2 + 12
+            self._bd_bar(cv, x0 + 20, yy, cw - 40, frac, pal, pal["ink"])
+            yy += 6 + 14
+            tw9 = (cw - 40 - 8) / 2.0
+            self._bd_tile(cv, x0 + 20, yy, x0 + 20 + tw9, yy + th9, "끝낸 일정", "%d개" % dn, pal)
+            self._bd_tile(cv, x0 + 28 + tw9, yy, x1 - 20, yy + th9, "남은 일정", "%d개" % left9, pal)
+        # 나
+        if showp:
+            py0 = y1 - hp
+            self._bd_box(cv, x0, py0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+            face = self._board_face_ph(44, pal["soft"])
+            if face is not None:
+                cv.create_image(x0 + 16 + 22, py0 + hp / 2, image=face)
+            fb, fs8 = self._bf(10, 2), self._bf(8, True)
+            l1, l2 = self._bd_ls(fb), self._bd_ls(fs8)
+            t0 = py0 + hp / 2 - (l1 + l2 + 3) / 2.0
+            cv.create_text(x0 + 72, t0 + l1 / 2, text=str(self.cfg.get("name") or self.char),
+                           font=fb, fill=pal["ink"], anchor="w")
+            try:
+                secs = float(self._today_secs())
+            except Exception:
+                secs = 0.0
+            cv.create_text(x0 + 72, t0 + l1 + 3 + l2 / 2,
+                           text="오늘 %d시간 %d분 작업" % (int(secs // 3600), int(secs % 3600 // 60)),
+                           font=fs8, fill=pal["sub"], anchor="w")
+
+    def _cal_head(self, cv, box, pal, title):
+        """달력 카드의 머리 — 제목 · ‹ 오늘 › · 월|주|목록. 아래 y 를 돌려준다."""
+        x0, y0, x1, _y1 = box
+        fb = self._bf(9, True)
+        cy = y0 + 20 + 17
+        # 제목이 길면(주 보기) 글자를 줄인다 — 넘기기 단추가 보기 전환 밑으로 들어가지 않게
+        seg_w = sum(int(self._tw(t, fb)) + 28 for t in ("월", "주", "목록")) + 10
+        nav_w = 32 * 2 + int(self._tw("오늘", fb)) + 24 + 8
+        room = (x1 - 20 - seg_w - 14) - (x0 + 22) - 14 - nav_w
+        for sz in (16, 14, 12, 11):
+            ft = self._bf(sz, 2)
+            if self._tw(title, ft) <= room:
+                break
+        title = self._bd_fit(title, ft, room)
+        cv.create_text(x0 + 22, cy, text=title, font=ft, fill=pal["ink"], anchor="w")
+        x = x0 + 22 + int(self._tw(title, ft)) + 14
+        for key, lab, ic in (("prev", "", "l_left"), ("today", "오늘", None), ("next", "", "l_right")):
+            w9 = 32 if ic else int(self._tw(lab, fb)) + 24
+            self._bd_box(cv, x, cy - 16, x + w9, cy + 16, 10, pal["fill"])
+            if ic:
+                self._bd_ic(cv, ic, x + w9 / 2, cy, 16, pal["ink2"])
+            else:
+                cv.create_text(x + w9 / 2, cy, text=lab, font=fb, fill=pal["ink2"])
+            self._board_ui_hit.append((x, cy - 16, x + w9, cy + 16, "cal:" + key))
+            x += w9 + 4
+        items = (("month", "월", None), ("week", "주", None), ("list", "목록", None))
+        ws = sum(int(self._tw(t, fb)) + 28 for _k, t, _i in items) + 6 + 4
+        self._bd_seg(cv, x1 - 20 - ws, cy, items, self._cal_data()["view"], pal, "cal:view:",
+                     h=32, f=fb, icon=False)
+        return cy + 17 + 14
+
+    def _cal_bar_img(self, w, h, col, pal, head, tail, done):
+        """일정 띠 한 장 — 옅은 바탕 + 왼쪽 색 줄(시작하는 주에만). 이어지는 쪽은 각지게."""
+        S = 4
+        im = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        fill = self._bd_c(self._mix(col, pal["card"], 0.90 if done else 0.84))
+        r = 7 * S
+        dr.rounded_rectangle([0, 0, w * S - 1, h * S - 1], radius=r, fill=fill)
+        if not head:
+            dr.rectangle([0, 0, r, h * S - 1], fill=fill)
+        if not tail:
+            dr.rectangle([w * S - 1 - r, 0, w * S - 1, h * S - 1], fill=fill)
+        if head:
+            m9 = Image.new("L", (w * S, h * S), 0)
+            ImageDraw.Draw(m9).rounded_rectangle([0, 0, w * S - 1, h * S - 1], radius=r, fill=255)
+            st = Image.new("RGBA", (w * S, h * S), (0, 0, 0, 0))
+            ImageDraw.Draw(st).rectangle(
+                [0, 0, int(3.5 * S), h * S], fill=self._bd_c(self._mix(col, pal["card"], 0.45) if done else col))
+            im.paste(st, (0, 0), ImageChops_multiply(m9, st.split()[3]))
+        return im.resize((w, h), Image.LANCZOS)
+
+    def _cal_dot_img(self, col, pal, ok, d=9):
+        S = 4
+        im = Image.new("RGBA", (d * S, d * S), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.ellipse([0, 0, d * S - 1, d * S - 1], fill=self._bd_c(col))
+        if not ok:
+            o = int(1.7 * S)
+            dr.ellipse([o, o, d * S - 1 - o, d * S - 1 - o], fill=self._bd_c(pal["card"]))
+        return im.resize((d, d), Image.LANCZOS)
+
+    def _cal_draw_grid(self, cv, box, pal, evs, week):
+        x0, y0, x1, y1 = box
+        y, m = self._cal_view()
+        ma, mb = self._cal_month_range(y, m)
+        sel, td = self._cal_selday(), self._cal_today()
+        if week:
+            ws0 = sel - self._cal_wd(sel)
+            rows = 1
+            title = self._cal_span(ws0, ws0 + 6)
+        else:
+            ws0 = ma - self._cal_wd(ma)
+            rows = (mb - ws0) // 7 + 1
+            title = "%d년 %d월" % (y, m)
+        gy = self._cal_head(cv, box, pal, title)
+        gx0, gx1 = x0 + 20, x1 - 20
+        cw = (gx1 - gx0) / 7.0
+        fw = self._bf(8, True)
+        red, blue = "#e0526a", "#5b83d6"
+        gy += self._bd_ls(fw) // 2
+        for i, t in enumerate(self.CAL_WD):
+            cv.create_text(gx0 + cw * i + 10, gy, text=t, font=fw, anchor="w",
+                           fill=red if i == 0 else (blue if i == 6 else pal["sub"]))
+        gy0 = gy + self._bd_ls(fw) // 2 + 8
+        gy1 = y1 - 18
+        rh = (gy1 - gy0) / float(rows)
+        fd = self._bf(9, True)
+        ld = self._bd_ls(fd)
+        faint = self._mix(pal["sub"], pal["card"], 0.55)
+        shown = self._cal_shown(evs)
+        BH, BG = 22, 4
+        top_pad = 10 + ld + 10
+        lanes_max = max(0, int((rh - top_pad - 4 + BG) // (BH + BG)))
+        fe = self._bf(8, True)
+        feo = tuple(fe) + ("overstrike",) if len(fe) >= 2 else fe
+        # 고른 날 바탕
+        for r in range(rows):
+            for c in range(7):
+                n = ws0 + r * 7 + c
+                if n == sel:
+                    cx0, cy0 = gx0 + cw * c, gy0 + rh * r
+                    cv.create_rectangle(int(cx0) + 1, int(cy0) + 1, int(cx0 + cw), int(cy0 + rh),
+                                        fill=pal["fill"], outline="")
+        # 격자 선 — 얇게 (칸마다 상자를 두지 않는다)
+        for r in range(rows + (1 if week else 0)):
+            yy = int(gy0 + rh * r)
+            cv.create_rectangle(gx0, yy, gx1, yy + 1, fill=pal["line"], outline="")
+        for c in range(1, 7):
+            xx = int(gx0 + cw * c)
+            cv.create_rectangle(xx, int(gy0), xx + 1, int(gy1), fill=pal["line"], outline="")
+        for r in range(rows):
+            top = gy0 + rh * r
+            wa = ws0 + r * 7
+            for c in range(7):
+                n = wa + c
+                cx0 = gx0 + cw * c
+                inmon = week or (ma <= n <= mb)
+                dd = self._cal_ymd(n)[2]
+                ty = top + 10 + ld / 2.0
+                if n == td:
+                    r9 = max(12, (max(ld, int(self._tw("%d" % dd, fd))) + 10) // 2)
+                    self._bd_box(cv, cx0 + 4, ty - r9, cx0 + 4 + r9 * 2, ty + r9, r9, pal["ink"])
+                    cv.create_text(cx0 + 4 + r9, ty, text="%d" % dd, font=fd,
+                                   fill=self._bd_on(pal["ink"]))
+                else:
+                    col = pal["ink2"] if inmon else faint
+                    if inmon and c == 0:
+                        col = red
+                    elif inmon and c == 6:
+                        col = blue
+                    cv.create_text(cx0 + 10, ty, text="%d" % dd, font=fd, fill=col, anchor="w")
+                self._board_ui_hit.append((cx0, top, cx0 + cw, top + rh, "cal:day:%d" % n))
+            # 이 주에 걸친 일정 — 줄(lane)을 앞에서부터 채운다
+            segs = [e for e in shown if e["e"] >= wa and e["s"] <= wa + 6]
+            used = []                     # 줄마다 마지막으로 쓴 칸
+            over = [0] * 7
+            for e in segs:
+                c0, c1 = max(e["s"], wa) - wa, min(e["e"], wa + 6) - wa
+                ln = None
+                for i9, last in enumerate(used):
+                    if last < c0:
+                        ln = i9
+                        break
+                if ln is None:
+                    ln = len(used)
+                    used.append(-1)
+                used[ln] = c1
+                if ln >= lanes_max:
+                    for c in range(c0, c1 + 1):
+                        over[c] += 1
+                    continue
+                head, tail = e["s"] >= wa, e["e"] <= wa + 6
+                bx0 = int(gx0 + cw * c0 + (4 if head else 0))
+                bx1 = int(gx0 + cw * (c1 + 1) - (4 if tail else 0))
+                by0 = int(top + top_pad + ln * (BH + BG))
+                col = e["cat"]["col"]
+                key = ("calbar", bx1 - bx0, BH, col, pal["card"], head, tail, e["done"])
+                self._bd_put(cv, key, lambda w9=bx1 - bx0, c9=col, h9=head, t9=tail, d9=e["done"]:
+                             self._cal_bar_img(w9, BH, c9, pal, h9, t9, d9), bx0, by0)
+                if e["id"] == self._cal_ev:
+                    self._bd_box(cv, bx0 - 2, by0 - 2, bx1 + 2, by0 + BH + 2, 9, None,
+                                 self._mix(col, pal["ink"], 0.25), 1.6)
+                tcol = pal["sub"] if e["done"] else self._mix(col, pal["ink"], 0.45)
+                lab = self._bd_fit(e["name"], fe, bx1 - bx0 - 15)
+                cv.create_text(bx0 + 10, by0 + BH / 2.0, text=lab,
+                               font=feo if e["done"] else fe, fill=tcol, anchor="w")
+                tend = bx0 + 11 + int(self._tw(lab, fe)) + 8
+                for st in e["steps"]:
+                    sd = st["d"]
+                    if sd is None or not (wa + c0 <= sd <= wa + c1):
+                        continue
+                    dx = gx0 + cw * (sd - wa + 0.5)
+                    if dx - 5 < tend or dx + 5 > bx1 - 4:
+                        continue
+                    self._bd_put(cv, ("caldot", col, pal["card"], st["ok"]),
+                                 lambda c9=col, o9=st["ok"]: self._cal_dot_img(c9, pal, o9),
+                                 dx, by0 + BH / 2.0, anchor="center")
+                self._board_ui_hit.append((bx0, by0, bx1, by0 + BH, "cal:ev:" + e["id"]))
+            for c in range(7):
+                if over[c]:
+                    cv.create_text(gx0 + cw * (c + 1) - 8, top + 10 + ld / 2.0,
+                                   text="+%d" % over[c], font=self._bf(8, True), fill=pal["sub"],
+                                   anchor="e")
+
+    def _cal_draw_list(self, cv, box, pal, evs):
+        x0, y0, x1, y1 = box
+        y, m = self._cal_view()
+        ma, mb = self._cal_month_range(y, m)
+        gy = self._cal_head(cv, box, pal, "%d년 %d월" % (y, m))
+        td = self._cal_today()
+        rows = [e for e in self._cal_shown(evs) if e["e"] >= ma and e["s"] <= mb]
+        fn, fs = self._bf(10, 2), self._bf(8, True)
+        rh = self._bd_ls(fn) + self._bd_ls(fs) + 24
+        yy = gy + 4
+        if not rows:
+            cv.create_text((x0 + x1) / 2, (gy + y1) / 2 - 10, text="이 달에는 일정이 없어요",
+                           font=self._bf(11, 2), fill=pal["ink"])
+            cv.create_text((x0 + x1) / 2, (gy + y1) / 2 + 16, text="오른쪽 아래 '새 일정'으로 넣어 보세요",
+                           font=self._bf(9), fill=pal["sub"])
+            return
+        for i, e in enumerate(rows):
+            if yy + rh > y1 - 40 and i < len(rows) - 1:
+                cv.create_text((x0 + x1) / 2, y1 - 24, text="외 %d개 — 분류로 걸러 보세요" % (len(rows) - i),
+                               font=fs, fill=pal["sub"])
+                break
+            if e["id"] == self._cal_ev:
+                self._bd_box(cv, x0 + 12, yy, x1 - 12, yy + rh - 4, 13, pal["fill"])
+            col = e["cat"]["col"]
+            self._bd_box(cv, x0 + 26, yy + rh / 2 - 8, x0 + 31, yy + rh / 2 + 4, 2.5, col)
+            l1, l2 = self._bd_ls(fn), self._bd_ls(fs)
+            t0 = yy + (rh - 4) / 2.0 - (l1 + l2 + 3) / 2.0
+            fno = tuple(fn) + ("overstrike",)
+            cv.create_text(x0 + 44, t0 + l1 / 2, text=self._bd_fit(e["name"], fn, x1 - x0 - 330),
+                           font=fno if e["done"] else fn, fill=pal["sub"] if e["done"] else pal["ink"],
+                           anchor="w")
+            cv.create_text(x0 + 44, t0 + l1 + 3 + l2 / 2,
+                           text="%s · %s" % (e["cat"]["name"], self._cal_span(e["s"], e["e"])),
+                           font=fs, fill=pal["sub"], anchor="w")
+            dl = e["e"] - td
+            rt = "끝" if e["done"] else self._cal_dday(dl)
+            cv.create_text(x1 - 28, yy + (rh - 4) / 2.0, text=rt, font=self._bf(9, 2), anchor="e",
+                           fill=pal["sub"] if (e["done"] or dl > 3) else self.CAL_DUE)
+            if e["steps"] or e["done"]:
+                pr = self._cal_prog(e)
+                rw9 = int(self._tw("D+999", self._bf(9, 2))) + 28 + 14
+                pw9 = int(self._tw("100%", fs))
+                self._bd_bar(cv, x1 - rw9 - pw9 - 10 - 90, yy + (rh - 4) / 2.0 - 3, 90, pr, pal, col)
+                cv.create_text(x1 - rw9, yy + (rh - 4) / 2.0, text="%d%%" % int(round(pr * 100)),
+                               font=fs, fill=pal["ink2"], anchor="e")
+            self._board_ui_hit.append((x0 + 12, yy, x1 - 12, yy + rh - 4, "cal:ev:" + e["id"]))
+            yy += rh
+
+    def _cal_focus(self, evs):
+        """오른쪽에 크게 보여 줄 일정 — 고른 것, 없으면 고른 날에 걸친 것 중 먼저 끝나는 것."""
+        if self._cal_ev:
+            for e in evs:
+                if e["id"] == self._cal_ev:
+                    return e
+        sel = self._cal_selday()
+        on = [e for e in self._cal_shown(evs) if e["s"] <= sel <= e["e"]]
+        on.sort(key=lambda e: (e["done"], e["ro"], e["e"]))
+        return on[0] if on else None
+
+    def _bd_switch(self, cv, x1, cy, on, col, pal):
+        """켜고 끄는 스위치 (오른쪽 끝 x1 기준) — 38x22."""
+        x0 = x1 - 38
+        self._bd_box(cv, x0, cy - 11, x1, cy + 11, 11, col if on else self._mix(pal["fill"], pal["ink"], 0.12))
+        kx = x1 - 11 if on else x0 + 11
+        self._bd_box(cv, kx - 8, cy - 8, kx + 8, cy + 8, 8, "#ffffff", shadow=(2, .18, 1))
+        return (x0, cy - 13, x1, cy + 13)
+
+    def _cal_draw_day(self, cv, box, pal, evs):
+        x0, y0, x1, y1 = box
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        sel, td = self._cal_selday(), self._cal_today()
+        _y, m, d = self._cal_ymd(sel)
+        fl = self._bf(8, 2)
+        yy = y0 + 20 + self._bd_ls(fl) // 2
+        cv.create_text(x0 + 20, yy, text=self.CAL_WD[self._cal_wd(sel)] + "요일", font=fl,
+                       fill=pal["sub"], anchor="w")
+        ft = self._bf(16, 2)
+        yy += self._bd_ls(fl) // 2 + 4 + self._bd_ls(ft) // 2
+        cv.create_text(x0 + 20, yy, text="%d월 %d일" % (m, d), font=ft, fill=pal["ink"], anchor="w")
+        if sel == td:
+            fb9 = self._bf(8, 2)
+            bx = x0 + 20 + int(self._tw("%d월 %d일" % (m, d), ft)) + 8
+            bw = int(self._tw("오늘", fb9)) + 18
+            self._bd_box(cv, bx, yy - 10, bx + bw, yy + 10, 10, pal["ink"])
+            cv.create_text(bx + bw / 2, yy, text="오늘", font=fb9, fill=self._bd_on(pal["ink"]))
+        yy += self._bd_ls(ft) // 2 + 16
+        bot = y1 - 16 - 46 - 14              # '새 일정' 단추 위
+        ev = self._cal_focus(evs)
+        fn, fs, fb = self._bf(11, 2), self._bf(8, True), self._bf(10, True)
+        if ev is not None:
+            col = ev["cat"]["col"]
+            steps = ev["steps"]
+            sh9 = self._bd_ls(fb) + 9
+            pins9 = [] if ev["ro"] else [
+                (k9, l9) for k9, l9, ok9 in (
+                    ("pd", "마감 말풍선에 띄우기", self.due_panel is not None),
+                    ("pt", "할 일 말풍선에 띄우기", self.todo_panel is not None)) if ok9]
+            pinh = (10 + len(pins9) * (self._bd_ls(fs) + 14)) if pins9 else 0
+            hh = 15 + self._bd_ls(fn) + 4 + self._bd_ls(fs) + 12 + 8 \
+                + (10 + len(steps) * sh9 if steps else 0) + pinh + 12 + 30 + 14
+            if yy + hh > bot and steps:          # 자리가 모자라면 단계는 접는다
+                hh -= 10 + len(steps) * sh9
+                steps = []
+            if yy + hh > bot and pinh:
+                hh -= pinh
+                pinh = 0
+            if yy + hh <= bot:
+                self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + hh, 16, pal["fill"])
+                ty = yy + 15 + self._bd_ls(fn) / 2.0
+                self._bd_box(cv, x0 + 30, ty - 5, x0 + 40, ty + 5, 3.5, col)
+                dl = ev["e"] - td
+                rt = "끝" if ev["done"] else self._cal_dday(dl)
+                frt = self._bf(9, 2)
+                cv.create_text(x1 - 30, ty, text=rt, font=frt, anchor="e",
+                               fill=pal["sub"] if (ev["done"] or dl > 3) else self.CAL_DUE)
+                cv.create_text(x0 + 48, ty, font=fn, fill=pal["ink"], anchor="w",
+                               text=self._bd_fit(ev["name"], fn, (x1 - 30 - int(self._tw(rt, frt)) - 10) - (x0 + 48)))
+                ty += self._bd_ls(fn) / 2.0 + 4 + self._bd_ls(fs) / 2.0
+                meta = ("마감 말풍선에 적은 마감 · %s" % self._cal_span(ev["s"], ev["e"])) if ev["ro"] \
+                    else "%s · %s" % (ev["cat"]["name"], self._cal_span(ev["s"], ev["e"]))
+                cv.create_text(x0 + 48, ty, text=self._bd_fit(meta, fs, x1 - x0 - 84),
+                               font=fs, fill=pal["sub"], anchor="w")
+                ty += self._bd_ls(fs) / 2.0 + 12
+                if not ev["ro"]:
+                    pr = self._cal_prog(ev)
+                    pw = (x1 - 30 - int(self._tw("100%", self._bf(9, 2))) - 10) - (x0 + 30)
+                    self._bd_box(cv, x0 + 30, ty, x0 + 30 + pw, ty + 6, 3,
+                                 self._mix(pal["fill"], pal["ink"], 0.07))
+                    if pr > 0:
+                        self._bd_box(cv, x0 + 30, ty, x0 + 30 + max(6, int(pw * pr)), ty + 6, 3, col)
+                    cv.create_text(x1 - 30, ty + 3, text="%d%%" % int(round(pr * 100)),
+                                   font=self._bf(9, 2), fill=pal["ink"], anchor="e")
+                ty += 8
+                if steps:
+                    ty += 10
+                    for i, st in enumerate(steps):
+                        my = ty + sh9 / 2.0
+                        if st["ok"]:
+                            self._bd_box(cv, x0 + 30, my - 9, x0 + 48, my + 9, 9, col)
+                            self._bd_ic(cv, "l_check", x0 + 39, my, 12, "#ffffff")
+                        else:
+                            self._bd_box(cv, x0 + 30, my - 9, x0 + 48, my + 9, 9, pal["card"],
+                                         self._mix(pal["sub"], pal["card"], 0.45), 1.6)
+                        cv.create_text(x0 + 58, my, text=self._bd_fit(st["t"], fb, x1 - x0 - 150), font=fb,
+                                       fill=pal["sub"] if st["ok"] else pal["ink"], anchor="w")
+                        if st["d"] is not None:
+                            cv.create_text(x1 - 30, my, text=self._cal_fmt(st["d"]), font=fs,
+                                           fill=pal["sub"], anchor="e")
+                        self._board_ui_hit.append((x0 + 22, ty, x1 - 22, ty + sh9,
+                                                   "cal:step:%s:%d" % (ev["id"], i)))
+                        ty += sh9
+                if pinh:
+                    # 바탕화면 말풍선에 띄우기 — 고치기 창을 열지 않고 여기서 바로 켜고 끈다
+                    ty += 10
+                    rowh = self._bd_ls(fs) + 14
+                    for key, lab in pins9:
+                        my = ty + rowh / 2.0
+                        cv.create_text(x0 + 30, my, text=lab, font=fs, fill=pal["ink2"], anchor="w")
+                        bx9 = self._bd_switch(cv, x1 - 30, my, ev[key], col, pal)
+                        self._board_ui_hit.append((x0 + 22, ty, x1 - 22, ty + rowh,
+                                                   "cal:%s:%s" % (key, ev["id"])))
+                        ty += rowh
+                ty += 12
+                if ev["ro"]:
+                    btns = (("고치기", "dueedit", False), ("일정으로 바꾸기", "dueconv", True))
+                else:
+                    btns = (("고치기", "edit", False),
+                            ("다시 진행" if ev["done"] else "끝냄", "done", True))
+                bw2 = ((x1 - 30) - (x0 + 30) - 8) / 2.0
+                eid9 = ev["id"][4:] if ev["ro"] else ev["id"]
+                for k, (lab, act, strong) in enumerate(btns):
+                    bx = x0 + 30 + k * (bw2 + 8)
+                    fill9 = pal["card"] if (not strong or ev["done"]) else col
+                    self._bd_box(cv, bx, ty, bx + bw2, ty + 30, 10, fill9)
+                    cv.create_text(bx + bw2 / 2, ty + 15, text=self._bd_fit(lab, self._bf(9, True), bw2 - 10),
+                                   font=self._bf(9, True),
+                                   fill=pal["ink"] if fill9 == pal["card"] else self._bd_on(col))
+                    self._board_ui_hit.append((bx, ty, bx + bw2, ty + 30, "cal:%s:%s" % (act, eid9)))
+                yy += hh + 18
+        else:
+            hh = 64
+            self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + hh, 16, pal["fill"])
+            cv.create_text((x0 + x1) / 2, yy + hh / 2, text="이 날은 일정이 없어요", font=self._bf(10, True),
+                           fill=pal["sub"])
+            yy += hh + 18
+
+        def section(title, rows, yy, add=None, circle=False, empty=""):
+            if (not rows and not add) or yy + self._bd_ls(fs) + 8 + self._bd_ls(fb) + 10 > bot:
+                return yy
+            ty9 = yy + self._bd_ls(fs) / 2.0
+            cv.create_text(x0 + 20, ty9, text=title, font=self._bf(9, True),
+                           fill=pal["sub"], anchor="w")
+            if add:
+                fa = self._bf(8, True)
+                aw = int(self._tw("+ 추가", fa)) + 16
+                self._bd_box(cv, x1 - 20 - aw, ty9 - 10, x1 - 20, ty9 + 10, 10, pal["fill"])
+                cv.create_text(x1 - 20 - aw / 2, ty9, text="+ 추가", font=fa, fill=pal["ink2"])
+                self._board_ui_hit.append((x1 - 24 - aw, ty9 - 13, x1 - 16, ty9 + 13, add))
+            yy += self._bd_ls(fs) + 8
+            rh = self._bd_ls(fb) + 10
+            if not rows and empty:
+                cv.create_text(x0 + 20, yy + rh / 2, text=empty, font=fs,
+                               fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+                return yy + rh + 14
+            for col9, name, right, hot, hit in rows:
+                if yy + rh > bot:
+                    break
+                if circle:
+                    self._bd_box(cv, x0 + 19, yy + rh / 2 - 8, x0 + 35, yy + rh / 2 + 8, 8, pal["card"],
+                                 self._mix(pal["sub"], pal["card"], 0.35), 1.6)
+                    tx9 = x0 + 44
+                else:
+                    self._bd_box(cv, x0 + 21, yy + rh / 2 - 4, x0 + 29, yy + rh / 2 + 4, 3, col9)
+                    tx9 = x0 + 38
+                rw = int(self._tw(right, self._bf(9, 2))) + 8 if right else 0
+                cv.create_text(tx9, yy + rh / 2, text=self._bd_fit(name, fb, x1 - 26 - rw - tx9),
+                               font=fb, fill=pal["ink"], anchor="w")
+                if right:
+                    cv.create_text(x1 - 20, yy + rh / 2, text=right, font=self._bf(9, 2), anchor="e",
+                                   fill=self.CAL_DUE if hot else pal["sub"])
+                if hit:
+                    self._board_ui_hit.append((x0 + 14, yy, x1 - 14, yy + rh, hit))
+                yy += rh
+            return yy + 14
+        shown = self._cal_shown(evs)
+        same = [e for e in shown if e["s"] <= sel <= e["e"] and (ev is None or e["id"] != ev["id"])]
+        yy = section("이 날의 다른 일정", [(e["cat"]["col"], e["name"], "끝" if e["done"] else "", False,
+                                     "cal:ev:" + e["id"]) for e in same[:4]], yy)
+        up = [e for e in shown if not e["done"] and e["e"] >= td]
+        up.sort(key=lambda e: e["e"])
+        duegate = bool(self.cfg.get("deadline_on"))
+        yy = section("다가오는 마감", [(e["cat"]["col"], e["name"], self._cal_dday(e["e"] - td),
+                                  e["e"] - td <= 3, "cal:ev:" + e["id"]) for e in up[:4]], yy,
+                     add="cal:dueadd" if duegate else None, empty="마감 말풍선에도 같이 떠요")
+        todo = []
+        self._cal_todo_txt = []
+        if getattr(self, "todo_on", False):
+            self._cal_todo_txt = [str(todo_text(t9)) for t9 in (getattr(self, "todos", None) or [])]
+            for i9, t9 in enumerate(self._cal_todo_txt[:5]):
+                tt = " ".join(p9.strip() for p9 in t9.split("\n") if p9.strip())
+                if tt:
+                    todo.append((None, tt, "", False, "cal:todo:%d" % i9))
+            section("할 일 말풍선", todo, yy, add="cal:todoadd", circle=True,
+                    empty="동그라미를 누르면 끝낸 것으로")
+        self._bd_box(cv, x0 + 16, y1 - 16 - 46, x1 - 16, y1 - 16, 14, pal["ink"])
+        fnw = self._bf(11, 2)
+        tw9 = int(self._tw("새 일정", fnw))
+        mx = (x0 + x1) / 2.0
+        self._bd_ic(cv, "l_plus", mx - tw9 / 2.0 - 4, y1 - 16 - 23, 16, self._bd_on(pal["ink"]))
+        cv.create_text(mx + 12, y1 - 16 - 23, text="새 일정", font=fnw, fill=self._bd_on(pal["ink"]))
+        self._board_ui_hit.append((x0 + 16, y1 - 16 - 46, x1 - 16, y1 - 16, "cal:new"))
+
+    # ── 누르기 ──
+    def _cal_act(self, a):
+        d = self._cal_data()
+        y, m = self._cal_view()
+        if a in ("prev", "next"):
+            k = -1 if a == "prev" else 1
+            if d["view"] == "week":
+                self._cal_sel = self._cal_selday() + 7 * k
+                self._cal_ym = self._cal_ymd(self._cal_sel)[:2]
+            else:
+                m += k
+                if m < 1:
+                    y, m = y - 1, 12
+                elif m > 12:
+                    y, m = y + 1, 1
+                self._cal_ym = (y, m)
+        elif a == "today":
+            self._cal_sel = self._cal_today()
+            self._cal_ym = self._cal_ymd(self._cal_sel)[:2]
+            self._cal_ev = None
+        elif a.startswith("view:"):
+            v = a[5:]
+            if v in ("month", "week", "list"):
+                d["view"] = v
+                self._cal_save()
+        elif a.startswith("flt:"):
+            self._cal_flt = a[4:]
+        elif a.startswith("day:"):
+            try:
+                self._cal_sel = int(a[4:])
+            except ValueError:
+                return
+            self._cal_ev = None
+            ym = self._cal_ymd(self._cal_sel)[:2]
+            if ym != self._cal_view():
+                self._cal_ym = ym                # 옅은 날(앞·뒤 달)을 누르면 그 달로
+        elif a.startswith("ev:"):
+            eid = a[3:]
+            if self._cal_ev == eid:              # 고른 것을 다시 누르면 고친다
+                if eid.startswith("due:"):
+                    self._cal_act("dueedit:" + eid[4:])
+                else:
+                    self._cal_edit(eid)
+                return
+            self._cal_ev = eid
+        elif a.startswith(("pd:", "pt:")):
+            ev = self._cal_raw(a[3:])
+            if ev is None:
+                return
+            key = a[:2]
+            on = not bool(ev.get(key, key == "pd"))
+            self._cal_ev = a[3:]
+            self._cal_pin_set(a[3:], key, on)
+            self._board_toast(("마감" if key == "pd" else "할 일") + " 말풍선에 "
+                              + ("띄웠어요" if on else "안 띄워요"))
+            return
+        elif a.startswith(("dueedit:", "dueconv:")):
+            key9 = a.split(":", 1)[1]
+            i9 = self._cal_due_idx(key9)
+            if i9 is None:                       # 그 사이 말풍선에서 지워졌다
+                self._cal_ev = None
+                self._board_toast("그 마감은 이미 없어요")
+                return
+            if a.startswith("dueedit:"):
+                self.add_due(edit=i9)
+                return
+            got = self._cal_due_to_event(key9)
+            if got:
+                self._cal_ev = got
+                self._board_toast("일정으로 바꿨어요 — 단계와 기간을 넣어 보세요")
+                self._cal_edit(got)
+            return
+        elif a == "dueadd":
+            self.add_due()
+            return
+        elif a == "todoadd":
+            self.add_todo()
+            return
+        elif a.startswith("todo:"):
+            try:
+                i9 = int(a[5:])
+            except ValueError:
+                return
+            # 그려 둔 글과 지금 그 번호의 글이 같을 때만 끝낸다 — 그 사이 말풍선에서
+            # 지웠으면 번호가 밀려 엉뚱한 할 일이 끝난 것으로 된다
+            want = self._cal_todo_txt[i9] if 0 <= i9 < len(self._cal_todo_txt) else None
+            have = (str(todo_text(self.todos[i9])) if 0 <= i9 < len(self.todos) else None)
+            if want is None or have != want:
+                self._board_draw()
+                return
+            self._todo_done(i9)
+            return
+        elif a.startswith("step:"):
+            _s, eid, i = a.split(":", 2) if a.count(":") >= 2 else ("", "", "")
+            eid, i = a[5:].rsplit(":", 1)
+            ev = self._cal_raw(eid)
+            try:
+                st = [x for x in (ev.get("steps") or []) if isinstance(x, dict)
+                      and str(x.get("t") or "").strip()][int(i)]
+            except Exception:
+                return
+            st["ok"] = not st.get("ok")
+            sts = [x for x in ev.get("steps") or [] if isinstance(x, dict)]
+            if sts and all(x.get("ok") for x in sts):
+                ev["done"] = True                 # 단계를 다 끝내면 일정도 끝
+                self._board_toast("'%s' 끝! 수고했어요" % str(ev.get("name") or "")[:16])
+            elif ev.get("done"):
+                ev["done"] = False
+            self._cal_ev = eid
+            self._cal_save()
+        elif a.startswith("done:"):
+            ev = self._cal_raw(a[5:])
+            if ev is None:
+                return
+            ev["done"] = not ev.get("done")
+            if ev["done"]:
+                for x in ev.get("steps") or []:
+                    if isinstance(x, dict):
+                        x["ok"] = True
+            self._cal_save()
+        elif a.startswith("edit:"):
+            self._cal_edit(a[5:])
+            return
+        elif a == "new":
+            self._cal_edit(None)
+            return
+        elif a == "catadd":
+            def done(v):
+                cats = d["cats"]
+                if len(cats) >= 12:
+                    self._board_toast("분류는 열두 개까지예요")
+                    return
+                used = set(str(c.get("col")) for c in cats)
+                col = next((c for c in self.CAL_COLS if c not in used), self.CAL_COLS[len(cats) % 8])
+                cats.append({"id": "c%d" % int(time.time() * 1000), "name": v[:10], "col": col})
+                self._cal_save()
+                self._board_draw()
+            self._board_ask("새 분류 이름", "", done)
+            return
+        self._board_draw()
+
+    def _cal_rclick(self, e):
+        """달력에서 우클릭 — 일정이면 고치기·끝냄·지우기, 분류면 이름·색·지우기."""
+        what = self._board_hit_at(e.x, e.y, self._board_ui_hit) or ""
+        pal = self._board_pal()
+        mn = tk.Menu(self._board_win, tearoff=0, font=self._bf(9), bg=pal["card"], fg=pal["ink"],
+                     activebackground=pal["soft"], activeforeground=pal["ink"], bd=0)
+        if what.startswith("cal:ev:due:"):
+            key9 = what[11:]
+            if self._cal_due_idx(key9) is None:
+                return
+            self._cal_ev = what[7:]
+            self._board_draw()
+
+            def due_del():
+                i9 = self._cal_due_idx(key9)      # 누르는 순간에 다시 찾는다
+                if i9 is not None:
+                    self.dues.pop(i9)
+                    self._due_save()
+                self._cal_ev = None
+                self._due_refresh()
+                self._board_draw()
+            mn.add_command(label="고치기", command=lambda: self._cal_act("dueedit:" + key9))
+            mn.add_command(label="일정으로 바꾸기 (단계·기간)",
+                           command=lambda: self._cal_act("dueconv:" + key9))
+            mn.add_separator()
+            mn.add_command(label="지우기", command=due_del)
+        elif what.startswith("cal:ev:"):
+            eid = what[7:]
+            ev = self._cal_raw(eid)
+            if ev is None:
+                return
+            self._cal_ev = eid
+            self._board_draw()
+            mn.add_command(label="고치기", command=lambda: self._cal_edit(eid))
+            mn.add_command(label="다시 진행" if ev.get("done") else "끝냄으로 표시",
+                           command=lambda: self._cal_act("done:" + eid))
+            mn.add_separator()
+            if self.due_panel is not None:
+                mn.add_command(label=("✓ " if ev.get("pd", True) else "    ") + "마감 말풍선에 띄우기",
+                               command=lambda: self._cal_act("pd:" + eid))
+            if self.todo_panel is not None:
+                mn.add_command(label=("✓ " if ev.get("pt") else "    ") + "할 일 말풍선에 띄우기",
+                               command=lambda: self._cal_act("pt:" + eid))
+            mn.add_separator()
+            mn.add_command(label="지우기", command=lambda: self._cal_del(eid))
+        elif what.startswith("cal:flt:") and what[8:] and what[8:] != "__due":
+            cid = what[8:]
+            c = self._cal_cat(cid)
+
+            def rename():
+                def done(v):
+                    c["name"] = v[:10]
+                    self._cal_save()
+                    self._board_draw()
+                self._board_ask("분류 이름", str(c.get("name") or ""), done)
+
+            def recolor():
+                got = self._pick_color(str(c.get("col") or "#ee5a8b"))
+                if got:
+                    c["col"] = got
+                    self._cal_save()
+                    self._board_uiph = {}
+                    self._board_draw()
+
+            def remove():
+                d = self._cal_data()
+                d["cats"] = [x for x in d["cats"] if str(x.get("id")) != cid]
+                for ev in d["events"]:
+                    if str(ev.get("cat")) == cid:
+                        ev["cat"] = ""            # 일정은 남긴다 (분류 없음)
+                if self._cal_flt == cid:
+                    self._cal_flt = ""
+                self._cal_save()
+                self._board_draw()
+            mn.add_command(label="이름 바꾸기", command=rename)
+            mn.add_command(label="색 바꾸기", command=recolor)
+            mn.add_separator()
+            mn.add_command(label="분류 지우기 (일정은 남아요)", command=remove)
+        elif what.startswith("cal:day:"):
+            try:
+                n = int(what[8:])
+            except ValueError:
+                return
+            self._cal_sel = n
+            self._cal_ev = None
+            self._board_draw()
+            mn.add_command(label="%s에 새 일정" % self._cal_span(n, n),
+                           command=lambda: self._cal_edit(None))
+        else:
+            return
+        try:
+            mn.tk_popup(e.x_root, e.y_root)
+        finally:
+            mn.grab_release()
+
+    def _cal_del(self, eid):
+        d = self._cal_data()
+        d["events"] = [x for x in d["events"] if str(x.get("id")) != str(eid)]
+        if self._cal_ev == eid:
+            self._cal_ev = None
+        self._cal_save()
+        self._board_toast("일정을 지웠어요")
+        self._board_draw()
+
+    def _cal_put(self, eid, name, cat, a, b, steps, memo="", pd=None, pt=None):
+        """일정을 넣거나 고친다. steps: [(이름, 날 수 또는 None)]. 끝낸 표시는 이름으로 잇는다.
+        pd·pt — 마감·할 일 말풍선에 띄울지 (None 이면 그대로, 새 일정은 마감만 켠다)."""
+        d = self._cal_data()
+        ev = self._cal_raw(eid) if eid else None
+        if ev is None:
+            if len(d["events"]) >= self.CAL_EV_MAX:
+                self._board_toast("일정이 너무 많아요 — 지난 것을 지워 주세요")
+                return None
+            ev = {"id": "e%d" % int(time.time() * 1000), "done": False}
+            d["events"].append(ev)
+        old = {str(x.get("t")): bool(x.get("ok")) for x in (ev.get("steps") or [])
+               if isinstance(x, dict)}
+        ev["name"] = str(name).strip()[:40] or "일정"
+        ev["cat"] = str(cat or "")
+        if b < a:
+            a, b = b, a
+        ev["s"], ev["e"] = self._cal_s(a), self._cal_s(b)
+        ev["steps"] = [{"t": str(t)[:20], "d": (self._cal_s(n) if n is not None else ""),
+                        "ok": old.get(str(t)[:20], False)}
+                       for t, n in steps[:self.CAL_STEP_MAX]]
+        if ev["steps"] and not all(x["ok"] for x in ev["steps"]):
+            ev["done"] = False
+        ev["memo"] = str(memo or "")[:120]
+        ev["pd"] = bool(ev.get("pd", True) if pd is None else pd)
+        ev["pt"] = bool(ev.get("pt", False) if pt is None else pt)
+        self._cal_save()
+        return ev["id"]
+
+    def _cal_steps_parse(self, text, y, m):
+        """단계 글 → [(이름, 날 수 또는 None)]. 한 줄에 하나, 끝에 날짜를 적으면 그 날."""
+        out = []
+        for ln in str(text or "").splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            nm, n = ln, None
+            if " " in ln:
+                head, tail = ln.rsplit(" ", 1)
+                got = self._cal_parse(tail, y, m) if any(ch.isdigit() for ch in tail) else None
+                if got is not None and head.strip():
+                    nm, n = head.strip(), got
+            out.append((nm[:20], n))
+        return out[:self.CAL_STEP_MAX]
+
+    CAL_QUICK = (("하루", 0), ("3일", 2), ("1주", 6), ("2주", 13), ("한 달", 29))
+
+    def _cal_edit(self, eid):
+        """일정 넣기·고치기 창 (새 디자인). 고치는 동안의 값은 ed 에 들고 있다가, 단계를
+        더하거나 뺄 때 창을 다시 그린다 — 그리기 전에 입력 칸의 글을 ed 로 거둔다."""
+        old = getattr(self, "_cal_edit_st", None)
+        if old is not None:
+            try:
+                old["close"]()
+            except Exception:
+                pass
+        d = self._cal_data()
+        ev = self._cal_raw(eid) if eid else None
+        sel = self._cal_selday()
+        a0 = self._cal_p(ev.get("s")) if ev else sel
+        b0 = self._cal_p(ev.get("e")) if ev else sel
+        a0 = sel if a0 is None else a0
+        b0 = a0 if (b0 is None or b0 < a0) else b0
+        vy, vm = self._cal_ymd(a0)[:2]
+        cat0 = (str(ev.get("cat") or "") if ev else
+                str(self._cal_flt if self._cal_flt not in ("", "__due")
+                    else (d["cats"][0]["id"] if d["cats"] else "")))
+        steps0 = []
+        if ev:
+            for x in (ev.get("steps") or [])[:self.CAL_STEP_MAX]:
+                if isinstance(x, dict) and str(x.get("t") or "").strip():
+                    n9 = self._cal_p(x.get("d"))
+                    steps0.append([str(x["t"])[:20], self._cal_fmt(n9) if n9 is not None else ""])
+        ed = {"name": str(ev.get("name") or "") if ev else "", "cat": cat0,
+              "s": self._cal_fmt(a0), "e": self._cal_fmt(b0), "steps": steps0,
+              "pd": bool(ev.get("pd", True)) if ev else True,
+              "pt": bool(ev.get("pt", False)) if ev else False,
+              "msg": "", "focus": "name"}
+        W = 460
+        has_d, has_t = self.due_panel is not None, self.todo_panel is not None
+
+        def height():
+            ncat = len(d["cats"][:12])
+            rows_c = max(1, (ncat + 3) // 4)
+            return (62 + 22 + 46 + 18            # 이름
+                    + 22 + rows_c * 38 + 12      # 분류
+                    + 22 + 46 + 8 + 30 + 18      # 기간 + 빠른 고르기
+                    + 22 + len(ed["steps"]) * 46 + 36 + 16     # 단계
+                    + ((22 + (int(has_d) + int(has_t)) * 40 + 10) if (has_d or has_t) else 0)
+                    + 24 + 38 + 22)
+
+        def closed():
+            self._cal_edit_win = None
+            self._cal_edit_st = None
+            self._cal_edit_w = None
+        win, cv, st = self._bd_dlg("일정 고치기" if ev else "새 일정", W, height(), on_close=closed)
+        pal = st["pal"]
+        self._cal_edit_win, self._cal_edit_st = win, st
+        w = {}
+
+        def gather():
+            """입력 칸의 글을 ed 로 거둔다 (다시 그리기 전에 · 저장하기 전에)."""
+            try:
+                ed["name"] = w["name"].get()
+                ed["s"], ed["e"] = w["s"].get(), w["e"].get()
+                for i9, (en, edt) in enumerate(w["rows"]):
+                    ed["steps"][i9] = [en.get(), edt.get()]
+            except Exception:
+                pass
+
+        def redraw(focus=None):
+            gather()
+            if focus:
+                ed["focus"] = focus
+            draw()
+
+        def set_cat(cid):
+            ed["cat"] = cid
+            redraw()
+
+        def quick(n):
+            gather()
+            a = self._cal_parse(ed["s"], vy, vm)
+            if a is None:
+                ed["msg"] = "시작 날짜를 먼저 적어 주세요 — 9/18 처럼"
+            else:
+                ed["e"] = self._cal_fmt(a + n)
+                ed["msg"] = ""
+            draw()
+
+        def step_add():
+            gather()
+            if len(ed["steps"]) >= self.CAL_STEP_MAX:
+                ed["msg"] = "단계는 여덟 개까지예요"
+            else:
+                ed["steps"].append(["", ""])
+                ed["focus"] = "step%d" % (len(ed["steps"]) - 1)
+            draw()
+
+        def step_del(i9):
+            gather()
+            if 0 <= i9 < len(ed["steps"]):
+                ed["steps"].pop(i9)
+            draw()
+
+        def toggle(key):
+            gather()
+            ed[key] = not ed[key]
+            draw()
+
+        def save(_e=None):
+            gather()
+            nm = ed["name"].strip()
+            if not nm:
+                ed["msg"], ed["focus"] = "이름을 적어 주세요", "name"
+                draw()
+                return "break"
+            a = self._cal_parse(ed["s"], vy, vm)
+            if a is None:
+                ed["msg"], ed["focus"] = "시작 날짜를 읽지 못했어요 — 9/18 처럼 적어 주세요", "s"
+                draw()
+                return "break"
+            ya, ma = self._cal_ymd(a)[:2]
+            b = self._cal_parse(ed["e"], ya, ma) if ed["e"].strip() else a
+            if b is None:
+                ed["msg"], ed["focus"] = "끝나는 날짜를 읽지 못했어요 — 9/28 처럼 적어 주세요", "e"
+                draw()
+                return "break"
+            if b < a:
+                b2 = self._cal_parse(ed["e"], ya + 1, ma)     # 12/28 – 1/5 처럼 해를 넘기는 일정
+                if b2 is not None and b2 - a <= 370 and not any(
+                        c9 in ed["e"] for c9 in ("년",)) and ed["e"].count("-") + ed["e"].count("/") \
+                        + ed["e"].count(".") < 2:
+                    b = b2
+                else:
+                    ed["msg"], ed["focus"] = "끝나는 날이 시작보다 앞이에요", "e"
+                    draw()
+                    return "break"
+            steps = []
+            for i9, (t9, d9) in enumerate(ed["steps"]):
+                t9 = t9.strip()
+                if not t9 and not d9.strip():
+                    continue                         # 빈 줄은 버린다
+                if not t9:
+                    ed["msg"], ed["focus"] = "단계 이름을 적어 주세요", "step%d" % i9
+                    draw()
+                    return "break"
+                n9 = None
+                if d9.strip():
+                    n9 = self._cal_parse(d9, ya, ma)
+                    if n9 is not None and n9 < a and self._cal_ymd(b)[0] > ya:
+                        n9 = self._cal_parse(d9, ya + 1, ma) or n9
+                    if n9 is None:
+                        ed["msg"], ed["focus"] = "'%s' 의 날짜를 읽지 못했어요" % t9[:8], "step%d" % i9
+                        draw()
+                        return "break"
+                steps.append((t9[:20], n9))
+            names = [t9 for t9, _n in steps]
+            if len(set(names)) != len(names):
+                ed["msg"] = "같은 이름의 단계가 있어요 — 이름을 다르게 적어 주세요"
+                draw()
+                return "break"
+            got = self._cal_put(eid if ev else None, nm, ed["cat"], a, b, steps,
+                                pd=ed["pd"], pt=ed["pt"])
+            if not got:
+                ed["msg"] = "일정이 너무 많아요 — 지난 것을 지워 주세요"
+                draw()
+                return "break"
+            st["close"]()
+            self._cal_ev = got
+            if not (a <= self._cal_selday() <= b):
+                self._cal_sel = a
+            self._cal_ym = self._cal_ymd(self._cal_selday())[:2]
+            if self._board_alive():
+                self._board_draw()
+            return "break"
+
+        def remove():
+            st["close"]()
+            self._cal_del(eid)
+
+        def draw():
+            H = height()
+            st["clear"]()
+            try:
+                win.geometry("%dx%d" % (W, H))
+                cv.configure(height=H)
+            except Exception:
+                pass
+            st["head"]()
+            fl = self._bf(9, True)
+            L, R = 24, W - 24
+
+            def lab(y, t, sub=""):
+                cv.create_text(L, y + 8, text=t, font=fl, fill=pal["ink2"], anchor="w")
+                if sub:
+                    cv.create_text(L + int(self._tw(t, fl)) + 8, y + 8, text=sub,
+                                   font=self._bf(8, True),
+                                   fill=self._mix(pal["sub"], pal["card"], 0.25), anchor="w")
+                return y + 22
+            y = lab(62, "이름")
+            w["name"] = st["field"](L, y, R, 46, ed["name"], font=self._bf(11, True))
+            y += 46 + 18
+            y = lab(y, "분류")
+            cats = d["cats"][:12]
+            fc = self._bf(9, True)
+            x = L
+            w["cats"] = {}
+            for c in cats:
+                cw9 = int(self._tw(str(c["name"]), fc)) + 38
+                if x + cw9 > R:
+                    x = L
+                    y += 38
+                on = (str(c["id"]) == str(ed["cat"]))
+                if on:
+                    self._bd_box(cv, x, y, x + cw9, y + 32, 16, self._mix(c["col"], pal["card"], 0.84),
+                                 c["col"], 1.6)
+                else:
+                    self._bd_box(cv, x, y, x + cw9, y + 32, 16, pal["fill"])
+                self._bd_box(cv, x + 12, y + 11, x + 22, y + 21, 5, c["col"])
+                cv.create_text(x + 29, y + 16, text=str(c["name"]), font=fc, anchor="w",
+                               fill=self._mix(c["col"], pal["ink"], 0.55) if on else pal["ink2"])
+                st["hits"].append((x, y, x + cw9, y + 32, lambda cid=str(c["id"]): set_cat(cid)))
+                w["cats"][str(c["id"])] = (x, y, x + cw9, y + 32)
+                x += cw9 + 6
+            y += 38 + 12
+            y = lab(y, "기간", "9/18 · 9-18 · 18 처럼")
+            fw = (R - L - 28) / 2.0
+            w["s"] = st["field"](L, y, L + fw, 46, ed["s"], hint="시작")
+            cv.create_text(L + fw + 14, y + 23, text="–", font=self._bf(11, True), fill=pal["sub"])
+            w["e"] = st["field"](L + fw + 28, y, R, 46, ed["e"], hint="끝")
+            y += 46 + 8
+            x = L
+            fq = self._bf(8, True)
+            for t9, n9 in self.CAL_QUICK:
+                qw = int(self._tw(t9, fq)) + 22
+                self._bd_box(cv, x, y, x + qw, y + 26, 13, pal["fill"])
+                cv.create_text(x + qw / 2.0, y + 13, text=t9, font=fq, fill=pal["ink2"])
+                st["hits"].append((x, y, x + qw, y + 26, lambda n=n9: quick(n)))
+                x += qw + 6
+            y += 30 + 18
+            y = lab(y, "단계", "날짜를 적으면 달력의 띠에 점이 찍혀요")
+            w["rows"] = []
+            for i9, (t9, d9) in enumerate(ed["steps"]):
+                cv.create_text(L + 10, y + 20, text="%d" % (i9 + 1), font=self._bf(9, 2),
+                               fill=pal["sub"])
+                en = st["field"](L + 26, y, R - 36 - 112, 40, t9)
+                edt = st["field"](R - 36 - 106, y, R - 36, 40, d9, hint="" if d9 else "날짜")
+                self._bd_ic(cv, "l_x", R - 14, y + 20, 14, pal["sub"])
+                st["hits"].append((R - 30, y + 4, R + 2, y + 36, lambda i=i9: step_del(i)))
+                w["rows"].append((en, edt))
+                y += 46
+            self._bd_box(cv, L, y, R, y + 32, 12, pal["fill"])
+            cv.create_text((L + R) / 2.0, y + 16, text="+ 단계 추가", font=self._bf(9, True),
+                           fill=pal["sub"])
+            st["hits"].append((L, y, R, y + 32, step_add))
+            w["step_add"] = (L, y, R, y + 32)
+            y += 36 + 16
+            if has_d or has_t:
+                y = lab(y, "바탕화면 말풍선", "캐릭터 곁에 같이 떠요")
+                colc = self._cal_cat(ed["cat"])["col"]
+                for key, t9, s9, ok9 in (("pd", "마감 말풍선에 띄우기", "끝나는 날까지 D-며칠", has_d),
+                                         ("pt", "할 일 말풍선에 띄우기", "시작한 뒤 다음 단계 하나", has_t)):
+                    if not ok9:
+                        continue
+                    cv.create_text(L, y + 20, text=t9, font=self._bf(10, True), fill=pal["ink"],
+                                   anchor="w")
+                    cv.create_text(L + int(self._tw(t9, self._bf(10, True))) + 10, y + 21, text=s9,
+                                   font=self._bf(8, True), fill=pal["sub"], anchor="w")
+                    self._bd_switch(cv, R, y + 20, ed[key], colc, pal)
+                    st["hits"].append((L, y + 2, R, y + 38, lambda k=key: toggle(k)))
+                    w["sw_" + key] = (L, y + 2, R, y + 38)
+                    y += 40
+                y += 10
+            by = H - 22 - 19
+            if ed["msg"]:
+                cv.create_text(L, by - 34, text=self._bd_fit(ed["msg"], self._bf(9, True), R - L),
+                               font=self._bf(9, True), fill=self.CAL_DUE, anchor="w")
+            x = st["button"](R, by, "저장", save, "ink")
+            st["button"](x - 8, by, "취소", st["close"], "fill")
+            if ev:
+                st["button"](L + int(self._tw("지우기", self._bf(10, True))) + 12, by, "지우기",
+                             remove, "danger")
+            for w9 in st["ents"]:
+                w9.bind("<Return>", save)
+            tgt = {"name": w["name"], "s": w["s"], "e": w["e"]}.get(ed["focus"])
+            if tgt is None and ed["focus"].startswith("step"):
+                try:
+                    tgt = w["rows"][int(ed["focus"][4:])][0]
+                except Exception:
+                    tgt = None
+            try:
+                (tgt or w["name"]).focus_force()
+                (tgt or w["name"]).icursor("end")
+            except Exception:
+                pass
+        w["ed"], w["save"], w["draw"], w["gather"] = ed, save, draw, gather
+        self._cal_edit_w = w
+        self._cal_edit_save = save
+        draw()
+        st["place"]()
+        try:
+            w["name"].focus_force()
+        except Exception:
+            pass
+
+    def _board_anim(self):
+        """스티커 모션 — 그 항목만 옮기거나 그림을 갈아 끼운다 (통째로 안 그린다)."""
+        if not self._board_alive():
+            return
+        if self._board_tab == "cal":
+            # 달력 탭 — 무대는 안 보인다. 알림 글 만료와 날짜 넘김만 본다.
+            tv = getattr(self, "_board_toast_v", None)
+            day9 = time.strftime("%Y-%m-%d")
+            if (tv and time.time() - tv[1] > 3.0) or (self._board_day and day9 != self._board_day):
+                if tv and time.time() - tv[1] > 3.0:
+                    self._board_toast_v = None
+                self._board_day = day9
+                self._board_draw()
+            self._board_day = day9
+            return
+        tv = getattr(self, "_board_toast_v", None)
+        if tv and time.time() - tv[1] > 3.0:
+            self._board_toast_v = None
+            self._board_draw_stage()
+        bcv = self._board_bcv
+        W, H = self._stk_wh.get("board") or (1, 1)
+        t = time.time()
+        self._board_poke_tick(t)
+        pk9 = self._board_poke
+        bud9 = {"end": time.perf_counter() + self.STK_XF_BUDGET}
+        for meta in self._stk_list("board"):
+            mo = str(meta.get("m") or "")
+            if not mo:
+                continue
+            sid = str(meta.get("id") or "")
+            if pk9 is not None and pk9.get("kind") == "stk" and str(pk9.get("id")) == sid:
+                continue
+            pose = self._stk_motion_pose(mo, t, float(sum(ord(c) for c in sid) % 7))
+            if pose is None:                  # 옛 '깜빡' 등 — 없는 모션은 가만히
+                continue
+            items = bcv.find_withtag("stk_" + sid)
+            if not items:
+                continue
+            it = items[-1]
+            dx, dy, a9, sx9, sy9 = pose
+            try:
+                if mo == "spin":
+                    ph2 = self._board_spin_img(meta, W, a9, bud9)
+                else:
+                    ph2 = self._stk_xform(meta, W, a9, sx9, sy9, pil=False, budget=bud9)
+                if ph2 is not None and self._board_stk_last.get(sid) is not ph2:
+                    self._board_stk_last[sid] = ph2
+                    bcv.itemconfigure(it, image=ph2)
+                bcv.coords(it, float(meta.get("x", .5)) * W + dx, float(meta.get("y", .5)) * H + dy)
+            except Exception:
+                pass
+        # 오노추 재생 연출 — 릴이 돌고(12장 · 10도) 음표가 떠오른다
+        if self._board_playing() and self._board_reel:
+            reels, nx, ny = self._board_reel
+            ang = int((t * 90) % 120) // 10 * 10
+            ph9 = self._bd_cached(("reel", ang), lambda: self._bd_reel(ang))
+            if ph9 is not None:
+                for it9 in reels:
+                    try:
+                        bcv.itemconfigure(it9, image=ph9)
+                    except Exception:
+                        pass
+            if t - self._board_note_at > 0.7:
+                self._board_note_at = t
+                pal9 = self._board_pal()
+                it9 = self._bd_put(bcv, ("ic", "music", 14, pal9["accent"]),
+                                   lambda: self._bd_icon("music", 14, pal9["accent"]),
+                                   nx + random.randint(-14, 14), ny, anchor="center", tags=("dyn", "bfx"))
+                if it9 is not None:
+                    self._board_fx.append((it9, nx + random.randint(-14, 14), ny, t, random.uniform(-12, 12)))
+        # 지금 듣는 곡이 바뀌면 곡 이름 자리를 다시 그린다 (1.5초에 한 번 본다) · 날이 바뀌면 D-day 도
+        if t - self._board_bgm_at > 1.5:
+            self._board_bgm_at = t
+            nm9 = self._board_bgm_title()
+            if self._board_bgm_last is not None and nm9 != self._board_bgm_last:
+                self._board_draw()
+            self._board_bgm_last = nm9
+            day9 = time.strftime("%Y-%m-%d")
+            if self._board_day and day9 != self._board_day:
+                self._board_draw_stage()
+            self._board_day = day9
 
     def _draw_prop_top(self, yo):
         """팔 위 소품 — 머리를 따라간다 (_follow_head). 본체는 _draw_prop_top_raw."""
@@ -39377,6 +46320,12 @@ class Mascot:
             pill(RX, y, "끌어서 맞추기", go, strong=True)
             return 0
 
+        def err_dir_row(y):
+            label(y, "오류 기록 폴더")
+            pill(RX, y, "폴더 열기",
+                 lambda: self._safe("open_state", self._open_state_dir))
+            return 0
+
         def chevron(cx, y, sign):
             """sign -1이면 ‹, +1이면 › 모양."""
             for dy in (-5, 5):
@@ -39734,6 +46683,9 @@ class Mascot:
                 y += 44 + 16
             y += 8
 
+            # 뭔가 안 될 때 보내 줄 파일이 있는 폴더 — 경로를 말로 알려 주면 못
+            # 찾는다(지뢰 132). 우클릭 메뉴에서 여기로 옮겼다 (요청).
+            y = group(y, "문제 해결", [err_dir_row])
 
             if fb_on:
                 self._oval(cv, PAD + 3, y - 4, PAD + 11, y + 4,
@@ -39849,6 +46801,8 @@ class Mascot:
                 new["settings_pos"] = list(self._set_pos)
             new["work_apps"] = apps_var.get().strip()
             new["room_nick"] = nick_var.get().strip()[:14]
+            for k9 in ("magnet", "mag_side"):      # 메뉴·끌기가 정한다 (창을 연 뒤 바뀌었을 수 있다)
+                new[k9] = self.us.get(k9, new.get(k9))
             _msg = msg_var.get().strip()[:20]
             new["room_msg"] = _msg
             new["room_msg_day"] = self._my_workday() if _msg else ""
@@ -40164,8 +47118,10 @@ class Mascot:
     ROOM_GOAL_N = 20         #   저장·통신·설정이 서로 다른 길이가 된다
 
     def _room_msg(self):
-        """오늘 한 줄. 작업일이 바뀌면 저절로 비워진다 ('오늘' 목표니까)."""
-        if str(self.us.get("room_msg_day") or "") != self._my_workday():
+        """오늘 한 줄. 작업일이 바뀌면 저절로 비워진다 ('오늘' 목표니까).
+        '문구 저장'(room_msg_keep)을 켜 두었으면 날이 바뀌어도 그대로다 (요청)."""
+        if (not self.us.get("room_msg_keep")
+                and str(self.us.get("room_msg_day") or "") != self._my_workday()):
             return ""
         return str(self.us.get("room_msg") or "").strip()[:self.ROOM_MSG_N]
 
@@ -40479,10 +47435,12 @@ class Mascot:
             pass
         self._room_key_last = None
 
-    def _room_msg_set(self, text):
-        """오늘 한 줄을 정한다 (빈 글자면 지운다)."""
+    def _room_msg_set(self, text, keep=None):
+        """오늘 한 줄을 정한다 (빈 글자면 지운다). keep 은 '문구 저장' — None 이면 그대로 둔다."""
         text = str(text or "").strip()[:20]
         self.us["room_msg"] = text
+        if keep is not None:
+            self.us["room_msg_keep"] = bool(keep)
         self.us["room_msg_day"] = self._my_workday() if text else ""
         try:      # 여는 순간 지워지는 open("w") 말고 _save_json 으로 (지뢰 35)
             _save_json(self.settings_path, self.us, indent=1)
@@ -40571,7 +47529,8 @@ class Mascot:
         win.configure(bg=cd["panel"])
         W = u(330)
         rowh = u(74)
-        H = u(96) + rowh * len(self.MSGWIN_ROWS) + u(66)
+        keeph = u(32)                  # 오늘 한 줄 칸 아래 '문구 저장' 줄
+        H = u(96) + rowh * len(self.MSGWIN_ROWS) + keeph + u(66)
         cv = tk.Canvas(win, width=W, height=H, bg=cd["panel"],
                        highlightthickness=0, bd=0)
         cv.pack()
@@ -40624,6 +47583,37 @@ class Mascot:
                                fill=self._shade(cd["fill"], 0.28))
                 paste_hit.append((bx0, by, W - u(20), by + u(38), key))
             y += rowh
+            if key == "msg":
+                keep_y = by + u(38) + u(20)
+                y += keeph
+
+        # 문구 저장 — 켜고 저장하면 한 줄이 내일도 모레도, 고칠 때까지 남는다 (요청)
+        keep = {"on": bool(self.us.get("room_msg_keep")), "box": None}
+
+        def keep_draw():
+            cv.delete("mkeep")
+            on9 = keep["on"]
+            fb9 = self._uf(8, True)
+            deep = self._shade(cd["fill"], 0.28)
+            tw9 = int(self._tw("문구 저장", fb9))
+            x0, x1 = u(22), u(22) + u(30) + tw9 + u(14)
+            self._rr_soft(cv, x0, keep_y - u(12), x1, keep_y + u(12), u(12),
+                          fill=(cd["fill"] if on9 else "#ffffff"), outline=edge,
+                          width=2, tags=("dyn", "mkeep"))
+            self._soft_dot(cv, x0 + u(14), keep_y, u(7),
+                           "#ffffff", outline=("" if on9 else edge),
+                           width=(0 if on9 else 2), tags=("dyn", "mkeep"))
+            if on9:
+                cv.create_text(x0 + u(14), keep_y, text="✓", font=self._uf(7, True),
+                               fill=deep, tags=("dyn", "mkeep"))
+            cv.create_text(x0 + u(26), keep_y, anchor="w", text="문구 저장", font=fb9,
+                           fill=("#ffffff" if on9 else deep), tags=("dyn", "mkeep"))
+            cv.create_text(W - u(24), keep_y, anchor="e",
+                           text=("고칠 때까지 매일 보여요" if on9
+                                 else "켜 두면 날이 바뀌어도 남아요"),
+                           font=self._uf(7, True), fill=sub, tags=("dyn", "mkeep"))
+            keep["box"] = (x0, keep_y - u(14), x1, keep_y + u(14))
+        keep_draw()
 
         # 마감 옆에 남은 날을 바로 보여 준다 — 잘못 썼는지 그 자리에서 보인다
         # **칸 안에 두면 안 된다** — Entry 가 캔버스 위에 얹혀 덮는다.
@@ -40661,7 +47651,7 @@ class Mascot:
         def done(save):
             if save:
                 self._safe("room_msg_set", self._room_msg_set,
-                           var["msg"].get())
+                           var["msg"].get(), keep["on"])
                 self._safe("room_goal_set", self._my_goal_set,
                            var["goal"].get(), None,
                            self._safe_str(self._due_parse,
@@ -40694,6 +47684,12 @@ class Mascot:
             # 붙여넣기가 먼저다 — 뒤에 두면 저장 단추 검사에 안 걸리지만,
             # 새 자리를 넣을 때는 늘 앞쪽에 두는 것이 이 프로젝트의 규칙이다
             # (지뢰 87).
+            kb9 = keep["box"]
+            if kb9 and kb9[0] <= ev.x <= kb9[2] and kb9[1] <= ev.y <= kb9[3]:
+                self._safe("ui_click", self._ui_click)
+                keep["on"] = not keep["on"]
+                keep_draw()
+                return
             for x0, y0, x1, y1, key9 in paste_hit:
                 if x0 <= ev.x <= x1 and y0 <= ev.y <= y1:
                     self._safe("ui_click", self._ui_click)
@@ -44920,7 +51916,8 @@ class Mascot:
         # 말풍선이 흐르는 동안에만 빨리 돈다. 100ms(10fps)로 흘리면
         # 한 프레임에 5px 씩 뛰어 뚝뚝 끊겨 보인다 (제보). 흐를 때만
         # 40ms(25fps)로 올린다 — 실측 한 프레임 4.7ms 라 잠깐이면 싸다.
-        ms9 = 40 if (self._song_hover or self._msg_hover) else 100
+        ms9 = 40 if (self._song_hover or self._msg_hover or self._room_poke is not None
+                     or self._room_pfx) else 100
         self._room_job = self.root.after(ms9, self._room_loop)   # 먼저 예약
         self._safe("room_frame", self._room_frame)
 
@@ -44959,6 +51956,102 @@ class Mascot:
                 bool(ts and time.time() - ts[1] < self.ROOM_TOAST),
                 int(time.time() - (self.room_net.ok_at if self.room_net else 0)
                     > 60))
+
+    def _room_my_body(self):
+        for ent in self._room_body:
+            if ent[2] == self.char:
+                return ent
+        return None
+
+    def _room_poke_start(self, kind, sid=None):
+        """누르면 반응 (꾸미기 아닐 때) — 내 캐릭터는 두 번 통통 + 하트, 스티커는 톡."""
+        now = time.time()
+        self._room_poke = {"kind": kind, "id": sid, "t0": now}
+        cv = self.room_cv
+        if kind == "char" and cv is not None:
+            ent = self._room_my_body()
+            bb = cv.bbox(ent[0]) if ent is not None else None
+            if bb:
+                if self._room_heart_ph is None:
+                    im = self._bd_icon("heart", 18, "#f07aa0")
+                    self._room_heart_ph = self._tkimg(im) if im is not None else False
+                if self._room_heart_ph:
+                    # 항목은 프레임이 만든다 — 누른 뒤 홈이 통째로 다시 그려지면
+                    # (나를 고르는 예전 일) 방금 만든 하트가 지워지기 때문이다
+                    hx, hy = (bb[0] + bb[2]) / 2.0, bb[1] + 10
+                    for i in range(3):
+                        self._room_pfx.append([None, hx + (i - 1) * 16, hy, now + i * 0.08, (i - 1) * 14.0])
+        if self._room_job is not None:            # 반응 동안은 촘촘히 (40ms)
+            try:
+                self.root.after_cancel(self._room_job)
+            except Exception:
+                pass
+            self._room_job = None
+        self._room_loop()
+
+    def _room_poke_tick(self, cv, now):
+        pk = self._room_poke
+        if pk is not None:
+            t = now - pk["t0"]
+            if pk["kind"] == "char":
+                ent = self._room_my_body()
+                if ent is None:
+                    self._room_poke = None
+                else:
+                    item, base = ent[0], ent[3]
+                    x = cv.coords(item)[0]
+                    if t >= 0.72:
+                        cv.coords(item, x, base)
+                        self._room_poke = None
+                    else:
+                        k9 = self._room_k()
+                        if t < 0.42:
+                            dy = -18 * k9 * math.sin(math.pi * t / 0.42)
+                        else:
+                            dy = -7 * k9 * math.sin(math.pi * min(1.0, (t - 0.42) / 0.3))
+                        cv.coords(item, x, base + dy)
+            else:
+                sid = str(pk.get("id") or "")
+                meta = self._stk_meta("room", sid)
+                items = cv.find_withtag("stk_" + sid)
+                W, H = self._stk_wh.get("room") or (1, 1)
+                if meta is None or not items:
+                    self._room_poke = None
+                else:
+                    cx, cy = float(meta.get("x", .5)) * W, float(meta.get("y", .5)) * H
+                    if t >= self.STK_POKE_T:
+                        ph2 = self._stk_photo(meta, self._stk_wpx(meta, W))
+                        self._room_poke = None
+                        dy = 0.0
+                    else:
+                        dy, a9, sx9, sy9 = self._stk_poke_pose(t)
+                        ph2 = self._stk_xform(meta, W, a9, sx9, sy9)
+                    if ph2 is not None:
+                        cv.itemconfigure(items[-1], image=ph2)
+                    cv.coords(items[-1], cx, cy + dy)
+        keep = []
+        for fx in self._room_pfx:
+            it, x0, y0, t0, vx = fx
+            tt = now - t0
+            if tt > 0.95:
+                if it is not None:
+                    try:
+                        cv.delete(it)
+                    except Exception:
+                        pass
+                continue
+            try:
+                p9 = (x0 + vx * max(0.0, tt), y0 - 60 * max(0.0, tt))
+                if it is None or not cv.type(it):          # 다시 그리기로 지워졌으면 새로
+                    it = fx[0] = cv.create_image(p9[0], p9[1], image=self._room_heart_ph,
+                                                 tags=("dyn", "rpfx"))
+                else:
+                    cv.coords(it, *p9)
+                cv.tag_raise(it)
+            except Exception:
+                continue
+            keep.append(fx)
+        self._room_pfx = keep
 
     @staticmethod
     def _room_hop(slot, now, k):
@@ -45300,6 +52393,8 @@ class Mascot:
             except Exception:
                 self._room_body = []
                 return
+        if self._room_poke is not None or self._room_pfx:
+            self._safe("room_poke", self._room_poke_tick, cv, now)
         # 노래 말풍선 마퀴 — 커서를 올리면 긴 제목이 옆으로 천천히 흐른다
         hov = self._song_hover
         if hov and hov in self._room_song_box:
@@ -47834,6 +54929,32 @@ class Mascot:
         self._soft_cache[key] = got
         return got
 
+    def _room_board_img(self, col, px):
+        """홈 내 칸의 마이 보드 아이콘 — 평범한 '홈' 집 모양 (요청). 달력 아이콘과 같은 결로
+        흰 둥근 판 위에 테마색 집."""
+        px = max(10, int(px))
+        key = ("boardic", str(col), px)
+        got = self._soft_cache.get(key)
+        if got is not None:
+            return got
+        S = 3
+        W = px * S
+        line = _g2_rgb(self._shade(col, 0.20)) + (255,)
+        face = _g2_rgb(col) + (255,)
+        im = Image.new("RGBA", (W, W), (0, 0, 0, 0))
+        d = ImageDraw.Draw(im)
+        lw = max(2, int(round(W * 0.062)))
+        r9 = W * 0.2
+        d.rounded_rectangle([W * .045, W * .045, W * .955, W * .955], r9, fill=(255, 255, 255, 255))
+        _pm_glyph(d, "home", W / 2.0, W / 2.0 + W * 0.02, W * 0.34, face, (255, 255, 255, 255))
+        d.rounded_rectangle([W * .045, W * .045, W * .955, W * .955], r9, outline=line, width=lw)
+        got = ImageTk.PhotoImage(im.resize((px, px), Image.LANCZOS))
+        if len(self._soft_cache) > 300:
+            for k2 in list(self._soft_cache)[:150]:
+                self._soft_cache.pop(k2, None)
+        self._soft_cache[key] = got
+        return got
+
     CAL_S = 0.72             # 달력 아이콘 크기 배율 (요청 — 더 작게)
     CAL_PAD = 6              # 카드 왼쪽·위 모서리에서 떨어진 거리 (k 배)
 
@@ -47852,7 +54973,11 @@ class Mascot:
     def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None):
         """내 칸 왼쪽 위의 달력 아이콘. 누르면 이 달의 도장판이 열린다."""
         x0, y0, x1, y1 = self._room_cal_box(kx0, ky0, k)
-        img = self._safe_str(self._room_cal_img, col, int(round(x1 - x0)))
+        if slot is None and self._board_on():
+            # 내 칸 — 마이 보드 아이콘 (요청: 도장판 자리에). 도장판은 보드 안 단추로.
+            img = self._safe_str(self._room_board_img, col, int(round(x1 - x0)))
+        else:
+            img = self._safe_str(self._room_cal_img, col, int(round(x1 - x0)))
         if img:                              # 지뢰 63 — 실패하면 "" 가 온다
             cv.create_image(x0, y0, image=img, anchor="nw",
                             tags=self.CAL_TAGS)
@@ -49226,12 +56351,12 @@ class Mascot:
         got = getattr(self, "_stk_mem", None)
         if got is not None:
             return got
-        d = {"room": [], "pomo": []}
+        d = {"room": [], "pomo": [], "board": []}
         try:
             raw = _load_json(self._stk_file())
             if not isinstance(raw, dict):
                 raise ValueError("기록 없음")
-            for k in ("room", "pomo"):
+            for k in ("room", "pomo", "board"):
                 v = raw.get(k)
                 if isinstance(v, list):
                     d[k] = [m for m in v
@@ -49243,7 +56368,8 @@ class Mascot:
         return d
 
     def _stk_list(self, where):
-        return self._stk_all()["pomo" if where == "pomo" else "room"]
+        d = self._stk_all()
+        return d[where] if where in d else d["room"]
 
     def _stk_save(self):
         if _load_failed(self._stk_file()):
@@ -49256,12 +56382,18 @@ class Mascot:
 
     def _stk_toast(self, msg):
         """알림 — 홈이 떠 있으면 홈 쪽에, 아니면 캐릭터 말풍선으로."""
+        if self._stk_edit == "board":
+            self._board_toast(msg)
+            return
         if self.room_win is not None and self._stk_edit != "pomo":
             self._room_toast = (msg, time.time())
         else:
             self._safe("stk_say", self._say, msg, 3.0)
 
     def _stk_redraw(self, where):
+        if where == "board":
+            self._safe("board_stage", self._board_draw_stage)
+            return
         if where == "pomo":
             self._pomo_redraw()
         else:
@@ -49491,6 +56623,10 @@ class Mascot:
         self._stk_srcs.pop(str(sid), None)
         for key in [k2 for k2 in self._stk_cache if k2[0] == str(sid)]:
             self._stk_cache.pop(key, None)
+        for key in [k2 for k2 in self._stk_xf if k2[0] == str(sid)]:
+            self._stk_xf_bytes -= self._stk_xf.pop(key)[1]
+        for key in [k2 for k2 in self._stk_xbase if k2[0] == str(sid)]:
+            self._stk_xbase.pop(key, None)
         if self._stk_pick == str(sid):
             self._stk_pick = None
         self._stk_save()
@@ -50195,6 +57331,10 @@ class Mascot:
         self._stk_srcs.pop(str(sid), None)
         for key in [k2 for k2 in self._stk_cache if k2[0] == str(sid)]:
             self._stk_cache.pop(key, None)
+        for key in [k2 for k2 in self._stk_xf if k2[0] == str(sid)]:
+            self._stk_xf_bytes -= self._stk_xf.pop(key)[1]
+        for key in [k2 for k2 in self._stk_xbase if k2[0] == str(sid)]:
+            self._stk_xbase.pop(key, None)
 
     def _stk_paste_mac(self):
         """맥 클립보드의 그림 — AppKit 으로 직접 꺼낸다.
@@ -50234,6 +57374,7 @@ class Mascot:
         cd, u = self.card, self._ui
         # 부모를 줘야 '항상 위' 창들 뒤에 숨지 않는다 (지뢰 15 파생)
         parent = (self.room_win if where == "room"
+                  else getattr(self, "_board_win", None) if where == "board"
                   else getattr(self, "_pomo_winref", None)) or self.root
         try:
             if parent is not None and not parent.winfo_exists():
@@ -50250,6 +57391,7 @@ class Mascot:
         tk.Label(win, text="스티커", font=self._uf(13, True),
                  bg=cd["panel"], fg=cd["text"]).pack(pady=(u(14), u(2)))
         tk.Label(win, text=("홈 화면에 붙어요" if where == "room"
+                            else "마이 보드에 붙어요" if where == "board"
                             else "뽀모도로 창에 붙어요"),
                  font=self._uf(8), bg=cd["panel"], fg=cd["sub"]).pack()
         tk.Label(win, text="끌어서 옮기고 · 모서리로 크기 · 위 손잡이로 회전",
@@ -59471,7 +66613,10 @@ class Mascot:
             return
         cb = self._room_cal_btn
         if cb and cb[0] <= e.x <= cb[2] and cb[1] <= e.y <= cb[3]:
-            self._safe("stamp_open", self._stamp_open)
+            if self._board_on():
+                self._safe("board_open", self._board_open)      # 도장판은 보드 안에
+            else:
+                self._safe("stamp_open", self._stamp_open)
             return
         for slot2, box in list(self._room_cal_btns.items()):
             if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
@@ -59544,6 +66689,23 @@ class Mascot:
             self._goal_open = None
             self._goal_due = False
             self._safe("room_draw", self._room_draw)
+        # 누르면 반응 (요청) — 스티커는 톡, 내 캐릭터 몸은 통통 + 하트.
+        # 단추·말풍선 판정 뒤, 카드 전체 판정 앞이다 (지뢰 87). 몸을 눌러도
+        # **예전 일(나를 고르고 '오늘 한 줄' 열기)은 그대로** 한다 — 반응만
+        # 얹는다. 몸이 카드 한가운데라 막으면 그 일을 할 자리가 없어진다
+        # (검사 넷이 잡았다: home5·roombar·msgclick·self).
+        if self._stk_edit != "room":
+            sid9 = self._stk_at("room", e.x, e.y)
+            if sid9 is not None:
+                self._safe("room_poke", self._room_poke_start, "stk", sid9)
+                return
+        ent9 = self._room_my_body()
+        if ent9 is not None and self.room_cv is not None:
+            bb9 = self.room_cv.bbox(ent9[0])
+            if bb9:
+                mx9 = (bb9[2] - bb9[0]) * 0.15
+                if bb9[0] + mx9 <= e.x <= bb9[2] - mx9 and bb9[1] <= e.y <= bb9[3]:
+                    self._safe("room_poke", self._room_poke_start, "char")
         for x0, y0, x1, y1, slot, sleeping in self._room_hit:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:
                 # 카드 클릭은 '고르기'만 한다. 예전에는 남의 카드를 누르면

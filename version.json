@@ -1,7 +1,7 @@
 {
- "version": 1789883865,
+ "version": 1790517153,
  "files": {
-  "mascot.py": "cbda2a866a0afd3bd31e10d4a1104ab4841239e3162a5053be2159b3a6fae73b",
+  "mascot.py": "7799177b93508c87279f23286e1654b5f4c6c45159c25265ea7a4f127a46106f",
   "parts_saga/arm_key.png": "3d768b4113fa86cf9402f8d0f5aacb74ce259824db12f28e97acfc1e0f3798b2",
   "parts_saga/arm_pen.png": "a97bab51402ba488ab7a2efe43a90bd056cc1e82cf23eada02110e8ea7edf842",
   "parts_saga/arm_right.png": "4bf3d4d48844a5f0f76679b02c2daa55e93fc5f474a74d8385657f22ef90989e",
@@ -14,7 +14,7 @@
   "parts_saga/chip_meta.json": "19d1e6c8695852c7445dbb541df4050fb3d0ca7eb0fcbfb71f30cd96c3c757d2",
   "parts_saga/chip_movie.png": "43bfa1493af45a8adc05b455acda466b56cad4394229cd8a706ae5cde09ed642",
   "parts_saga/chip_spoon.png": "9c1f69af5de27a78fcff161bc8cacbe21aa3ce8cc5b8ea8294517ae23925f08f",
-  "parts_saga/config.json": "750708d382b0bfc906fea2ef596eef6e5349a160dfa729b2efb15c3b8e4f1a83",
+  "parts_saga/config.json": "90f627207eca2ab0073311f99db4f416c38f71f62c2938c0037186d4dc369479",
   "parts_saga/config.json.bak": "5e9aa3efda582170ad9660042a9e4710c673d3dc9ab91cc50ca0d3ae9c65a9eb",
   "parts_saga/crown.png": "b1b7426a0222ac294a782cb06db6c9c4aba4e660591dd1761dc9e4da050175fc",
   "parts_saga/desk.png": "7e8409238ccfe75e0ba52c16791f249d79e34f71b224941a8ae23c4127cd56a1",
@@ -99,6 +99,9 @@
   "parts_saga/wg_head.png": "746589054c4e1ec2fe0949f224e4a618af5340326d48eab8cc668311f273e068",
   "parts_saga/fonts/Pretendard-Bold.otf": "2e91915fab54df71cc9598ebf608b2bdb54c6fe3c066ac61dff0bc44fca71cc7",
   "parts_saga/fonts/Pretendard-Regular.otf": "3ffbacde6ab8411f1d2db54bb9b1f0b3ee2a738932033722cf0388c06aed1c93",
+  "parts_saga/fonts/SUIT-Bold.otf": "40178aa07b8ce5ef7bfe8381641272de8e6020095245995d95ed71c26f54f2a8",
+  "parts_saga/fonts/SUIT-ExtraBold.otf": "67e6733beb6192138e4651f4436f0e2be2fe6a519861dd23cb86cf136bac0232",
+  "parts_saga/fonts/SUIT-SemiBold.otf": "faeab67df52b4400aec8893507b5b1502057b53f1224bfe6c89cdba2bece0ca1",
   "parts_saga/skins/shinhana/arm_key.png": "261b8ce1a5a39a3b65e047fb891f8bc13de2d27b017c1a59ab2cbac59a4029e3",
   "parts_saga/skins/shinhana/arm_pen.png": "50eb88e56720167dc7fd83e74bc72b901383b97d521014342e50b124e0b4c087",
   "parts_saga/skins/shinhana/arm_right.png": "4ad019c954136d5720ca87f21b0115f64e42be57d53f938a3d5b8443c2bb9c6c",
@@ -636,11 +639,11 @@
   "parts_saga/words/kkodle.json": "cec16ab9934b2532339e4928c71b3467b03ef57601c6fc7fef8b4174c07d7b63"
  },
  "notes": [
-  "소품을 바꾼 뒤 웃으며 몸을 흔들 때 옛 소품(계란 후라이)이 어긋난 자리에 나오던 것을 고쳤어요 — 이제 기울여도 바꾼 소품 그대로예요",
-  "새 몸짓 넷 — 막춤·좌우 스텝·파도타기·눈 비비기. 작업 중이든 쉴 때든 가끔 나와요 (춤은 20~40분, 눈 비비기는 40~90분에 한 번쯤)",
-  "고개를 끄덕이거나 기울일 때 머리 위 소품·양갈래·날개가 같이 따라 움직여요",
-  "윈도우 10: 뽀모도로·홈·환경설정·쪽지함 창과 우클릭 메뉴 모서리를 각진 모양으로 통일했어요",
-  "유리 테마: 밝은 바탕화면에서 글자가 안 읽히던 것과 흐림이 안 걸리는 컴퓨터에서 판이 불투명하던 것을 고쳤어요",
-  "우클릭 메뉴의 오른쪽 끝을 눌러도 항목이 안 먹던 것을 고쳤어요"
+  "**마이 보드가 생겼어요** — 캐릭터 우클릭 → '마이 보드' (홈 내 칸의 집 아이콘으로도 열려요). 내 캐릭터가 앉아 있는 보드에 사진·메모지·마스킹테이프·체크리스트·티켓·스티커를 붙여 꾸며요",
+  "**마이 보드 꾸미는 법** — 오른쪽 위 '꾸미기'를 누르면 도구 띠가 나와요. 붙인 것은 끌어서 옮기고, 손잡이로 크기·회전·지우기 · Ctrl+V 로 그림 붙여넣기 · 되돌리기와 프리셋 저장도 돼요. 톱니바퀴에서 테마·바탕·말풍선을 바꿔요",
+  "**달력 탭** — 마이 보드 위쪽 '달력'. 날짜를 눌러 일정을 넣고 단계(러프·선화·채색…)와 진행률을 적어요 (월·주·목록 보기). 일정을 바탕화면의 마감·할 일 말풍선에 띄울 수 있고, 말풍선의 마감도 달력에서 고치고 끝낼 수 있어요",
+  "**자석 모드** — 우클릭 → '자석 모드'를 켜고 캐릭터를 화면 가장자리(위·아래·왼쪽·오른쪽)로 끌고 가면 착 붙어서 벽 너머에서 빼꼼 내다봐요. 다시 끌어내면 떨어지고, 메뉴에서 끄면 평소대로예요 (환경설정의 '부드러운 가장자리'가 켜져 있어야 해요)",
+  "홈 '오늘 한 줄'에 **문구 저장** — 켜 두면 날이 바뀌어도 고칠 때까지 그대로예요 · '오류 기록 폴더 열기'는 환경설정 맨 아래 '문제 해결'로 옮겼어요",
+  "마이 보드와 자석 모드는 윈도우 전용이에요 (맥은 준비 중) · 메뉴의 새 항목 옆 빨간 점은 한 번 눌러 보면 사라져요"
  ]
 }
