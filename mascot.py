@@ -1612,6 +1612,8 @@ DEFAULT_SETTINGS = {
     "room_msg_day": "",      # 그 한 줄을 쓴 작업일 (날이 바뀌면 지운다)
     "room_msg_keep": False,  # 문구 저장 — 켜면 날이 바뀌어도 고칠 때까지 남는다
     "board_seen": False,     # 우클릭 메뉴의 '마이 보드'를 눌러 봤나 (새로움 점)
+    "board_bh": "",          # 서버에 올려 둔 내 보드의 해시 (친구에게 알리는 값)
+    "board_up": None,        # 서버에 올려 둔 그림 열쇠들 (다시 안 올린다)
     "mag_seen": False,       # 우클릭 메뉴의 '자석 모드'를 눌러 봤나 (새로움 점)
     "magnet": False,         # 자석 모드 — 화면 가장자리에 붙어 벽 너머에서 내다본다
     "mag_side": "",          # 지금 붙어 있는 벽 (l r t b · 빈 값이면 안 붙음)
@@ -9172,6 +9174,15 @@ class Mascot:
         self._mag_sig = None         # 그 그림을 정한 것 전부 (자세·몸 장·덧장·묶음)
         self._mag_same = False       # 이번 프레임이 직전과 같았나 (올리기를 건너뛴다)
         self._mag_push = None        # 마지막으로 올린 (자리, 시각)
+        self._bv = None              # 남의 보드를 보는 중 {"slot","d","stk","state"}
+        self._bsh_dirty = 0.0        # 내 보드가 바뀐 시각 (올릴 것이 있다)
+        self._bsh_busy = False       # 올리는 중
+        self._bsh_q = []             # 통신 스레드 → 본 스레드 (앞에서 꺼내 비운다 · 지뢰 26)
+        self._bsh_off = False        # 서버에 보드 저장소가 없다 — 이 세션에서는 안 올린다
+        self._bsh_retry = 0.0        # 이때까지는 다시 안 올린다
+        self._bsh_boot = False       # 켠 뒤 한 번 — 아직 안 올린 보드가 있으면 올린다
+        self._bsh_down = {}          # 받는 중인 자리 → 시작한 시각
+        self._room_board_btns = {}   # 남의 카드의 집 아이콘 자리
         self._mag_lay = None         # 맥 — 기운 몸을 담는 따로 된 창 (MacMagLayer)
         self._crash_fp = None        # 맥 — 프로세스가 죽을 때의 자국을 남길 파일
         if IS_MAC:
@@ -9578,7 +9589,7 @@ class Mascot:
         self._stamp_pack_at = 0.0    # 공개용 꾸러미 캐시
         self._stamp_pack_v = None
         self._stamp_brief_ref = None # 도장판에 펼친 브리핑 그림 (참조 유지)
-        self._room_cal_btns = {}     # 남의 카드 달력 아이콘 자리
+        self._room_cal_btns = {}; self._room_board_btns = {}     # 남의 카드 달력 아이콘 자리
         self._room_cal_data = {}     # 남이 공개한 도장 (slot → cal)
         self._room_song_hits = {}    # 노래 말풍선 자리 (slot → (상자, 주소))
         self._room_song_box = {}     # 말풍선 그대로의 상자 (마퀴용)
@@ -39996,11 +40007,483 @@ class Mascot:
     def _board_file(self):
         return os.path.join(self.state_dir, ".myhome.json")
 
-    def _board_dir(self):
+    # ── 친구의 마이 보드 보기 (요청 2026-09-28) ─────────────────────────────
+    # 내 보드의 내용(.myhome.json 에서 보이는 것만)과 그림을 방 코드로 잠가 서버의 보드
+    # 저장소에 올린다 (board_migrate.sql — board_put/board_get/board_keep). 자리 신호에는
+    # 해시(bh) 하나만 실린다 → 친구의 홈에서 내 칸 왼쪽 위에 집 아이콘이 뜬다. 친구는 그
+    # 아이콘을 **누를 때만** 받는다 (안 누르면 통신이 없다 · 지뢰 47). 받은 것은
+    # .board_peers/<자리>/ 에 남아, 해시가 그대로면 다시 안 받고 꺼진 친구의 보드도 열린다.
+    # 보는 화면은 같은 보드 창의 **방문 모드**(self._bv)다 — 그리는 코드는 그대로고
+    # _board_data·_board_dir·_stk_list·_board_seat_pil·_bd_prof 가 그 사람 것을 돌려준다.
+    # 읽기 전용이고(저장·꾸미기·우클릭·붙여넣기·체크 전부 막힌다) 달력은 안 올린다.
+    BSH_WAIT = 12.0              # 마지막으로 고친 뒤 이만큼 지나야 올린다 (끌 때마다 올리지 않게)
+    BSH_RETRY = 300.0            # 올리기가 실패하면 이만큼 쉰다
+    BSH_BLOB_MAX = 380000        # 잠근 덩어리 하나의 상한 (서버는 400000)
+    BSH_FILES_MAX = 60           # 그림 수 상한
+    BSH_PX = {"photo": 760, "mat": 1100, "shelf": 512, "stk": 512}
+
+    @staticmethod
+    def _bh_ok(v):
+        """보드 해시 — 아스키 영문·숫자 16자 안 (폴더·열쇠로 쓰인다)."""
+        v = str(v or "")[:16]
+        return v if v and all(("0" <= c <= "9") or ("a" <= c <= "z") for c in v) else ""
+
+    def _bv_has(self, p):
+        return bool(self._board_on() and self._bh_ok((p or {}).get("bh")))
+
+    def _bsh_mine_exists(self):
+        try:
+            return os.path.exists(self._board_file())
+        except Exception:
+            return False
+
+    def _bsh_adv(self):
+        """자리 신호에 실을 내 보드의 해시 — 보여 주기를 껐거나 아직 못 올렸으면 빈 값."""
+        if getattr(self, "_board_mem", None) is None and not self._bsh_mine_exists():
+            return ""
+        if self._board_mine().get("noshare"):
+            return ""
+        return self._bh_ok(self.us.get("board_bh"))
+
+    def _bpeer_dir(self, slot):
+        return os.path.join(self.state_dir, ".board_peers", str(slot))
+
+    def _bv_who(self, slot):
+        """그 사람의 지금 값 — 접속해 있으면 자리 신호, 아니면 마지막으로 본 값."""
+        for q in (getattr(self, "room_people", None) or []):
+            if isinstance(q, dict) and (q.get("slot") or "") == slot:
+                return q
+        w = (self._room_who_get() or {}).get(slot)
+        return dict(w, off=True) if isinstance(w, dict) else {"off": True}
+
+    def _bd_prof(self):
+        """보드 왼쪽에 적는 사람 값 — 내 보드면 내 것, 남의 보드면 그 사람 것."""
+        bv = self._bv
+        if bv is None:
+            try:
+                ti = str(self._title() or "")
+            except Exception:
+                ti = ""
+            try:
+                lvn, lsec = int(self._level()), float(self.lv_secs)
+            except Exception:
+                lvn, lsec = 1, 0.0
+            try:
+                secs = float(self._today_secs())
+            except Exception:
+                secs = 0.0
+            try:
+                goal = max(0.5, float(self.us.get("goal_hours") or 8))
+            except Exception:
+                goal = 8.0
+            su9, st9 = self._room_song()
+            return {"name": str(self.cfg.get("name") or self.char), "title": ti, "lv": lvn,
+                    "lsec": lsec, "secs": secs, "goal": goal,
+                    "frac": max(0.0, min(1.0, secs / (goal * 3600.0))),
+                    "hours": self._lv_hours(), "song_u": su9, "song_t": str(st9 or ""),
+                    "state": "", "say": ""}
+        slot = bv["slot"]
+        w = self._bv_who(slot)
+        try:
+            lvn = max(1, int(w.get("lv") or 1))
+        except Exception:
+            lvn = 1
+        try:
+            mins = max(0.0, float(w.get("t") or 0))
+        except Exception:
+            mins = 0.0
+        try:
+            fr = float(w.get("p") or 0.0)
+            fr = fr / 100.0 if fr > 1.0 else fr
+        except Exception:
+            fr = 0.0
+        sg = w.get("sg") if isinstance(w.get("sg"), dict) else {}
+        su9 = str(sg.get("u") or "") if self._song_ok(sg.get("u")) else ""
+        st9 = str(sg.get("t") or "").strip()
+        off = bool(w.get("off")) or str(w.get("s") or "") == "off"
+        s9 = str(w.get("s") or "")
+        state = "안 켰어요" if off else ("작업 중" if s9 == "work" else "쉬는 중")
+        return {"name": self._room_name_of(slot), "title": str(w.get("ti") or ""), "lv": lvn,
+                "lsec": None, "secs": mins * 60.0, "goal": None,
+                "frac": max(0.0, min(1.0, fr)), "hours": max(0, lvn - 1),
+                "song_u": su9, "song_t": (st9 if su9 and st9 and st9 != "…" else
+                                          ("오늘의 노래" if su9 else "오늘의 노래 없음")),
+                "state": state,
+                "say": "자리에 없어요" if off else ("지금 그리는 중" if s9 == "work"
+                                              else "잠깐 쉬는 중")}
+
+    def _room_name_of(self, slot):
+        w = (self._room_who_get() or {}).get(slot)
+        if isinstance(w, dict) and w.get("n"):
+            return str(w["n"])[:14]
+        for q in (getattr(self, "room_people", None) or []):
+            if isinstance(q, dict) and (q.get("slot") or "") == slot and q.get("n"):
+                return str(q["n"])[:14]
+        return self.ROOM_NAME.get(slot, "친구")
+
+    # ── 보는 쪽 ─────────────────────────────────────────────────────────
+    def _bv_reset_caches(self):
+        """보드를 갈아 끼울 때 — 그림 캐시가 앞 보드의 것이다 (열쇠가 항목 번호라 겹친다)."""
+        self._board_ph = {}
+        self._board_uiph = {}
+        self._board_mat_cache = {}
+        self._board_pick = None
+        self._board_drag = None
+        self._stk_pick = None
+        self._board_poke = None
+        self._board_say = None
+        self._board_fx = []
+        self._board_matadj = False
+
+    def _bv_clear(self):
+        self._bv = None
+        if self._board_alive():
+            self._bv_reset_caches()
+
+    def _bv_leave(self):
+        """내 보드로 돌아간다."""
+        if self._bv is None:
+            return
+        self._bv_clear()
+        self._tip_hide()
+        if self._board_alive():
+            self._board_draw()
+
+    def _bv_load_cached(self, slot):
+        """받아 둔 그 사람의 보드 (없으면 None)."""
+        try:
+            man = _load_json(os.path.join(self._bpeer_dir(slot), "board.json"))
+        except Exception:
+            man = None
+        return man if isinstance(man, dict) and isinstance(man.get("d"), dict) else None
+
+    def _bv_enter(self, slot, man, state="ok", msg=""):
+        """그 사람의 보드를 창에 건다 (man 이 없으면 빈 보드 + 받아 오는 중)."""
+        d = {}
+        stk = []
+        if isinstance(man, dict):
+            try:
+                d = json.loads(json.dumps(man.get("d") or {}))
+            except Exception:
+                d = {}
+            base = self._bpeer_dir(slot)
+            for m9 in list(man.get("stk") or [])[:self.STK_MAX]:
+                if not isinstance(m9, dict) or not m9.get("f"):
+                    continue
+                m8 = dict(m9)
+                # 스티커 그림은 .stk 기준으로 읽는다 — 받아 둔 폴더를 그 기준의 상대 경로로
+                m8["f"] = os.path.relpath(os.path.join(base, os.path.basename(str(m9["f"]))),
+                                          self._stk_dir())
+                m8["id"] = "v:%s:%s" % (slot, m9.get("id") or "")    # 내 스티커와 안 겹치게
+                stk.append(m8)
+        d.pop("presets", None)
+        self._board_fill(d)
+        self._bv = {"slot": slot, "d": d, "stk": stk, "state": state, "msg": msg,
+                    "h": self._bh_ok((man or {}).get("h"))}
+        self._bv_reset_caches()
+        self._board_tab = "board"
+
+    def _board_visit(self, slot):
+        """홈에서 남의 칸의 집 아이콘을 눌렀다 — 그 사람의 마이 보드를 연다."""
+        slot = str(slot or "")
+        if not slot or slot == self.char or not self._board_on():
+            return False
+        if not self._board_alive():
+            self._board_open()
+        if not self._board_alive():
+            return False
+        if self._bv is None and getattr(self, "_board_edit", False):
+            self._board_toggle_edit()          # 꾸미던 것은 저장하고 넘어간다
+        self._board_set_close()
+        want = self._bh_ok(self._bv_who(slot).get("bh"))
+        man = self._bv_load_cached(slot)
+        have = self._bh_ok((man or {}).get("h"))
+        need = bool(want) and want != have
+        if man is None and not want:
+            self._bv_enter(slot, None, "fail", "아직 보드를 올리지 않았어요")
+        else:
+            self._bv_enter(slot, man, "loading" if need else "ok")
+        try:
+            self._board_win.deiconify()
+            self._board_win.lift()
+        except Exception:
+            pass
+        self._board_draw()
+        if need:
+            self._bv_fetch(slot)
+        return True
+
+    def _bv_fetch(self, slot):
+        net = self.room_net
+        if net is None:
+            if self._bv is not None and self._bv["slot"] == slot:
+                self._bv["state"] = "fail" if self._bv["state"] == "loading" else self._bv["state"]
+                self._bv["msg"] = "방에 연결돼 있지 않아요"
+                self._board_draw()
+            return
+        now = time.time()
+        if now - float(self._bsh_down.get(slot) or 0.0) < 30.0:
+            return                              # 이미 받는 중이다
+        self._bsh_down[slot] = now
+        threading.Thread(target=self._bsh_down_run,
+                         args=(net, slot, self._bpeer_dir(slot), self._bsh_q),
+                         daemon=True).start()
+
+    # ── 통신 (스레드 — Tk 를 건드리지 않는다 · 지뢰 150) ─────────────────
+    @staticmethod
+    def _bsh_pack(path, maxpx):
+        """그림 파일 하나를 보낼 꾸러미로 — 줄이고, 색은 JPEG · 투명은 따로 PNG 한 장.
+        (WebP 는 굳힌 앱에 없을 수 있다 · 지뢰 21. PNG 통째는 사진에서 너무 크다.)"""
+        im = Image.open(path)
+        im.load()
+        im = im.convert("RGBA")
+        for _try in range(4):
+            if max(im.size) > maxpx:
+                k = maxpx / float(max(im.size))
+                im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))),
+                               Image.LANCZOS)
+            a = im.getchannel("A")
+            bio = io.BytesIO()
+            if a.getextrema()[0] >= 250:
+                im.convert("RGB").save(bio, "JPEG", quality=86, optimize=True)
+                out = {"j": _b64.b64encode(bio.getvalue()).decode()}
+            else:
+                im.convert("RGB").save(bio, "JPEG", quality=90, optimize=True)
+                b2 = io.BytesIO()
+                a.save(b2, "PNG", optimize=True)
+                out = {"j": _b64.b64encode(bio.getvalue()).decode(),
+                       "a": _b64.b64encode(b2.getvalue()).decode()}
+            if sum(len(v) for v in out.values()) <= 200000:
+                return out
+            maxpx = int(maxpx * 0.72)
+        return None
+
+    @staticmethod
+    def _bsh_unpack(obj):
+        """꾸러미 → RGBA 그림."""
+        rgb = Image.open(io.BytesIO(_b64.b64decode(obj["j"])))
+        rgb.load()
+        rgb = rgb.convert("RGB")
+        if not obj.get("a"):
+            return rgb.convert("RGBA")
+        a = Image.open(io.BytesIO(_b64.b64decode(obj["a"])))
+        a.load()
+        a = a.convert("L")
+        if a.size != rgb.size:
+            a = a.resize(rgb.size, Image.LANCZOS)
+        out = rgb.convert("RGBA")
+        out.putalpha(a)
+        return out
+
+    @staticmethod
+    def _bsh_refs(snap, stk):
+        """보드가 쓰는 그림들 — [(종류, 어디에 든 dict, 열쇠)]."""
+        out = []
+        for it in snap.get("items") or []:
+            if isinstance(it, dict) and it.get("f"):
+                out.append(("photo", it, "f"))
+        for p in snap.get("shelf") or []:
+            if isinstance(p, dict) and p.get("f"):
+                out.append(("shelf", p, "f"))
+        if snap.get("mat_img"):
+            out.append(("mat", snap, "mat_img"))
+        for m9 in stk or []:
+            if isinstance(m9, dict) and m9.get("f"):
+                out.append(("stk", m9, "f"))
+        return out
+
+    def _bsh_up_run(self, net, slot, bdir, sdir, snap, stk, done, share, q):
+        """내 보드를 올린다 (스레드)."""
+        try:
+            if not share:
+                net._rpc("board_keep", {"p_room": net.room, "p_slot": slot, "p_keys": ""},
+                         timeout=20)
+                q.append(("up_ok", "", []))
+                return
+            keys = []
+            made = {}
+            for kind, holder, fk in self._bsh_refs(snap, stk)[:self.BSH_FILES_MAX]:
+                fn = os.path.basename(str(holder.get(fk) or ""))
+                src = os.path.join(sdir if kind == "stk" else bdir, fn)
+                got = made.get(src)
+                if got is None:
+                    got = ""
+                    try:
+                        pk = self._bsh_pack(src, self.BSH_PX[kind])
+                    except Exception:
+                        pk = None
+                    if pk is not None:
+                        raw = json.dumps(pk, sort_keys=True).encode()
+                        key = "a" + hashlib.sha1(raw).hexdigest()[:16]
+                        if key not in done:
+                            blob = _room_seal(net.key, pk)
+                            if len(blob) <= self.BSH_BLOB_MAX:
+                                r9 = net._rpc("board_put", {"p_room": net.room, "p_slot": slot,
+                                                            "p_k": key, "p_blob": blob},
+                                              timeout=30)
+                                if r9 in (1, "1", True):
+                                    got = key
+                                time.sleep(0.35)
+                        else:
+                            got = key
+                    made[src] = got
+                if got:
+                    holder[fk] = got + ".png"
+                    keys.append(got)
+                else:
+                    holder[fk] = ""              # 못 올린 그림 — 받는 쪽은 그림 없이 그린다
+            body = {"v": 1, "d": snap, "stk": stk}
+            h = hashlib.sha1(json.dumps(body, sort_keys=True,
+                                        ensure_ascii=False).encode()).hexdigest()[:12]
+            body["h"] = h
+            body["at"] = int(time.time())
+            blob = _room_seal(net.key, body)
+            if len(blob) > self.BSH_BLOB_MAX:
+                raise RuntimeError("보드 내용이 너무 크다 (%d)" % len(blob))
+            r9 = net._rpc("board_put", {"p_room": net.room, "p_slot": slot, "p_k": "m",
+                                        "p_blob": blob}, timeout=30)
+            if r9 not in (1, "1", True):
+                raise RuntimeError("서버가 안 받음 (%r)" % (r9,))
+            keys = sorted(set(keys))
+            net._rpc("board_keep", {"p_room": net.room, "p_slot": slot,
+                                    "p_keys": ",".join(["m"] + keys)}, timeout=20)
+            q.append(("up_ok", h, keys))
+        except Exception as e:
+            q.append(("up_fail", "%s: %s" % (type(e).__name__, str(e)[:160])))
+
+    def _bsh_down_run(self, net, slot, cdir, q):
+        """남의 보드를 받는다 (스레드) — 없는 그림만 받는다."""
+        try:
+            blob = net._rpc("board_get", {"p_room": net.room, "p_slot": slot, "p_k": "m"},
+                            timeout=30)
+            man = _room_open_blob(net.key, blob) if isinstance(blob, str) and blob else None
+            if not isinstance(man, dict) or not isinstance(man.get("d"), dict):
+                q.append(("down_fail", slot, "아직 보드를 올리지 않았어요"))
+                return
+            os.makedirs(cdir, exist_ok=True)
+            need = []
+            for _kind, holder, fk in self._bsh_refs(man["d"], man.get("stk") or []):
+                fn = os.path.basename(str(holder.get(fk) or ""))
+                key = fn[:-4] if fn.endswith(".png") else ""
+                if not self._bh_ok(key[1:]) or not key.startswith("a"):
+                    holder[fk] = ""
+                    continue
+                holder[fk] = key + ".png"
+                if key not in need and not os.path.exists(os.path.join(cdir, key + ".png")):
+                    need.append(key)
+            for key in need[:self.BSH_FILES_MAX]:
+                b9 = net._rpc("board_get", {"p_room": net.room, "p_slot": slot, "p_k": key},
+                              timeout=30)
+                pk = _room_open_blob(net.key, b9) if isinstance(b9, str) and b9 else None
+                if not isinstance(pk, dict) or not pk.get("j"):
+                    continue
+                try:
+                    im = self._bsh_unpack(pk)
+                    tmp = os.path.join(cdir, key + ".png.tmp")
+                    im.save(tmp, "PNG")
+                    os.replace(tmp, os.path.join(cdir, key + ".png"))
+                except Exception:
+                    continue
+            _save_json(os.path.join(cdir, "board.json"), man)
+            # 안 쓰는 그림은 치운다 (보드가 바뀔 때마다 쌓이지 않게)
+            keep = set(os.path.basename(str(h9.get(k9) or ""))
+                       for _k, h9, k9 in self._bsh_refs(man["d"], man.get("stk") or []))
+            for fn in os.listdir(cdir):
+                if fn.endswith(".png") and fn not in keep:
+                    try:
+                        os.remove(os.path.join(cdir, fn))
+                    except Exception:
+                        pass
+            q.append(("down_ok", slot, man))
+        except Exception as e:
+            q.append(("down_fail", slot, "보드를 받지 못했어요 (%s)" % type(e).__name__))
+
+    def _bsh_tick(self, now):
+        """통신 바퀴에서 — 받은 결과를 거두고, 내 보드가 바뀌었으면 올린다."""
+        q = self._bsh_q
+        while q:
+            ev = q.pop(0)                        # 앞에서 꺼내 비운다 (지뢰 26)
+            if ev[0] == "up_ok":
+                self._bsh_busy = False
+                self.us["board_bh"] = self._bh_ok(ev[1])
+                self.us["board_up"] = list(ev[2])[:200]
+                self._safe("settings", self._save_settings)
+                self._safe("room_push", self._room_push_now)
+            elif ev[0] == "up_fail":
+                self._bsh_busy = False
+                self._bsh_retry = now + self.BSH_RETRY
+                self._bsh_dirty = self._bsh_dirty or now
+                if "404" in ev[1] or "PGRST202" in ev[1]:
+                    self._bsh_off = True         # 서버에 보드 저장소가 아직 없다
+                if not getattr(self, "_bsh_logged", False):
+                    self._bsh_logged = True
+                    self._log_error("board_share " + ev[1])
+            elif ev[0] in ("down_ok", "down_fail"):
+                self._bsh_down.pop(ev[1], None)
+                bv = self._bv
+                if bv is None or bv["slot"] != ev[1] or not self._board_alive():
+                    continue
+                if ev[0] == "down_ok":
+                    self._bv_enter(ev[1], ev[2])
+                elif bv["state"] == "loading":
+                    if bv["d"].get("items") or bv.get("h"):
+                        bv["state"], bv["msg"] = "ok", ""       # 받아 둔 것을 그대로 보여 준다
+                    else:
+                        bv["state"], bv["msg"] = "fail", ev[2]
+                self._board_draw()
+        if self._bsh_off or self._bsh_busy or not self._board_on() or self.room_net is None:
+            return
+        if not self._bsh_boot:
+            self._bsh_boot = True
+            # 켠 뒤 한 번 — 보드가 있는데 아직 안 올렸으면 올린다
+            if self._bsh_mine_exists() and not self.us.get("board_bh") \
+                    and not self._board_mine().get("noshare"):
+                self._bsh_dirty = now - self.BSH_WAIT + 20.0
+        if not self._bsh_dirty or now - self._bsh_dirty < self.BSH_WAIT or now < self._bsh_retry:
+            return
+        if self._bv is not None or getattr(self, "_board_edit", False):
+            return                               # 꾸미는 중 — 끝나면 올린다
+        self._bsh_dirty = 0.0
+        self._bsh_busy = True
+        d = self._board_mine()
+        try:
+            snap = {k: d.get(k) for k in self.BOARD_SNAP_KEYS if k in d}
+            snap["guest"] = list(d.get("guest") or [])[-12:]
+            snap = json.loads(json.dumps(snap))
+            stk = json.loads(json.dumps(list(self._stk_all().get("board") or [])))
+            for it in snap.get("items") or []:
+                if isinstance(it, dict) and it.get("due"):
+                    d9 = self._board_due_find(it["due"])
+                    it["dd"] = str(d9.get("date") or "")[:10] if d9 else ""
+        except Exception:
+            self._bsh_busy = False
+            self._log_error("board_share_snap")
+            return
+        threading.Thread(target=self._bsh_up_run,
+                         args=(self.room_net, self.char, self._board_dir_mine(),
+                               self._stk_dir(), snap, stk,
+                               set(self.us.get("board_up") or []),
+                               not d.get("noshare"), self._bsh_q),
+                         daemon=True).start()
+
+    def _board_dir_mine(self):
         return os.path.join(self.state_dir, ".board")
 
+    def _board_dir(self):
+        bv = self._bv
+        if bv is not None:                 # 남의 보드 — 받아 둔 그림이 있는 폴더
+            return self._bpeer_dir(bv["slot"])
+        return self._board_dir_mine()
+
     def _board_data(self):
-        """보드 상태 — 한 번 읽고 들고 있는다. 없는 열쇠는 기본값으로 채운다."""
+        """지금 보드 창이 보여 주는 보드 — 남의 보드를 보는 중이면 그 사람 것."""
+        bv = self._bv
+        if bv is not None:
+            return bv["d"]
+        return self._board_mine()
+
+    def _board_mine(self):
+        """내 보드 상태 — 한 번 읽고 들고 있는다. 없는 열쇠는 기본값으로 채운다."""
         d = getattr(self, "_board_mem", None)
         if d is not None:
             return d
@@ -40011,6 +40494,13 @@ class Mascot:
                 d = raw
         except Exception:
             d = {}
+        self._board_fill(d)
+        self._board_mem = d
+        return d
+
+    @staticmethod
+    def _board_fill(d):
+        """없는 열쇠를 기본값으로 채운다 (내 보드 · 받아 온 남의 보드 모두)."""
         d.setdefault("mat", "grid")
         d.setdefault("tpl", "cream")
         th = d.get("theme")
@@ -40024,7 +40514,6 @@ class Mascot:
             d["guest"] = []
         if not isinstance(d.get("presets"), list):
             d["presets"] = []
-        self._board_mem = d
         return d
 
     BOARD_UNDO_MAX = 40
@@ -40051,6 +40540,9 @@ class Mascot:
         self._board_cover = None
 
     def _board_save(self, undo=True):
+        if self._bv is not None:
+            return                          # 남의 보드 — 아무것도 저장하지 않는다
+        self._bsh_dirty = time.time()       # 친구에게 보여 줄 것이 바뀌었다
         if _load_failed(self._board_file()):
             self._log_error("board_locked")
             return
@@ -40069,6 +40561,8 @@ class Mascot:
 
     def _board_undo(self):
         """Ctrl+Z — 저장 단위로 한 걸음 되돌린다 (끌기 한 번 = 한 걸음)."""
+        if self._bv is not None:
+            return False
         if not self._board_undo_stack:
             self._board_toast("되돌릴 것이 없어요")
             return False
@@ -40641,6 +41135,8 @@ class Mascot:
         self._board_loop()
 
     def _board_close(self):
+        if self._bv is not None:
+            self._bv_clear()                 # 내 보드 기준으로 정리한다
         self._board_set_close()
         self._board_undo_stack = []       # 되돌리기는 창과 함께 끝난다 — 그 다음에 파일 정리
         self._board_last_snap = None
@@ -40838,19 +41334,40 @@ class Mascot:
         cy = band // 2
         self._bd_box(cv, 22, cy - 17, 56, cy + 17, 11, pal["ink"])
         self._bd_ic(cv, "l_home", 39, cy, 20, self._bd_on(pal["ink"]))
-        name = str(self.cfg.get("name") or self.char)
+        vis = self._bv is not None
+        name = self._bd_prof()["name"]
         ft = self._bf(13, 2)
         cv.create_text(70, cy, text=name, font=ft, fill=pal["ink"], anchor="w")
         x = 70 + int(self._tw(name, ft))
         ft2 = self._bf(13, True)
         cv.create_text(x, cy, text="의 마이 보드", font=ft2, fill=pal["sub"], anchor="w")
         x += int(self._tw("의 마이 보드", ft2)) + 18
-        x = self._bd_seg(cv, x, cy, (("board", "보드", "l_board"), ("cal", "달력", "l_cal")),
-                         self._board_tab, pal, "tab:")
+        if not vis:                        # 남의 보드 — 달력은 안 보인다
+            x = self._bd_seg(cv, x, cy, (("board", "보드", "l_board"), ("cal", "달력", "l_cal")),
+                             self._board_tab, pal, "tab:")
         # 오른쪽 — 창 단추 · 꾸미기 · 아이콘 단추 (글자 없이, 커서를 올리면 이름표 · 요청)
         self._board_tips = []
         xl = self._board_chrome(self._board_win, cv, W - 16, cy, pal)
         xs = xl - 12
+        if vis:
+            xs = self._bd_button(cv, xs, cy, "내 보드로", "l_home", pal["ink"], pal,
+                                 "visit_back") - 6
+            self._board_tips.append((xs + 6, cy - 18, xl - 12, cy + 18, "내 마이 보드로 돌아가기"))
+            mx = x + 16
+            fm = self._bf(10)
+            room = xs - 16 - mx - 18
+            st9 = str(self._bv.get("state") or "")
+            if room > 60:
+                motto = str(d.get("motto") or "")
+                if st9 == "loading":
+                    motto = "보드를 받아 오는 중…"
+                elif st9 == "fail":
+                    motto = str(self._bv.get("msg") or "보드를 받지 못했어요")
+                if motto:
+                    self._bd_box(cv, mx, cy - 3, mx + 6, cy + 3, 3, pal["accent"])
+                    cv.create_text(mx + 14, cy, text=self._bd_fit(motto, fm, room), font=fm,
+                                   fill=pal["ink2"], anchor="w")
+            return
         if self._board_tab == "board":
             ed = getattr(self, "_board_edit", False)
             xs = self._bd_button(cv, xs, cy, "완료" if ed else "꾸미기",
@@ -40934,7 +41451,10 @@ class Mascot:
         got = self._board_uiph.get("seat_pil")
         if got is None:
             try:
-                got = (Image.open(os.path.join(self.dir, "seat.png")).convert("RGBA"), 0)
+                p9 = os.path.join(self.dir, "seat.png")
+                if self._bv is not None:     # 남의 보드 — 그 사람의 앉은 모습
+                    p9 = self._room_art_file(self._bv["slot"], "seat.png") or ""
+                got = (Image.open(p9).convert("RGBA"), 0)
             except Exception:
                 got = (None, 0)
             self._board_uiph["seat_pil"] = got
@@ -41001,11 +41521,9 @@ class Mascot:
         # ── 프로필 ──
         R = 42
         fnm, fbd, fl = self._bf(15, 2), self._bf(9, True), self._bf(9, True)
-        ti = ""
-        try:
-            ti = str(self._title() or "")
-        except Exception:
-            pass
+        pf = self._bd_prof()
+        vis = self._bv is not None
+        ti = pf["title"]
         bh9 = self._bd_ls(fbd) + 10
         h1 = 22 + R * 2 + 14 + self._bd_ls(fnm) + (8 + bh9 if ti else 0) + 16 \
             + self._bd_ls(fl) + 8 + 6 + 20
@@ -41031,8 +41549,7 @@ class Mascot:
         self._bd_put(cv, ("avatar", R, pal["card"], pal["soft"], pal["accent"]),
                      lambda: self._bd_avatar(R, pal), cx, y, anchor="center")
         y += R + 14 + self._bd_ls(fnm) // 2
-        cv.create_text(cx, y, text=str(self.cfg.get("name") or self.char), font=fnm,
-                       fill=pal["ink"])
+        cv.create_text(cx, y, text=pf["name"], font=fnm, fill=pal["ink"])
         y += self._bd_ls(fnm) // 2
         if ti:
             tw = int(self._tw(ti, fbd)) + 24
@@ -41042,16 +41559,18 @@ class Mascot:
                            fill=self._mix(pal["accent"], pal["ink"], 0.18))
             y += bh9
         y += 16 + self._bd_ls(fl) // 2
-        try:
-            lvn, lsec = int(self._level()), float(self.lv_secs)
-        except Exception:
-            lvn, lsec = 1, 0.0
+        lvn, lsec = pf["lv"], pf["lsec"]
         cv.create_text(x0 + pad, y, text="Lv. %d" % lvn, font=fl, fill=pal["ink2"], anchor="w")
-        left9 = max(1, int((3600 - (lsec % 3600)) // 60))
-        cv.create_text(x1 - pad, y, text="다음 레벨까지 %d분" % left9, font=self._bf(8, True),
-                       fill=pal["sub"], anchor="e")
+        if lsec is not None:
+            left9 = max(1, int((3600 - (lsec % 3600)) // 60))
+            cv.create_text(x1 - pad, y, text="다음 레벨까지 %d분" % left9, font=self._bf(8, True),
+                           fill=pal["sub"], anchor="e")
+        else:                                # 남의 보드 — 레벨 속 시간은 모른다
+            cv.create_text(x1 - pad, y, text=pf["state"], font=self._bf(8, True),
+                           fill=pal["sub"], anchor="e")
         y += self._bd_ls(fl) // 2 + 8
-        self._bd_bar(cv, x0 + pad, y, cw - pad * 2, (lsec % 3600) / 3600.0, pal)
+        self._bd_bar(cv, x0 + pad, y, cw - pad * 2,
+                     ((lsec % 3600) / 3600.0) if lsec is not None else pf["frac"], pal)
 
         # 오늘의 작업 카드
         if show2:
@@ -41059,29 +41578,28 @@ class Mascot:
             self._bd_box(cv, x0, ty0, x1, ty0 + h2, 20, pal["card"], shadow=(10, .06, 4))
             y = ty0 + 18 + self._bd_ls(flab) // 2
             cv.create_text(x0 + pad, y, text="오늘의 작업", font=flab, fill=pal["sub"], anchor="w")
-            try:
-                secs = float(self._today_secs())
-            except Exception:
-                secs = 0.0
-            try:
-                goal = max(0.5, float(self.us.get("goal_hours") or 8))
-            except Exception:
-                goal = 8.0
+            secs, goal = pf["secs"], pf["goal"]
             y += self._bd_ls(flab) // 2 + 8 + hbig // 2
             hh9, mm9 = int(secs // 3600), int(secs % 3600 // 60)
             parts = ([("%d" % hh9, True), ("시간", False)] if hh9 else []) \
                 + [("%d" % mm9, True), ("분", False)]
             self._bd_bignum(cv, x0 + pad, y, parts, pal)
-            frac = max(0.0, min(1.0, secs / (goal * 3600.0)))
+            frac = pf["frac"]
             cv.create_text(x1 - pad, y + hbig * 0.16, text="%d%%" % int(frac * 100),
                            font=self._bf(10, 2), fill=pal["accent"], anchor="e")
             y += hbig // 2 + 12
             self._bd_bar(cv, x0 + pad, y, cw - pad * 2, frac, pal)
             y += 6 + 14
-            tiles = (("목표", ("%g시간" % goal), None),
-                     ("토마토", "%d개" % self._board_tomato_n(), None),
-                     ("오늘 기분", str(d.get("mood") or "—"), "settings"),
-                     ("누적", "%d시간" % self._lv_hours(), None))
+            if vis:
+                tiles = (("지금", pf["state"], None),
+                         ("레벨", "Lv. %d" % lvn, None),
+                         ("오늘 기분", str(d.get("mood") or "—"), None),
+                         ("누적", "%d시간" % pf["hours"], None))
+            else:
+                tiles = (("목표", ("%g시간" % goal), None),
+                         ("토마토", "%d개" % self._board_tomato_n(), None),
+                         ("오늘 기분", str(d.get("mood") or "—"), "settings"),
+                         ("누적", "%d시간" % self._lv_hours(), None))
             tw9 = (cw - pad * 2 - 8) / 2.0
             for i9, (cap, val, hit) in enumerate(tiles[:rows * 2]):
                 tx0 = x0 + pad + (i9 % 2) * (tw9 + 8)
@@ -41091,7 +41609,7 @@ class Mascot:
         # 오늘의 노래 카드 — 홈의 오노추와 같은 값 (요청: 자동으로 연동)
         if show3:
             sy0 = y0 + h1 + gap + h2 + gap
-            su9, _st9 = self._room_song()
+            su9 = pf["song_u"]
             self._bd_box(cv, x0, sy0, x1, sy0 + h3, 20, pal["card"], shadow=(10, .06, 4))
             my = sy0 + h3 / 2.0
             self._bd_put(cv, ("vinyl", 44, pal["accent"], pal["ink"]),
@@ -41100,9 +41618,13 @@ class Mascot:
             tx = x0 + 16 + 44 + 12
             tw0 = (x1 - 16 - 36 - 10) - tx
             ty9 = my - (l1 + l2 + 3) / 2.0
-            cv.create_text(tx, ty9 + l1 / 2.0, text=self._bd_fit(self._board_bgm_title(), fb, tw0),
+            cv.create_text(tx, ty9 + l1 / 2.0,
+                           text=self._bd_fit(pf["song_t"] if vis else self._board_bgm_title(),
+                                             fb, tw0),
                            font=fb, fill=pal["ink"], anchor="w")
-            if su9:
+            if vis:
+                sub9 = "오늘의 노래 · 눌러서 듣기" if su9 else "오늘은 노래를 안 걸었어요"
+            elif su9:
                 n9 = self._song_like_n(self.char, {"u": su9, "lk": int(
                     (self.us.get("room_song_likes") or {}).get("n") or 0)})
                 sub9 = "오늘의 노래" + (" · ♥ %d" % n9 if n9 else "") + " · 바꾸기"
@@ -41113,6 +41635,11 @@ class Mascot:
                            anchor="w")
             bx = x1 - 16 - 18
             self._bd_box(cv, bx - 18, my - 18, bx + 18, my + 18, 18, pal["ink"])
+            if vis:
+                self._bd_ic(cv, "l_play", bx + 1, my, 16, self._bd_on(pal["ink"]))
+                if su9:
+                    self._board_ui_hit.append((x0, sy0, x1, sy0 + h3, "visit_song"))
+                return
             self._bd_ic(cv, "l_stop" if self._board_playing() else "l_play", bx + (0 if self._board_playing() else 1),
                         my, 16, self._bd_on(pal["ink"]))
             self._board_ui_hit.append((x0, sy0, x1, sy0 + h3, "bgm"))
@@ -41158,8 +41685,9 @@ class Mascot:
             self._bd_ic(cv, "l_chat", cx, my + 1, 26, pal["sub"])
             fe = self._bf(11, 2)
             cv.create_text(cx, my + 52, text="아직 남긴 글이 없어요", font=fe, fill=pal["ink"])
-            cv.create_text(cx, my + 58 + self._bd_ls(fe), text="아래에 오늘의 한 줄을 남겨 보세요",
-                           font=self._bf(9), fill=pal["sub"])
+            if self._bv is None:
+                cv.create_text(cx, my + 58 + self._bd_ls(fe), text="아래에 오늘의 한 줄을 남겨 보세요",
+                               font=self._bf(9), fill=pal["sub"])
         else:
             y = ly0
             face = self._board_face_ph(36, pal["soft"])
@@ -41183,6 +41711,8 @@ class Mascot:
                                text=self._board_ago(g.get("at")), font=fa9,
                                fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
                 y = bot
+        if self._bv is not None:
+            return                           # 남의 보드 — 읽기만 한다
         # 입력 칸
         yy = y1 - 14 - 23
         self._bd_box(cv, x0 + 14, yy - 23, x1 - 14, yy + 23, 14, pal["fill"])
@@ -41207,6 +41737,8 @@ class Mascot:
 
     def _board_bgm_title(self):
         """보드의 노래 = 내 오노추 (홈에서 걸든 보드에서 걸든 같은 값)."""
+        if self._bv is not None:             # 남의 보드 — 그 사람의 오노추
+            return self._bd_prof()["song_t"]
         su9, st9 = self._room_song()
         if not su9:
             return "오늘의 노래 없음"
@@ -41508,6 +42040,8 @@ class Mascot:
         t = str(self._board_bub().get("t") or "").strip()
         if t:
             return t
+        if self._bv is not None:
+            return self._bd_prof()["say"]
         return "지금 그리는 중" if self._working() else "잠깐 쉬는 중"
 
     def _bd_wrap_tk(self, text, font, maxw):
@@ -42723,7 +43257,7 @@ class Mascot:
                 self._board_poke_start("char")
             elif what and what.startswith("item:"):
                 it9 = self._board_item(what[5:])
-                if it9 is not None and it9.get("kind") == "check":
+                if it9 is not None and it9.get("kind") == "check" and self._bv is None:
                     self._board_check_toggle(it9, self._board_check_row_at(it9, e.x, e.y))
             return
         if self._board_grip_press(e):
@@ -42882,6 +43416,8 @@ class Mascot:
             pass
 
     def _board_wheel(self, e, which):
+        if self._bv is not None:
+            return
         if which == "main" and self._board_tab == "cal":
             lay = self._board_layout()
             x0, y0, x1, y1 = lay["stage"]
@@ -42921,6 +43457,8 @@ class Mascot:
 
     def _board_rclick(self, e, which):
         """우클릭 — 항목이면 회전·색·글·지우기, 스티커면 모션·지우기 (꾸미기 중)."""
+        if self._bv is not None:
+            return
         if which == "main" and self._board_tab == "cal":
             self._cal_rclick(e)
             return
@@ -43464,6 +44002,8 @@ class Mascot:
         self._board_draw()
 
     def _board_tool(self, k):
+        if self._bv is not None:
+            return
         d = self._board_data()
         if k == "photo":
             q = self._pick_image_file()
@@ -43545,8 +44085,12 @@ class Mascot:
         if not due:
             return it
         it2 = dict(it)
-        d9 = self._board_due_find(due)
-        n = self._days_to(d9.get("date")) if d9 else None
+        if self._bv is not None:
+            # 남의 보드 — 마감 목록은 내 것이 아니다. 올릴 때 적어 둔 날짜(dd)로 센다
+            n = self._days_to(it.get("dd")) if it.get("dd") else None
+        else:
+            d9 = self._board_due_find(due)
+            n = self._days_to(d9.get("date")) if d9 else None
         if n is None:
             it2["text"] = "끝!"
         elif n == 0:
@@ -43689,7 +44233,7 @@ class Mascot:
         return fn
 
     def _board_paste(self):
-        if not self._board_alive():
+        if not self._board_alive() or self._bv is not None:
             return False
         im = self._board_clip_img()
         if im is None:
@@ -43789,6 +44333,8 @@ class Mascot:
         self._board_draw()
 
     def _board_toggle_edit(self):
+        if self._bv is not None:
+            return                           # 남의 보드는 못 꾸민다
         self._board_edit = not getattr(self, "_board_edit", False)
         if self._board_edit:
             self._stk_edit = "board"
@@ -43803,7 +44349,23 @@ class Mascot:
         self._board_draw()
 
     def _board_ui_act(self, what):
+        if what == "visit_back":
+            self._bv_leave()
+            return
+        if self._bv is not None:
+            # 남의 보드 — 읽기만 한다. 되는 것은 돌아가기와 노래 듣기뿐이다
+            if what == "visit_song":
+                u9 = self._bd_prof()["song_u"]
+                if u9 and self._song_ok(u9):
+                    self._open_url(u9)
+            return
         d = self._board_data()
+        if what == "share_toggle":
+            d["noshare"] = not bool(d.get("noshare"))
+            self._board_save(undo=False)
+            self._board_toast("친구에게 보드를 안 보여 줘요" if d.get("noshare")
+                              else "친구가 홈에서 내 보드를 볼 수 있어요")
+            return
         if what.startswith("tab:"):
             tab = what[4:]
             if tab in ("board", "cal") and tab != self._board_tab:
@@ -44214,6 +44776,16 @@ class Mascot:
         self._bd_ic(cv, "pen", W - P - 22, y + 21, 16, pal["sub"])
         hit.append((bx9, y, W - P, y + 42, "bub_text"))
         y += 42 + 24
+        # 6) 친구에게 보여 주기 — 한 줄로 (창이 화면보다 길어지지 않게)
+        on8 = not d.get("noshare")
+        t8 = "친구에게 내 보드 보여 주기"
+        cv.create_text(P, y, text=t8, font=fs, fill=pal["ink"], anchor="w")
+        cv.create_text(P + int(self._tw(t8, fs)) + 10, y + 1,
+                       text="홈의 내 칸 집 아이콘 · 달력은 안 보여요",
+                       font=self._bf(8, True), fill=pal["sub"], anchor="w")
+        sb8 = self._bd_switch(cv, W - P, y, on8, pal["accent"], pal)
+        hit.append((sb8[0] - 8, sb8[1] - 4, sb8[2], sb8[3] + 4, "share_toggle"))
+        y += 11 + 22
         # 창 높이를 내용에 맞춘다
         try:
             if abs(win.winfo_height() - y) > 2:
@@ -48343,6 +48915,10 @@ class Mascot:
             # 캐릭터는 아예 안 실어 신호를 아끼고, 받는 쪽은 열쇠가
             # 없으면 기존 값을 지킨다.
             out["sk"] = self._my_skin_id()
+        if self._board_on() and (self.us.get("board_bh") or self._bsh_mine_exists()):
+            # 내 보드의 해시 — 친구의 홈에서 내 칸에 집 아이콘이 뜬다. **빈 값도 싣는다**
+            # (보여 주기를 껐다 — 안 실으면 아이콘이 남의 화면에 영영 남는다 · 지뢰 92)
+            out["bh"] = self._bsh_adv()
         # 진단 — 꺼진 구역과 마지막 실패 이유. '안 돼요' 제보가 왔을 때
         # 그 컴퓨터에 가지 않고도 무엇이 죽었는지 갈린다 (지뢰 51).
         # 사람 이름·파일·창 제목은 안 들어간다 (구역 이름과 예외 종류뿐).
@@ -50006,6 +50582,8 @@ class Mascot:
             self._room_start()
         if self.room_net is None:
             return
+        if self.cfg.get("myhome"):
+            self._safe("board_share", self._bsh_tick, now)
         # 쪽지 — 화면이 안 바뀌어도 반드시 처리해야 하는 것은 통신
         # 바퀴에 둔다 (지뢰 97)
         self._safe("note_poll", self._note_poll, now)
@@ -50359,6 +50937,8 @@ class Mascot:
             # 캐릭터·옛 판) 기존 것을 지킨다 (지뢰 92).
             sk9 = (self._form_ok(q.get("sk")) if "sk" in q
                    else self._form_ok(cur.get("sk")))
+            # 보드 해시 — 폼과 같은 규칙 (열쇠가 있으면 그 값, 없으면 기존 것)
+            bh9 = self._bh_ok(q.get("bh") if "bh" in q else cur.get("bh"))
             rm = str(q.get("rm") or "")[:self.RANK_MSG_N]
             rmg = q.get("rmg")
             rmg = (dict((str(a9)[:4], str(b9 or "")[:self.RANK_MSG_N])
@@ -50377,6 +50957,7 @@ class Mascot:
                     or (cur.get("kd") or None) != kd9
                     or str(cur.get("cdh") or "") != cdh9
                     or self._form_ok(cur.get("sk")) != sk9
+                    or self._bh_ok(cur.get("bh")) != bh9
                     or float(cur.get("lvd") or 0) != lvd
                     or (cur.get("ms") or None) != ms9
                     or (cur.get("rmg") or {}) != rmg):
@@ -50405,6 +50986,8 @@ class Mascot:
                     row2["cdh"] = cdh9
                 if sk9:
                     row2["sk"] = sk9
+                if bh9:
+                    row2["bh"] = bh9
                 if lvd:
                     row2["lvd"] = lvd
                 row2["seen"] = _now9              # 직접 본 것은 지금
@@ -52375,6 +52958,8 @@ class Mascot:
                 # 입고 있는 폼 — 안 넣으면 사가가 변신해도 남의 화면이
                 # 안 바뀐다 (지뢰 89)
                 q.get("sk"),
+                # 보드 해시 — 안 넣으면 집 아이콘이 남의 화면에서 안 바뀐다 (지뢰 89)
+                q.get("bh"),
                 # 같이 뽀모도로 중인가 — 안 넣으면 '같작업' 배지가
                 # 남의 화면에서 안 바뀐다 (지뢰 89)
                 str((q.get("tm") or {}).get("i") or "")
@@ -53783,7 +54368,7 @@ class Mascot:
         self._room_body = []
         self._room_bre_d = {}
         self._room_msg_boxes = {}    # 말풍선 마퀴 자리 (카드 모드에서도)
-        self._room_cal_btns = {}
+        self._room_cal_btns = {}; self._room_board_btns = {}
         self._room_song_hits = {}
         self._room_song_box = {}
         self._room_song_slots = set()
@@ -54018,7 +54603,7 @@ class Mascot:
         self._room_hit = []
         self._room_body = []
         self._room_bre_d = {}
-        self._room_cal_btns = {}
+        self._room_cal_btns = {}; self._room_board_btns = {}
         self._room_song_hits = {}
         self._room_song_box = {}
         self._room_song_slots = set()
@@ -54781,9 +55366,10 @@ class Mascot:
             # 달력이 있으면 그 **실제 오른쪽 끝** 바로 뒤부터 (요청 —
             # 딱 붙어도 되니 가려지지만 않게). 손으로 적은 수를 쓰면
             # 아이콘 크기를 바꿀 때마다 어긋난다.
-            has_cal = (slot == self.char or isinstance(p.get("cal"), dict))
+            nic9 = self._room_icons_n(slot, p)
+            has_cal = nic9 > 0
             pad9 = 6 * k
-            lo9 = ((self._room_cal_box(kx0, ky0, k)[2] + 3 * k) if has_cal
+            lo9 = ((self._room_cal_box(kx0, ky0, k, nic9 - 1)[2] + 3 * k) if has_cal
                    else kx0 + pad9)
             hi9 = kx1 - pad9
             # 흰 판이 글자보다 좌우 14k 씩 더 나간다 — 그만큼 빼야 칸 안에
@@ -54936,11 +55522,18 @@ class Mascot:
             self._room_inbox_card = (kx0, ky0, kx1, ky1)
             self._safe("room_cal", self._room_cal_draw,
                        cv, kx0, ky0, k, self._room_raw(slot))
-        elif isinstance(p.get("cal"), dict):
-            # 도장판을 공개한 사람 — 그 카드에도 달력 아이콘이 뜬다
-            self._room_cal_data[slot] = p["cal"]
-            self._safe("room_cal2", self._room_cal_draw,
-                       cv, kx0, ky0, k, self._room_raw(slot), slot)
+        else:
+            ic9 = 0
+            if self._bv_has(p):
+                # 보드를 보여 주는 사람 — 집 아이콘 (누르면 그 사람의 마이 보드 · 요청)
+                self._safe("room_bd2", self._room_cal_draw,
+                           cv, kx0, ky0, k, self._room_raw(slot), slot, "board", 0)
+                ic9 = 1
+            if isinstance(p.get("cal"), dict):
+                # 도장판을 공개한 사람 — 그 카드에도 달력 아이콘이 뜬다
+                self._room_cal_data[slot] = p["cal"]
+                self._safe("room_cal2", self._room_cal_draw,
+                           cv, kx0, ky0, k, self._room_raw(slot), slot, None, ic9)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
 
     BADGE_TAGS = ("dyn", "ui")   # 스티커 위로 올라가야 눌린다 (달력과 같다)
@@ -55399,7 +55992,13 @@ class Mascot:
     CAL_S = 0.72             # 달력 아이콘 크기 배율 (요청 — 더 작게)
     CAL_PAD = 6              # 카드 왼쪽·위 모서리에서 떨어진 거리 (k 배)
 
-    def _room_cal_box(self, kx0, ky0, k):
+    def _room_icons_n(self, slot, p):
+        """그 칸 왼쪽 위에 서는 아이콘 수 (집·달력) — 그리는 쪽과 비켜 서는 쪽이 같이 본다."""
+        if slot == self.char:
+            return 1
+        return int(self._bv_has(p)) + int(isinstance(p.get("cal"), dict))
+
+    def _room_cal_box(self, kx0, ky0, k, idx=0):
         """달력 아이콘이 차지하는 네모.
 
         **그리는 쪽과 비켜 서는 쪽(말풍선)이 같은 값을 본다.** 예전에는
@@ -55407,14 +56006,15 @@ class Mascot:
         서고 있어서, 한쪽만 고치면 말풍선이 아이콘 뒤로 들어갔다.
         """
         r = 10 * k * self.CAL_S
-        x0 = kx0 + self.CAL_PAD * k
+        x0 = kx0 + self.CAL_PAD * k + idx * (2 * r + 4 * k)
         y0 = ky0 + self.CAL_PAD * k
         return (x0, y0, x0 + 2 * r, y0 + 2 * r)
 
-    def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None):
-        """내 칸 왼쪽 위의 달력 아이콘. 누르면 이 달의 도장판이 열린다."""
-        x0, y0, x1, y1 = self._room_cal_box(kx0, ky0, k)
-        if slot is None and self._board_on():
+    def _room_cal_draw(self, cv, kx0, ky0, k, col, slot=None, kind=None, idx=0):
+        """내 칸 왼쪽 위의 달력 아이콘. 누르면 이 달의 도장판이 열린다.
+        kind="board" 면 집 아이콘 — 남의 칸이면 그 사람의 마이 보드가 열린다 (요청)."""
+        x0, y0, x1, y1 = self._room_cal_box(kx0, ky0, k, idx)
+        if kind == "board" or (slot is None and self._board_on()):
             # 내 칸 — 마이 보드 아이콘 (요청: 도장판 자리에). 도장판은 보드 안 단추로.
             img = self._safe_str(self._room_board_img, col, int(round(x1 - x0)))
         else:
@@ -55429,6 +56029,11 @@ class Mascot:
         box = (x0 - 4 * k, y0 - 4 * k, x1 + 4 * k, y1 + 4 * k)
         if slot is None:
             self._room_cal_btn = box
+        elif kind == "board":
+            # 옆 아이콘과 누르는 자리가 안 겹치게 좌우는 덜 넓힌다
+            self._room_board_btns[slot] = (x0 - 2 * k, y0 - 4 * k, x1 + 2 * k, y1 + 4 * k)
+        elif idx:
+            self._room_cal_btns[slot] = (x0 - 2 * k, y0 - 4 * k, x1 + 4 * k, y1 + 4 * k)
         else:
             self._room_cal_btns[slot] = box
 
@@ -56809,10 +57414,14 @@ class Mascot:
         return d
 
     def _stk_list(self, where):
+        if where == "board" and self._bv is not None:
+            return self._bv["stk"]          # 남의 보드 — 그 사람의 스티커
         d = self._stk_all()
         return d[where] if where in d else d["room"]
 
     def _stk_save(self):
+        if self._stk_edit == "board":
+            self._bsh_dirty = time.time()   # 보드의 스티커가 바뀌었다
         if _load_failed(self._stk_file()):
             self._log_error("stk_locked")   # 못 읽은 파일은 안 덮는다
             return
@@ -65735,6 +66344,8 @@ class Mascot:
                           # 입고 있던 폼도 마지막으로 본 것 그대로 — 꺼진
                           # 사이에 기본 모습으로 되돌아가 보이지 않게
                           "sk": self._form_ok(w.get("sk")),
+                          # 보드도 마지막으로 본 것 그대로 — 꺼져 있어도 볼 수 있다
+                          "bh": self._bh_ok(w.get("bh")),
                           "a": "", "off": True})
         # 차례: 나 → 접속한 사람(레벨 높은 순) → 안 켠 사람 (요청).
         # 예전엔 게이지(%) 순이라 1%마다 자리가 뒤바뀌어 어지러웠다 —
@@ -67082,6 +67693,10 @@ class Mascot:
             else:
                 self._safe("stamp_open", self._stamp_open)
             return
+        for slot2, box in list(self._room_board_btns.items()):
+            if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
+                self._safe("board_visit", self._board_visit, slot2)
+                return
         for slot2, box in list(self._room_cal_btns.items()):
             if box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]:
                 self._safe("stamp_open", self._stamp_open, slot2)
