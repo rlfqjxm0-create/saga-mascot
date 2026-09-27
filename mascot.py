@@ -1614,6 +1614,7 @@ DEFAULT_SETTINGS = {
     "board_seen": False,     # 우클릭 메뉴의 '마이 보드'를 눌러 봤나 (새로움 점)
     "board_bh": "",          # 서버에 올려 둔 내 보드의 해시 (친구에게 알리는 값)
     "board_up": None,        # 서버에 올려 둔 그림 열쇠들 (다시 안 올린다)
+    "gb_seen": 0,            # 방명록 — 어디까지 읽었나 (글 번호 · 큰 쪽으로만)
     "mag_seen": False,       # 우클릭 메뉴의 '자석 모드'를 눌러 봤나 (새로움 점)
     "magnet": False,         # 자석 모드 — 화면 가장자리에 붙어 벽 너머에서 내다본다
     "mag_side": "",          # 지금 붙어 있는 벽 (l r t b · 빈 값이면 안 붙음)
@@ -9182,6 +9183,13 @@ class Mascot:
         self._bsh_retry = 0.0        # 이때까지는 다시 안 올린다
         self._bsh_boot = False       # 켠 뒤 한 번 — 아직 안 올린 보드가 있으면 올린다
         self._bsh_down = {}          # 받는 중인 자리 → 시작한 시각
+        self._gb = None              # 방명록 (자리 → 서버에 남은 글들) · 처음 쓸 때 읽는다
+        self._gb_at = {}             # 자리 → 마지막으로 받아 온 시각
+        self._gb_busy = {}           # 자리 → 받는 중(시작한 시각)
+        self._gb_off = False         # 서버에 방명록 저장소가 없다 (이 세션은 쉰다)
+        self._gb_add_at = 0.0        # 마지막으로 글을 남긴 시각 (연타 막기)
+        self._gb_told = 0            # 이번 세션에 알린 가장 새 글 번호
+        self._gb_boot = 0.0          # 켠 뒤 첫 확인 시각
         self._room_board_btns = {}   # 남의 카드의 집 아이콘 자리
         self._mag_lay = None         # 맥 — 기운 몸을 담는 따로 된 창 (MacMagLayer)
         self._crash_fp = None        # 맥 — 프로세스가 죽을 때의 자국을 남길 파일
@@ -22994,11 +23002,8 @@ class Mascot:
         pr = ch.get("press")
         if mv is None and pr is not None and (abs(e.x_root - pr[0]) > 4
                                               or abs(e.y_root - pr[1]) > 4):
-            if ch.get("native") and self._chrome_native_move(win):
-                # OS 가 옮겼다 (놓을 때까지 안에서 돈다) — 끌기는 이미 끝났다
-                ch["press"] = ch["move"] = ch["target"] = None
-                ch["maxed"] = None
-                return True
+            # (창 옮기기를 OS 에 맡기던 길은 걷어냈다 — 지뢰 239. ctypes 로 들어간 OS 의
+            #  옮기기 고리 안에서 Tk 타이머가 파이썬 콜백을 부르면 파이썬이 통째로 중단한다.)
             ch["move"] = mv = (pr[0] - pr[2], pr[1] - pr[3])
             ch["maxed"] = None            # 끌기 시작하면 '꽉 채움'은 풀린 것
             # 유리 판은 끄는 동안 굳힌다 — 아크릴을 옮길 때마다 다시 흐리면
@@ -23041,35 +23046,6 @@ class Mascot:
             win.geometry("%dx%d+%d+%d" % to)
         except Exception:
             pass
-
-    def _chrome_native_move(self, win):
-        """창 옮기기를 OS 에 맡긴다 — 제목 표시줄을 잡고 끄는 것과 같은 길이라 다른
-        프로그램 창처럼 부드럽게 움직인다 (요청). Tk 의 geometry 로 따라가면 사건마다
-        한 박자 늦고 12ms 로 묶여 있어 끊겨 보였다.
-
-        마우스 왼쪽 단추가 **실제로 눌려 있을 때만** 한다 — 아니면(검사의 가짜 사건)
-        OS 의 옮기기 고리에 들어가 멈춘다. 그때는 False 를 돌려 예전 길로 간다."""
-        if not IS_WIN:
-            return False
-        try:
-            u = ctypes.WinDLL("user32")                      # 지뢰 21·23 — 제 손잡이
-            u.GetAsyncKeyState.argtypes = [ctypes.c_int]
-            u.GetAsyncKeyState.restype = ctypes.c_short
-            u.GetSystemMetrics.argtypes = [ctypes.c_int]
-            vk = 0x02 if u.GetSystemMetrics(23) else 0x01    # 단추를 바꿔 쓰는 사람
-            if not (u.GetAsyncKeyState(vk) & 0x8000):
-                return False
-            hwnd = int(win.wm_frame(), 16)
-            u.ReleaseCapture.restype = ctypes.c_int
-            u.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
-                                       ctypes.c_void_p]
-            u.SendMessageW.restype = ctypes.c_void_p
-            u.ReleaseCapture()
-            u.SendMessageW(hwnd, 0x00A1, 2, 0)               # WM_NCLBUTTONDOWN · HTCAPTION
-            return True
-        except Exception:
-            self._log_error("chrome_native")
-            return False
 
     def _chrome_release(self, win):
         ch = getattr(win, "_chrome", None)
@@ -40112,6 +40088,16 @@ class Mascot:
                 "say": "자리에 없어요" if off else ("지금 그리는 중" if s9 == "work"
                                               else "잠깐 쉬는 중")}
 
+    def _bv_cal(self):
+        """보고 있는 보드의 주인이 공개한 도장판 (없으면 None) — 접속해 있을 때 자리 신호에 실린다."""
+        if self._bv is None:
+            return None
+        slot = self._bv["slot"]
+        cal = self._bv_who(slot).get("cal")
+        if not isinstance(cal, dict):
+            cal = self._room_cal_data.get(slot)
+        return cal if isinstance(cal, dict) else None
+
     def _room_name_of(self, slot):
         w = (self._room_who_get() or {}).get(slot)
         if isinstance(w, dict) and w.get("n"):
@@ -40211,6 +40197,8 @@ class Mascot:
         self._board_draw()
         if need:
             self._bv_fetch(slot)
+        if self._gb_can():
+            self._gb_start("list", slot)
         return True
 
     def _bv_fetch(self, slot):
@@ -40398,6 +40386,277 @@ class Mascot:
         except Exception as e:
             q.append(("down_fail", slot, "보드를 받지 못했어요 (%s)" % type(e).__name__))
 
+    # ── 방명록 (친구가 글을 남긴다 · 요청 2026-09-28) ─────────────────────
+    # 주인이 제 보드에 쓰는 한 줄은 예전처럼 보드 파일(d["guest"])에 있고 보드와 함께 올라간다.
+    # 친구가 남기는 글은 서버 표(room_guest)에 있다 — 주인이 꺼져 있어도 남는다.
+    # 보이는 목록은 둘을 **그릴 때마다 합친다** (베껴 두면 한쪽만 지웠을 때 어긋난다 · 지뢰 30).
+    GB_TEXT = 80                 # 글 한 줄의 길이
+    GB_OPEN_GAP = 45.0           # 보드를 띄워 둔 동안 다시 받는 간격
+    GB_IDLE_GAP = 600.0          # 닫혀 있을 때 내 방명록을 확인하는 간격 (지뢰 47)
+    GB_ADD_GAP = 15.0            # 글을 잇달아 남기는 간격
+    GB_KEEP = 60
+
+    def _gb_path(self):
+        return os.path.join(self.state_dir, ".guestbook.json")
+
+    def _gb_all(self):
+        if self._gb is None:
+            try:
+                got = _load_json(self._gb_path())
+            except Exception:
+                got = None
+            self._gb = got if isinstance(got, dict) else {}
+        return self._gb
+
+    def _gb_slot(self):
+        """지금 보드의 주인 자리."""
+        return self._bv["slot"] if self._bv is not None else self.char
+
+    def _gb_can(self):
+        return (not self._gb_off) and self.room_net is not None and self._board_on()
+
+    def _gb_list(self, d):
+        """지금 보드에 보일 방명록 — 주인의 한 줄 + 친구가 남긴 글, 오래된 것부터."""
+        slot = self._gb_slot()
+        out = []
+        for g in (d.get("guest") or []):
+            if isinstance(g, dict) and str(g.get("t") or "").strip():
+                out.append({"k": "l%r" % (g.get("at"),), "s": slot, "n": str(g.get("n") or ""),
+                            "t": str(g.get("t"))[:self.GB_TEXT], "at": g.get("at"), "own": True})
+        for g in (self._gb_all().get(slot) or []):
+            if isinstance(g, dict) and str(g.get("t") or "").strip():
+                out.append({"k": "s%d" % int(g.get("id") or 0), "s": str(g.get("s") or ""),
+                            "n": str(g.get("n") or ""), "t": str(g.get("t"))[:self.GB_TEXT],
+                            "at": g.get("at"), "own": False, "id": int(g.get("id") or 0)})
+
+        def when(g):
+            try:
+                return float(g.get("at") or 0)
+            except Exception:
+                return 0.0
+        out.sort(key=when)
+        return out[-self.GB_KEEP:]
+
+    def _gb_mine_to_del(self, g):
+        """이 글을 내가 지울 수 있나 — 내 보드의 글 전부, 남의 보드에서는 내가 쓴 글."""
+        if self._bv is None:
+            return True
+        return (not g.get("own")) and g.get("s") == self.char
+
+    def _gb_face(self, slot, sz, bg):
+        """글쓴이 얼굴 — 보드 주인이면 보드의 얼굴, 아니면 그 사람의 앉은 모습에서."""
+        if not slot or slot == self._gb_slot():
+            return self._board_face_ph(sz, bg)
+        key = ("gface", slot, sz, bg)
+        got = self._board_uiph.get(key)
+        if got is not None:
+            return got[0]
+        ph = None
+        try:
+            p9 = os.path.join(self.dir, "seat.png") if slot == self.char \
+                else (self._room_art_file(slot, "seat.png") or "")
+            if p9 and os.path.exists(p9):
+                s9 = Image.open(p9).convert("RGBA")
+                w9, h9 = s9.size
+                f9 = s9.crop((int(w9 * .05), int(h9 * .06), int(w9 * .84), int(h9 * .72)))
+                S = sz * 3
+                k = S * 1.06 / f9.height
+                f9 = f9.resize((max(1, int(f9.width * k)), max(1, int(f9.height * k))),
+                               Image.LANCZOS)
+                c9 = Image.new("RGBA", (S, S), self._bd_c(bg))
+                c9.alpha_composite(f9, ((S - f9.width) // 2, (S - f9.height) // 2 + S // 20))
+                m9 = Image.new("L", (S, S), 0)
+                ImageDraw.Draw(m9).ellipse((0, 0, S - 1, S - 1), fill=255)
+                o = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+                o.paste(c9, (0, 0), m9)
+                ph = self._tkimg(o.resize((sz, sz), Image.LANCZOS))
+        except Exception:
+            ph = None
+        self._board_uiph[key] = (ph, 0)
+        return ph
+
+    def _gb_run(self, net, op, slot, arg, q):
+        """방명록 통신 (스레드 — Tk 를 건드리지 않는다 · 지뢰 150)."""
+        try:
+            A = {"p_room": net.room, "p_slot": slot}
+            if op == "add":
+                r = net._rpc("guest_add", dict(A, p_blob=_room_seal(net.key, arg)), timeout=15)
+                try:
+                    ok9 = int(r or 0) > 0
+                except Exception:
+                    ok9 = False
+                q.append(("gb_added", slot, ok9))
+                if not ok9:
+                    return
+            elif op == "del":
+                net._rpc("guest_del", dict(A, p_id=int(arg)), timeout=15)
+            rows = net._rpc("guest_list", A, timeout=15) or []
+            now = time.time()
+            out = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                g = _room_open_blob(net.key, r.get("b")) if isinstance(r.get("b"), str) else None
+                if not isinstance(g, dict) or not str(g.get("t") or "").strip():
+                    continue                       # 방 코드가 다른 글 · 빈 글
+                try:
+                    age = max(0.0, float(r.get("a") or 0))
+                    gid = int(r.get("i") or 0)
+                except Exception:
+                    continue
+                out.append({"id": gid, "s": str(g.get("s") or "")[:40],
+                            "n": str(g.get("n") or "")[:14],
+                            "t": str(g.get("t"))[:self.GB_TEXT], "at": now - age})
+            out.sort(key=lambda g: g["id"])
+            q.append(("gb_ok", slot, out[-self.GB_KEEP:]))
+        except Exception as e:
+            q.append(("gb_fail", slot, op, "%s %s" % (type(e).__name__, str(e)[:160])))
+
+    def _gb_start(self, op, slot, arg=None):
+        net = self.room_net
+        if net is None or self._gb_off:
+            return False
+        now = time.time()
+        if op == "list" and now - float(self._gb_busy.get(slot) or 0.0) < 20.0:
+            return False                           # 이미 받는 중이다
+        self._gb_busy[slot] = now
+        self._gb_at[slot] = now
+        threading.Thread(target=self._gb_run, args=(net, op, slot, arg, self._bsh_q),
+                         daemon=True).start()
+        return True
+
+    def _gb_event(self, ev, now):
+        slot = ev[1]
+        shown = self._board_alive() and self._gb_slot() == slot
+        if ev[0] == "gb_ok":
+            self._gb_busy.pop(slot, None)
+            allg = self._gb_all()
+            old = allg.get(slot) or []
+            if old != ev[2]:
+                allg[slot] = ev[2]
+                if len(allg) > 40:                 # 상한 (지뢰 18) — 내 것은 남긴다
+                    for k9 in [k for k in list(allg) if k != self.char][:len(allg) - 40]:
+                        allg.pop(k9, None)
+                try:
+                    _save_json(self._gb_path(), allg)
+                except Exception:
+                    pass
+                if shown and self._board_tab == "board":
+                    self._board_draw()
+            if slot == self.char:
+                self._gb_notice(ev[2], shown)
+        elif ev[0] == "gb_added":
+            if shown:
+                self._board_toast("방명록에 남겼어요" if ev[2]
+                                  else "지금은 못 남겼어요 — 잠시 뒤에 다시")
+            if not ev[2]:
+                self._gb_busy.pop(slot, None)
+        elif ev[0] == "gb_fail":
+            self._gb_busy.pop(slot, None)
+            msg = str(ev[3])
+            if "404" in msg or "PGRST202" in msg:
+                self._gb_off = True                # 서버에 방명록 저장소가 아직 없다
+                if shown:
+                    self._board_draw()
+            if not getattr(self, "_gb_logged", False):
+                self._gb_logged = True
+                self._log_error("guestbook %s %s" % (ev[2], msg))
+            if ev[2] in ("add", "del") and shown:
+                self._board_toast("지금은 못 남겼어요 — 잠시 뒤에 다시" if ev[2] == "add"
+                                  else "지금은 못 지웠어요 — 잠시 뒤에 다시")
+
+    def _gb_notice(self, lst, shown):
+        """내 방명록에 새 글 — 보고 있으면 읽은 것으로, 아니면 한 번 알린다."""
+        top, who = 0, ""
+        for g in lst:
+            if g.get("s") != self.char and int(g.get("id") or 0) > top:
+                top, who = int(g["id"]), str(g.get("n") or "") or self._room_name_of(g.get("s"))
+        try:
+            seen = int(self.us.get("gb_seen") or 0)
+        except Exception:
+            seen = 0
+        if top <= seen:
+            return
+        if shown and self._bv is None and self._board_tab == "board":
+            self.us["gb_seen"] = top               # 큰 쪽으로만 올린다 (지뢰 30)
+            self._safe("settings", self._save_settings)
+            return
+        if top > self._gb_told:
+            self._gb_told = top
+            if not self.us.get("room_mute"):
+                self._safe("guest_say", self._say,
+                           "%s 방명록에 글을 남겼어요" % self._josa_iga(who or "친구"), 6.0)
+
+    @staticmethod
+    def _josa_iga(name):
+        """이름 + 이/가 (받침이 있으면 '이')."""
+        name = str(name or "")
+        try:
+            c = ord(name[-1])
+            if 0xAC00 <= c <= 0xD7A3:
+                return name + ("이" if (c - 0xAC00) % 28 else "가")
+        except Exception:
+            pass
+        return name + "님이"
+
+    def _gb_tick(self, now):
+        """보드를 띄워 둔 동안은 그 방명록을, 닫혀 있으면 가끔 내 것을 받아 온다."""
+        if not self._gb_can():
+            return
+        if self._board_alive():
+            slot = self._gb_slot()
+            if now - float(self._gb_at.get(slot) or 0.0) >= self.GB_OPEN_GAP:
+                self._gb_start("list", slot)
+            return
+        if not self._gb_boot:
+            self._gb_boot = now + 50.0             # 켠 직후에는 방 통신이 먼저다
+            return
+        if now < self._gb_boot or not self._bsh_adv():
+            return                                 # 보드를 안 올렸으면 남길 사람도 없다
+        if now - float(self._gb_at.get(self.char) or 0.0) >= self.GB_IDLE_GAP:
+            self._gb_start("list", self.char)
+
+    def _gb_write(self, text):
+        """지금 보드의 방명록에 글을 남긴다 (남의 보드 — 서버로)."""
+        text = " ".join(str(text or "").split())[:self.GB_TEXT]
+        if not text:
+            return False
+        if not self._gb_can():
+            self._board_toast("방에 연결돼 있지 않아요")
+            return False
+        now = time.time()
+        if now - self._gb_add_at < self.GB_ADD_GAP:
+            self._board_toast("조금 있다가 남겨 주세요")
+            return False
+        self._gb_add_at = now
+        return self._gb_start("add", self._gb_slot(),
+                              {"s": self.char, "n": self._room_nick()[:14], "t": text,
+                               "at": int(now)})
+
+    def _gb_delete(self, key):
+        """방명록의 글 하나를 지운다 (내 보드의 글 · 남의 보드에 내가 쓴 글)."""
+        d = self._board_data()
+        hit = [g for g in self._gb_list(d) if g["k"] == key]
+        if not hit or not self._gb_mine_to_del(hit[0]):
+            return False
+        g = hit[0]
+        if g.get("own"):
+            if self._bv is not None:
+                return False
+            d["guest"] = [x for x in (d.get("guest") or [])
+                          if not (isinstance(x, dict) and "l%r" % (x.get("at"),) == key)]
+            self._board_save()
+            self._board_draw()
+            return True
+        if not self._gb_can():
+            self._board_toast("방에 연결돼 있지 않아요")
+            return False
+        slot = self._gb_slot()
+        allg = self._gb_all()                      # 화면에서는 바로 지운다 (서버는 뒤따라)
+        allg[slot] = [x for x in (allg.get(slot) or []) if int(x.get("id") or 0) != g["id"]]
+        self._board_draw()
+        return self._gb_start("del", slot, g["id"])
+
     def _bsh_tick(self, now):
         """통신 바퀴에서 — 받은 결과를 거두고, 내 보드가 바뀌었으면 올린다."""
         q = self._bsh_q
@@ -40418,6 +40677,11 @@ class Mascot:
                 if not getattr(self, "_bsh_logged", False):
                     self._bsh_logged = True
                     self._log_error("board_share " + ev[1])
+            elif ev[0].startswith("gb_"):
+                try:
+                    self._gb_event(ev, now)
+                except Exception:
+                    self._log_error("guest_event")
             elif ev[0] in ("down_ok", "down_fail"):
                 self._bsh_down.pop(ev[1], None)
                 bv = self._bv
@@ -40431,6 +40695,10 @@ class Mascot:
                     else:
                         bv["state"], bv["msg"] = "fail", ev[2]
                 self._board_draw()
+        try:
+            self._gb_tick(now)
+        except Exception:
+            self._log_error("guest_tick")
         if self._bsh_off or self._bsh_busy or not self._board_on() or self.room_net is None:
             return
         if not self._bsh_boot:
@@ -41093,8 +41361,6 @@ class Mascot:
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry("%dx%d+%d+%d" % (W, H, max(0, (sw - W) // 2), max(0, (sh - H) // 2)))
         self._chrome_setup(win, None, band=64, on_close=self._board_close)
-        if getattr(win, "_chrome", None):
-            win._chrome["native"] = True       # 끌기는 OS 에 맡긴다 (부드럽게 · 요청)
         cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["bg"])
         self._bd_undark(cv)
         cv.pack(fill="both", expand=True)
@@ -41133,6 +41399,8 @@ class Mascot:
         self._board_last_snap = None
         self._safe("board_draw", self._board_draw)
         self._board_loop()
+        if self._gb_can():
+            self._gb_at.pop(self.char, None)     # 다음 통신 바퀴에 내 방명록을 받는다
 
     def _board_close(self):
         if self._bv is not None:
@@ -41353,6 +41621,9 @@ class Mascot:
             xs = self._bd_button(cv, xs, cy, "내 보드로", "l_home", pal["ink"], pal,
                                  "visit_back") - 6
             self._board_tips.append((xs + 6, cy - 18, xl - 12, cy + 18, "내 마이 보드로 돌아가기"))
+            if self._bv_cal() is not None:
+                xs = self._bd_icon_btn(cv, xs, cy, "l_star", "%s의 도장판" % name, None, pal,
+                                       "visit_stamp")
             mx = x + 16
             fm = self._bf(10)
             room = xs - 16 - mx - 18
@@ -41670,7 +41941,7 @@ class Mascot:
         fh = self._bf(12, 2)
         hy = y0 + 20 + self._bd_ls(fh) // 2
         cv.create_text(x0 + 20, hy, text="방명록", font=fh, fill=pal["ink"], anchor="w")
-        gl = list(d.get("guest") or [])
+        gl = self._gb_list(d)
         fn = self._bf(9, 2)
         cnt = "%d" % len(gl)
         cw9 = max(24, int(self._tw(cnt, fn)) + 16)
@@ -41685,16 +41956,18 @@ class Mascot:
             self._bd_ic(cv, "l_chat", cx, my + 1, 26, pal["sub"])
             fe = self._bf(11, 2)
             cv.create_text(cx, my + 52, text="아직 남긴 글이 없어요", font=fe, fill=pal["ink"])
-            if self._bv is None:
-                cv.create_text(cx, my + 58 + self._bd_ls(fe), text="아래에 오늘의 한 줄을 남겨 보세요",
+            if self._bv is None or self._gb_can():
+                cv.create_text(cx, my + 58 + self._bd_ls(fe),
+                               text=("아래에 오늘의 한 줄을 남겨 보세요" if self._bv is None
+                                     else "아래에 첫 글을 남겨 보세요"),
                                font=self._bf(9), fill=pal["sub"])
         else:
             y = ly0
-            face = self._board_face_ph(36, pal["soft"])
             fn9, ft9, fa9 = self._bf(10, 2), self._bf(10), self._bf(8, True)
             ln9 = self._bd_ls(fn9)
             maxw = (x1 - 20) - (x0 + 67)
             for g in reversed(gl[-12:]):
+                face = self._gb_face(g.get("s"), 36, pal["soft"])
                 tid = cv.create_text(x0 + 67, y + 10 + ln9 + 3, text=str(g.get("t") or "")[:80],
                                      font=ft9, fill=pal["ink2"], anchor="nw", width=maxw)
                 bb = cv.bbox(tid) or (0, 0, 0, y + 50)
@@ -41704,19 +41977,28 @@ class Mascot:
                     break
                 if face is not None:
                     cv.create_image(x0 + 20 + 18, y + 10 + 18, image=face)
-                nm9 = str(g.get("n") or "나")
+                nm9 = str(g.get("n") or "") or (self._bd_prof()["name"] if g.get("own")
+                                                else self._room_name_of(g.get("s")))
+                nm9 = self._bd_fit(nm9, fn9, maxw - 86)
                 cv.create_text(x0 + 67, y + 10 + ln9 // 2, text=nm9, font=fn9, fill=pal["ink"],
                                anchor="w")
+                if self._gb_mine_to_del(g):
+                    gx9, gy9 = x1 - 20 - 8, y + 10 + ln9 // 2
+                    self._bd_ic(cv, "l_x", gx9, gy9, 12, self._mix(pal["sub"], pal["card"], 0.35))
+                    self._board_ui_hit.append((gx9 - 11, gy9 - 11, gx9 + 11, gy9 + 11,
+                                               "gdel:" + g["k"]))
+                    self._board_tips.append((gx9 - 11, gy9 - 11, gx9 + 11, gy9 + 11, "이 글 지우기"))
                 cv.create_text(x0 + 67 + int(self._tw(nm9, fn9)) + 7, y + 10 + ln9 // 2 + 1,
                                text=self._board_ago(g.get("at")), font=fa9,
                                fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
                 y = bot
-        if self._bv is not None:
-            return                           # 남의 보드 — 읽기만 한다
+        if self._bv is not None and not self._gb_can():
+            return                           # 남의 보드인데 남길 길이 없다 (방 연결·서버)
         # 입력 칸
         yy = y1 - 14 - 23
         self._bd_box(cv, x0 + 14, yy - 23, x1 - 14, yy + 23, 14, pal["fill"])
-        cv.create_text(x0 + 30, yy, text="한 줄 남기기", font=self._bf(10),
+        cv.create_text(x0 + 30, yy, text="한 줄 남기기" if self._bv is None else "방명록 남기기",
+                       font=self._bf(10),
                        fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
         self._bd_box(cv, x1 - 14 - 6 - 34, yy - 17, x1 - 14 - 6, yy + 17, 11, pal["accent"])
         self._bd_ic(cv, "l_arrow", x1 - 14 - 6 - 17, yy, 17, self._bd_on(pal["accent"]))
@@ -43800,7 +44082,6 @@ class Mascot:
         ch = getattr(win, "_chrome", None)
         if ch:
             ch["fixed"] = True
-            ch["native"] = True
         cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["card"], width=W, height=H)
         self._bd_undark(cv)
         cv.pack(fill="both", expand=True)
@@ -44358,6 +44639,16 @@ class Mascot:
                 u9 = self._bd_prof()["song_u"]
                 if u9 and self._song_ok(u9):
                     self._open_url(u9)
+            elif what == "visit_stamp":
+                cal9 = self._bv_cal()
+                if cal9 is not None:
+                    self._room_cal_data[self._bv["slot"]] = cal9
+                    self._safe("stamp_open", self._stamp_open, self._bv["slot"])
+            elif what == "guest":
+                who9 = self._bd_prof()["name"]
+                self._board_ask("%s의 방명록에 남기기" % who9, "", self._gb_write)
+            elif what.startswith("gdel:"):
+                self._gb_delete(what[5:])
             return
         d = self._board_data()
         if what == "share_toggle":
@@ -44430,12 +44721,16 @@ class Mascot:
             self._board_draw()
         elif what == "guest":
             def done(v):
-                d["guest"].append({"n": str(self.cfg.get("name") or self.char), "t": v[:80],
-                                   "at": time.time()})
+                v = " ".join(str(v or "").split())[:self.GB_TEXT]
+                if not v:
+                    return
+                d["guest"].append({"n": self._room_nick()[:14], "t": v, "at": time.time()})
                 d["guest"] = d["guest"][-60:]
                 self._board_save()
                 self._board_draw()
             self._board_ask("방명록 한 줄", "", done)
+        elif what.startswith("gdel:"):
+            self._gb_delete(what[5:])
         elif what == "bgm":
             if self._room_song()[0]:
                 self._safe("board_song_play", self._board_song_play)
@@ -44533,7 +44828,6 @@ class Mascot:
         ch = getattr(win, "_chrome", None)
         if ch:
             ch["fixed"] = True
-            ch["native"] = True
         cv = tk.Canvas(win, highlightthickness=0, bd=0, bg=pal["card"], width=W, height=700)
         self._bd_undark(cv)
         cv.pack(fill="both", expand=True)
@@ -55523,17 +55817,13 @@ class Mascot:
             self._safe("room_cal", self._room_cal_draw,
                        cv, kx0, ky0, k, self._room_raw(slot))
         else:
-            ic9 = 0
             if self._bv_has(p):
                 # 보드를 보여 주는 사람 — 집 아이콘 (누르면 그 사람의 마이 보드 · 요청)
                 self._safe("room_bd2", self._room_cal_draw,
                            cv, kx0, ky0, k, self._room_raw(slot), slot, "board", 0)
-                ic9 = 1
             if isinstance(p.get("cal"), dict):
-                # 도장판을 공개한 사람 — 그 카드에도 달력 아이콘이 뜬다
+                # 도장판을 공개한 사람 — 아이콘은 없다 (요청). 그 사람의 보드 머리에서 연다
                 self._room_cal_data[slot] = p["cal"]
-                self._safe("room_cal2", self._room_cal_draw,
-                           cv, kx0, ky0, k, self._room_raw(slot), slot, None, ic9)
         self._room_hit.append((kx0, ky0, kx1, ky1, slot, sleeping))
 
     BADGE_TAGS = ("dyn", "ui")   # 스티커 위로 올라가야 눌린다 (달력과 같다)
@@ -55996,7 +56286,7 @@ class Mascot:
         """그 칸 왼쪽 위에 서는 아이콘 수 (집·달력) — 그리는 쪽과 비켜 서는 쪽이 같이 본다."""
         if slot == self.char:
             return 1
-        return int(self._bv_has(p)) + int(isinstance(p.get("cal"), dict))
+        return int(self._bv_has(p))          # 도장판은 그 사람의 보드 머리에서 연다 (요청)
 
     def _room_cal_box(self, kx0, ky0, k, idx=0):
         """달력 아이콘이 차지하는 네모.
