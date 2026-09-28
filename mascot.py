@@ -1814,6 +1814,15 @@ def layer_api():
 # 뒤 통째로 사라졌다 (제보 · 실측: 캐시가 한 번 넘치자 21장 전부 빈칸). 캐시마다
 # 고치면 한 곳을 반드시 빠뜨리므로(지뢰 55) 그림을 얹는 한 곳에서 붙잡는다.
 _CV_KEEP_MAX = 240
+_CV_KEEP_MB = 40           # 용량 상한 — 보드의 구운 무대처럼 한 장이 몇 MB 인 그림은 240장을 기다리면
+#                            수백 MB 가 된다 (실측: 보드를 다시 구울 때마다 +5MB · 친구 보드 드나들기 180↔250MB)
+
+
+def _cv_img_bytes(img):
+    try:
+        return int(img.width()) * int(img.height()) * 4
+    except Exception:
+        return 0
 
 
 def _cv_keep(cv, img):
@@ -1830,16 +1839,24 @@ def _cv_keep(cv, img):
         keep = d9.get("_img_keep")
         if keep is None:
             keep = d9["_img_keep"] = {}
-        keep[str(img)] = img
-        if len(keep) > _CV_KEEP_MAX:
+        nm9 = str(img)
+        if nm9 not in keep:
+            d9["_img_keep_b"] = d9.get("_img_keep_b", 0) + _cv_img_bytes(img)
+        keep[nm9] = img
+        if len(keep) > _CV_KEEP_MAX or                 d9.get("_img_keep_b", 0) > d9.get("_img_keep_lim", _CV_KEEP_MB * 1000000):
             w = cv._w
             live = set(cv.tk.splitlist(cv.tk.eval(
                 'set ::ena_kr {}; foreach ::ena_ki [%s find all] '
                 '{if {[%s type $::ena_ki] eq "image"} '
                 '{lappend ::ena_kr [%s itemcget $::ena_ki -image]}}; '
                 'set ::ena_kr' % (w, w, w))))
+            live.add(nm9)                     # 지금 얹으려는 것은 아직 캔버스에 없다
             for nm in [n for n in keep if n not in live]:
                 keep.pop(nm, None)
+            tot = sum(_cv_img_bytes(v) for v in keep.values())
+            d9["_img_keep_b"] = tot
+            # 걸린 그림만으로 상한을 넘는 창(가득 꾸민 보드)은 얹을 때마다 훑지 않게 문턱을 올린다
+            d9["_img_keep_lim"] = max(_CV_KEEP_MB * 1000000, int(tot * 1.5))
     except Exception:
         pass
 
@@ -9183,6 +9200,8 @@ class Mascot:
         self._bsh_retry = 0.0        # 이때까지는 다시 안 올린다
         self._bsh_boot = False       # 켠 뒤 한 번 — 아직 안 올린 보드가 있으면 올린다
         self._bsh_down = {}          # 받는 중인 자리 → 시작한 시각
+        self._board_baked = None     # 한 장으로 구운 보드 무대 (보드를 열기 전에도 있어야 한다 · 지뢰 13)
+        self._bph_used = set()       # 이번 그리기에 쓴 항목 그림 열쇠
         self._gb = None              # 방명록 (자리 → 서버에 남은 글들) · 처음 쓸 때 읽는다
         self._gb_at = {}             # 자리 → 마지막으로 받아 온 시각
         self._gb_busy = {}           # 자리 → 받는 중(시작한 시각)
@@ -39957,8 +39976,12 @@ class Mascot:
                         ("tag", "네임택"))
     BOARD_TICKET_COL = {"classic": "#ffffff", "admit": "#ffd6e3", "coupon": "#fff1a8",
                         "tag": "#cfe6ff"}
-    BOARD_ITEM_MAX = 40
+    BOARD_ITEM_MAX = 80        # 붙이는 것 (사진·메모지·테이프·티켓…) — 요청으로 40 → 80
+    BOARD_STK_MAX = 40         # 보드의 스티커 (홈·뽀모도로는 STK_MAX 그대로 — 그쪽 창은 이미 무겁다)
+    BOARD_PH_MB = 64           # 항목 그림 캐시 상한 (용량 · 지뢰 42) — 장수로 막으면 넘칠 때 매번 다시 굽는다
+    BOARD_BAKE_MIN = 6         # 붙인 것이 이만큼이면 꾸미기가 아닐 때 한 장으로 구워 얹는다
     BOARD_UI_MAX = 260         # 보드 UI 그림 캐시 상한 (지뢰 18) — 한 장이 작다
+    BOARD_UI_MB = 24           # 같은 캐시의 용량 상한 — 카드 바탕은 창만 해서 크기마다 남으면 수십 MB 다
 
     def _board_on(self):
         return bool(self.cfg.get("myhome")) and (IS_WIN or IS_MAC)
@@ -39995,7 +40018,8 @@ class Mascot:
     BSH_WAIT = 12.0              # 마지막으로 고친 뒤 이만큼 지나야 올린다 (끌 때마다 올리지 않게)
     BSH_RETRY = 300.0            # 올리기가 실패하면 이만큼 쉰다
     BSH_BLOB_MAX = 380000        # 잠근 덩어리 하나의 상한 (서버는 400000)
-    BSH_FILES_MAX = 60           # 그림 수 상한
+    BSH_FILES_MAX = 150          # 그림 수 상한 (서버는 한 사람 200개 · 24MB)
+    BSH_PUT_TRIES = 3            # 서버가 안 받으면(방 전체의 속도 제한) 기다렸다 다시
     BSH_PX = {"photo": 760, "mat": 1100, "shelf": 512, "stk": 512}
 
     @staticmethod
@@ -40111,6 +40135,7 @@ class Mascot:
     def _bv_reset_caches(self):
         """보드를 갈아 끼울 때 — 그림 캐시가 앞 보드의 것이다 (열쇠가 항목 번호라 겹친다)."""
         self._board_ph = {}
+        self._board_baked = None
         self._board_uiph = {}
         self._board_mat_cache = {}
         self._board_pick = None
@@ -40153,7 +40178,7 @@ class Mascot:
             except Exception:
                 d = {}
             base = self._bpeer_dir(slot)
-            for m9 in list(man.get("stk") or [])[:self.STK_MAX]:
+            for m9 in list(man.get("stk") or [])[:self.BOARD_STK_MAX]:
                 if not isinstance(m9, dict) or not m9.get("f"):
                     continue
                 m8 = dict(m9)
@@ -40290,6 +40315,7 @@ class Mascot:
                 return
             keys = []
             made = {}
+            missed = 0
             for kind, holder, fk in self._bsh_refs(snap, stk)[:self.BSH_FILES_MAX]:
                 fn = os.path.basename(str(holder.get(fk) or ""))
                 src = os.path.join(sdir if kind == "stk" else bdir, fn)
@@ -40306,11 +40332,18 @@ class Mascot:
                         if key not in done:
                             blob = _room_seal(net.key, pk)
                             if len(blob) <= self.BSH_BLOB_MAX:
-                                r9 = net._rpc("board_put", {"p_room": net.room, "p_slot": slot,
-                                                            "p_k": key, "p_blob": blob},
-                                              timeout=30)
-                                if r9 in (1, "1", True):
-                                    got = key
+                                # 서버는 방 전체의 속도를 막는다 — 여럿이 같이 올리면 잠깐 안
+                                # 받는다(0). 그림을 빼 버리지 말고 기다렸다 다시 한다.
+                                for try9 in range(self.BSH_PUT_TRIES):
+                                    r9 = net._rpc("board_put", {"p_room": net.room,
+                                                                "p_slot": slot, "p_k": key,
+                                                                "p_blob": blob}, timeout=30)
+                                    if r9 in (1, "1", True):
+                                        got = key
+                                        break
+                                    time.sleep(2.5 + 2.5 * try9)
+                                if not got:
+                                    missed += 1
                                 time.sleep(0.35)
                         else:
                             got = key
@@ -40335,7 +40368,7 @@ class Mascot:
             keys = sorted(set(keys))
             net._rpc("board_keep", {"p_room": net.room, "p_slot": slot,
                                     "p_keys": ",".join(["m"] + keys)}, timeout=20)
-            q.append(("up_ok", h, keys))
+            q.append(("up_ok", h, keys, missed))
         except Exception as e:
             q.append(("up_fail", "%s: %s" % (type(e).__name__, str(e)[:160])))
 
@@ -40665,7 +40698,11 @@ class Mascot:
             if ev[0] == "up_ok":
                 self._bsh_busy = False
                 self.us["board_bh"] = self._bh_ok(ev[1])
-                self.us["board_up"] = list(ev[2])[:200]
+                self.us["board_up"] = list(ev[2])[:400]
+                if len(ev) > 3 and ev[3]:
+                    # 못 올린 그림이 있다 — 친구에게는 그 자리가 비어 보인다. 조금 뒤에 한 번 더
+                    # (이미 올린 그림은 다시 안 올리므로 빠진 것만 간다)
+                    self._bsh_dirty = now + 90.0 - self.BSH_WAIT
                 self._safe("settings", self._save_settings)
                 self._safe("room_push", self._room_push_now)
             elif ev[0] == "up_fail":
@@ -40960,10 +40997,40 @@ class Mascot:
         out.alpha_composite(im, (M, M))
         return out, M
 
+    def _bd_ui_trim(self):
+        """보드를 다 그린 뒤 — UI 그림 캐시가 용량 상한을 넘으면 오래된 것부터 놓는다.
+        꺼내 쓴 것은 맨 뒤로 옮겨 두므로(_bd_put) 남는 것은 지금 크기의 그림이다. 화면에 걸린
+        그림은 캔버스가 붙들고 있어 빈칸이 되지 않는다 (지뢰 223)."""
+        c = self._board_uiph
+
+        def size(v):
+            ph = v[0] if isinstance(v, tuple) and v else v
+            try:
+                return int(ph.width()) * int(ph.height()) * 8
+            except Exception:
+                return 0
+        sz = {k: size(v) for k, v in c.items()}
+        tot = sum(sz.values())
+        cap = self.BOARD_UI_MB * 1000000
+        if tot <= cap:
+            return
+        for k in list(c):
+            if tot <= cap * 0.6:
+                break
+            if not sz.get(k):
+                continue                      # 그림이 아닌 것(원본 PIL 등)은 그대로
+            c.pop(k, None)
+            tot -= sz[k]
+
     def _bd_put(self, cv, key, make, x, y, anchor="nw", tags=()):
         """구운 그림을 캐시해 얹는다. make() 는 그림 또는 (그림, 여백)."""
         cache = self._board_uiph
         got = cache.get(key)
+        if got is not None:
+            try:
+                cache[key] = cache.pop(key)      # 쓴 것은 맨 뒤로 (오래된 것부터 놓는다)
+            except Exception:
+                pass
         if got is None:
             im = make()
             m = 0
@@ -41375,6 +41442,7 @@ class Mascot:
         self._board_hit = []
         self._board_ui_hit = []
         self._board_ph = {}            # 항목 그림 캐시 (id, 열쇠) → PhotoImage
+        self._board_baked = None       # 한 장으로 구운 무대 (서명, 그림, 붙든 것)
         self._board_uiph = {}          # UI 조각 그림 캐시
         self._board_mat_cache = {}
         self._board_toast_v = None
@@ -42273,12 +42341,31 @@ class Mascot:
         self._board_hit = []
         self._board_grips = []
         self._board_stk_last = {}
+        self._bph_used = set()
         key = ("stage", W, H, str(d.get("mat")), str(d.get("mat_img") or ""),
                self._board_mat_posv() if d.get("mat") == "custom" else None,
                tuple(sorted(pal.items())))
-        self._bd_put(bcv, key, lambda: self._bd_stage_pil(W, H, pal, d).convert("RGBA"), 0, 0)
-        for it in list(d.get("items") or []):
-            self._board_draw_item(bcv, it, W, BH)
+        # 무대 바탕은 창만 한 그림이다 — 크기마다 한 장씩 남으면 창을 끌어 키우는 동안 수십 MB 가
+        # 쌓인다 (실측 80MB). 지금 크기 것만 든다.
+        for k9 in [k for k in self._board_uiph
+                   if isinstance(k, tuple) and k and k[0] == "stage" and k != key]:
+            self._board_uiph.pop(k9, None)
+        items9 = list(d.get("items") or [])
+        baked = False
+        if (len(items9) >= self.BOARD_BAKE_MIN and not getattr(self, "_board_edit", False)
+                and not self._board_matadj):
+            try:
+                baked = self._board_bake(bcv, key, items9, W, H, BH, pal, d)
+            except Exception:
+                self._log_error("board_bake")
+                baked = False
+                bcv.delete("all")
+                self._board_hit = []
+        if not baked:
+            self._board_baked = None              # 꾸미는 동안에는 큰 그림을 들고 있지 않는다
+            self._bd_put(bcv, key, lambda: self._bd_stage_pil(W, H, pal, d).convert("RGBA"), 0, 0)
+            for it in items9:
+                self._board_draw_item(bcv, it, W, BH)
         # 스티커 (홈·뽀모도로와 같은 시스템의 세 번째 창)
         self._stk_draw(bcv, "board", W, H, tags="dyn")
         # 캐릭터 — 선반 위, 발밑에 옅은 그늘 (누르면 통통 — bchar 태그만 옮긴다)
@@ -42293,6 +42380,8 @@ class Mascot:
                 self._board_hit.append((W // 2 - seat.width * .4, BH + 14 - seat.height,
                                         W // 2 + seat.width * .4, BH + 14, "char"))
         self._board_ledge_items(bcv, W, H, BH, pal)
+        self._bph_trim()
+        self._bd_ui_trim()
         self._board_draw_bubble(bcv, W, H, BH, pal)
         if self._board_matadj:
             self._board_adj_bar(bcv, W)
@@ -42754,7 +42843,7 @@ class Mascot:
         self._board_draw_shelf(bcv, W, H, BH, pal)
 
     # ── 선반 소품 (내 그림을 선반에 세워 전시 · 요청) ─────────────────────────
-    BOARD_SHELF_MAX = 20
+    BOARD_SHELF_MAX = 30
 
     def _board_shelf(self, pid):
         for p in self._board_data().get("shelf") or []:
@@ -42801,7 +42890,7 @@ class Mascot:
         for p in props:
             pid = str(p.get("id"))
             key = ("prop", pid, str(p.get("f")), int(p.get("h") or 84), bool(p.get("flip")))
-            got = self._board_ph.get(key)
+            got = self._bph_get(key)
             if got is None:
                 try:
                     im, w, h, M = self._bd_prop_pil(p)
@@ -42809,10 +42898,7 @@ class Mascot:
                     self._log_error("board_prop")
                     continue
                 got = (self._tkimg(im), w, h, M)
-                if len(self._board_ph) > 80:
-                    for old in list(self._board_ph)[:30]:
-                        self._board_ph.pop(old, None)
-                self._board_ph[key] = got
+                self._bph_put(key, got)
             ph, w, h, M = got
             cx = float(p.get("x", .5)) * W
             by = H - float(p.get("b", 14))
@@ -42944,6 +43030,104 @@ class Mascot:
     # ── 항목 그림 ────────────────────────────────────────────────────────
     BOARD_SS = 2               # 항목은 두 배로 그려 돌리고 줄인다 (가장자리 매끈)
 
+    def _bph_get(self, key):
+        """항목 그림 캐시에서 꺼낸다 — 꺼낸 것은 맨 뒤로 (지금 쓰는 것이 먼저 버려지지 않게 · 지뢰 185)."""
+        c = self._board_ph
+        got = c.get(key)
+        if got is not None:
+            try:
+                c[key] = c.pop(key)
+            except Exception:
+                pass
+            self._bph_used.add(key)
+        return got
+
+    def _bph_trim(self):
+        """무대를 다 그린 뒤 — 이번에 안 쓴 그림이 쓴 것보다 많으면 놓는다.
+        창 크기를 바꾸면 항목 그림이 크기마다 한 벌씩 생긴다 (실측: 끌어서 키우는 동안 350장)."""
+        c, used = self._board_ph, self._bph_used
+        stale = [k for k in c if k not in used]
+        if len(stale) > max(20, len(used)):
+            for k in stale:
+                c.pop(k, None)
+
+    def _bph_put(self, key, val):
+        """항목 그림 캐시에 넣는다 — 상한은 용량이다. 예전에는 80장에서 오래된 30장을 버려서,
+        붙인 것이 그보다 많으면 그릴 때마다 전부 다시 구웠다 (실측 10ms → 610ms)."""
+        c = self._board_ph
+        c[key] = val
+        self._bph_used.add(key)
+
+        def size(v):
+            ph = v[0] if isinstance(v, tuple) else v
+            try:
+                return int(ph.width()) * int(ph.height()) * 8      # Tk 그림 + 달아 둔 원본
+            except Exception:
+                return 0
+        cap = self.BOARD_PH_MB * 1000000
+        if len(c) > 40:
+            tot = sum(size(v) for v in c.values())
+            for old in list(c):
+                if tot <= cap or len(c) <= 40:
+                    break
+                if old == key:
+                    continue
+                tot -= size(c.pop(old))
+
+    def _board_bake(self, bcv, skey, items, W, H, BH, pal, d):
+        """꾸미기가 아닐 때 — 바탕과 붙인 것들을 **한 장으로** 구워 얹는다.
+
+        붙인 것이 많으면 캔버스 항목이 그만큼 겹쳐 쌓이고, 그 위에서 스티커가 움직일 때마다
+        Tk 가 밑에 걸친 항목을 전부 다시 칠한다 (지뢰 72 — 실측: 붙인 것 80 · 움직이는 스티커 20
+        에서 한 코어의 40%). 붙인 것은 스티커·캐릭터·선반 소품보다 아래라 한 장으로 합쳐도
+        쌓임 차례가 그대로다. 누르는 자리(_board_hit)는 좌표라 그대로 통한다.
+        구운 것은 서명(바탕 + 그림·자리)이 같으면 다시 안 굽는다.
+        """
+        base = self._bd_cached(skey, lambda: self._bd_stage_pil(W, H, pal, d).convert("RGBA"))
+        src = getattr(base, "_pil_src", None)
+        if src is None:
+            return False
+        parts, sig = [], [skey]
+        for it in items:
+            ph = self._board_item_img(it, W)
+            if ph is None:
+                continue
+            im = getattr(ph, "_pil_src", None)
+            if im is None:
+                return False
+            cx = int(float(it.get("x", 0.5)) * W)
+            cy = int(float(it.get("y", 0.5)) * BH)
+            parts.append((ph, im, cx, cy, str(it.get("id"))))
+            sig.append((id(ph), cx, cy))
+        sig = tuple(sig)
+        got = getattr(self, "_board_baked", None)
+        if got is None or got[0] != sig:
+            out = src.copy()
+            for ph, im, cx, cy, _iid in parts:
+                x0, y0 = cx - im.width // 2, cy - im.height // 2
+                sx, sy = max(0, -x0), max(0, -y0)
+                if sx >= im.width or sy >= im.height or x0 >= out.width or y0 >= out.height:
+                    continue
+                piece = im if im.mode == "RGBA" else im.convert("RGBA")
+                if sx or sy:
+                    piece = piece.crop((sx, sy, piece.width, piece.height))
+                out.alpha_composite(piece, (max(0, x0), max(0, y0)))
+            # 서명의 id() 가 남의 것으로 바뀌지 않게 그림들을 같이 붙든다
+            got = (sig, self._tkimg(out), [p[0] for p in parts])
+            self._board_baked = got
+        # 구운 한 장은 내가 들고 있다(_board_baked) — 캔버스의 붙들기 목록(지뢰 223)에 넣으면
+        # 다시 구울 때마다 몇 MB 짜리가 상한까지 쌓인다
+        nk9 = bcv.__dict__.get("_no_img_keep")
+        bcv.__dict__["_no_img_keep"] = True
+        try:
+            bcv.create_image(0, 0, image=got[1], anchor="nw", tags=("bbake",))
+        finally:
+            bcv.__dict__["_no_img_keep"] = nk9
+        for ph, im, cx, cy, iid in parts:
+            hw, hh = ph.width() / 2.0, ph.height() / 2.0
+            self._board_hit.append((cx - hw, cy - hh, cx + hw, cy + hh, "item:" + iid))
+        return True
+
     def _board_item_img(self, it, W):
         """항목 하나를 PIL 로 그려 돌린 PhotoImage. 열쇠에 모양을 정하는 값만."""
         it = self._board_item_live(it)
@@ -42954,7 +43138,7 @@ class Mascot:
                str(it.get("cap") or ""), str(it.get("col") or ""), str(it.get("f") or ""),
                str(it.get("fix") or ""), str(it.get("sty") or ""),
                str(it.get("items") or ""))
-        ph = self._board_ph.get(key)
+        ph = self._bph_get(key)
         if ph is not None and kind == "check" and \
                 self._board_rows.get(str(it.get("id")), (0, 0, 0, -1, 0))[3] != wpx * self.BOARD_SS:
             ph = None                      # 줄 자리 표가 다른 크기 것이면 다시 굽는다
@@ -42976,10 +43160,7 @@ class Mascot:
         except Exception:
             self._log_error("board_item_img")
             return None
-        if len(self._board_ph) > 80:
-            for old in list(self._board_ph)[:30]:
-                self._board_ph.pop(old, None)
-        self._board_ph[key] = ph
+        self._bph_put(key, ph)
         return ph
 
     def _board_wrap(self, dr, text, font, maxw):
@@ -43102,7 +43283,7 @@ class Mascot:
             f = self._bd_pil_font(max(20, wpx // 6), True)
             if f is None:
                 return None
-            t = str(it.get("text") or "")
+            t = " ".join(str(it.get("text") or "").split())     # 한 줄짜리다 — 줄바꿈이 들면 재다 터진다
             sw = max(3, int(wpx / 70))
             d0 = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
             tw = int(d0.textlength(t, font=f)) + sw * 4 + 8
@@ -57697,7 +57878,7 @@ class Mascot:
                 if isinstance(v, list):
                     d[k] = [m for m in v
                             if isinstance(m, dict) and m.get("f")
-                            ][:self.STK_MAX]
+                            ][:self._stk_cap(k)]
         except Exception:
             pass
         self._stk_mem = d
@@ -57923,11 +58104,15 @@ class Mascot:
                 (gx, gy, r + 5 * k, kind))
 
     # ── 넣기·지우기 ───────────────────────────────────────────────────
+    def _stk_cap(self, where):
+        """그 창에 붙일 수 있는 스티커 수 — 마이 보드는 더 많이 (요청)."""
+        return self.BOARD_STK_MAX if where == "board" else self.STK_MAX
+
     def _stk_add_img(self, where, im):
         """PIL 그림 하나를 그 창의 스티커로 넣는다. 넣은 id 를 돌려준다."""
         lst = self._stk_list(where)
-        if len(lst) >= self.STK_MAX:
-            self._stk_toast("스티커는 %d장까지 붙일 수 있어요" % self.STK_MAX)
+        if len(lst) >= self._stk_cap(where):
+            self._stk_toast("스티커는 %d장까지 붙일 수 있어요" % self._stk_cap(where))
             return None
         try:
             im = im.convert("RGBA")
