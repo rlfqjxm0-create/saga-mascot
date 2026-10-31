@@ -5095,15 +5095,36 @@ class MacSoundPack(_MacSoundPool):
     맥은 어느 키를 눌렀는지 알 수 없어(카운터만 읽는다) 키별 구분은 못 한다.
     인자만 맞춰 두고 무시한다.
 
-    **타자 소리만 AVAudioPlayer 를 '미리 준비해 둔 채로' 쓴다.** 준비된
-    플레이어는 45초를 쉬어도 play 가 그대로 빠르고, 끝난 것은 tend 가 도로
-    준비한다. 번들에 AVFoundation 파이썬 꾸러미는 없어도 시스템 프레임워크를
-    불러 클래스를 찾으면 된다 (지뢰 130). 못 쓰면 NSSound 로 낸다.
-    **이 프로세스처럼 실행 루프가 도는 곳에서만 쓸 것** (지뢰 245).
+    **타자 소리는 AVAudioEngine 한 대를 켜 둔 채로 낸다.** 준비해 둔 PCM 을
+    이미 돌고 있는 노드에 얹기만 해서, AVAudioPlayer 를 그때그때 시작할 때보다
+    키 → 실제 소리가 절반이다 (재생 호출 22ms → 0.06ms · 실측 69ms → 33ms ·
+    지뢰 245). 장치도 안 쉬므로 조용하다 치는 첫 타가 늦지 않는다. 자리를 비우면
+    (ENG_AWAY) 엔진을 내린다 — 돌고 있는 오디오는 컴퓨터의 잠들기를 막는다.
+    번들에 AVFoundation 파이썬 꾸러미가 없어도 시스템 프레임워크를 불러 클래스를
+    찾으면 된다 (지뢰 130). 못 쓰면 NSSound 로 낸다.
+    **inputNode 는 부르지 말 것** — 부르는 순간 마이크 권한을 묻는다.
     """
 
-    AV_ROWS = 12                  # 소리 종류 상한 — 맥은 어차피 키를 못 가린다
-    AV_MAX = 24                   # 플레이어 수 상한 (첫 준비 한 개에 8~30ms)
+    ENG_ROWS = 24                 # 소리 종류 상한 — 맥은 어차피 키를 못 가린다
+    ENG_FMTS = 3                  # 섞여 있어도 받아 줄 형식(샘플률·채널) 수
+    ENG_NODES = 6                 # 형식마다 겹쳐 낼 수 있는 소리 수
+    ENG_FRAMES = 256              # 장치 버퍼 — 기본 512 보다 약 11ms 빠르다
+    ENG_AWAY = 60.0               # 입력이 없으면 엔진을 내리는 초
+    ENG_TEND = 1.0                # 엔진을 살피는 간격
+    GAIN_MONO, GAIN_STEREO = 0.73, 0.82   # AVAudioPlayer 때 크기에 맞춘다 (실측)
+
+    _paths = ()
+    _bufs = ()
+    _fmts = None
+    _eng = None
+    _nodes = None
+    _dev = None
+    _closed = False
+    _bad_at = 0.0
+    _fails = 0
+    _turn9 = 0
+    _last9 = -1
+    _tend_at = 0.0
 
     def __init__(self, folder, volume=60):
         self.folder = folder
@@ -5121,53 +5142,102 @@ class MacSoundPack(_MacSoundPool):
             if name.lower().endswith(".wav") and os.path.exists(p):
                 paths.append(p)
         super().__init__(paths, volume)
-        self._ready = []          # [(플레이어, 길이)] 곧바로 낼 수 있는 것
-        self._spent = []          # [(끝나는 시각, 플레이어, 길이)] 도로 준비할 것
-        self._av = []
-        try:
-            self._av_build(paths)
-        except Exception:
-            self._av, self._ready, self._spent = [], [], []
+        self._paths = paths       # 엔진은 키 스레드가 올린다 — 켤 때 창이 안 멈추게
 
-    def _av_build(self, paths):
+    def _eng_load(self):
         import objc
         objc.lookUpClass("NSBundle").bundleWithPath_(
             "/System/Library/Frameworks/AVFoundation.framework").load()
-        AV = objc.lookUpClass("AVAudioPlayer")
-        NSData = objc.lookUpClass("NSData")
-        step = max(1, len(paths) // self.AV_ROWS)
-        rows = paths[::step][:self.AV_ROWS]
-        copies = max(2, self.AV_MAX // max(1, len(rows)))
-        g = self.volume / 100.0
-        made = []
-        for p in rows:
-            data = NSData.dataWithContentsOfFile_(p)
-            for _ in range(copies):
-                got = AV.alloc().initWithData_error_(data, None)
-                q = got[0] if isinstance(got, tuple) else got
-                if q is None:
-                    continue
-                q.setVolume_(g)
-                made.append((q, float(q.duration())))
-        random.shuffle(made)
-        self._av = [m9[0] for m9 in made]
-        # 처음 준비도 키 스레드가 한다 — 여기서 하면 켤 때 창이 멈춘다
-        self._spent = [(0.0, q, d) for q, d in made]
+        AF = objc.lookUpClass("AVAudioFile")
+        PB = objc.lookUpClass("AVAudioPCMBuffer")
+        URL = objc.lookUpClass("NSURL")
+        step = max(1, len(self._paths) // self.ENG_ROWS)
+        bufs, fmts = [], {}
+        for p in self._paths[::step][:self.ENG_ROWS]:
+            got = AF.alloc().initForReading_error_(URL.fileURLWithPath_(p), None)
+            f = got[0] if isinstance(got, tuple) else got
+            if f is None:
+                continue
+            fmt = f.processingFormat()
+            key = (float(fmt.sampleRate()), int(fmt.channelCount()))
+            if key not in fmts and len(fmts) >= self.ENG_FMTS:
+                continue
+            b = PB.alloc().initWithPCMFormat_frameCapacity_(fmt, int(f.length()))
+            f.readIntoBuffer_error_(b, None)
+            if int(b.frameLength()) > 0:
+                fmts.setdefault(key, fmt)
+                bufs.append((b, key))
+        if not bufs:
+            raise ValueError("엔진에 올릴 소리가 없음")
+        self._bufs, self._fmts = bufs, fmts
+
+    def _eng_up(self):
+        """엔진을 새로 세운다 — 장치가 바뀌었을 때도 이 한 길로."""
+        import objc
+        self._eng_down()
+        if not self._bufs:
+            self._eng_load()
+        AE = objc.lookUpClass("AVAudioEngine")
+        PN = objc.lookUpClass("AVAudioPlayerNode")
+        dev = _mac_out_dev()
+        _mac_out_frames(dev, self.ENG_FRAMES)
+        e = AE.alloc().init()
+        mix = e.mainMixerNode()
+        mix.setOutputVolume_(self.volume / 100.0)
+        nodes = {}
+        for key, fmt in self._fmts.items():
+            row = []
+            for _ in range(self.ENG_NODES):
+                n = PN.alloc().init()
+                e.attachNode_(n)
+                e.connect_to_format_(n, mix, fmt)
+                n.setVolume_(self.GAIN_MONO if key[1] == 1 else self.GAIN_STEREO)
+                row.append(n)
+            nodes[key] = row
+        e.prepare()
+        ok = e.startAndReturnError_(None)
+        if not (ok[0] if isinstance(ok, tuple) else ok):
+            raise RuntimeError("엔진이 안 켜짐")
+        for row in nodes.values():
+            for n in row:
+                n.play()
+        self._nodes, self._dev, self._eng = nodes, dev, e
+
+    def _eng_down(self):
+        e, self._eng = self._eng, None
+        if e is not None:
+            e.stop()
 
     def tend(self, now):
-        """끝난 플레이어 하나를 도로 준비한다 (키 스레드가 쉬는 틈에)."""
-        if not self._spent or self._spent[0][0] > now:
+        """엔진을 살핀다 (키 스레드가 ENG_TEND 마다) — 켜고, 내리고, 장치를 따라간다."""
+        self._tend_at = now + self.ENG_TEND
+        if self._closed:
             return
-        _at, q, d = self._spent.pop(0)
-        q.prepareToPlay()
-        self._ready.append((q, d))
+        if self.volume <= 0 or idle_seconds() > self.ENG_AWAY:
+            self._eng_down()
+            return
+        e = self._eng
+        if e is not None and e.isRunning() and _mac_out_dev() == self._dev:
+            return
+        if now < self._bad_at:
+            return
+        try:
+            self._eng_up()
+            self._fails = 0
+        except Exception:
+            self._bad_at = now + 5.0
+            self._fails += 1
+            if self._fails <= 3:          # 이유는 키 스레드가 남긴다
+                raise
+        if self._closed:                  # 올리는 사이에 닫혔다
+            self._eng_down()
 
     def set_volume(self, volume):
         super().set_volume(volume)
-        g = self.volume / 100.0
-        for q in getattr(self, "_av", ()):
+        e = self._eng
+        if e is not None:
             try:
-                q.setVolume_(g)
+                e.mainMixerNode().setOutputVolume_(self.volume / 100.0)
             except Exception:
                 pass
 
@@ -5177,28 +5247,37 @@ class MacSoundPack(_MacSoundPool):
         # `except Exception: pass` 로 감싸여 있어서 맞지 않으면 **아무 소리도
         # 안 나면서 아무 자국도 안 남는다** — 맥에서 타자 소리가 한 번도
         # 안 났던 원인 (사가 제보). 맥은 어느 키인지 몰라 code 는 안 쓴다.
-        ready = getattr(self, "_ready", None)
-        if ready and self.volume > 0:
-            q, d = ready.pop(0)
-            self._spent.append((time.time() + d + 0.03, q, d))
+        if self.volume > 0 and not self._closed:
             try:
-                if q.play():
+                e = self._eng
+                if (e is None or not e.isRunning()) and time.time() >= self._bad_at:
+                    self._eng_up()            # 자리를 비웠다 돌아온 첫 키
+                if self._eng is not None:
+                    i = random.randrange(len(self._bufs))
+                    if i == self._last9:
+                        i = (i + 1) % len(self._bufs)
+                    self._last9 = i
+                    b, k = self._bufs[i]
+                    row = self._nodes[k]
+                    self._turn9 += 1
+                    # 2 = 그 노드에 남은 소리를 끊는다 — 뒤에 줄을 서면 늦는다
+                    row[self._turn9 % len(row)
+                        ].scheduleBuffer_atTime_options_completionHandler_(b, None, 2, None)
                     return
             except Exception:
-                pass
+                self._bad_at = time.time() + 5.0
         self._fire(hash(str(key)) % max(len(self.pool), 1))
 
     def reap(self):
         pass                      # NSSound는 스스로 정리된다
 
     def close(self):
+        self._closed = True
         self._all_stop()
-        self._ready, self._spent = [], []
-        for q in getattr(self, "_av", ()):
-            try:
-                q.stop()
-            except Exception:
-                pass
+        try:
+            self._eng_down()
+        except Exception:
+            pass
 
 
 class MacPenSound(_MacSoundPool):
@@ -5835,6 +5914,82 @@ class MacKeyGate:
             self.hold = True
         self.t, self.ups = now, ups
         return not self.hold
+
+
+class _MacAudioAddr(ctypes.Structure):
+    _fields_ = [("sel", ctypes.c_uint32), ("scope", ctypes.c_uint32),
+                ("el", ctypes.c_uint32)]
+
+
+_MAC_CA = None
+
+
+def _mac_ca():
+    global _MAC_CA
+    if _MAC_CA is None:
+        ca = ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio")
+        p = ctypes.POINTER(_MacAudioAddr)
+        ca.AudioObjectGetPropertyData.argtypes = [
+            ctypes.c_uint32, p, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p]
+        ca.AudioObjectSetPropertyData.argtypes = [
+            ctypes.c_uint32, p, ctypes.c_uint32, ctypes.c_void_p,
+            ctypes.c_uint32, ctypes.c_void_p]
+        _MAC_CA = ca
+    return _MAC_CA
+
+
+def _mac_out_dev():
+    """지금 기본 출력 장치 번호."""
+    a = _MacAudioAddr(0x644F7574, 0x676C6F62, 0)      # 'dOut' · 'glob'
+    dev, size = ctypes.c_uint32(), ctypes.c_uint32(4)
+    _mac_ca().AudioObjectGetPropertyData(1, ctypes.byref(a), 0, None,
+                                         ctypes.byref(size), ctypes.byref(dev))
+    return dev.value
+
+
+def _mac_out_frames(dev, n):
+    """이 프로세스가 쓰는 장치 버퍼 크기. 안 되는 장치(블루투스 등)는 그대로 둔다."""
+    a = _MacAudioAddr(0x6673697A, 0x676C6F62, 0)      # 'fsiz' · 'glob'
+    v = ctypes.c_uint32(n)
+    _mac_ca().AudioObjectSetPropertyData(dev, ctypes.byref(a), 0, None, 4, ctypes.byref(v))
+
+
+def _mac_key_counter():
+    """카운터 읽기 — PyDLL 은 GIL 을 안 놓는다. 0.6us 짜리를 읽자고 GIL 을 놓으면
+    그리기가 끝나기를 또 기다려야 한다."""
+    from ctypes import util
+    f = ctypes.PyDLL(util.find_library("CoreGraphics")).CGEventSourceCounterForEventType
+    f.restype = ctypes.c_uint32
+    f.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    return f
+
+
+def _mac_realtime():
+    """이 스레드를 시간 제약 스레드로 — 코어오디오 스레드가 쓰는 정책이다.
+    보통 스레드는 4ms 를 자라고 하면 18ms 를 자서 키 감지가 12.7ms 늦었다
+    (실측 → 3.5ms · 지뢰 245). 오래 달리면 운영체제가 알아서 평범하게 내린다."""
+    class _TB(ctypes.Structure):
+        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+    class _Policy(ctypes.Structure):
+        _fields_ = [("period", ctypes.c_uint32), ("computation", ctypes.c_uint32),
+                    ("constraint", ctypes.c_uint32), ("preemptible", ctypes.c_int32)]
+
+    libc = ctypes.CDLL(None)
+    libc.pthread_self.restype = ctypes.c_void_p
+    libc.pthread_mach_thread_np.argtypes = [ctypes.c_void_p]
+    libc.pthread_mach_thread_np.restype = ctypes.c_uint32
+    libc.thread_policy_set.argtypes = [ctypes.c_uint32, ctypes.c_uint32,
+                                       ctypes.c_void_p, ctypes.c_uint32]
+    tb = _TB()
+    libc.mach_timebase_info(ctypes.byref(tb))
+    tick = lambda ms: int(ms * 1e6 * tb.denom / tb.numer)
+    p = _Policy(tick(KEYTAP_GAP * 1000), tick(0.5), tick(KEYTAP_GAP * 1000), 1)
+    r = libc.thread_policy_set(libc.pthread_mach_thread_np(libc.pthread_self()),
+                               2, ctypes.byref(p), 4)   # 2 = TIME_CONSTRAINT · 4 칸
+    if r != 0:
+        raise OSError("thread_policy_set %s" % r)
 
 
 def _mac_no_nap():
@@ -11954,6 +12109,7 @@ class Mascot:
             return
         self._keytap_on = True          # 프레임은 이제 소리를 안 낸다
         self._keytap_stop = False
+        sys.setswitchinterval(0.001)    # 그리기가 GIL 을 오래 안 쥐게 (기본 5ms)
         try:
             _mac_no_nap()
         except Exception:
@@ -11962,7 +12118,11 @@ class Mascot:
 
     def _keytap_run(self):
         import objc
-        count = _MAC_CG.CGEventSourceCounterForEventType
+        try:
+            _mac_realtime()
+        except Exception:
+            self._log_error("keytap_rt")
+        count = _mac_key_counter()
         hid, down, up = MacInput.HID, MacInput.KEY_DOWN, MacInput.KEY_UP
         gate = MacKeyGate()
         last = int(count(hid, down))
@@ -11972,16 +12132,16 @@ class Mascot:
             try:
                 n = int(count(hid, down))
                 sp = self.sndpack
-                if n == last and not getattr(sp, "_spent", None):
+                now = time.time()
+                if n == last and now < getattr(sp, "_tend_at", now + 1):
                     continue
                 with objc.autorelease_pool():
                     if n != last:
                         last = n
-                        if sp is not None and gate.press(time.time(),
-                                                         int(count(hid, up))):
+                        if sp is not None and gate.press(now, int(count(hid, up))):
                             sp.play(n)
                     elif sp is not None:
-                        sp.tend(time.time())
+                        sp.tend(now)
                 fails = 0
             except Exception:
                 fails += 1
