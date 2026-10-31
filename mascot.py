@@ -5099,7 +5099,7 @@ class MacSoundPack(_MacSoundPool):
     플레이어는 45초를 쉬어도 play 가 그대로 빠르고, 끝난 것은 tend 가 도로
     준비한다. 번들에 AVFoundation 파이썬 꾸러미는 없어도 시스템 프레임워크를
     불러 클래스를 찾으면 된다 (지뢰 130). 못 쓰면 NSSound 로 낸다.
-    재생은 도우미 프로세스에서 돈다 (`_key_sound_main` · 지뢰 244).
+    **이 프로세스처럼 실행 루프가 도는 곳에서만 쓸 것** (지뢰 245).
     """
 
     AV_ROWS = 12                  # 소리 종류 상한 — 맥은 어차피 키를 못 가린다
@@ -5847,90 +5847,6 @@ def _mac_no_nap():
 
 
 KEYTAP_GAP = 0.004           # 키를 살피는 간격 (실측 CPU 0.26%)
-
-
-def _key_sound_main():
-    """맥 타자 소리 도우미 프로세스 — 같은 실행 파일을 --key-sound 로 다시 부른다.
-
-    **타이머 프로세스 안에서는 재생 호출이 28ms 걸리는데, 창이 없는 프로세스에서는
-    0.02ms 다** (맥 러너 실측). 그래서 키 감지와 재생을 통째로 뺐다. 여기서 죽어도
-    캐릭터는 안 죽는다. 줄마다 {"pack": 폴더, "vol": 음량} 을 받고, 부모가 사라지면
-    파이프가 닫혀 같이 끝난다. ENA_KEYSND_LOG 를 주면 시각을 남긴다 (맥 러너 검사용).
-    """
-    import objc
-    try:
-        from AppKit import NSApplication
-        NSApplication.sharedApplication().setActivationPolicy_(2)   # Dock 에 안 뜬다
-    except Exception:
-        pass
-    try:
-        _mac_no_nap()
-    except Exception:
-        pass
-    MacInput()                   # 카운터 함수의 규격을 건다
-    count = _MAC_CG.CGEventSourceCounterForEventType
-    hid, down, up = MacInput.HID, MacInput.KEY_DOWN, MacInput.KEY_UP
-    want = {"pack": None, "vol": 60.0}
-
-    def reader():
-        for line in sys.stdin:
-            try:
-                got = json.loads(line)
-                want["pack"], want["vol"] = got.get("pack"), float(got.get("vol") or 0)
-            except Exception:
-                pass
-        os._exit(0)              # 부모가 사라졌다
-
-    threading.Thread(target=reader, daemon=True).start()
-    log = os.environ.get("ENA_KEYSND_LOG")
-    logf = open(log, "a", encoding="utf-8", buffering=1) if log else None
-    gate = MacKeyGate()
-    sp, have = None, None
-    last = int(count(hid, down))
-    fails = 0
-    while True:
-        time.sleep(KEYTAP_GAP)
-        try:
-            n = int(count(hid, down))
-            if want["pack"] != have:
-                have = want["pack"]
-                if sp is not None:
-                    sp.close()
-                sp = MacSoundPack(have, want["vol"]) if have else None
-            elif sp is not None and want["vol"] != sp.volume:
-                sp.set_volume(want["vol"])
-            if n == last and not getattr(sp, "_spent", None):
-                continue
-            with objc.autorelease_pool():
-                if n != last:
-                    last = n
-                    t9 = time.time()
-                    if sp is not None and gate.press(t9, int(count(hid, up))):
-                        a9 = time.perf_counter()
-                        sp.play(n)
-                        if logf is not None:
-                            logf.write("%.6f %.6f %d\n" % (t9, time.perf_counter() - a9,
-                                                           len(sp._ready)))
-                elif sp is not None:
-                    sp.tend(time.time())
-            fails = 0
-        except Exception:
-            import traceback
-            traceback.print_exc()
-            fails += 1
-            if fails > 5:
-                sys.exit(1)      # 부모가 알아채고 다시 띄우거나 스레드로 물러난다
-
-
-if "--key-sound" in sys.argv:
-    # 재생기(--yt-player)와 같은 갈림길 — 런처를 다시 굽지 않아도 길이 생긴다
-    if IS_MAC:
-        try:
-            _key_sound_main()
-        except Exception:
-            import traceback
-            traceback.print_exc()
-    sys.exit(0)
 
 
 def cursor_pos():
@@ -12022,92 +11938,21 @@ class Mascot:
             return None
         return 3584 + (sc & 0xFF) if sc > 0xFF else sc
 
-    KEYSND_RETRY = 3             # 도우미가 이만큼 죽으면 스레드로 물러난다
-    KEYSND_SYNC = 0.25           # 소리팩·음량을 도우미에 맞추는 간격
-
     def _keytap_start(self):
         """맥 타자 소리를 그리기에서 떼어 낸다.
 
         맥은 키를 프레임마다 세었다. 프레임이 평소 12fps 라 소리가 평균
         55ms·최대 468ms 늦고 프레임 박자에 맞춰 '탁.. 탁..' 끊겼으며, 한
-        프레임에 겹친 타는 사라졌다 (사가 제보 · 지뢰 244). 소리는 도우미
-        프로세스가 내고(_key_sound_main), 통계·표정은 그대로 프레임이 센다.
+        프레임에 겹친 타는 사라졌다 (사가 제보 · 지뢰 245). 이 스레드가 카운터를
+        직접 보고 소리를 낸다 — 통계·표정은 그대로 프레임이 센다. **Tk 는
+        건드리지 말 것** (지뢰 150). 카운터 읽기는 0.6us 다.
+
+        별도 프로세스로 빼 봤지만 쓰지 말 것 — 실제 소리를 재니 차이가 없었고,
+        실행 루프가 없으면 플레이어가 첫 재생 뒤로 조용히 죽는다 (지뢰 245).
         """
         if _MAC_CG is None:
             return
-        self._keysnd_proc = None
-        self._keysnd_sent = None
-        self._keysnd_at = 0.0
-        self._keysnd_dead = 0
         self._keytap_on = True          # 프레임은 이제 소리를 안 낸다
-        if not self._keysnd_spawn():
-            self._keytap_thread()
-
-    def _keysnd_spawn(self):
-        import subprocess
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--key-sound"]
-        else:
-            cmd = [sys.executable, "-u", os.path.abspath(__file__), "--key-sound"]
-        env9 = dict(os.environ)
-        env9["MASCOT_NO_UPDATE"] = "1"   # 런처가 업데이트 확인을 건너뛴다
-        errf = None
-        try:
-            errf = open(os.path.join(self.state_dir, ".keysnd_err.txt"), "a",
-                        encoding="utf-8", errors="replace")
-            errf.write("\n===== %s 시작\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
-            errf.flush()
-        except Exception:
-            errf = None
-        try:
-            self._keysnd_proc = subprocess.Popen(
-                cmd, cwd=HERE, env=env9, stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL, stderr=(errf or subprocess.DEVNULL),
-                encoding="utf-8", errors="replace")
-        except Exception:
-            self._keysnd_proc = None
-            self._log_error("keysnd_spawn")
-            return False
-        self._keysnd_sent = None
-        return True
-
-    def _keytap_sync(self, now):
-        """도우미가 살아 있는지 보고, 소리팩·음량을 맞춘다 (프레임에서 · 싸다)."""
-        p = getattr(self, "_keysnd_proc", None)
-        if p is None or now < self._keysnd_at:
-            return
-        self._keysnd_at = now + self.KEYSND_SYNC
-        if p.poll() is not None:
-            self._keysnd_proc = None
-            self._keysnd_dead += 1
-            self._log_error("keysnd_dead rc=%s" % p.returncode)
-            if self._keysnd_dead >= self.KEYSND_RETRY or not self._keysnd_spawn():
-                self._keytap_thread()     # 소리가 아예 안 나는 것보다 낫다
-            return
-        sp = self.sndpack
-        want = (getattr(sp, "folder", None), float(getattr(sp, "volume", 0) or 0))
-        if want != self._keysnd_sent:
-            self._keysnd_sent = want
-            try:
-                p.stdin.write(json.dumps({"pack": want[0], "vol": want[1]}) + "\n")
-                p.stdin.flush()
-            except (OSError, ValueError):
-                pass                      # 다음 바퀴의 poll 이 알아챈다
-
-    def _keysnd_quit(self):
-        p = getattr(self, "_keysnd_proc", None)
-        self._keysnd_proc = None
-        if p is None:
-            return
-        for fn in (p.stdin.close, p.terminate):
-            try:
-                fn()
-            except Exception:
-                pass
-
-    def _keytap_thread(self):
-        """도우미를 못 쓸 때 — 같은 일을 이 프로세스의 스레드가 한다."""
-        self._keytap_on = True
         self._keytap_stop = False
         try:
             _mac_no_nap()
@@ -12152,15 +11997,11 @@ class Mascot:
             return
         dk, dm, pressed = mi.read()
         now = time.time()
-        try:
-            self._keytap_sync(now)
-        except Exception:
-            self._log_error("keysnd_sync")
         if dk:
             self.key_events += dk
             self.stat["keys"] = self.stat.get("keys", 0) + dk
             sp = self.sndpack
-            # 소리는 도우미(또는 키 스레드)가 낸다. 둘 다 없을 때만 여기서.
+            # 소리는 키 스레드가 낸다 (_keytap_run). 스레드가 없을 때만 여기서.
             if sp is not None and not getattr(self, "_keytap_on", False):
                 try:
                     sp.play(self.key_events)      # 한 프레임에 한 번만
@@ -13318,7 +13159,6 @@ class Mascot:
                         break
                 setattr(self, _nm, None)
             self._keytap_stop = True
-            self._keysnd_quit()
             if self._kb is not None:
                 self._kb.stop()
             if self._ms is not None:
