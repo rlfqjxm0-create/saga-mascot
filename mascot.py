@@ -5125,6 +5125,15 @@ class MacSoundPack(_MacSoundPool):
     _turn9 = 0
     _last9 = -1
     _tend_at = 0.0
+    trail = None                  # 기록할 줄 — 키 스레드가 .keysnd.log 로 옮긴다
+    seen9 = ""                    # 키 스레드가 본 것 (기록용)
+    _keys9 = 0
+    KEYLOG_MAX = 300              # 한 번 켤 때 키마다 남기는 줄 수
+
+    def _note(self, msg):
+        t = self.trail
+        if t is not None and len(t) < 1000:
+            t.append("%.3f %s" % (time.time(), msg))
 
     def __init__(self, folder, volume=60):
         self.folder = folder
@@ -5143,6 +5152,7 @@ class MacSoundPack(_MacSoundPool):
                 paths.append(p)
         super().__init__(paths, volume)
         self._paths = paths       # 엔진은 키 스레드가 올린다 — 켤 때 창이 안 멈추게
+        self.trail = []
 
     def _eng_load(self):
         import objc
@@ -5174,6 +5184,7 @@ class MacSoundPack(_MacSoundPool):
     def _eng_up(self):
         """엔진을 새로 세운다 — 장치가 바뀌었을 때도 이 한 길로."""
         import objc
+        t0 = time.perf_counter()
         self._eng_down()
         if not self._bufs:
             self._eng_load()
@@ -5202,10 +5213,19 @@ class MacSoundPack(_MacSoundPool):
             for n in row:
                 n.play()
         self._nodes, self._dev, self._eng = nodes, dev, e
+        try:
+            f9 = e.outputNode().outputFormatForBus_(0)
+            self._note("engine up %.0fms 돌고있음=%s %s objc=%s py=%s 형식=%s 소리=%d %s" % (
+                (time.perf_counter() - t0) * 1000, e.isRunning(), _mac_out_info(dev),
+                getattr(objc, "__version__", "?"), sys.version.split()[0],
+                f9.description(), len(self._bufs), sorted(self._fmts)))
+        except Exception as ex:
+            self._note("engine up 기록 실패 %r" % (ex,))
 
     def _eng_down(self):
         e, self._eng = self._eng, None
         if e is not None:
+            self._note("engine down")
             e.stop()
 
     def tend(self, now):
@@ -5219,12 +5239,16 @@ class MacSoundPack(_MacSoundPool):
         e = self._eng
         if e is not None and e.isRunning() and _mac_out_dev() == self._dev:
             return
+        if e is not None:
+            self._note("engine 다시 세움 돌고있음=%s 장치 %s→%s" % (
+                e.isRunning(), self._dev, _mac_out_dev()))
         if now < self._bad_at:
             return
         try:
             self._eng_up()
             self._fails = 0
-        except Exception:
+        except Exception as ex:
+            self._note("engine 실패(살피기) %r" % (ex,))
             self._bad_at = now + 5.0
             self._fails += 1
             if self._fails <= 3:          # 이유는 키 스레드가 남긴다
@@ -5261,12 +5285,41 @@ class MacSoundPack(_MacSoundPool):
                     row = self._nodes[k]
                     self._turn9 += 1
                     # 2 = 그 노드에 남은 소리를 끊는다 — 뒤에 줄을 서면 늦는다
-                    row[self._turn9 % len(row)
-                        ].scheduleBuffer_atTime_options_completionHandler_(b, None, 2, None)
+                    n9 = row[self._turn9 % len(row)]
+                    n9.scheduleBuffer_atTime_options_completionHandler_(b, None, 2, None)
+                    self._keys9 += 1
+                    if self._keys9 <= self.KEYLOG_MAX:
+                        try:              # 기록이 터져 소리가 두 번 나면 안 된다
+                            self._key_note(n9)
+                        except Exception as ex:
+                            self._note("key 기록 실패 %r" % (ex,))
                     return
-            except Exception:
+                self._note("key NSSound 엔진 없음 다음시도까지 %.1f초" % (self._bad_at - time.time()))
+            except Exception as ex:
+                self._note("key NSSound 예외 %r" % (ex,))
                 self._bad_at = time.time() + 5.0
         self._fire(hash(str(key)) % max(len(self.pool), 1))
+
+    def _key_note(self, n9):
+        e = self._eng
+        rt = e.outputNode().lastRenderTime()
+        self._note("key engine %s 돌고있음=%s 노드재생=%s 표본=%s" % (
+            self.seen9, e.isRunning(), n9.isPlaying(),
+            rt.sampleTime() if rt is not None and rt.isSampleTimeValid() else None))
+
+    def _fire(self, idx):
+        """키 스레드에는 실행 루프가 없어 NSSound 가 첫 재생 뒤로 조용히 죽는다
+        (지뢰 245) — 메인 스레드에 맡긴다. 엔진을 못 쓸 때만 오는 길이다."""
+        if self.volume <= 0 or not self.pool:
+            return
+        row = self.pool[idx % len(self.pool)]
+        snd = row[self._turn[idx % len(self.pool)] % len(row)]
+        self._turn[idx % len(self.pool)] += 1
+        try:
+            snd.performSelectorOnMainThread_withObject_waitUntilDone_("stop", None, False)
+            snd.performSelectorOnMainThread_withObject_waitUntilDone_("play", None, False)
+        except Exception:
+            pass
 
     def reap(self):
         pass                      # NSSound는 스스로 정리된다
@@ -5955,6 +6008,25 @@ def _mac_out_frames(dev, n):
     _mac_ca().AudioObjectSetPropertyData(dev, ctypes.byref(a), 0, None, 4, ctypes.byref(v))
 
 
+def _mac_out_info(dev):
+    """장치 진단 — 연결 종류·표본률·버퍼·지연 (.keysnd.log 에 남긴다)."""
+    ca = _mac_ca()
+
+    def get(sel, scope, typ):
+        a = _MacAudioAddr(int.from_bytes(sel.encode(), "big"),
+                          int.from_bytes(scope.encode(), "big"), 0)
+        v, size = typ(), ctypes.c_uint32(ctypes.sizeof(typ))
+        r = ca.AudioObjectGetPropertyData(dev, ctypes.byref(a), 0, None,
+                                          ctypes.byref(size), ctypes.byref(v))
+        return v.value if r == 0 else "실패%s" % r
+
+    tran = get("tran", "glob", ctypes.c_uint32)
+    return "장치=%s 연결=%s 표본률=%s 버퍼=%s 장치지연=%s 안전여유=%s" % (
+        dev, tran.to_bytes(4, "big").decode("latin1") if isinstance(tran, int) else tran,
+        get("nsrt", "glob", ctypes.c_double), get("fsiz", "glob", ctypes.c_uint32),
+        get("ltnc", "outp", ctypes.c_uint32), get("saft", "outp", ctypes.c_uint32))
+
+
 def _mac_key_counter():
     """카운터 읽기 — PyDLL 은 GIL 을 안 놓는다. 0.6us 짜리를 읽자고 GIL 을 놓으면
     그리기가 끝나기를 또 기다려야 한다."""
@@ -5963,6 +6035,14 @@ def _mac_key_counter():
     f.restype = ctypes.c_uint32
     f.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
     return f
+
+
+def _mac_key_age(hid, ev):
+    """그 이벤트가 몇 ms 전에 있었나 — 감지가 실제 키보다 얼마나 늦었는지 잰다."""
+    try:
+        return "%.1f" % (float(_MAC_CG.CGEventSourceSecondsSinceLastEventType(hid, ev)) * 1000)
+    except Exception:
+        return "?"
 
 
 def _mac_realtime():
@@ -12137,11 +12217,19 @@ class Mascot:
                     continue
                 with objc.autorelease_pool():
                     if n != last:
-                        last = n
-                        if sp is not None and gate.press(now, int(count(hid, up))):
-                            sp.play(n)
+                        step, last = n - last, n
+                        ups = int(count(hid, up))
+                        go = gate.press(now, ups)
+                        if sp is not None:
+                            sp.seen9 = "n=%d+%d 뗌=%d 눌린지=%sms" % (
+                                n, step, ups, _mac_key_age(hid, down))
+                            if go:
+                                sp.play(n)
+                            else:
+                                sp._note("key 막음(꾹 누름) " + sp.seen9)
                     elif sp is not None:
                         sp.tend(now)
+                        self._keysnd_flush(sp)
                 fails = 0
             except Exception:
                 fails += 1
@@ -12149,6 +12237,21 @@ class Mascot:
                 if fails > 5:             # 이것도 안 되면 프레임이 낸다
                     self._keytap_on = False
                     return
+
+    def _keysnd_flush(self, sp):
+        """소리 기록을 파일로 — 사가 제보처럼 화면만으로 안 갈리는 것을 친구 쪽에서 가른다."""
+        t = getattr(sp, "trail", None)
+        if not t:
+            return
+        path = os.path.join(self.state_dir, ".keysnd.log")
+        try:
+            lines = [t.pop(0) for _ in range(len(t))]
+            if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
+                os.replace(path, path + ".1")
+            with open(path, "a", encoding="utf-8") as fp:
+                fp.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
 
     def _poll_mac_input(self):
         """맥: 리스너 콜백 대신 카운터 변화를 읽어 같은 상태를 만든다."""
