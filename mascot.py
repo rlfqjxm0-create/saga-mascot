@@ -3530,8 +3530,10 @@ class TeamStrip:
                 self.hwnd = int(self.top.wm_frame(), 16) if IS_WIN else 0
             except Exception:
                 self.hwnd = 0
-        for w9 in ((self.top, self.canvas) if self.canvas is not None
-                   else (self.top,)):
+        # **캔버스가 있으면 캔버스에만 건다.** 캔버스의 bindtags 에는 제 창이
+        # 들어 있어서 양쪽에 걸면 우클릭 한 번에 on_menu 가 두 번 불린다 —
+        # 맥에서 메뉴를 닫자마자 또 떴다 (지뢰 244).
+        for w9 in ((self.canvas,) if self.canvas is not None else (self.top,)):
             w9.bind("<Button-1>", self._on_press)
             w9.bind("<B1-Motion>", self._on_move)
             w9.bind("<ButtonRelease-1>", self._on_release)
@@ -5092,9 +5094,19 @@ class MacSoundPack(_MacSoundPool):
 
     맥은 어느 키를 눌렀는지 알 수 없어(카운터만 읽는다) 키별 구분은 못 한다.
     인자만 맞춰 두고 무시한다.
+
+    **타자 소리만 AVAudioPlayer 를 '미리 준비해 둔 채로' 쓴다.** 준비된
+    플레이어는 45초를 쉬어도 play 가 그대로 빠르고, 끝난 것은 tend 가 도로
+    준비한다. 번들에 AVFoundation 파이썬 꾸러미는 없어도 시스템 프레임워크를
+    불러 클래스를 찾으면 된다 (지뢰 130). 못 쓰면 NSSound 로 낸다.
+    재생은 도우미 프로세스에서 돈다 (`_key_sound_main` · 지뢰 244).
     """
 
+    AV_ROWS = 12                  # 소리 종류 상한 — 맥은 어차피 키를 못 가린다
+    AV_MAX = 24                   # 플레이어 수 상한 (첫 준비 한 개에 8~30ms)
+
     def __init__(self, folder, volume=60):
+        self.folder = folder
         with open(os.path.join(folder, "config.json"), encoding="utf-8") as fp:
             cfg = json.load(fp)
         if cfg.get("key_define_type", "multi") != "multi":
@@ -5109,6 +5121,55 @@ class MacSoundPack(_MacSoundPool):
             if name.lower().endswith(".wav") and os.path.exists(p):
                 paths.append(p)
         super().__init__(paths, volume)
+        self._ready = []          # [(플레이어, 길이)] 곧바로 낼 수 있는 것
+        self._spent = []          # [(끝나는 시각, 플레이어, 길이)] 도로 준비할 것
+        self._av = []
+        try:
+            self._av_build(paths)
+        except Exception:
+            self._av, self._ready, self._spent = [], [], []
+
+    def _av_build(self, paths):
+        import objc
+        objc.lookUpClass("NSBundle").bundleWithPath_(
+            "/System/Library/Frameworks/AVFoundation.framework").load()
+        AV = objc.lookUpClass("AVAudioPlayer")
+        NSData = objc.lookUpClass("NSData")
+        step = max(1, len(paths) // self.AV_ROWS)
+        rows = paths[::step][:self.AV_ROWS]
+        copies = max(2, self.AV_MAX // max(1, len(rows)))
+        g = self.volume / 100.0
+        made = []
+        for p in rows:
+            data = NSData.dataWithContentsOfFile_(p)
+            for _ in range(copies):
+                got = AV.alloc().initWithData_error_(data, None)
+                q = got[0] if isinstance(got, tuple) else got
+                if q is None:
+                    continue
+                q.setVolume_(g)
+                made.append((q, float(q.duration())))
+        random.shuffle(made)
+        self._av = [m9[0] for m9 in made]
+        # 처음 준비도 키 스레드가 한다 — 여기서 하면 켤 때 창이 멈춘다
+        self._spent = [(0.0, q, d) for q, d in made]
+
+    def tend(self, now):
+        """끝난 플레이어 하나를 도로 준비한다 (키 스레드가 쉬는 틈에)."""
+        if not self._spent or self._spent[0][0] > now:
+            return
+        _at, q, d = self._spent.pop(0)
+        q.prepareToPlay()
+        self._ready.append((q, d))
+
+    def set_volume(self, volume):
+        super().set_volume(volume)
+        g = self.volume / 100.0
+        for q in getattr(self, "_av", ()):
+            try:
+                q.setVolume_(g)
+            except Exception:
+                pass
 
     def play(self, key, code=None):
         # **인자를 둘 받아야 한다.** 부르는 쪽은 늘
@@ -5116,6 +5177,15 @@ class MacSoundPack(_MacSoundPool):
         # `except Exception: pass` 로 감싸여 있어서 맞지 않으면 **아무 소리도
         # 안 나면서 아무 자국도 안 남는다** — 맥에서 타자 소리가 한 번도
         # 안 났던 원인 (사가 제보). 맥은 어느 키인지 몰라 code 는 안 쓴다.
+        ready = getattr(self, "_ready", None)
+        if ready and self.volume > 0:
+            q, d = ready.pop(0)
+            self._spent.append((time.time() + d + 0.03, q, d))
+            try:
+                if q.play():
+                    return
+            except Exception:
+                pass
         self._fire(hash(str(key)) % max(len(self.pool), 1))
 
     def reap(self):
@@ -5123,6 +5193,12 @@ class MacSoundPack(_MacSoundPool):
 
     def close(self):
         self._all_stop()
+        self._ready, self._spent = [], []
+        for q in getattr(self, "_av", ()):
+            try:
+                q.stop()
+            except Exception:
+                pass
 
 
 class MacPenSound(_MacSoundPool):
@@ -5705,6 +5781,7 @@ class MacInput:
 
     HID = 1                      # kCGEventSourceStateHIDSystemState (실제 하드웨어)
     KEY_DOWN = 10
+    KEY_UP = 11
     MOVED, L_DRAG, R_DRAG = 5, 6, 7
 
     def __init__(self):
@@ -5732,6 +5809,128 @@ class MacInput:
         dk, self.keys = max(keys - self.keys, 0), keys
         dm, self.moves = max(moves - self.moves, 0), moves
         return dk, dm, bool(self.cg.CGEventSourceButtonState(self.HID, 0))
+
+
+class MacKeyGate:
+    """키를 꾹 누른 자동 반복에는 소리를 안 낸다 (윈도우의 `first` 와 같은 일).
+
+    맥 카운터는 어느 키인지 모른다. 다만 자동 반복은 첫 반복까지 최소 0.2초쯤
+    떼지 않고 있어야 시작되므로, '키를 뗀 일 없이 그만큼 지나 또 눌렸다'를
+    반복으로 본다. 빠른 타자의 겹침(앞 키를 떼기 전에 다음 키)은 그보다 훨씬
+    짧아 걸리지 않는다. 떼는 순간 풀린다.
+    """
+
+    HOLD = 0.2
+
+    def __init__(self):
+        self.t = 0.0
+        self.ups = None
+        self.hold = False
+
+    def press(self, now, ups):
+        """눌림 하나 — 소리를 낼 눌림이면 True."""
+        if ups != self.ups:
+            self.hold = False
+        elif now - self.t > self.HOLD:
+            self.hold = True
+        self.t, self.ups = now, ups
+        return not self.hold
+
+
+def _mac_no_nap():
+    """앱 낮잠으로 키 감지가 늦어지지 않게 — 받은 표는 프로세스가 끝날 때까지 든다.
+    (NSActivityUserInitiatedAllowingIdleSystemSleep)"""
+    import objc
+    global _MAC_NAP_TOKEN
+    _MAC_NAP_TOKEN = objc.lookUpClass("NSProcessInfo").processInfo(
+        ).beginActivityWithOptions_reason_(0x00EFFFFF, "keyboard sound")
+
+
+KEYTAP_GAP = 0.004           # 키를 살피는 간격 (실측 CPU 0.26%)
+
+
+def _key_sound_main():
+    """맥 타자 소리 도우미 프로세스 — 같은 실행 파일을 --key-sound 로 다시 부른다.
+
+    **타이머 프로세스 안에서는 재생 호출이 28ms 걸리는데, 창이 없는 프로세스에서는
+    0.02ms 다** (맥 러너 실측). 그래서 키 감지와 재생을 통째로 뺐다. 여기서 죽어도
+    캐릭터는 안 죽는다. 줄마다 {"pack": 폴더, "vol": 음량} 을 받고, 부모가 사라지면
+    파이프가 닫혀 같이 끝난다. ENA_KEYSND_LOG 를 주면 시각을 남긴다 (맥 러너 검사용).
+    """
+    import objc
+    try:
+        from AppKit import NSApplication
+        NSApplication.sharedApplication().setActivationPolicy_(2)   # Dock 에 안 뜬다
+    except Exception:
+        pass
+    try:
+        _mac_no_nap()
+    except Exception:
+        pass
+    MacInput()                   # 카운터 함수의 규격을 건다
+    count = _MAC_CG.CGEventSourceCounterForEventType
+    hid, down, up = MacInput.HID, MacInput.KEY_DOWN, MacInput.KEY_UP
+    want = {"pack": None, "vol": 60.0}
+
+    def reader():
+        for line in sys.stdin:
+            try:
+                got = json.loads(line)
+                want["pack"], want["vol"] = got.get("pack"), float(got.get("vol") or 0)
+            except Exception:
+                pass
+        os._exit(0)              # 부모가 사라졌다
+
+    threading.Thread(target=reader, daemon=True).start()
+    log = os.environ.get("ENA_KEYSND_LOG")
+    logf = open(log, "a", encoding="utf-8", buffering=1) if log else None
+    gate = MacKeyGate()
+    sp, have = None, None
+    last = int(count(hid, down))
+    fails = 0
+    while True:
+        time.sleep(KEYTAP_GAP)
+        try:
+            n = int(count(hid, down))
+            if want["pack"] != have:
+                have = want["pack"]
+                if sp is not None:
+                    sp.close()
+                sp = MacSoundPack(have, want["vol"]) if have else None
+            elif sp is not None and want["vol"] != sp.volume:
+                sp.set_volume(want["vol"])
+            if n == last and not getattr(sp, "_spent", None):
+                continue
+            with objc.autorelease_pool():
+                if n != last:
+                    last = n
+                    t9 = time.time()
+                    if sp is not None and gate.press(t9, int(count(hid, up))):
+                        a9 = time.perf_counter()
+                        sp.play(n)
+                        if logf is not None:
+                            logf.write("%.6f %.6f %d\n" % (t9, time.perf_counter() - a9,
+                                                           len(sp._ready)))
+                elif sp is not None:
+                    sp.tend(time.time())
+            fails = 0
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            fails += 1
+            if fails > 5:
+                sys.exit(1)      # 부모가 알아채고 다시 띄우거나 스레드로 물러난다
+
+
+if "--key-sound" in sys.argv:
+    # 재생기(--yt-player)와 같은 갈림길 — 런처를 다시 굽지 않아도 길이 생긴다
+    if IS_MAC:
+        try:
+            _key_sound_main()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    sys.exit(0)
 
 
 def cursor_pos():
@@ -9123,7 +9322,15 @@ class Mascot:
         self._safe("menu_tick", self._menu_tick_wrap, menu)
         # grab_release를 안 하면 메뉴를 닫은 뒤에도 마우스를 붙잡고 있어
         # 다음 클릭이 엉뚱하게 먹힌다
+        self._strip_rc_last = None   # 띠로 돌려보낸 마지막 우클릭 (같은 사건 두 번 방지)
+
         def _pop(e):
+            # 띠 위를 누른 우클릭이 이 창으로 샜으면 띠 메뉴로 (지뢰 244)
+            try:
+                if self._strip_rc(e):
+                    return
+            except Exception:
+                self._log_error("strip_rc")
             # 카드 위 내 각오 말풍선을 우클릭하면 메뉴 대신 **고치는 창**을
             # 연다 (요청). _safe 는 돌려주는 값이 없어 여기서 직접 감싼다.
             try:
@@ -9138,6 +9345,11 @@ class Mascot:
 
         self.canvas.bind("<Button-3>", _pop)
         self._menu_pop = _pop        # 몸 레이어 창도 같은 것을 쓴다
+        if IS_MAC:
+            # 우클릭 처리가 없는 창(환경설정 등)이 key 창일 때도 띠로 돌려보낸다
+            for ev9 in ("<Button-3>", "<Button-2>"):
+                self.root.bind_all(ev9, lambda e: self._safe(
+                    "strip_rc", self._strip_rc, e), add="+")
         self.tray = None
         self._tray_q = []            # 트레이 스레드가 넣고 그리기 루프가 뺀다
         self._safe("tray", self._tray_setup)
@@ -9268,6 +9480,10 @@ class Mascot:
                 self._macin = MacInput()
             except Exception:
                 self._macin = None
+            self._keytap_stop = False
+            self._keytap_on = False
+            if self._macin is not None:
+                self._safe("keytap", self._keytap_start)
 
         # ── 그림자 레이어 창 ─────────────────────────────────────────────
         self.root.update_idletasks()
@@ -9757,6 +9973,14 @@ class Mascot:
         self._cal_day = ""            # 마지막으로 본 날짜 (바뀌면 말풍선을 다시 그린다)
         self._cal_day_at = 0.0
         self._cal_todo_txt = []       # 달력에 그려 둔 할 일 글 (누를 때 같은 것인지 본다)
+        self._lg_mem = None           # .ledger.json (가계부 · 한 번 읽고 들고 있는다)
+        self._lg_fix_at = 0.0         # 고정 지출을 마지막으로 본 때
+        self._lg_dncache = {}         # 기록 날짜 글 → 날 수
+        self._lg_pick = None          # 고른 기록
+        self._lg_chips = []           # 그려 둔 '자주 적은 것' (누를 때 같은 차례로 찾는다)
+        self._lg_q_st = None          # 적기 창
+        self._lg_q_w = None
+        self._lg_fx_w = None
         self._board_set_win = self._board_set_cv = None    # 보드 환경설정 창
         self._board_set_hit = []
         self._stk_wipe = False     # 배경 지우기 모드
@@ -11798,6 +12022,129 @@ class Mascot:
             return None
         return 3584 + (sc & 0xFF) if sc > 0xFF else sc
 
+    KEYSND_RETRY = 3             # 도우미가 이만큼 죽으면 스레드로 물러난다
+    KEYSND_SYNC = 0.25           # 소리팩·음량을 도우미에 맞추는 간격
+
+    def _keytap_start(self):
+        """맥 타자 소리를 그리기에서 떼어 낸다.
+
+        맥은 키를 프레임마다 세었다. 프레임이 평소 12fps 라 소리가 평균
+        55ms·최대 468ms 늦고 프레임 박자에 맞춰 '탁.. 탁..' 끊겼으며, 한
+        프레임에 겹친 타는 사라졌다 (사가 제보 · 지뢰 244). 소리는 도우미
+        프로세스가 내고(_key_sound_main), 통계·표정은 그대로 프레임이 센다.
+        """
+        if _MAC_CG is None:
+            return
+        self._keysnd_proc = None
+        self._keysnd_sent = None
+        self._keysnd_at = 0.0
+        self._keysnd_dead = 0
+        self._keytap_on = True          # 프레임은 이제 소리를 안 낸다
+        if not self._keysnd_spawn():
+            self._keytap_thread()
+
+    def _keysnd_spawn(self):
+        import subprocess
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--key-sound"]
+        else:
+            cmd = [sys.executable, "-u", os.path.abspath(__file__), "--key-sound"]
+        env9 = dict(os.environ)
+        env9["MASCOT_NO_UPDATE"] = "1"   # 런처가 업데이트 확인을 건너뛴다
+        errf = None
+        try:
+            errf = open(os.path.join(self.state_dir, ".keysnd_err.txt"), "a",
+                        encoding="utf-8", errors="replace")
+            errf.write("\n===== %s 시작\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            errf.flush()
+        except Exception:
+            errf = None
+        try:
+            self._keysnd_proc = subprocess.Popen(
+                cmd, cwd=HERE, env=env9, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=(errf or subprocess.DEVNULL),
+                encoding="utf-8", errors="replace")
+        except Exception:
+            self._keysnd_proc = None
+            self._log_error("keysnd_spawn")
+            return False
+        self._keysnd_sent = None
+        return True
+
+    def _keytap_sync(self, now):
+        """도우미가 살아 있는지 보고, 소리팩·음량을 맞춘다 (프레임에서 · 싸다)."""
+        p = getattr(self, "_keysnd_proc", None)
+        if p is None or now < self._keysnd_at:
+            return
+        self._keysnd_at = now + self.KEYSND_SYNC
+        if p.poll() is not None:
+            self._keysnd_proc = None
+            self._keysnd_dead += 1
+            self._log_error("keysnd_dead rc=%s" % p.returncode)
+            if self._keysnd_dead >= self.KEYSND_RETRY or not self._keysnd_spawn():
+                self._keytap_thread()     # 소리가 아예 안 나는 것보다 낫다
+            return
+        sp = self.sndpack
+        want = (getattr(sp, "folder", None), float(getattr(sp, "volume", 0) or 0))
+        if want != self._keysnd_sent:
+            self._keysnd_sent = want
+            try:
+                p.stdin.write(json.dumps({"pack": want[0], "vol": want[1]}) + "\n")
+                p.stdin.flush()
+            except (OSError, ValueError):
+                pass                      # 다음 바퀴의 poll 이 알아챈다
+
+    def _keysnd_quit(self):
+        p = getattr(self, "_keysnd_proc", None)
+        self._keysnd_proc = None
+        if p is None:
+            return
+        for fn in (p.stdin.close, p.terminate):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _keytap_thread(self):
+        """도우미를 못 쓸 때 — 같은 일을 이 프로세스의 스레드가 한다."""
+        self._keytap_on = True
+        self._keytap_stop = False
+        try:
+            _mac_no_nap()
+        except Exception:
+            self._log_error("keytap_nap")
+        threading.Thread(target=self._keytap_run, daemon=True).start()
+
+    def _keytap_run(self):
+        import objc
+        count = _MAC_CG.CGEventSourceCounterForEventType
+        hid, down, up = MacInput.HID, MacInput.KEY_DOWN, MacInput.KEY_UP
+        gate = MacKeyGate()
+        last = int(count(hid, down))
+        fails = 0
+        while not self._keytap_stop:
+            time.sleep(KEYTAP_GAP)
+            try:
+                n = int(count(hid, down))
+                sp = self.sndpack
+                if n == last and not getattr(sp, "_spent", None):
+                    continue
+                with objc.autorelease_pool():
+                    if n != last:
+                        last = n
+                        if sp is not None and gate.press(time.time(),
+                                                         int(count(hid, up))):
+                            sp.play(n)
+                    elif sp is not None:
+                        sp.tend(time.time())
+                fails = 0
+            except Exception:
+                fails += 1
+                self._log_error("keytap")
+                if fails > 5:             # 이것도 안 되면 프레임이 낸다
+                    self._keytap_on = False
+                    return
+
     def _poll_mac_input(self):
         """맥: 리스너 콜백 대신 카운터 변화를 읽어 같은 상태를 만든다."""
         mi = self._macin
@@ -11805,11 +12152,16 @@ class Mascot:
             return
         dk, dm, pressed = mi.read()
         now = time.time()
+        try:
+            self._keytap_sync(now)
+        except Exception:
+            self._log_error("keysnd_sync")
         if dk:
             self.key_events += dk
             self.stat["keys"] = self.stat.get("keys", 0) + dk
             sp = self.sndpack
-            if sp is not None:
+            # 소리는 도우미(또는 키 스레드)가 낸다. 둘 다 없을 때만 여기서.
+            if sp is not None and not getattr(self, "_keytap_on", False):
                 try:
                     sp.play(self.key_events)      # 한 프레임에 한 번만
                 except Exception:
@@ -12965,6 +13317,8 @@ class Mascot:
                             pass
                         break
                 setattr(self, _nm, None)
+            self._keytap_stop = True
+            self._keysnd_quit()
             if self._kb is not None:
                 self._kb.stop()
             if self._ms is not None:
@@ -21413,6 +21767,8 @@ class Mascot:
                             pass
 
         def menu(e):
+            if self._strip_rc(e):        # 띠 위를 누른 우클릭이 샌 것 (지뢰 244)
+                return None
             if self._mag_hit(e) or inroot(e):
                 return self._menu_pop(self._lay_ev(e))
 
@@ -25643,6 +25999,8 @@ class Mascot:
             self._safe("mag_keep", self._mag_keep, now)
         if self.cfg.get("myhome"):
             self._safe("cal_day", self._cal_day_tick, now)
+        if self.cfg.get("ledger"):
+            self._safe("lg_fixed", self._lg_fixed_tick, now)
         if self._glass:
             self._safe("glass", self._glass_tick, now)
             self._safe("pane", self._pane_tick, now)
@@ -28137,6 +28495,37 @@ class Mascot:
 
     def _strip_click(self):
         self._safe("pomo_win", self._pomo_win)
+
+    def _strip_rc(self, e):
+        """이 우클릭이 띠(친구들·데드라인 시계) 위를 누른 것인데 다른 창으로
+        갔으면 그 띠의 메뉴를 띄운다. 처리했으면 True.
+
+        맥 Tk 는 우클릭을 눌린 창이 아니라 **key 창**으로 보낸다 — 띠가 맨
+        앞이어도 본체가 key 창이면 본체 메뉴가 떴다 (사가 제보 · 지뢰 244).
+        왼클릭은 눌린 창으로 간다. 그 사건의 화면 좌표는 맞으므로 그것으로
+        가른다. 윈도우는 사건이 제자리로 가서 이 길을 안 쓴다.
+        """
+        if not IS_MAC:
+            return False
+        try:
+            xr, yr = int(e.x_root), int(e.y_root)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        for st in (getattr(self, "_strip", None), getattr(self, "_dl_strip", None)):
+            if st is None or not st.visible:
+                continue
+            if not (st.x <= xr < st.x + st.w and st.y <= yr < st.y + st.h):
+                continue
+            w9, top9 = str(getattr(e, "widget", "")), str(st.top)
+            if w9 == top9 or w9.startswith(top9 + "."):
+                return False              # 제대로 띠에 왔다 — 띠가 처리한다
+            # 같은 사건이 위젯 쪽과 bind_all 쪽으로 두 번 온다
+            key9 = (getattr(e, "serial", None), getattr(e, "time", None))
+            if key9 != self._strip_rc_last:
+                self._strip_rc_last = key9
+                st.on_menu(xr - st.x, yr - st.y, xr, yr)
+            return True
+        return False
 
     def _strip_seat(self, slot, h, name="seat"):
         """앉은 그림 (PIL·캐시). name 은 seat / seat_pen / seat_pen2 —
@@ -37857,6 +38246,8 @@ class Mascot:
         cv.bind("<Button-1>", lambda e: self._safe("bgm_click", on_press, e))
 
         def on_rclick(e):
+            if self._strip_rc(e):        # 띠 위를 누른 우클릭이 샌 것 (지뢰 244)
+                return
             # 목록 단추 우클릭 → 프리셋 설정 창 (이름·대표 목록 · 요청)
             act, dat = find(e.x, e.y)
             if act == "set":
@@ -39992,10 +40383,14 @@ class Mascot:
 
     def _bd_bind_menu(self, w, fn):
         """우클릭을 건다. 맥 Tk 는 우클릭이 <Button-2> 이고 Ctrl+클릭도 우클릭이다."""
-        w.bind("<Button-3>", fn)
+        def fn9(e):
+            if self._strip_rc(e):        # 띠 위를 누른 우클릭이 샌 것 (지뢰 244)
+                return None
+            return fn(e)
+        w.bind("<Button-3>", fn9)
         if IS_MAC:
-            w.bind("<Button-2>", fn)
-            w.bind("<Control-Button-1>", fn)
+            w.bind("<Button-2>", fn9)
+            w.bind("<Control-Button-1>", fn9)
 
     def _bd_bind_key(self, w, key, fn):
         """Ctrl+<key> 를 건다 — 맥은 ⌘ 도 같이."""
@@ -41087,6 +41482,9 @@ class Mascot:
         "list": (("p", ((9, 7), (20, 7)), False), ("p", ((9, 12), (20, 12)), False),
                  ("p", ((9, 17), (20, 17)), False), ("c", 5, 7, .6), ("c", 5, 12, .6),
                  ("c", 5, 17, .6)),
+        "wallet": (("r", 3, 6, 21, 19, 3.5), ("p", ((3, 10.5), (21, 10.5)), False), ("c", 16.5, 14.8, .7)),
+        "eye": (("p", ((2, 12), (4.6, 8.9), (8, 6.8), (12, 6.1), (16, 6.8), (19.4, 8.9), (22, 12), (19.4, 15.1), (16, 17.2), (12, 17.9), (8, 17.2), (4.6, 15.1)), True), ("c", 12, 12, 2.6)),
+        "eyeoff": (("p", ((2, 12), (4.6, 8.9), (8, 6.8), (12, 6.1), (16, 6.8), (19.4, 8.9), (22, 12), (19.4, 15.1), (16, 17.2), (12, 17.9), (8, 17.2), (4.6, 15.1)), True), ("c", 12, 12, 2.6), ("p", ((4, 4), (20, 20)), False)),
     }
 
     def _bd_line_icon(self, kind, d, col, lw=1.8):
@@ -41566,7 +41964,19 @@ class Mascot:
         cv.delete("all")
         self._board_ui_hit = []
         self._cal_hit = []
+        if self._board_tab == "money" and not self._lg_on():
+            self._board_tab = "board"
         self._board_draw_head(cv, lay, pal, d)
+        if self._board_tab == "money":
+            # 가계부 탭 — 달력 탭처럼 무대 캔버스를 치우고 본 캔버스에 그린다
+            try:
+                bcv.place_forget()
+            except Exception:
+                pass
+            self._lg_draw(cv, lay, pal)
+            if self._board_set_alive():
+                self._safe("board_set_draw", self._board_set_draw)
+            return
         if self._board_tab == "cal":
             # 달력 탭 — 무대 캔버스를 치우고 본 캔버스에 달력을 그린다
             try:
@@ -41679,8 +42089,10 @@ class Mascot:
         cv.create_text(x, cy, text="의 마이 보드", font=ft2, fill=pal["sub"], anchor="w")
         x += int(self._tw("의 마이 보드", ft2)) + 18
         if not vis:                        # 남의 보드 — 달력은 안 보인다
-            x = self._bd_seg(cv, x, cy, (("board", "보드", "l_board"), ("cal", "달력", "l_cal")),
-                             self._board_tab, pal, "tab:")
+            tabs9 = [("board", "보드", "l_board"), ("cal", "달력", "l_cal")]
+            if self._lg_on():
+                tabs9.append(("money", "가계부", "l_wallet"))
+            x = self._bd_seg(cv, x, cy, tuple(tabs9), self._board_tab, pal, "tab:")
         # 오른쪽 — 창 단추 · 꾸미기 · 아이콘 단추 (글자 없이, 커서를 올리면 이름표 · 요청)
         self._board_tips = []
         xl = self._board_chrome(self._board_win, cv, W - 16, cy, pal)
@@ -41716,6 +42128,11 @@ class Mascot:
                                      "꾸미기 끝내기 (저장)" if ed else "내 보드 꾸미기"))
         xs = self._bd_icon_btn(cv, xs, cy, "l_gear", "환경설정", None, pal, "settings")
         xs = self._bd_icon_btn(cv, xs - 2, cy, "l_star", "도장판", None, pal, "stamp")
+        if self._board_tab in ("cal", "money") and self._lg_on():
+            hid9 = bool(self._lg_data().get("hide"))
+            xs = self._bd_icon_btn(cv, xs - 2, cy, "l_eyeoff" if hid9 else "l_eye",
+                                   "금액 보이기" if hid9 else "금액 가리기 (화면 공유할 때)",
+                                   None, pal, "lg:hide")
         if self._board_tab == "board":
             cur9 = str(d.get("cur_preset") or "")
             xs = self._bd_icon_btn(cv, xs - 2, cy, "l_grid",
@@ -43887,6 +44304,12 @@ class Mascot:
             if x0 <= e.x <= x1 and y0 <= e.y <= y1:      # 달력 위에서 휠 — 달을 넘긴다
                 self._cal_act("prev" if e.delta > 0 else "next")
             return
+        if which == "main" and self._board_tab == "money":
+            lay = self._board_layout()
+            x0, y0, x1, y1 = lay["stage"]
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1 and self._lg_on():
+                self._lg_act("prev" if e.delta > 0 else "next")
+            return
         step = 1.1 if e.delta > 0 else 1 / 1.1
         if which == "stage" and self._board_matadj:
             cx, cy, z = self._board_mat_posv()
@@ -43924,6 +44347,10 @@ class Mascot:
             return
         if which == "main" and self._board_tab == "cal":
             self._cal_rclick(e)
+            return
+        if which == "main" and self._board_tab == "money":
+            if self._lg_on():
+                self._lg_rclick(e)
             return
         if which != "stage" or self._board_matadj:
             return
@@ -44298,11 +44725,13 @@ class Mascot:
         win.bind("<Escape>", close)
         win.protocol("WM_DELETE_WINDOW", close)
 
-        def field(x0, y0, x1, h, init="", font=None, multi=False, hint=""):
-            """옅은 입력 칸 — 눌러 들어가면 테두리가 강조색이 된다. Entry(또는 Text)를 돌려준다."""
+        def field(x0, y0, x1, h, init="", font=None, multi=False, hint="", bg=None):
+            """옅은 입력 칸 — 눌러 들어가면 테두리가 강조색이 된다. Entry(또는 Text)를 돌려준다.
+            bg — 옅은 판 위에 놓는 칸은 바탕과 같은 색이면 안 보인다 (가계부 적기 창의 메모)."""
             font = font or self._bf(10)
-            a = self._bd_box(cv, x0, y0, x1, y0 + h, 12, pal["fill"])
-            b = self._bd_box(cv, x0, y0, x1, y0 + h, 12, pal["fill"], pal["accent"], 1.6)
+            bg = bg or pal["fill"]
+            a = self._bd_box(cv, x0, y0, x1, y0 + h, 12, bg)
+            b = self._bd_box(cv, x0, y0, x1, y0 + h, 12, bg, pal["accent"], 1.6)
             if b is not None:
                 cv.itemconfigure(b, state="hidden")
             if multi:
@@ -44313,7 +44742,7 @@ class Mascot:
                 cv.create_window(x0 + 14, y0 + 10, anchor="nw", window=w9, width=x1 - x0 - 28,
                                  height=h - 20)
             else:
-                w9 = tk.Entry(cv, font=font, relief="flat", bd=0, bg=pal["fill"], fg=pal["ink"],
+                w9 = tk.Entry(cv, font=font, relief="flat", bd=0, bg=bg, fg=pal["ink"],
                               insertbackground=pal["ink"], highlightthickness=0,
                               selectbackground=pal["soft"], selectforeground=pal["ink"])
                 w9.insert(0, init)
@@ -44840,12 +45269,17 @@ class Mascot:
             return
         if what.startswith("tab:"):
             tab = what[4:]
-            if tab in ("board", "cal") and tab != self._board_tab:
-                if tab == "cal" and getattr(self, "_board_edit", False):
+            if tab == "money" and not self._lg_on():
+                return
+            if tab in ("board", "cal", "money") and tab != self._board_tab:
+                if tab != "board" and getattr(self, "_board_edit", False):
                     self._board_toggle_edit()        # 꾸미던 것은 저장하고 넘어간다
                 self._board_tab = tab
                 self._tip_hide()
                 self._board_draw()
+        elif what.startswith("lg:"):
+            if self._lg_on():
+                self._lg_act(what[3:])
         elif what.startswith("cal:"):
             self._cal_act(what[4:])
         elif what == "edit":
@@ -44972,7 +45406,7 @@ class Mascot:
     def _board_toast(self, msg):
         self._board_toast_v = (str(msg), time.time())
         if self._board_alive():
-            if self._board_tab == "cal":
+            if self._board_tab in ("cal", "money"):
                 self._board_draw()
             else:
                 self._board_draw_stage()
@@ -45428,7 +45862,8 @@ class Mascot:
             out.append({"id": str(ev.get("id")), "name": str(ev.get("name") or "일정")[:40],
                         "cat": c, "s": a, "e": b, "steps": steps, "done": bool(ev.get("done")),
                         "memo": str(ev.get("memo") or ""), "ro": False,
-                        "pd": bool(ev.get("pd", True)), "pt": bool(ev.get("pt", False))})
+                        "pd": bool(ev.get("pd", True)), "pt": bool(ev.get("pt", False)),
+                        "amt": self._cal_amt(ev)})
         for i9, d9 in enumerate(getattr(self, "dues", None) or []):
             n = self._cal_p(d9.get("date"))
             nm = str(d9.get("name") or "").strip()
@@ -45490,14 +45925,14 @@ class Mascot:
         if getattr(self, "_cal_touch_job", None) is not None:
             return
         try:
-            if not (self._board_alive() and self._board_tab == "cal"):
+            if not (self._board_alive() and self._board_tab in ("cal", "money")):
                 return
         except Exception:
             return
 
         def go():
             self._cal_touch_job = None
-            if self._board_alive() and self._board_tab == "cal":
+            if self._board_alive() and self._board_tab in ("cal", "money"):
                 self._safe("board_draw", self._board_draw)
         self._cal_touch_job = self.root.after(30, go)
 
@@ -45663,8 +46098,11 @@ class Mascot:
             cv.create_text((x0 + x1) / 2, yy + 18, text="+ 분류 추가", font=self._bf(9, True),
                            fill=pal["sub"])
             self._board_ui_hit.append((x0 + 20, yy, x1 - 20, yy + 36, "cal:catadd"))
-        # 이 달 진행
-        if show2:
+        # 이 달 진행 — 가계부를 켰고 받을 돈이 있으면 그 자리에 받을 돈 (요청 · 목업 ③)
+        recv9 = self._lg_recv(evs) if (show2 and self.cfg.get("ledger")) else []
+        if recv9:
+            self._lg_cal_recv_card(cv, x0, x1, y0 + h1 + 14, h2, pal, recv9)
+        elif show2:
             ty0 = y0 + h1 + 14
             mine = [e for e in inm if not e["ro"]]
             dn = sum(1 for e in mine if e["done"])
@@ -45798,6 +46236,7 @@ class Mascot:
         lanes_max = max(0, int((rh - top_pad - 4 + BG) // (BH + BG)))
         fe = self._bf(8, True)
         feo = tuple(fe) + ("overstrike",) if len(fe) >= 2 else fe
+        lgon9 = bool(self.cfg.get("ledger"))
         # 고른 날 바탕
         for r in range(rows):
             for c in range(7):
@@ -45866,7 +46305,10 @@ class Mascot:
                     self._bd_box(cv, bx0 - 2, by0 - 2, bx1 + 2, by0 + BH + 2, 9, None,
                                  self._mix(col, pal["ink"], 0.25), 1.6)
                 tcol = pal["sub"] if e["done"] else self._mix(col, pal["ink"], 0.45)
-                lab = self._bd_fit(e["name"], fe, bx1 - bx0 - 15)
+                won9 = bool(tail and lgon9 and int(e.get("amt") or 0) > 0 and bx1 - bx0 > 44)
+                lab = self._bd_fit(e["name"], fe, bx1 - bx0 - 15 - (14 if won9 else 0))
+                if won9:
+                    cv.create_text(bx1 - 8, by0 + BH / 2.0, text="₩", font=fe, fill=tcol, anchor="e")
                 cv.create_text(bx0 + 10, by0 + BH / 2.0, text=lab,
                                font=feo if e["done"] else fe, fill=tcol, anchor="w")
                 tend = bx0 + 11 + int(self._tw(lab, fe)) + 8
@@ -45875,7 +46317,7 @@ class Mascot:
                     if sd is None or not (wa + c0 <= sd <= wa + c1):
                         continue
                     dx = gx0 + cw * (sd - wa + 0.5)
-                    if dx - 5 < tend or dx + 5 > bx1 - 4:
+                    if dx - 5 < tend or dx + 5 > bx1 - 4 - (16 if won9 else 0):
                         continue
                     self._bd_put(cv, ("caldot", col, pal["card"], st["ok"]),
                                  lambda c9=col, o9=st["ok"]: self._cal_dot_img(c9, pal, o9),
@@ -45985,14 +46427,18 @@ class Mascot:
                     ("pd", "마감 말풍선에 띄우기", self.due_panel is not None),
                     ("pt", "할 일 말풍선에 띄우기", self.todo_panel is not None)) if ok9]
             pinh = (10 + len(pins9) * (self._bd_ls(fs) + 14)) if pins9 else 0
+            mbox = self._lg_ev_box_h(ev)
             hh = 15 + self._bd_ls(fn) + 4 + self._bd_ls(fs) + 12 + 8 \
-                + (10 + len(steps) * sh9 if steps else 0) + pinh + 12 + 30 + 14
+                + (10 + len(steps) * sh9 if steps else 0) + pinh + mbox + 12 + 30 + 14
             if yy + hh > bot and steps:          # 자리가 모자라면 단계는 접는다
                 hh -= 10 + len(steps) * sh9
                 steps = []
             if yy + hh > bot and pinh:
                 hh -= pinh
                 pinh = 0
+            if yy + hh > bot and mbox:
+                hh -= mbox
+                mbox = 0
             if yy + hh <= bot:
                 self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + hh, 16, pal["fill"])
                 ty = yy + 15 + self._bd_ls(fn) / 2.0
@@ -46007,7 +46453,16 @@ class Mascot:
                 ty += self._bd_ls(fn) / 2.0 + 4 + self._bd_ls(fs) / 2.0
                 meta = ("마감 말풍선에 적은 마감 · %s" % self._cal_span(ev["s"], ev["e"])) if ev["ro"] \
                     else "%s · %s" % (ev["cat"]["name"], self._cal_span(ev["s"], ev["e"]))
-                cv.create_text(x0 + 48, ty, text=self._bd_fit(meta, fs, x1 - x0 - 84),
+                aw9 = 0
+                if not ev["ro"] and self.cfg.get("ledger") and int(ev.get("amt") or 0) <= 0:
+                    # 금액 없는 일정 — 설명 줄 끝에 작은 '+ 금액' (따로 줄을 두면 아래 칸이 밀린다)
+                    fa9 = self._bf(8, True)
+                    aw9 = int(self._tw("+ 금액", fa9)) + 16
+                    self._bd_box(cv, x1 - 30 - aw9, ty - 10, x1 - 30, ty + 10, 10, pal["card"])
+                    cv.create_text(x1 - 30 - aw9 / 2.0, ty, text="+ 금액", font=fa9, fill=pal["ink2"])
+                    self._board_ui_hit.append((x1 - 34 - aw9, ty - 13, x1 - 26, ty + 13, "lg:amt:" + ev["id"]))
+                    aw9 += 8
+                cv.create_text(x0 + 48, ty, text=self._bd_fit(meta, fs, x1 - x0 - 84 - aw9),
                                font=fs, fill=pal["sub"], anchor="w")
                 ty += self._bd_ls(fs) / 2.0 + 12
                 if not ev["ro"]:
@@ -46020,6 +46475,8 @@ class Mascot:
                     cv.create_text(x1 - 30, ty + 3, text="%d%%" % int(round(pr * 100)),
                                    font=self._bf(9, 2), fill=pal["ink"], anchor="e")
                 ty += 8
+                if mbox:
+                    ty = self._lg_ev_box(cv, x0, x1, ty, ev, pal)
                 if steps:
                     ty += 10
                     for i, st in enumerate(steps):
@@ -46384,7 +46841,7 @@ class Mascot:
         self._board_toast("일정을 지웠어요")
         self._board_draw()
 
-    def _cal_put(self, eid, name, cat, a, b, steps, memo="", pd=None, pt=None):
+    def _cal_put(self, eid, name, cat, a, b, steps, memo="", pd=None, pt=None, amt=None):
         """일정을 넣거나 고친다. steps: [(이름, 날 수 또는 None)]. 끝낸 표시는 이름으로 잇는다.
         pd·pt — 마감·할 일 말풍선에 띄울지 (None 이면 그대로, 새 일정은 마감만 켠다)."""
         d = self._cal_data()
@@ -46410,6 +46867,11 @@ class Mascot:
         ev["memo"] = str(memo or "")[:120]
         ev["pd"] = bool(ev.get("pd", True) if pd is None else pd)
         ev["pt"] = bool(ev.get("pt", False) if pt is None else pt)
+        if amt is not None:                       # 금액 (가계부의 받을 돈) — 0 이면 뺀다
+            if int(amt) > 0:
+                ev["amt"] = int(amt)
+            else:
+                ev.pop("amt", None)
         self._cal_save()
         return ev["id"]
 
@@ -46461,9 +46923,11 @@ class Mascot:
               "s": self._cal_fmt(a0), "e": self._cal_fmt(b0), "steps": steps0,
               "pd": bool(ev.get("pd", True)) if ev else True,
               "pt": bool(ev.get("pt", False)) if ev else False,
+              "amt": ("{:,}".format(self._cal_amt(ev)) if (ev and self._cal_amt(ev)) else ""),
               "msg": "", "focus": "name"}
         W = 460
         has_d, has_t = self.due_panel is not None, self.todo_panel is not None
+        lg9 = bool(self.cfg.get("ledger"))
 
         def height():
             ncat = len(d["cats"][:12])
@@ -46471,6 +46935,7 @@ class Mascot:
             return (62 + 22 + 46 + 18            # 이름
                     + 22 + rows_c * 38 + 12      # 분류
                     + 22 + 46 + 8 + 30 + 18      # 기간 + 빠른 고르기
+                    + ((22 + 46 + 18) if lg9 else 0)       # 금액 (가계부)
                     + 22 + len(ed["steps"]) * 46 + 36 + 16     # 단계
                     + ((22 + (int(has_d) + int(has_t)) * 40 + 10) if (has_d or has_t) else 0)
                     + 24 + 38 + 22)
@@ -46489,6 +46954,8 @@ class Mascot:
             try:
                 ed["name"] = w["name"].get()
                 ed["s"], ed["e"] = w["s"].get(), w["e"].get()
+                if "amt" in w:
+                    ed["amt"] = w["amt"].get()
                 for i9, (en, edt) in enumerate(w["rows"]):
                     ed["steps"][i9] = [en.get(), edt.get()]
             except Exception:
@@ -46586,8 +47053,19 @@ class Mascot:
                 ed["msg"] = "같은 이름의 단계가 있어요 — 이름을 다르게 적어 주세요"
                 draw()
                 return "break"
+            amt9 = None
+            if lg9:
+                t9 = str(ed.get("amt") or "").strip()
+                if t9 in ("", "0"):
+                    amt9 = 0
+                else:
+                    amt9 = self._lg_amt(t9)
+                    if amt9 is None:
+                        ed["msg"], ed["focus"] = "금액을 읽지 못했어요 — 450000 처럼 적어 주세요", "amt"
+                        draw()
+                        return "break"
             got = self._cal_put(eid if ev else None, nm, ed["cat"], a, b, steps,
-                                pd=ed["pd"], pt=ed["pt"])
+                                pd=ed["pd"], pt=ed["pt"], amt=amt9)
             if not got:
                 ed["msg"] = "일정이 너무 많아요 — 지난 것을 지워 주세요"
                 draw()
@@ -46665,6 +47143,10 @@ class Mascot:
                 st["hits"].append((x, y, x + qw, y + 26, lambda n=n9: quick(n)))
                 x += qw + 6
             y += 30 + 18
+            if lg9:
+                y = lab(y, "금액", "받을 돈 · 가계부와 이어져요 · 비워도 돼요")
+                w["amt"] = st["field"](L, y, L + fw, 46, ed["amt"], hint="원")
+                y += 46 + 18
             y = lab(y, "단계", "날짜를 적으면 달력의 띠에 점이 찍혀요")
             w["rows"] = []
             for i9, (t9, d9) in enumerate(ed["steps"]):
@@ -46709,7 +47191,7 @@ class Mascot:
                              remove, "danger")
             for w9 in st["ents"]:
                 w9.bind("<Return>", save)
-            tgt = {"name": w["name"], "s": w["s"], "e": w["e"]}.get(ed["focus"])
+            tgt = {"name": w["name"], "s": w["s"], "e": w["e"], "amt": w.get("amt")}.get(ed["focus"])
             if tgt is None and ed["focus"].startswith("step"):
                 try:
                     tgt = w["rows"][int(ed["focus"][4:])][0]
@@ -46730,12 +47212,1888 @@ class Mascot:
         except Exception:
             pass
 
+    # ── 가계부 (요청 · 2026-10-16 · 준사) ────────────────────────────────
+    # 기록은 .ledger.json 하나다 — 보드·달력과 따로라 친구에게 절대 안 올라간다 (지뢰 238).
+    # 날짜는 달력과 같은 '날 수' 셈이고, 보고 있는 달·고른 날(_cal_ym·_cal_sel)도 달력과 같이 쓴다.
+    # 받을 돈은 저장하지 않고 그릴 때마다 센다 (지뢰 30) — 달력 일정의 금액(amt)에서 그 일정으로
+    # 적힌 들어온 돈(기록의 ev)을 뺀 것이다. 그래서 기록을 지우면 받을 돈이 저절로 되살아난다.
+    LG_IN = "#2a9a6a"
+    LG_CATS0 = ({"id": "food", "name": "식비", "col": "#f2a23c"},
+                {"id": "gear", "name": "재료·장비", "col": "#8a73e0", "nb": True},
+                {"id": "life", "name": "생활", "col": "#3fa7d6"},
+                {"id": "sub", "name": "구독", "col": "#ee5a8b"},
+                {"id": "move", "name": "교통", "col": "#4bb98a"},
+                {"id": "etc", "name": "기타", "col": "#9aa1ad"})
+    LG_ICATS0 = ({"id": "i_com", "name": "커미션", "col": "#f2a23c"},
+                 {"id": "i_out", "name": "외주", "col": "#ee5a8b"},
+                 {"id": "i_goods", "name": "굿즈 판매", "col": "#3fa7d6"},
+                 {"id": "i_etc", "name": "기타 수입", "col": "#9aa1ad"})
+    # 낱말 → 분류 (처음 보는 이름일 때만 · 한 번 고치면 그 이름은 learn 이 기억한다)
+    LG_WORDS = (("sub", ("구독", "넷플릭스", "유튜브", "클립", "어도비", "포토샵", "스포티파이",
+                         "멜론", "애플", "아이클라우드", "구글", "디즈니", "티빙", "웨이브", "쿠팡와우",
+                         "노션", "챗지피티", "멤버십", "정기")),
+                ("gear", ("펜촉", "타블렛", "태블릿", "아이패드", "액정", "펜", "종이", "물감", "브러시",
+                          "브러쉬", "소재", "에셋", "폰트", "인쇄", "굿즈", "아크릴", "스티커", "모니터",
+                          "키보드", "마우스", "장비", "재료", "화방", "캔버스", "마카", "프로그램")),
+                ("move", ("택시", "버스", "지하철", "기차", "ktx", "srt", "주유", "기름", "주차",
+                          "교통", "톨비", "따릉이", "킥보드", "항공", "비행기")),
+                ("food", ("커피", "카페", "점심", "저녁", "아침", "밥", "배달", "편의점", "간식", "치킨",
+                          "피자", "마라", "떡볶이", "라면", "빵", "디저트", "음료", "식비", "식사", "야식",
+                          "햄버거", "버거", "김밥", "국밥", "찌개", "고기", "초밥", "술", "맥주", "케이크",
+                          "아메리카노", "라떼", "스벅", "메가커피", "식당", "마트")),
+                ("life", ("다이소", "생필품", "세제", "휴지", "약", "병원", "관리비", "전기", "가스",
+                          "수도", "통신", "휴대폰", "핸드폰", "월세", "보험", "세금", "미용실", "옷",
+                          "생활", "택배", "선물")))
+    LG_INWORDS = ("입금", "커미션", "외주", "환불", "월급", "수입", "판매", "선금", "잔금", "용돈",
+                  "정산", "후원", "상금", "급여", "의뢰비")
+    LG_IN_CAT = (("i_com", ("커미션", "커미", "의뢰")), ("i_out", ("외주", "월급", "급여", "정산")),
+                 ("i_goods", ("굿즈", "판매")))
+    LG_DAYWORD = {"오늘": 0, "어제": -1, "그제": -2, "그저께": -2, "엊그제": -2}
+    LG_ITEM_MAX = 6000
+    LG_LEARN_MAX = 300
+    LG_FIX_MAX = 30
+    LG_CAT_MAX = 10
+
+    def _lg_on(self):
+        """가계부를 보여 줄까 — config 를 켠 캐릭터의 내 보드에서만 (남의 보드에서는 안 보인다)."""
+        return bool(self.cfg.get("ledger")) and self._bv is None
+
+    def _lg_file(self):
+        return os.path.join(self.state_dir, ".ledger.json")
+
+    def _lg_data(self):
+        d = getattr(self, "_lg_mem", None)
+        if d is not None:
+            return d
+        d = {}
+        try:
+            raw = _load_json(self._lg_file())
+            if isinstance(raw, dict):
+                d = raw
+        except Exception:
+            d = {}
+        if not isinstance(d.get("items"), list):
+            d["items"] = []
+        d["items"] = [it for it in d["items"] if isinstance(it, dict) and it.get("id")]
+        if not isinstance(d.get("cats"), list) or not d.get("cats"):
+            d["cats"] = [dict(c) for c in self.LG_CATS0]
+        if not isinstance(d.get("icats"), list) or not d.get("icats"):
+            d["icats"] = [dict(c) for c in self.LG_ICATS0]
+        if not isinstance(d.get("fixed"), list):
+            d["fixed"] = []
+        d["fixed"] = [f for f in d["fixed"] if isinstance(f, dict) and f.get("id")]
+        if not isinstance(d.get("learn"), dict):
+            d["learn"] = {}
+        if d.get("view") not in ("cal", "list", "stat"):
+            d["view"] = "cal"
+        try:
+            d["budget"] = max(0, int(d.get("budget") or 0))
+        except Exception:
+            d["budget"] = 0
+        if d.get("sn") not in (3, 6, 12):
+            d["sn"] = 6
+        self._lg_mem = d
+        return d
+
+    def _lg_save(self):
+        if _load_failed(self._lg_file()):
+            self._log_error("lg_locked")         # 못 읽은 파일은 안 덮는다 (지뢰 92)
+            return False
+        try:
+            _save_json(self._lg_file(), self._lg_data())    # 지뢰 35
+            return True
+        except Exception:
+            self._log_error("lg_save")
+            return False
+
+    def _lg_dn(self, ds):
+        """기록의 날짜 글 → 날 수 (같은 글은 한 번만 셈한다 — 기록이 수천 줄이어도 싸게)."""
+        ds = str(ds or "")
+        c = self._lg_dncache
+        if ds in c:
+            return c[ds]
+        n = self._cal_p(ds)
+        if len(c) > 4000:
+            c.clear()
+        c[ds] = n
+        return n
+
+    def _lg_cat(self, cid):
+        d = self._lg_data()
+        for c in d["cats"] + d["icats"]:
+            if str(c.get("id")) == str(cid):
+                return c
+        return {"id": "", "name": "분류 없음", "col": self.CAL_NONE}
+
+    def _lg_is_in(self, cid):
+        return any(str(c.get("id")) == str(cid) for c in self._lg_data()["icats"])
+
+    def _lg_won(self, n, sign=True, unit=False):
+        """돈 글 — 4,500 · +4,500 · −4,500. '금액 가리기'면 점으로 (방송·화면 공유 중)."""
+        n = int(n)
+        if self._lg_data().get("hide"):
+            t = "•••••"
+        else:
+            t = "{:,}".format(abs(n))
+        if sign and n:
+            t = ("+" if n > 0 else "−") + t
+        return t + ("원" if unit and not self._lg_data().get("hide") else "")
+
+    def _lg_short(self, n):
+        """좁은 칸의 돈 글 — 만 단위로 줄인다 (+120만 · −2.4만)."""
+        n = int(n)
+        if self._lg_data().get("hide"):
+            return ("+" if n > 0 else "−") + "••"
+        a = abs(n)
+        if a >= 10000:
+            v = a / 10000.0
+            t = (("%.1f" % v).rstrip("0").rstrip(".") if v < 100 else "%d" % int(round(v))) + "만"
+        else:
+            t = "{:,}".format(a)
+        return ("+" if n > 0 else "−") + t
+
+    @staticmethod
+    def _lg_amt(tok):
+        """'4500' · '4,500' · '4500원' · '9천' · '3만' · '1.5만' · '1만2천' → 원. 못 읽으면 None."""
+        t = str(tok or "").strip().replace(",", "")
+        if t.endswith("원"):
+            t = t[:-1]
+        if t[:1] in ("+", "-", "−"):
+            t = t[1:]
+        if not t or not (t[0].isdigit() or t[0] in "만천"):
+            return None
+        total, num, seen = 0.0, "", False
+        for ch in t:
+            if ch.isdigit() or ch == ".":
+                num += ch
+            elif ch in "만천백":
+                try:
+                    v = float(num or "1")
+                except ValueError:
+                    return None
+                total += v * {"만": 10000, "천": 1000, "백": 100}[ch]
+                num, seen = "", True
+            else:
+                return None
+        if num:
+            try:
+                total += float(num)
+            except ValueError:
+                return None
+            seen = True
+        if not seen:
+            return None
+        v = int(round(total))
+        return v if 0 < v < 10 ** 10 else None
+
+    def _lg_parse(self, text, base):
+        """한 줄 → {name, amt, sign, day, memo}. sign: +1 들어온 돈 · -1 나간 돈 · None 모름.
+        '커피 4500' · '+커미션 120000' · '택시 12,300 어제' · '펜촉 14800 아이패드'(뒤는 메모).
+        base 는 날짜를 '14일'처럼 적었을 때 기준이 되는 달의 날(보통 고른 날)."""
+        t = str(text or "").strip()
+        sign = None
+        if t[:1] == "+":
+            sign, t = 1, t[1:].strip()
+        elif t[:1] in ("-", "−"):
+            sign, t = -1, t[1:].strip()
+        toks = t.split()
+        amt, ai = None, None
+        for i, tok in enumerate(toks):
+            v = self._lg_amt(tok)
+            if v is not None:
+                amt, ai = v, i
+                if tok[:1] == "+":
+                    sign = 1
+                elif tok[:1] in ("-", "−"):
+                    sign = -1
+                break
+        y, m, _d = self._cal_ymd(base)
+        day, keep = None, []
+        for i, tk in enumerate(toks):
+            if i == ai:
+                continue
+            if day is None and tk in self.LG_DAYWORD:
+                day = self._cal_today() + self.LG_DAYWORD[tk]
+                continue
+            if day is None and any(ch.isdigit() for ch in tk) and any(ch in tk for ch in "/.-월일"):
+                got = self._cal_parse(tk, y, m)
+                if got is not None:
+                    day = got
+                    continue
+            keep.append((i, tk))
+        name_t = [tk for i, tk in keep if ai is None or i < ai]
+        memo_t = [tk for i, tk in keep if ai is not None and i > ai]
+        if not name_t and memo_t:
+            name_t, memo_t = memo_t[:1], memo_t[1:]
+        name = " ".join(name_t).strip()
+        if sign is None and any(w in name for w in self.LG_INWORDS):
+            sign = 1
+        return {"name": name[:30], "amt": amt, "sign": sign, "day": day,
+                "memo": " ".join(memo_t).strip()[:60]}
+
+    def _lg_guess(self, name, sign):
+        """이름으로 분류를 고른다 — 기억해 둔 것이 먼저, 그다음 낱말 표."""
+        d = self._lg_data()
+        nm = str(name or "").strip()
+        pool = d["icats"] if sign == 1 else d["cats"]
+        ids = [str(c.get("id")) for c in pool]
+        got = str(d["learn"].get(nm) or "")
+        if got in ids:
+            return got
+        low = nm.lower()
+        table = self.LG_IN_CAT if sign == 1 else self.LG_WORDS
+        for cid, words in table:
+            if cid in ids and any(w.lower() in low for w in words):
+                return cid
+        for want in (("i_etc",) if sign == 1 else ("etc",)):
+            if want in ids:
+                return want
+        return ids[-1] if ids else ""
+
+    def _lg_sign_of(self, p):
+        """해석 결과의 부호 — 적은 것이 없으면 기억해 둔 분류로, 그것도 없으면 나간 돈."""
+        if p.get("sign") in (1, -1):
+            return p["sign"]
+        got = str(self._lg_data()["learn"].get(str(p.get("name") or "").strip()) or "")
+        return 1 if (got and self._lg_is_in(got)) else -1
+
+    def _lg_get(self, iid):
+        for it in self._lg_data()["items"]:
+            if str(it.get("id")) == str(iid):
+                return it
+        return None
+
+    def _lg_add(self, day, amt, cat, name, memo="", ev=None, fx=None, iid=None, learn=True,
+                save=True):
+        """기록을 넣거나 고친다. amt 는 부호가 있다(+ 들어온 돈 · − 나간 돈). → 기록 id."""
+        d = self._lg_data()
+        it = self._lg_get(iid) if iid else None
+        if it is None:
+            if len(d["items"]) >= self.LG_ITEM_MAX:
+                self._board_toast("기록이 너무 많아요 — 오래된 것을 지워 주세요")
+                return None
+            nid = "m%d" % int(time.time() * 1000)
+            while self._lg_get(nid) is not None:
+                nid += "x"
+            it = {"id": nid}
+            d["items"].append(it)
+        it["d"] = self._cal_s(day)
+        it["amt"] = int(amt)
+        it["cat"] = str(cat or "")
+        it["name"] = (str(name or "").strip() or str(self._lg_cat(cat).get("name") or "기록"))[:30]
+        it["memo"] = str(memo or "").strip()[:60]
+        it["at"] = int(time.time())
+        if ev:
+            it["ev"] = str(ev)
+        if fx:
+            it["fx"] = str(fx)
+        if learn and str(name or "").strip():
+            lr = d["learn"]
+            k = str(name).strip()[:30]
+            lr.pop(k, None)
+            lr[k] = str(cat or "")
+            if len(lr) > self.LG_LEARN_MAX:            # 오래된 절반만 (지뢰 18)
+                for old in list(lr)[:self.LG_LEARN_MAX // 2]:
+                    lr.pop(old, None)
+        if save:
+            self._lg_save()
+            self._cal_touch()
+        return it["id"]
+
+    def _lg_del(self, iid):
+        d = self._lg_data()
+        it = self._lg_get(iid)
+        if it is None:
+            return False
+        if it.get("fx"):
+            # 고정 지출이 저절로 적은 줄 — 지우면 이 달에는 다시 안 적는다
+            for f in d["fixed"]:
+                if str(f.get("id")) == str(it["fx"]):
+                    n = self._lg_dn(it.get("d"))
+                    if n is not None:
+                        f["skip"] = "%04d-%02d" % self._cal_ymd(n)[:2]
+        d["items"] = [x for x in d["items"] if str(x.get("id")) != str(iid)]
+        self._lg_save()
+        return True
+
+    def _lg_range(self, a, b):
+        """[(날 수, 기록)] — a~b 사이."""
+        out = []
+        for it in self._lg_data()["items"]:
+            n = self._lg_dn(it.get("d"))
+            if n is not None and a <= n <= b:
+                out.append((n, it))
+        return out
+
+    def _lg_paid(self):
+        """일정 id → 그 일정으로 적힌 들어온 돈 합."""
+        out = {}
+        for it in self._lg_data()["items"]:
+            ev = str(it.get("ev") or "")
+            try:
+                a = int(it.get("amt") or 0)
+            except Exception:
+                a = 0
+            if ev and a > 0:
+                out[ev] = out.get(ev, 0) + a
+        return out
+
+    def _lg_recv(self, evs=None):
+        """받을 돈 — [(일정, 금액, 받은 것, 남은 것)], 마감이 빠른 차례. 저장하지 않고 센다."""
+        if not self.cfg.get("ledger"):
+            return []
+        evs = self._cal_events() if evs is None else evs
+        paid = self._lg_paid()
+        out = []
+        for e in evs:
+            if e["ro"] or int(e.get("amt") or 0) <= 0:
+                continue
+            p = paid.get(e["id"], 0)
+            if p < e["amt"]:
+                out.append((e, e["amt"], p, e["amt"] - p))
+        out.sort(key=lambda r: (r[0]["e"], r[0]["name"]))
+        return out
+
+    def _lg_fixed_tick(self, now, force=False):
+        """고정 지출 — 날이 되면 그달 가계부에 저절로 적는다 (1분에 한 번 본다).
+        이미 적었거나 그달 줄을 지웠으면(skip) 다시 안 적는다. 지난 달은 거슬러 안 적는다."""
+        if not force and now - self._lg_fix_at < 60.0:
+            return
+        self._lg_fix_at = now
+        if not self.cfg.get("ledger"):
+            return
+        d = self._lg_data()
+        if not d["fixed"] or _load_failed(self._lg_file()):
+            return
+        td = self._cal_today()
+        y, m, _dd = self._cal_ymd(td)
+        ma, mb = self._cal_month_range(y, m)
+        ym = "%04d-%02d" % (y, m)
+        have = set(str(it.get("fx")) for n, it in self._lg_range(ma, mb) if it.get("fx"))
+        added = 0
+        for f in d["fixed"]:
+            if not f.get("on", True) or str(f.get("id")) in have or f.get("skip") == ym:
+                continue
+            try:
+                day = max(1, min(31, int(f.get("day") or 1)))
+                amt = int(f.get("amt") or 0)
+            except Exception:
+                continue
+            n = min(ma + day - 1, mb)
+            if amt <= 0 or n > td:
+                continue
+            self._lg_add(n, -amt, f.get("cat") or "sub", f.get("name") or "고정 지출", "고정 지출",
+                         fx=f["id"], learn=False, save=False)
+            added += 1
+        if added:
+            self._lg_save()
+            if self._board_alive() and self._board_tab == "money":
+                self._safe("board_draw", self._board_draw)
+
+    def _lg_freq(self, n=4):
+        """자주 적은 것 — 최근 90일에 두 번 넘게 같은 이름·금액으로 적은 나간 돈."""
+        td = self._cal_today()
+        cnt, last = {}, {}
+        for i, it in enumerate(self._lg_data()["items"][-600:]):
+            try:
+                a = int(it.get("amt") or 0)
+            except Exception:
+                continue
+            nd = self._lg_dn(it.get("d"))
+            if a >= 0 or it.get("fx") or it.get("ev") or nd is None or nd < td - 90:
+                continue
+            k = (str(it.get("name") or ""), -a, str(it.get("cat") or ""))
+            cnt[k] = cnt.get(k, 0) + 1
+            last[k] = i
+        top = sorted((k for k in cnt if cnt[k] >= 2), key=lambda k: (-cnt[k], -last[k]))
+        return top[:n]
+
+    def _lg_month(self, y, m):
+        """(들어온 돈, 나간 돈, {분류: 나간 돈}, {분류: 들어온 돈}) — 그 달."""
+        a, b = self._cal_month_range(y, m)
+        inc = exp = 0
+        byc, byi = {}, {}
+        for _n, it in self._lg_range(a, b):
+            try:
+                v = int(it.get("amt") or 0)
+            except Exception:
+                continue
+            c = str(it.get("cat") or "")
+            if v > 0:
+                inc += v
+                byi[c] = byi.get(c, 0) + v
+            else:
+                exp += -v
+                byc[c] = byc.get(c, 0) - v
+        return inc, exp, byc, byi
+
+    def _lg_spent_budget(self, byc):
+        """예산에 드는 나간 돈 — '예산에서 뺀' 분류(재료·장비 같은 일감 비용)는 뺀다."""
+        nb = set(str(c.get("id")) for c in self._lg_data()["cats"] if c.get("nb"))
+        return sum(v for c, v in byc.items() if c not in nb)
+
+    # ── 그리기 ──
+    def _lg_draw(self, cv, lay, pal):
+        self._lg_draw_left(cv, lay["left"], pal)
+        x0, y0, x1, y1 = lay["stage"]
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        v = self._lg_data()["view"]
+        if v == "list":
+            self._lg_draw_list(cv, (x0, y0, x1, y1), pal)
+        elif v == "stat":
+            self._lg_draw_stat(cv, (x0, y0, x1, y1), pal)
+        else:
+            self._lg_draw_grid(cv, (x0, y0, x1, y1), pal)
+        if v == "stat":
+            self._lg_draw_plan(cv, lay["right"], pal)
+        else:
+            self._lg_draw_day(cv, lay["right"], pal)
+        tv = getattr(self, "_board_toast_v", None)
+        if tv and time.time() - tv[1] < 3.0:
+            f = self._bf(9, True)
+            w9 = int(self._tw(tv[0], f)) + 36
+            cx = (x0 + x1) / 2.0
+            self._bd_box(cv, cx - w9 / 2, y1 - 58, cx + w9 / 2, y1 - 24, 17, pal["ink"],
+                         shadow=(6, .18, 3))
+            cv.create_text(cx, y1 - 41, text=tv[0], font=f, fill=self._bd_on(pal["ink"]))
+
+    def _lg_fitf(self, text, size, maxw, low=8):
+        """그 폭에 들어가는 가장 큰 굵은 글꼴 — 돈 글은 자르지 않고 줄인다."""
+        for sz in range(int(size), int(low) - 1, -1):
+            f = self._bf(sz, 2)
+            if self._tw(text, f) <= maxw:
+                return f
+        return self._bf(low, 2)
+
+    def _lg_tile(self, cv, bx, by, w9, h9, cap, val, col, pal):
+        """옅은 칸 — 작은 설명 위에 굵은 돈 글 (넘치면 글자를 줄인다)."""
+        fs = self._bf(8, True)
+        self._bd_box(cv, bx, by, bx + w9, by + h9, 13, pal["fill"])
+        fv = self._lg_fitf(val, 12, w9 - 22)
+        lc, lv = self._bd_ls(fs), self._bd_ls(self._bf(12, 2))
+        ty = by + h9 / 2.0 - (lc + lv + 2) / 2.0
+        cv.create_text(bx + 12, ty + lc / 2.0, text=cap, font=fs, fill=pal["sub"], anchor="w")
+        cv.create_text(bx + 12, ty + lc + 2 + lv / 2.0, text=val, font=fv, fill=col, anchor="w")
+
+    def _lg_big(self, cv, x, y, text, col, unit, pal, size=20, maxw=None):
+        """큰 돈 글 + 작은 '원'. 넘치면 글자를 줄인다. 아래 끝을 맞춘다."""
+        for sz in (size, size - 2, size - 4, size - 6):
+            fb = self._bf(sz, 2)
+            fs = self._bf(max(8, int(sz * 0.5)), True)
+            w9 = self._tw(text, fb) + (self._tw(unit, fs) + 4 if unit else 0)
+            if maxw is None or w9 <= maxw:
+                break
+        hb, hs = self._bd_ls(fb), self._bd_ls(fs)
+        cv.create_text(x, y, text=text, font=fb, fill=col, anchor="w")
+        if unit:
+            cv.create_text(x + int(self._tw(text, fb)) + 3, y + (hb - hs) / 2.0 - hb * 0.08,
+                           text=unit, font=fs, fill=pal["sub"], anchor="w")
+        return hb
+
+    def _lg_draw_left(self, cv, box, pal):
+        x0, y0, x1, y1 = box
+        cw = x1 - x0
+        d = self._lg_data()
+        y, m = self._cal_view()
+        td = self._cal_today()
+        ma, mb = self._cal_month_range(y, m)
+        inc, exp, byc, _byi = self._lg_month(y, m)
+        net = inc - exp
+        spent = self._lg_spent_budget(byc)
+        recv = self._lg_recv()
+        fl, fs, fb = self._bf(9, True), self._bf(8, True), self._bf(9, True)
+        lfl, lfs, lfb = self._bd_ls(fl), self._bd_ls(fs), self._bd_ls(fb)
+        hbig = self._bd_ls(self._bf(20, 2))
+        th9 = self._bd_ls(self._bf(8, True)) + self._bd_ls(self._bf(12, 2)) + 22
+        hb9 = (lfb + 8 + 6 + 8 + lfs + 14) if d["budget"] else (34 + 14)
+        hr9 = (lfb + 4 + lfs + 14) if recv else 0
+        h1 = 18 + lfl + 8 + hbig + 14 + th9 + 18 + hb9 + hr9 + 4
+        h1 = min(h1, y1 - y0)
+        self._bd_box(cv, x0, y0, x1, y0 + h1, 20, pal["card"], shadow=(10, .06, 4))
+        yy = y0 + 18 + lfl / 2.0
+        cur = (ma <= td <= mb)
+        cv.create_text(x0 + 20, yy, text="%d월 남은 돈" % m, font=fl, fill=pal["sub"], anchor="w")
+        cv.create_text(x1 - 20, yy, text="이번 달" if cur else "%d년" % y, font=fs,
+                       fill=self._mix(pal["sub"], pal["card"], 0.35), anchor="e")
+        yy += lfl / 2.0 + 8 + hbig / 2.0
+        self._lg_big(cv, x0 + 20, yy, self._lg_won(net) if net else "0",
+                     self.LG_IN if net > 0 else (self.CAL_DUE if net < 0 else pal["ink"]), "원", pal,
+                     maxw=cw - 40)
+        yy += hbig / 2.0 + 14
+        tw9 = (cw - 40 - 8) / 2.0
+        for k, (cap, val, col) in enumerate((("들어온 돈", self._lg_won(inc, False), self.LG_IN),
+                                             ("나간 돈", self._lg_won(exp, False), pal["ink"]))):
+            self._lg_tile(cv, x0 + 20 + k * (tw9 + 8), yy, tw9, th9, cap, val, col, pal)
+        yy += th9 + 18
+        if d["budget"]:
+            b9 = d["budget"]
+            ry = yy + lfb / 2.0
+            cv.create_text(x0 + 20, ry, text="생활비 예산", font=fb, fill=pal["ink"], anchor="w")
+            cv.create_text(x1 - 20, ry, text="%s / %s" % (self._lg_won(spent, False),
+                                                          self._lg_won(b9, False)),
+                           font=fs, fill=pal["sub"], anchor="e")
+            yy += lfb + 8
+            over = spent > b9
+            self._bd_bar(cv, x0 + 20, yy, cw - 40, spent / float(b9), pal,
+                         self.CAL_DUE if over else pal["accent"])
+            yy += 6 + 8
+            if over:
+                hint = "예산을 %s원 넘었어요" % self._lg_won(spent - b9, False)
+            elif cur:
+                left9 = max(1, mb - td + 1)
+                hint = "하루 %s원씩 쓰면 딱 맞아요" % self._lg_won((b9 - spent) // left9, False)
+            else:
+                hint = "예산의 %d%% 썼어요" % int(round(100.0 * spent / b9))
+            cv.create_text(x0 + 20, yy + lfs / 2.0, text=self._bd_fit(hint, fs, cw - 40), font=fs,
+                           fill=self.CAL_DUE if over else pal["sub"], anchor="w")
+            self._board_ui_hit.append((x0 + 12, ry - lfb / 2.0 - 4, x1 - 12, yy + lfs + 4, "lg:budget"))
+            yy += lfs + 14
+        else:
+            self._bd_box(cv, x0 + 20, yy, x1 - 20, yy + 34, 11, pal["fill"])
+            cv.create_text((x0 + x1) / 2.0, yy + 17, text="+ 생활비 예산 정하기", font=fs, fill=pal["sub"])
+            self._board_ui_hit.append((x0 + 20, yy, x1 - 20, yy + 34, "lg:budget"))
+            yy += 34 + 14
+        if recv and yy + lfb + lfs < y0 + h1:
+            ry = yy + lfb / 2.0
+            tot = sum(r[3] for r in recv)
+            cv.create_text(x0 + 20, ry, text="받을 돈", font=fb, fill=pal["ink"], anchor="w")
+            cv.create_text(x1 - 20, ry, text=self._lg_won(tot, False), font=self._bf(9, 2),
+                           fill=self.LG_IN, anchor="e")
+            cv.create_text(x0 + 20, ry + lfb / 2.0 + 4 + lfs / 2.0,
+                           text="%d건 · 달력 일정에서 저절로" % len(recv), font=fs, fill=pal["sub"],
+                           anchor="w")
+            self._board_ui_hit.append((x0 + 12, yy - 4, x1 - 12, yy + lfb + 4 + lfs + 4, "lg:recv"))
+        # 어디에 썼나
+        ty0 = y0 + h1 + 14
+        if y1 - ty0 < 120:
+            return
+        self._bd_box(cv, x0, ty0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        yy = ty0 + 18 + lfl / 2.0
+        cv.create_text(x0 + 20, yy, text="어디에 썼나", font=fl, fill=pal["sub"], anchor="w")
+        cv.create_text(x1 - 20, yy, text="우클릭으로 고치기", font=fs,
+                       fill=self._mix(pal["sub"], pal["card"], 0.35), anchor="e")
+        yy += lfl / 2.0 + 12
+        rows = sorted(((v, c) for c, v in byc.items() if v > 0), reverse=True)
+        if not rows:
+            cv.create_text((x0 + x1) / 2.0, (yy + y1) / 2.0 - 6, text="이 달에 나간 돈이 없어요",
+                           font=fs, fill=pal["sub"])
+            return
+        tot = float(sum(v for v, _c in rows))
+        top = float(rows[0][0])
+        rh = lfb + 6 + 6 + 12
+        fp = self._bf(8, True)
+        pw = int(self._tw("100%", fp)) + 6
+        for v, cid in rows:
+            if yy + rh > y1 - 10:
+                break
+            c = self._lg_cat(cid)
+            my = yy + lfb / 2.0
+            self._bd_box(cv, x0 + 20, my - 4, x0 + 28, my + 4, 4, c["col"])
+            amt9 = self._lg_won(v, False)
+            aw = int(self._tw(amt9, fb))
+            cv.create_text(x0 + 36, my, text=self._bd_fit(str(c["name"]) + (" ·예산 밖" if c.get("nb") else ""),
+                                                          fb, cw - 56 - aw - pw - 10),
+                           font=fb, fill=pal["ink"], anchor="w")
+            cv.create_text(x1 - 20 - pw, my, text=amt9, font=fb, fill=pal["ink"], anchor="e")
+            cv.create_text(x1 - 20, my, text="%d%%" % int(round(100 * v / tot)), font=fp,
+                           fill=pal["sub"], anchor="e")
+            self._bd_bar(cv, x0 + 20, yy + lfb + 6, cw - 40, v / top, pal, c["col"])
+            self._board_ui_hit.append((x0 + 12, yy - 4, x1 - 12, yy + rh - 6, "lg:cat:" + str(cid)))
+            yy += rh
+
+    def _lg_head(self, cv, box, pal, title):
+        """가계부 카드의 머리 — 제목 · ‹ 오늘 › · 달력|내역|통계. 아래 y 를 돌려준다."""
+        x0, y0, x1, _y1 = box
+        fb = self._bf(9, True)
+        cy = y0 + 20 + 17
+        items = (("cal", "달력", None), ("list", "내역", None), ("stat", "통계", None))
+        seg_w = sum(int(self._tw(t, fb)) + 28 for _k, t, _i in items) + 6 + 4
+        nav_w = 32 * 2 + int(self._tw("오늘", fb)) + 24 + 8
+        room = (x1 - 20 - seg_w - 14) - (x0 + 22) - 14 - nav_w
+        for sz in (16, 14, 12, 11):
+            ft = self._bf(sz, 2)
+            if self._tw(title, ft) <= room:
+                break
+        title = self._bd_fit(title, ft, room)
+        cv.create_text(x0 + 22, cy, text=title, font=ft, fill=pal["ink"], anchor="w")
+        x = x0 + 22 + int(self._tw(title, ft)) + 14
+        for key, lab, ic in (("prev", "", "l_left"), ("today", "오늘", None), ("next", "", "l_right")):
+            w9 = 32 if ic else int(self._tw(lab, fb)) + 24
+            self._bd_box(cv, x, cy - 16, x + w9, cy + 16, 10, pal["fill"])
+            if ic:
+                self._bd_ic(cv, ic, x + w9 / 2, cy, 16, pal["ink2"])
+            else:
+                cv.create_text(x + w9 / 2, cy, text=lab, font=fb, fill=pal["ink2"])
+            self._board_ui_hit.append((x, cy - 16, x + w9, cy + 16, "lg:" + key))
+            x += w9 + 4
+        self._bd_seg(cv, x1 - 20 - seg_w, cy, items, self._lg_data()["view"], pal, "lg:view:",
+                     h=32, f=fb, icon=False)
+        return cy + 17 + 14
+
+    def _lg_draw_grid(self, cv, box, pal):
+        x0, y0, x1, y1 = box
+        y, m = self._cal_view()
+        ma, mb = self._cal_month_range(y, m)
+        sel, td = self._cal_selday(), self._cal_today()
+        ws0 = ma - self._cal_wd(ma)
+        rows = (mb - ws0) // 7 + 1
+        gy = self._lg_head(cv, box, pal, "%d년 %d월" % (y, m))
+        gx0, gx1 = x0 + 20, x1 - 20
+        cw = (gx1 - gx0) / 7.0
+        fw = self._bf(8, True)
+        red, blue = "#e0526a", "#5b83d6"
+        gy += self._bd_ls(fw) // 2
+        for i, t in enumerate(self.CAL_WD):
+            cv.create_text(gx0 + cw * i + 10, gy, text=t, font=fw, anchor="w",
+                           fill=red if i == 0 else (blue if i == 6 else pal["sub"]))
+        gy0 = gy + self._bd_ls(fw) // 2 + 8
+        gy1 = y1 - 18
+        rh = (gy1 - gy0) / float(rows)
+        fd = self._bf(9, True)
+        ld = self._bd_ls(fd)
+        faint = self._mix(pal["sub"], pal["card"], 0.55)
+        inc, out = {}, {}
+        for n, it in self._lg_range(ma, mb):
+            try:
+                v = int(it.get("amt") or 0)
+            except Exception:
+                continue
+            if v > 0:
+                inc[n] = inc.get(n, 0) + v
+            elif v < 0:
+                out[n] = out.get(n, 0) + v
+        exp9 = {}
+        for e, _a, _p, left in self._lg_recv():
+            if ma <= e["e"] <= mb:
+                exp9[e["e"]] = exp9.get(e["e"], 0) + left
+        for r in range(rows):
+            for c in range(7):
+                n = ws0 + r * 7 + c
+                if n == sel:
+                    cx0, cy0 = gx0 + cw * c, gy0 + rh * r
+                    cv.create_rectangle(int(cx0) + 1, int(cy0) + 1, int(cx0 + cw), int(cy0 + rh),
+                                        fill=pal["fill"], outline="")
+        for r in range(rows):
+            yy = int(gy0 + rh * r)
+            cv.create_rectangle(gx0, yy, gx1, yy + 1, fill=pal["line"], outline="")
+        for c in range(1, 7):
+            xx = int(gx0 + cw * c)
+            cv.create_rectangle(xx, int(gy0), xx + 1, int(gy1), fill=pal["line"], outline="")
+        fa = self._bf(8, True)
+        la = self._bd_ls(fa)
+        green_bg = self._mix(self.LG_IN, pal["card"], 0.90)
+        green_ln = self._mix(self.LG_IN, pal["card"], 0.45)
+        for r in range(rows):
+            top = gy0 + rh * r
+            for c in range(7):
+                n = ws0 + r * 7 + c
+                cx0 = gx0 + cw * c
+                inmon = ma <= n <= mb
+                dd = self._cal_ymd(n)[2]
+                ty = top + 10 + ld / 2.0
+                if n == td:
+                    r9 = max(12, (max(ld, int(self._tw("%d" % dd, fd))) + 10) // 2)
+                    self._bd_box(cv, cx0 + 4, ty - r9, cx0 + 4 + r9 * 2, ty + r9, r9, pal["ink"])
+                    cv.create_text(cx0 + 4 + r9, ty, text="%d" % dd, font=fd,
+                                   fill=self._bd_on(pal["ink"]))
+                else:
+                    col = pal["ink2"] if inmon else faint
+                    if inmon and c == 0:
+                        col = red
+                    elif inmon and c == 6:
+                        col = blue
+                    cv.create_text(cx0 + 10, ty, text="%d" % dd, font=fd, fill=col, anchor="w")
+                self._board_ui_hit.append((cx0, top, cx0 + cw, top + rh, "lg:day:%d" % n))
+                if not inmon:
+                    continue
+                lines = []
+                if n in inc:
+                    lines.append((inc[n], self.LG_IN, False))
+                if n in out:
+                    lines.append((out[n], pal["ink2"], False))
+                if n in exp9:
+                    lines.append((exp9[n], self.LG_IN, True))
+                room = rh - (10 + ld + 6) - 6
+                need = 0
+                keep = []
+                for v, col, pill in reversed(lines):        # 아래부터 쌓는다 (예정이 맨 아래)
+                    h9 = (2 * la + 8) if pill else (la + 2)
+                    if need + h9 > room:
+                        break
+                    keep.append((v, col, pill))
+                    need += h9
+                yb = top + rh - 7
+                maxw = cw - 12
+                for v, col, pill in keep:
+                    if pill:
+                        # 받을 돈 — '예정' 위에 금액 아래, 두 줄 (칸이 좁아 한 줄이면 '예정'이 떨어진다)
+                        t9 = self._lg_won(v)
+                        if self._tw(t9, fa) + 12 > maxw:
+                            t9 = self._lg_short(v)
+                        w9 = int(max(self._tw(t9, fa), self._tw("예정", fa))) + 12
+                        bx1 = cx0 + cw - 5
+                        self._bd_box(cv, bx1 - w9, yb - 2 * la - 6, bx1, yb, 7, green_bg, green_ln, 1.2)
+                        cv.create_text(bx1 - w9 / 2.0, yb - 3 - la * 1.5, text="예정", font=fa, fill=col)
+                        cv.create_text(bx1 - w9 / 2.0, yb - 3 - la * 0.5, text=t9, font=fa, fill=col)
+                        yb -= 2 * la + 8
+                    else:
+                        t9 = self._lg_won(v)
+                        if self._tw(t9, fa) > maxw:
+                            t9 = self._lg_short(v)
+                        cv.create_text(cx0 + cw - 7, yb - la / 2.0, text=t9, font=fa, fill=col,
+                                       anchor="e")
+                        yb -= la + 2
+
+    def _lg_draw_list(self, cv, box, pal):
+        """내역 — 이 달 기록을 날짜별로 (최근 날이 위)."""
+        x0, y0, x1, y1 = box
+        y, m = self._cal_view()
+        ma, mb = self._cal_month_range(y, m)
+        gy = self._lg_head(cv, box, pal, "%d년 %d월" % (y, m))
+        got = self._lg_range(ma, mb)
+        if not got:
+            cv.create_text((x0 + x1) / 2, (gy + y1) / 2 - 10, text="이 달에는 기록이 없어요",
+                           font=self._bf(11, 2), fill=pal["ink"])
+            cv.create_text((x0 + x1) / 2, (gy + y1) / 2 + 16,
+                           text="오른쪽 아래 '쓴 돈 · 받은 돈 적기'로 넣어 보세요",
+                           font=self._bf(9), fill=pal["sub"])
+            return
+        got.sort(key=lambda r: (-r[0], -int(r[1].get("at") or 0)))
+        fh, fn, fs = self._bf(8, 2), self._bf(10, True), self._bf(8, True)
+        lh, ln, ls9 = self._bd_ls(fh), self._bd_ls(fn), self._bd_ls(fs)
+        rh = ln + ls9 + 16
+        fa = self._bf(10, 2)
+        yy = gy + 2
+        day = None
+        shown = 0
+        for i, (n, it) in enumerate(got):
+            need = rh + ((lh + 14) if n != day else 0)
+            if yy + need > y1 - 34:
+                cv.create_text((x0 + x1) / 2, y1 - 22,
+                               text="외 %d개 — 달력에서 날을 눌러 보세요" % (len(got) - shown),
+                               font=fs, fill=pal["sub"])
+                break
+            if n != day:
+                day = n
+                tot = sum(int(x.get("amt") or 0) for n2, x in got if n2 == n)
+                _yy, mm, dd = self._cal_ymd(n)
+                hy = yy + 8 + lh / 2.0
+                cv.create_text(x0 + 26, hy, text="%d월 %d일 %s요일" % (mm, dd, self.CAL_WD[self._cal_wd(n)]),
+                               font=fh, fill=pal["sub"], anchor="w")
+                cv.create_text(x1 - 28, hy, text=self._lg_won(tot) if tot else "0", font=fh,
+                               fill=self.LG_IN if tot > 0 else pal["sub"], anchor="e")
+                self._board_ui_hit.append((x0 + 12, yy, x1 - 12, yy + lh + 14, "lg:day:%d" % n))
+                yy += lh + 14
+            v = int(it.get("amt") or 0)
+            c = self._lg_cat(it.get("cat"))
+            if str(it.get("id")) == str(self._lg_pick or ""):
+                self._bd_box(cv, x0 + 14, yy, x1 - 14, yy + rh - 4, 12, pal["fill"])
+            my = yy + (rh - 4) / 2.0
+            self._bd_box(cv, x0 + 26, my - 5, x0 + 36, my + 5, 5, c["col"])
+            aw = int(self._tw(self._lg_won(v), fa))
+            t0 = my - (ln + ls9 + 2) / 2.0
+            cv.create_text(x0 + 48, t0 + ln / 2.0, text=self._bd_fit(str(it.get("name") or ""), fn,
+                                                                     x1 - x0 - 100 - aw),
+                           font=fn, fill=pal["ink"], anchor="w")
+            sub = str(c["name"]) + (" · " + str(it["memo"]) if it.get("memo") else "")
+            cv.create_text(x0 + 48, t0 + ln + 2 + ls9 / 2.0, text=self._bd_fit(sub, fs, x1 - x0 - 100 - aw),
+                           font=fs, fill=pal["sub"], anchor="w")
+            cv.create_text(x1 - 28, my, text=self._lg_won(v), font=fa,
+                           fill=self.LG_IN if v > 0 else pal["ink"], anchor="e")
+            self._board_ui_hit.append((x0 + 14, yy, x1 - 14, yy + rh - 4, "lg:it:" + str(it["id"])))
+            yy += rh
+            shown += 1
+
+    def _lg_work_hours(self, a, b, days=None):
+        """a~b 날의 작업 시간(시간) — 타이머 하루 기록에서. 못 읽으면 0."""
+        if days is None:
+            try:
+                days = self._hist_load()
+            except Exception:
+                days = {}
+        s = 0.0
+        for n in range(a, b + 1):
+            try:
+                s += float((days.get(self._cal_s(n)) or {}).get("work") or 0)
+            except Exception:
+                pass
+        return s / 3600.0
+
+    def _lg_draw_stat(self, cv, box, pal):
+        """통계 — 달마다 들어온 돈·나간 돈 막대 · 어디서 벌었나 · 한 건에 얼마."""
+        x0, y0, x1, y1 = box
+        d = self._lg_data()
+        y, m = self._cal_view()
+        sn = d["sn"]
+        months = []
+        yy9, mm9 = y, m
+        for _i in range(sn):
+            months.append((yy9, mm9))
+            mm9 -= 1
+            if mm9 < 1:
+                yy9, mm9 = yy9 - 1, 12
+        months.reverse()
+        gy = self._lg_head(cv, box, pal, "%d년 %d월까지" % (y, m))
+        fb = self._bf(9, True)
+        fs = self._bf(8, True)
+        lfb, lfs = self._bd_ls(fb), self._bd_ls(fs)
+        # 기간 고르기 + 범례
+        cy = gy + 6 + 14
+        self._bd_seg(cv, x0 + 22, cy, (("3", "3개월", None), ("6", "6개월", None), ("12", "1년", None)),
+                     str(sn), pal, "lg:sn:", h=28, f=fs, icon=False)
+        lx = x1 - 22
+        for lab, col in (("나간 돈", self._mix(pal["sub"], pal["card"], 0.45)), ("들어온 돈", self.LG_IN)):
+            cv.create_text(lx, cy, text=lab, font=fs, fill=pal["ink2"], anchor="e")
+            lx -= int(self._tw(lab, fs)) + 8
+            self._bd_box(cv, lx - 8, cy - 4, lx, cy + 4, 4, col)
+            lx -= 20
+        # 막대
+        sums = [self._lg_month(a, b) for a, b in months]
+        top = max([1] + [max(s9[0], s9[1]) for s9 in sums])
+        cx0, cx1 = x0 + 26, x1 - 26
+        ch_top = cy + 14 + 14 + lfs
+        ch_bot = y0 + int((y1 - y0) * 0.60)
+        slot = (cx1 - cx0) / float(len(months))
+        bw = max(5, min(28, int(slot * 0.30)))
+        cv.create_rectangle(cx0, ch_bot, cx1, ch_bot + 1, fill=pal["line"], outline="")
+        for i, ((yy9, mm9), s9) in enumerate(zip(months, sums)):
+            inc, exp = s9[0], s9[1]
+            cxm = cx0 + slot * (i + 0.5)
+            on = (yy9, mm9) == (y, m)
+            hi = (ch_bot - ch_top - 6) * inc / float(top)
+            he = (ch_bot - ch_top - 6) * exp / float(top)
+            ci = self.LG_IN if on else self._mix(self.LG_IN, pal["card"], 0.55)
+            ce = self._mix(pal["sub"], pal["card"], 0.25 if on else 0.62)
+            if hi >= 2:
+                self._bd_box(cv, cxm - bw - 2, ch_bot - hi, cxm - 2, ch_bot, min(6, bw / 2.0), ci)
+            if he >= 2:
+                self._bd_box(cv, cxm + 2, ch_bot - he, cxm + bw + 2, ch_bot, min(6, bw / 2.0), ce)
+            net = inc - exp
+            if inc or exp:
+                t9 = self._lg_won(net) if net else "0"
+                if self._tw(t9, fs) > slot - 4:
+                    t9 = self._lg_short(net) if net else "0"
+                if self._tw(t9, fs) <= slot - 2:
+                    cv.create_text(cxm, ch_bot - max(hi, he) - 6 - lfs / 2.0, text=t9, font=fs,
+                                   fill=(self.LG_IN if net > 0 else self.CAL_DUE) if on else pal["sub"])
+            ml = "%d월" % mm9
+            if self._tw(ml, fs) > slot - 2:
+                ml = "%d" % mm9
+            cv.create_text(cxm, ch_bot + 8 + lfs / 2.0, text=ml, font=self._bf(8, 2) if on else fs,
+                           fill=pal["ink"] if on else pal["sub"])
+            self._board_ui_hit.append((cxm - slot / 2, ch_top, cxm + slot / 2, ch_bot + 14 + lfs,
+                                       "lg:mon:%d:%d" % (yy9, mm9)))
+        # 아래 두 칸
+        by0 = ch_bot + 14 + lfs + 22
+        cv.create_rectangle(x0 + 22, by0 - 10, x1 - 22, by0 - 9, fill=pal["line"], outline="")
+        mid = (x0 + x1) / 2.0
+        cv.create_rectangle(int(mid), by0 + 4, int(mid) + 1, y1 - 18, fill=pal["line"], outline="")
+        a0 = self._cal_month_range(*months[0])[0]
+        b0 = self._cal_month_range(*months[-1])[1]
+        byi = {}
+        for s9 in sums:
+            for c9, v9 in s9[3].items():
+                byi[c9] = byi.get(c9, 0) + v9
+        ft = self._bf(11, 2)
+        lt = self._bd_ls(ft)
+        # 어디서 벌었나
+        L, R = x0 + 26, mid - 18
+        yy = by0 + lt / 2.0
+        cv.create_text(L, yy, text="어디서 벌었나", font=ft, fill=pal["ink"], anchor="w")
+        yy += lt / 2.0 + 10
+        rows = sorted(((v, c) for c, v in byi.items() if v > 0), reverse=True)
+        if not rows:
+            cv.create_text(L, yy + lfs, text="이 기간에 들어온 돈이 없어요", font=fs, fill=pal["sub"],
+                           anchor="w")
+        else:
+            topv = float(rows[0][0])
+            rh = lfb + 6 + 6 + 10
+            for v, cid in rows:
+                if yy + rh > y1 - 14:
+                    break
+                c = self._lg_cat(cid)
+                my = yy + lfb / 2.0
+                self._bd_box(cv, L, my - 4, L + 8, my + 4, 4, c["col"])
+                a9 = self._lg_won(v, False)
+                cv.create_text(L + 16, my, text=self._bd_fit(str(c["name"]), fb, R - L - 30 - self._tw(a9, fb)),
+                               font=fb, fill=pal["ink"], anchor="w")
+                cv.create_text(R, my, text=a9, font=fb, fill=pal["ink"], anchor="e")
+                self._bd_bar(cv, L, yy + lfb + 6, R - L, v / topv, pal, c["col"])
+                yy += rh
+        # 한 건에 얼마
+        L, R = mid + 18, x1 - 26
+        yy = by0 + lt / 2.0
+        cv.create_text(L, yy, text="한 건에 얼마 받았나", font=ft, fill=pal["ink"], anchor="w")
+        yy += lt / 2.0 + 6 + lfs / 2.0
+        cv.create_text(L, yy, text=self._bd_fit("금액 넣은 일정 · 작업 기록으로 셈", fs, R - L),
+                       font=fs, fill=pal["sub"], anchor="w")
+        yy += lfs / 2.0 + 10
+        paid = self._lg_paid()
+        evs = [e for e in self._cal_events() if not e["ro"] and int(e.get("amt") or 0) > 0
+               and a0 <= e["e"] <= b0 and paid.get(e["id"], 0) > 0]
+        evs.sort(key=lambda e: -e["e"])
+        if not evs:
+            cv.create_text(L, yy + lfs, text="달력 일정에 금액을 넣고 입금을 누르면 떠요", font=fs,
+                           fill=pal["sub"], anchor="w")
+            return
+        try:
+            days = self._hist_load()
+        except Exception:
+            days = {}
+        hrs = [(e, self._lg_work_hours(e["s"], e["e"], days)) for e in evs]
+        avg = sum(e["amt"] for e in evs) // len(evs)
+        th = sum(h for _e, h in hrs)
+        per = (sum(e["amt"] for e, h in hrs if h > 0) / th) if th > 0.5 else 0
+        th9 = self._bd_ls(fs) + self._bd_ls(self._bf(12, 2)) + 22
+        tw9 = (R - L - 8) / 2.0
+        for k, (cap, val, col) in enumerate((("한 건 평균", self._lg_won(avg, False), pal["ink"]),
+                                             ("시간당", self._lg_won(int(per), False) if per else "–",
+                                              self.LG_IN))):
+            self._lg_tile(cv, L + k * (tw9 + 8), yy, tw9, th9, cap, val, col, pal)
+        yy += th9 + 12
+        for e, h in hrs:
+            if yy + lfb > y1 - 14:
+                break
+            r9 = "%s · %s" % (self._lg_won(e["amt"], False),
+                              ("%d시간" % int(round(h))) if h >= 0.5 else "기록 없음")
+            rw = int(self._tw(r9, fs))
+            cv.create_text(L, yy + lfb / 2.0, text=self._bd_fit(e["name"], fb, R - L - rw - 10), font=fb,
+                           fill=pal["ink"], anchor="w")
+            cv.create_text(R, yy + lfb / 2.0, text=r9, font=fs, fill=pal["sub"], anchor="e")
+            self._board_ui_hit.append((L - 6, yy - 2, R + 6, yy + lfb + 2, "lg:goev:" + e["id"]))
+            yy += lfb + 8
+
+    def _lg_draw_day(self, cv, box, pal):
+        """오른쪽 — 고른 날의 기록 · 빠르게 적기 · 자주 쓰는 것 · 이번 달 고정 지출."""
+        x0, y0, x1, y1 = box
+        d = self._lg_data()
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        sel, td = self._cal_selday(), self._cal_today()
+        _y, m, dd = self._cal_ymd(sel)
+        fl = self._bf(8, 2)
+        yy = y0 + 20 + self._bd_ls(fl) // 2
+        cv.create_text(x0 + 20, yy, text=self.CAL_WD[self._cal_wd(sel)] + "요일", font=fl,
+                       fill=pal["sub"], anchor="w")
+        day_items = sorted([it for n, it in self._lg_range(sel, sel)],
+                           key=lambda it: int(it.get("at") or 0))
+        tot = sum(int(it.get("amt") or 0) for it in day_items)
+        if day_items:
+            cv.create_text(x1 - 20, yy, text="이 날 " + (self._lg_won(tot) if tot else "0"),
+                           font=self._bf(9, 2), fill=self.LG_IN if tot > 0 else pal["ink2"], anchor="e")
+        ft = self._bf(16, 2)
+        yy += self._bd_ls(fl) // 2 + 4 + self._bd_ls(ft) // 2
+        tt = "%d월 %d일" % (m, dd)
+        cv.create_text(x0 + 20, yy, text=tt, font=ft, fill=pal["ink"], anchor="w")
+        rx = x0 + 20 + int(self._tw(tt, ft)) + 8
+        if sel == td:
+            fb9 = self._bf(8, 2)
+            bw = int(self._tw("오늘", fb9)) + 18
+            self._bd_box(cv, rx, yy - 10, rx + bw, yy + 10, 10, pal["ink"])
+            cv.create_text(rx + bw / 2, yy, text="오늘", font=fb9, fill=self._bd_on(pal["ink"]))
+        yy += self._bd_ls(ft) // 2 + 14
+        bot = y1 - 16 - 46 - 14
+        fn, fs, fb = self._bf(10, True), self._bf(8, True), self._bf(9, True)
+        ln, ls9, lb = self._bd_ls(fn), self._bd_ls(fs), self._bd_ls(fb)
+        rh = ln + ls9 + 20
+        fa = self._bf(10, 2)
+        # 기록 — 아래 '빠르게 적기' 자리는 남긴다
+        quick_h = lb + 8 + 40 + 16
+        if not day_items:
+            hh = 56
+            if yy + hh <= bot:
+                self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + hh, 14, pal["fill"])
+                cv.create_text((x0 + x1) / 2, yy + hh / 2, text="이 날은 기록이 없어요",
+                               font=fb, fill=pal["sub"])
+                yy += hh + 16
+        for i, it in enumerate(day_items):
+            if yy + rh > bot - quick_h and i < len(day_items):
+                if yy + ls9 + 8 <= bot - quick_h + 30:
+                    cv.create_text((x0 + x1) / 2, yy + ls9 / 2.0,
+                                   text="외 %d개 — 내역에서 보세요" % (len(day_items) - i), font=fs,
+                                   fill=pal["sub"])
+                    yy += ls9 + 12
+                break
+            v = int(it.get("amt") or 0)
+            c = self._lg_cat(it.get("cat"))
+            on = str(it.get("id")) == str(self._lg_pick or "")
+            self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + rh - 6, 13, pal["fill"],
+                         self._mix(c["col"], pal["ink"], 0.25) if on else None, 1.6)
+            my = yy + (rh - 6) / 2.0
+            self._bd_box(cv, x0 + 28, my - 5, x0 + 38, my + 5, 5, c["col"])
+            a9 = self._lg_won(v)
+            aw = int(self._tw(a9, fa))
+            t0 = my - (ln + ls9 + 2) / 2.0
+            cv.create_text(x0 + 48, t0 + ln / 2.0,
+                           text=self._bd_fit(str(it.get("name") or ""), fn, x1 - x0 - 84 - aw),
+                           font=fn, fill=pal["ink"], anchor="w")
+            sub = str(c["name"]) + (" · " + str(it["memo"]) if it.get("memo") else "")
+            cv.create_text(x0 + 48, t0 + ln + 2 + ls9 / 2.0, text=self._bd_fit(sub, fs, x1 - x0 - 84 - aw),
+                           font=fs, fill=pal["sub"], anchor="w")
+            cv.create_text(x1 - 28, my, text=a9, font=fa, fill=self.LG_IN if v > 0 else pal["ink"],
+                           anchor="e")
+            self._board_ui_hit.append((x0 + 16, yy, x1 - 16, yy + rh - 6, "lg:it:" + str(it["id"])))
+            yy += rh
+        yy += 6
+        # 빠르게 적기
+        if yy + quick_h <= bot:
+            cv.create_text(x0 + 20, yy + lb / 2.0, text="빠르게 적기", font=fb, fill=pal["sub"], anchor="w")
+            yy += lb + 8
+            self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + 40, 12, pal["card"], pal["line"], 1.4)
+            cv.create_text(x0 + 30, yy + 20, text=self._bd_fit("예) 커피 4500 · +입금 120000", fs,
+                                                                x1 - x0 - 60),
+                           font=fs, fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+            self._board_ui_hit.append((x0 + 16, yy, x1 - 16, yy + 40, "lg:new"))
+            yy += 40 + 16
+        # 자주 쓰는 것
+        fq = self._lg_freq()
+        self._lg_chips = fq
+        if fq and yy + ls9 + 8 + 30 <= bot:
+            cv.create_text(x0 + 20, yy + ls9 / 2.0, text="자주 적은 것 — 누르면 바로 적혀요", font=fs,
+                           fill=pal["sub"], anchor="w")
+            yy += ls9 + 8
+            x = x0 + 16
+            fc = self._bf(8, True)
+            for i, (nm, a9, cid) in enumerate(fq):
+                t9 = "%s %s" % (nm, self._lg_won(a9, False))
+                w9 = int(self._tw(t9, fc)) + 30
+                if x + w9 > x1 - 16:
+                    if yy + 30 + 30 > bot:
+                        break
+                    x = x0 + 16
+                    yy += 34
+                self._bd_box(cv, x, yy, x + w9, yy + 28, 14, pal["fill"])
+                self._bd_box(cv, x + 10, yy + 10, x + 18, yy + 18, 4, self._lg_cat(cid)["col"])
+                cv.create_text(x + 23, yy + 14, text=t9, font=fc, fill=pal["ink2"], anchor="w")
+                self._board_ui_hit.append((x, yy, x + w9, yy + 28, "lg:chip:%d" % i))
+                x += w9 + 6
+            yy += 28 + 16
+        # 이번 달 고정 지출
+        if yy + lb + 8 + lb <= bot:
+            ty9 = yy + lb / 2.0
+            cv.create_text(x0 + 20, ty9, text="이번 달 고정 지출", font=fb, fill=pal["sub"], anchor="w")
+            fa2 = self._bf(8, True)
+            aw = int(self._tw("+ 추가", fa2)) + 16
+            self._bd_box(cv, x1 - 20 - aw, ty9 - 10, x1 - 20, ty9 + 10, 10, pal["fill"])
+            cv.create_text(x1 - 20 - aw / 2, ty9, text="+ 추가", font=fa2, fill=pal["ink2"])
+            self._board_ui_hit.append((x1 - 24 - aw, ty9 - 13, x1 - 16, ty9 + 13, "lg:fxadd"))
+            yy += lb + 10
+            if not d["fixed"]:
+                cv.create_text(x0 + 20, yy + ls9 / 2.0,
+                               text=self._bd_fit("구독료처럼 매달 나가는 돈 — 날이 되면 저절로 적혀요", fs,
+                                                 x1 - x0 - 40),
+                               font=fs, fill=self._mix(pal["sub"], pal["card"], 0.3), anchor="w")
+            for f in d["fixed"]:
+                if yy + lb + 6 > bot:
+                    break
+                c = self._lg_cat(f.get("cat"))
+                my = yy + lb / 2.0
+                self._bd_box(cv, x0 + 21, my - 4, x0 + 29, my + 4, 4, c["col"])
+                r9 = "매달 %s일 · %s" % (f.get("day") or 1, self._lg_won(int(f.get("amt") or 0), False))
+                rw = int(self._tw(r9, fs))
+                cv.create_text(x0 + 38, my, text=self._bd_fit(str(f.get("name") or ""), fb, x1 - x0 - 70 - rw),
+                               font=fb, fill=pal["ink"] if f.get("on", True) else pal["sub"], anchor="w")
+                cv.create_text(x1 - 20, my, text=r9, font=fs, fill=pal["sub"], anchor="e")
+                self._board_ui_hit.append((x0 + 14, yy - 2, x1 - 14, yy + lb + 4, "lg:fx:" + str(f["id"])))
+                yy += lb + 8
+        self._bd_box(cv, x0 + 16, y1 - 16 - 46, x1 - 16, y1 - 16, 14, pal["ink"])
+        fnw = self._bf(10, 2)
+        lab = "쓴 돈 · 받은 돈 적기"
+        tw9 = int(self._tw(lab, fnw))
+        mx = (x0 + x1) / 2.0
+        self._bd_ic(cv, "l_plus", mx - tw9 / 2.0 - 4, y1 - 16 - 23, 16, self._bd_on(pal["ink"]))
+        cv.create_text(mx + 12, y1 - 16 - 23, text=lab, font=fnw, fill=self._bd_on(pal["ink"]))
+        self._board_ui_hit.append((x0 + 16, y1 - 16 - 46, x1 - 16, y1 - 16, "lg:new"))
+
+    def _lg_draw_plan(self, cv, box, pal):
+        """오른쪽(통계 보기) — 한 달 생활비 예산과 고정 지출."""
+        x0, y0, x1, y1 = box
+        d = self._lg_data()
+        self._bd_box(cv, x0, y0, x1, y1, 20, pal["card"], shadow=(10, .06, 4))
+        ft, fs, fb = self._bf(12, 2), self._bf(8, True), self._bf(9, True)
+        lt, ls9, lb = self._bd_ls(ft), self._bd_ls(fs), self._bd_ls(fb)
+        yy = y0 + 20 + lt / 2.0
+        cv.create_text(x0 + 20, yy, text="예산과 고정 지출", font=ft, fill=pal["ink"], anchor="w")
+        yy += lt / 2.0 + 4 + ls9 / 2.0
+        cv.create_text(x0 + 20, yy, text="매달 1일에 새로 시작해요", font=fs, fill=pal["sub"], anchor="w")
+        yy += ls9 / 2.0 + 14
+        td = self._cal_today()
+        y, m, dd = self._cal_ymd(td)
+        ma, mb = self._cal_month_range(y, m)
+        _inc, _exp, byc, _byi = self._lg_month(y, m)
+        spent = self._lg_spent_budget(byc)
+        nbn = [str(c["name"]) for c in d["cats"] if c.get("nb")]
+        bh = 16 + lb + 10 + 8 + 8 + ls9 + (8 + ls9 if nbn else 0) + 16
+        self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + bh, 14, pal["fill"])
+        self._board_ui_hit.append((x0 + 16, yy, x1 - 16, yy + bh, "lg:budget"))
+        ty = yy + 16 + lb / 2.0
+        cv.create_text(x0 + 30, ty, text="한 달 생활비", font=fb, fill=pal["ink"], anchor="w")
+        cv.create_text(x1 - 30, ty, text=(self._lg_won(d["budget"], False) + "원") if d["budget"]
+                       else "눌러서 정하기", font=self._bf(10, 2) if d["budget"] else fs,
+                       fill=pal["ink"] if d["budget"] else pal["sub"], anchor="e")
+        ty += lb / 2.0 + 10
+        b9 = max(1, d["budget"])
+        self._bd_bar(cv, x0 + 30, ty, x1 - x0 - 60, spent / float(b9) if d["budget"] else 0, pal,
+                     self.CAL_DUE if (d["budget"] and spent > d["budget"]) else pal["accent"], h=8)
+        ty += 8 + 8 + ls9 / 2.0
+        cv.create_text(x0 + 30, ty, text="%s 썼어요" % self._lg_won(spent, False), font=fs,
+                       fill=pal["sub"], anchor="w")
+        cv.create_text(x1 - 30, ty, text="%d일 남음" % (mb - td + 1), font=fs,
+                       fill=pal["sub"], anchor="e")
+        if nbn:
+            ty += ls9 + 8
+            cv.create_text(x0 + 30, ty, text=self._bd_fit("예산 밖: %s (일감 비용)" % " · ".join(nbn),
+                                                          fs, x1 - x0 - 60),
+                           font=fs, fill=pal["ink2"], anchor="w")
+        yy += bh + 22
+        tot = sum(int(f.get("amt") or 0) for f in d["fixed"] if f.get("on", True))
+        cv.create_text(x0 + 20, yy + lb / 2.0, text="고정 지출", font=fb, fill=pal["ink"], anchor="w")
+        cv.create_text(x1 - 20, yy + lb / 2.0, text="한 달 %s" % self._lg_won(tot, False), font=fs,
+                       fill=pal["sub"], anchor="e")
+        yy += lb + 12
+        have = set(str(it.get("fx")) for _n, it in self._lg_range(ma, mb) if it.get("fx"))
+        rh = lb + 14
+        fa = self._bf(9, 2)
+        for f in d["fixed"]:
+            if yy + rh > y1 - 16 - 36 - 12 - 2 * (ls9 + 4):
+                break
+            my = yy + rh / 2.0
+            done = str(f.get("id")) in have
+            if done:
+                self._bd_box(cv, x0 + 20, my - 9, x0 + 38, my + 9, 9, self.LG_IN)
+                self._bd_ic(cv, "l_check", x0 + 29, my, 12, "#ffffff")
+            else:
+                self._bd_box(cv, x0 + 20, my - 9, x0 + 38, my + 9, 9, pal["card"],
+                             self._mix(pal["sub"], pal["card"], 0.45), 1.6)
+            a9 = self._lg_won(int(f.get("amt") or 0), False)
+            r9 = "매달 %s일" % (f.get("day") or 1)
+            aw = int(self._tw(a9, fa))
+            rw = int(self._tw(r9, fs))
+            cv.create_text(x0 + 48, my, text=self._bd_fit(str(f.get("name") or ""), fb,
+                                                          x1 - x0 - 90 - aw - rw),
+                           font=fb, fill=pal["ink"] if f.get("on", True) else pal["sub"], anchor="w")
+            cv.create_text(x1 - 20 - aw - 12, my, text=r9, font=fs, fill=pal["sub"], anchor="e")
+            cv.create_text(x1 - 20, my, text=a9, font=fa, fill=pal["ink"], anchor="e")
+            self._board_ui_hit.append((x0 + 14, yy, x1 - 14, yy + rh, "lg:fx:" + str(f["id"])))
+            yy += rh
+        yy += 6
+        if yy + 36 <= y1 - 16:
+            self._bd_box(cv, x0 + 16, yy, x1 - 16, yy + 36, 12, pal["fill"])
+            cv.create_text((x0 + x1) / 2.0, yy + 18, text="+ 고정 지출 추가", font=fb, fill=pal["sub"])
+            self._board_ui_hit.append((x0 + 16, yy, x1 - 16, yy + 36, "lg:fxadd"))
+            yy += 36 + 14
+        for t9 in ("날이 되면 저절로 적혀요 (✓ 이번 달)",
+                   "금액이 바뀐 달은 그 기록만 고치면 돼요"):
+            if yy + ls9 > y1 - 10:
+                break
+            cv.create_text(x0 + 20, yy + ls9 / 2.0, text=self._bd_fit(t9, fs, x1 - x0 - 40), font=fs,
+                           fill=pal["sub"], anchor="w")
+            yy += ls9 + 4
+
+    # ── 달력 탭에 붙는 것 (일정의 금액 · 받을 돈) ──
+    def _lg_ev_box_h(self, ev):
+        """달력 오른쪽 일정 칸에 들어갈 '금액' 상자의 높이 (가계부가 꺼졌으면 0)."""
+        if not self.cfg.get("ledger") or ev["ro"]:
+            return 0
+        fs, fb = self._bf(8, True), self._bf(9, True)
+        amt = int(ev.get("amt") or 0)
+        if amt <= 0:
+            return 0                              # 금액이 없으면 설명 줄 끝의 '+ 금액' 뿐이다
+        left = amt - self._lg_paid().get(ev["id"], 0)
+        return 10 + 11 + self._bd_ls(fb) + 9 + 7 + 7 + self._bd_ls(fs) + (10 + 30 if left > 0 else 0) + 11 + 2
+
+    def _lg_ev_box(self, cv, x0, x1, ty, ev, pal):
+        """일정의 금액 상자 — 금액 · 받은 만큼 막대 · '다 받았어요/잔금 받았어요' · '일부만'.
+        누르면 가계부에 들어온 돈으로 적힌다 (그 일정의 기록이라 ev 를 단다)."""
+        fs, fb = self._bf(8, True), self._bf(9, True)
+        lfs, lfb = self._bd_ls(fs), self._bd_ls(fb)
+        amt = int(ev.get("amt") or 0)
+        if amt <= 0:
+            return ty
+        ty += 10
+        paid = self._lg_paid().get(ev["id"], 0)
+        left = amt - paid
+        h = 11 + lfb + 9 + 7 + 7 + lfs + (10 + 30 if left > 0 else 0) + 11
+        L, R = x0 + 26, x1 - 26
+        self._bd_box(cv, L, ty, R, ty + h, 12, pal["card"])
+        y = ty + 11 + lfb / 2.0
+        cv.create_text(L + 12, y, text="금액", font=fs, fill=pal["ink2"], anchor="w")
+        cv.create_text(R - 12, y, text=self._lg_won(amt, False, True), font=self._bf(10, 2),
+                       fill=pal["ink"], anchor="e")
+        self._board_ui_hit.append((L, ty, R, y + lfb / 2.0 + 2, "lg:amt:" + ev["id"]))
+        y += lfb / 2.0 + 9
+        self._bd_bar(cv, L + 12, y, R - L - 24, paid / float(amt), pal, self.LG_IN, h=7)
+        y += 7 + 7 + lfs / 2.0
+        if left <= 0:
+            lt9, rt9 = "다 받았어요", ""
+        elif paid > 0:
+            lt9, rt9 = "%s 받음" % self._lg_won(paid, False), "남은 %s" % self._lg_won(left, False)
+        else:
+            lt9, rt9 = "아직 안 받았어요", ""
+        rw = int(self._tw(rt9, fs)) if rt9 else 0
+        cv.create_text(L + 12, y, text=self._bd_fit(lt9, fs, R - L - 30 - rw), font=fs,
+                       fill=self.LG_IN if paid > 0 else pal["sub"], anchor="w")
+        if rt9:
+            cv.create_text(R - 12, y, text=rt9, font=fs, fill=pal["sub"], anchor="e")
+        y += lfs / 2.0
+        if left > 0:
+            y += 10
+            fbb = self._bf(9, True)
+            pw = int(self._tw("일부만", fbb)) + 26
+            bx1 = R - 12 - pw - 6
+            lab = "잔금 받았어요" if paid > 0 else "다 받았어요"
+            self._bd_box(cv, L + 12, y, bx1, y + 30, 10, self.LG_IN)
+            cv.create_text((L + 12 + bx1) / 2.0, y + 15, text=self._bd_fit(lab, fbb, bx1 - L - 20),
+                           font=fbb, fill="#ffffff")
+            self._board_ui_hit.append((L + 12, y, bx1, y + 30, "lg:pay:" + ev["id"]))
+            self._bd_box(cv, R - 12 - pw, y, R - 12, y + 30, 10, pal["fill"])
+            cv.create_text(R - 12 - pw / 2.0, y + 15, text="일부만", font=fbb, fill=pal["ink"])
+            self._board_ui_hit.append((R - 12 - pw, y, R - 12, y + 30, "lg:part:" + ev["id"]))
+        return ty + h + 2
+
+    def _lg_cal_recv_card(self, cv, x0, x1, ty0, h2, pal, recv):
+        """달력 왼쪽 '받을 돈' 카드 (가계부를 켠 사람 · 받을 돈이 있을 때 진행 카드 자리)."""
+        fl, fs, fb = self._bf(9, True), self._bf(8, True), self._bf(9, True)
+        lfl, lfs, lfb = self._bd_ls(fl), self._bd_ls(fs), self._bd_ls(fb)
+        cw = x1 - x0
+        self._bd_box(cv, x0, ty0, x1, ty0 + h2, 20, pal["card"], shadow=(10, .06, 4))
+        yy = ty0 + 18 + lfl / 2.0
+        cv.create_text(x0 + 20, yy, text="받을 돈", font=fl, fill=pal["sub"], anchor="w")
+        cv.create_text(x1 - 20, yy, text="가계부와 같이 봐요", font=fs,
+                       fill=self._mix(pal["sub"], pal["card"], 0.35), anchor="e")
+        hbig = self._bd_ls(self._bf(20, 2))
+        yy += lfl / 2.0 + 6 + hbig / 2.0
+        self._lg_big(cv, x0 + 20, yy, self._lg_won(sum(r[3] for r in recv), False), self.LG_IN, "원",
+                     pal, maxw=cw - 40)
+        yy += hbig / 2.0 + 12
+        rh = lfb + 3 + lfs + 10
+        for i, (e, amt, paid, left) in enumerate(recv):
+            if yy + rh > ty0 + h2 - 10:
+                cv.create_text(x0 + 20, yy + lfs / 2.0, text="외 %d건" % (len(recv) - i), font=fs,
+                               fill=pal["sub"], anchor="w")
+                break
+            my = yy + lfb / 2.0
+            self._bd_box(cv, x0 + 20, my - 4, x0 + 28, my + 4, 4, e["cat"]["col"])
+            a9 = self._lg_won(left, False)
+            aw = int(self._tw(a9, fb))
+            cv.create_text(x0 + 36, my, text=self._bd_fit(e["name"], fb, cw - 66 - aw), font=fb,
+                           fill=pal["ink"], anchor="w")
+            cv.create_text(x1 - 20, my, text=a9, font=fb, fill=pal["ink"], anchor="e")
+            if paid > 0:
+                sub = "%s 받음 · %s 남음" % (self._lg_won(paid, False), self._lg_won(left, False))
+            else:
+                sub = "마감 %s · 아직 안 받음" % self._cal_span(e["e"], e["e"])
+            cv.create_text(x0 + 36, my + lfb / 2.0 + 3 + lfs / 2.0, text=self._bd_fit(sub, fs, cw - 56),
+                           font=fs, fill=pal["sub"], anchor="w")
+            self._board_ui_hit.append((x0 + 12, yy - 3, x1 - 12, yy + rh - 4, "cal:ev:" + e["id"]))
+            yy += rh
+
+    # ── 누르기 ──
+    def _lg_act(self, a):
+        d = self._lg_data()
+        y, m = self._cal_view()
+        if a in ("prev", "next"):
+            k = -1 if a == "prev" else 1
+            m += k
+            if m < 1:
+                y, m = y - 1, 12
+            elif m > 12:
+                y, m = y + 1, 1
+            self._cal_ym = (y, m)
+        elif a == "today":
+            self._cal_sel = self._cal_today()
+            self._cal_ym = self._cal_ymd(self._cal_sel)[:2]
+        elif a.startswith("view:"):
+            if a[5:] in ("cal", "list", "stat"):
+                d["view"] = a[5:]
+                self._lg_save()
+        elif a.startswith("sn:"):
+            try:
+                v = int(a[3:])
+            except ValueError:
+                return
+            if v in (3, 6, 12):
+                d["sn"] = v
+                self._lg_save()
+        elif a.startswith("mon:"):
+            try:
+                yy9, mm9 = (int(x) for x in a[4:].split(":"))
+            except ValueError:
+                return
+            self._cal_ym = (yy9, mm9)
+            d["view"] = "cal"
+            self._lg_save()
+        elif a.startswith("day:"):
+            try:
+                self._cal_sel = int(a[4:])
+            except ValueError:
+                return
+            self._lg_pick = None
+            ym = self._cal_ymd(self._cal_sel)[:2]
+            if ym != self._cal_view():
+                self._cal_ym = ym
+        elif a.startswith("it:"):
+            iid = a[3:]
+            it = self._lg_get(iid)
+            if it is None:
+                self._board_draw()
+                return
+            if self._lg_pick == iid:                 # 고른 것을 다시 누르면 고친다
+                self._lg_quick(iid)
+                return
+            self._lg_pick = iid
+            n = self._lg_dn(it.get("d"))
+            if n is not None:
+                self._cal_sel = n
+        elif a == "new":
+            self._lg_quick(None, self._cal_selday())
+            return
+        elif a.startswith("chip:"):
+            try:
+                nm, a9, cid = self._lg_chips[int(a[5:])]
+            except Exception:
+                return
+            day = self._cal_selday()
+            self._lg_add(day, -int(a9), cid, nm, learn=False)
+            self._board_toast("%s %s원 적었어요" % (nm, self._lg_won(a9, False)))
+            return
+        elif a == "hide":
+            d["hide"] = not bool(d.get("hide"))
+            self._lg_save()
+            self._tip_hide()
+        elif a == "budget":
+            def done(v):
+                v9 = self._lg_amt(v) if v.strip() not in ("0", "") else 0
+                if v9 is None:
+                    self._board_toast("금액을 읽지 못했어요 — 600000 처럼 적어 주세요")
+                    return
+                d["budget"] = int(v9)
+                self._lg_save()
+                self._board_draw()
+            self._board_ask("한 달 생활비 예산 — 원 단위로 · 0 이면 안 써요",
+                            str(d["budget"] or ""), done, empty=True)
+            return
+        elif a == "recv":
+            self._board_tab = "cal"
+        elif a.startswith("goev:"):
+            ev = self._cal_raw(a[5:])
+            if ev is None:
+                return
+            self._board_tab = "cal"
+            self._cal_ev = a[5:]
+            n = self._cal_p(ev.get("e"))
+            if n is not None:
+                self._cal_sel = n
+                self._cal_ym = self._cal_ymd(n)[:2]
+        elif a == "fxadd":
+            self._lg_fixed_edit(None)
+            return
+        elif a.startswith("fx:"):
+            self._lg_fixed_edit(a[3:])
+            return
+        elif a.startswith("cat:"):
+            return                                    # 분류 줄 — 우클릭으로 고친다
+        elif a.startswith(("pay:", "part:", "amt:")):
+            self._lg_pay(a.split(":", 1)[0], a.split(":", 1)[1])
+            return
+        self._board_draw()
+
+    def _lg_pay_cat(self, ev):
+        """일정의 분류 이름으로 들어온 돈 분류를 고른다 (외주 → 외주, 커미션 → 커미션)."""
+        nm = str((self._cal_cat(ev.get("cat")) or {}).get("name") or "")
+        for c in self._lg_data()["icats"]:
+            if str(c.get("name")) and (str(c["name"]) in nm or nm in str(c["name"])) and nm:
+                return str(c["id"])
+        return self._lg_guess(nm + " " + str(ev.get("name") or ""), 1)
+
+    def _lg_pay(self, kind, eid):
+        """달력 일정의 금액 — pay 남은 돈을 다 받음 · part 일부만 · amt 금액 넣기·고치기."""
+        ev = self._cal_raw(eid)
+        if ev is None:
+            return
+        try:
+            amt = int(ev.get("amt") or 0)
+        except Exception:
+            amt = 0
+        paid = self._lg_paid().get(eid, 0)
+        left = amt - paid
+        name = str(ev.get("name") or "일정")
+        self._cal_ev = eid
+
+        def put(v, label):
+            got = self._lg_add(self._cal_today(), int(v), self._lg_pay_cat(ev), name, label, ev=eid,
+                               learn=False)
+            if got:
+                self._board_toast("가계부에 +%s원 적었어요 · %s %s" % (self._lg_won(v, False), name[:12],
+                                                                       label))
+                self._board_draw()
+        if kind == "amt":
+            def done(v):
+                if not v.strip() or v.strip() == "0":
+                    ev.pop("amt", None)
+                else:
+                    v9 = self._lg_amt(v)
+                    if v9 is None:
+                        self._board_toast("금액을 읽지 못했어요 — 450000 처럼 적어 주세요")
+                        return
+                    ev["amt"] = int(v9)
+                self._cal_save()
+                self._board_draw()
+            self._board_ask("'%s' 금액 — 원 단위로 · 비우면 빼요" % name[:14],
+                            ("{:,}".format(amt) if amt > 0 else ""), done, empty=True)
+            return
+        if left <= 0:
+            return
+        if kind == "pay":
+            put(left, "잔금" if paid > 0 else "입금")
+            return
+
+        def done2(v):
+            v9 = self._lg_amt(v)
+            if v9 is None:
+                self._board_toast("금액을 읽지 못했어요 — 225000 처럼 적어 주세요")
+                return
+            put(int(v9), "선금" if paid == 0 else "입금")
+        self._board_ask("받은 금액 — 남은 돈 %s원" % self._lg_won(left, False), "", done2)
+
+    def _lg_rclick(self, e):
+        what = self._board_hit_at(e.x, e.y, self._board_ui_hit) or ""
+        pal = self._board_pal()
+        mn = tk.Menu(self._board_win, tearoff=0, font=self._bf(9), bg=pal["card"], fg=pal["ink"],
+                     activebackground=pal["soft"], activeforeground=pal["ink"], bd=0)
+        d = self._lg_data()
+        if what.startswith("lg:it:"):
+            iid = what[6:]
+            if self._lg_get(iid) is None:
+                return
+            self._lg_pick = iid
+            self._board_draw()
+
+            def rm():
+                if self._lg_del(iid):
+                    self._lg_pick = None
+                    self._board_toast("기록을 지웠어요")
+                    self._board_draw()
+            mn.add_command(label="고치기", command=lambda: self._lg_quick(iid))
+            mn.add_separator()
+            mn.add_command(label="지우기", command=rm)
+        elif what.startswith("lg:cat:"):
+            cid = what[7:]
+            c = self._lg_cat(cid)
+            if not c.get("id"):
+                return
+
+            def rename():
+                def done(v):
+                    c["name"] = v[:10]
+                    self._lg_save()
+                    self._board_draw()
+                self._board_ask("분류 이름", str(c.get("name") or ""), done)
+
+            def recolor():
+                got = self._pick_color(str(c.get("col") or "#9aa1ad"))
+                if got:
+                    c["col"] = got
+                    self._lg_save()
+                    self._board_draw()
+
+            def nb():
+                c["nb"] = not bool(c.get("nb"))
+                self._lg_save()
+                self._board_toast(("'%s'은(는) 예산에서 뺐어요" if c["nb"] else "'%s'도 예산에 넣었어요")
+                                  % str(c.get("name")))
+                self._board_draw()
+            mn.add_command(label="이름 바꾸기", command=rename)
+            mn.add_command(label="색 바꾸기", command=recolor)
+            mn.add_separator()
+            mn.add_command(label="예산에 넣기" if c.get("nb") else "예산에서 빼기 (일감 비용)", command=nb)
+        elif what.startswith("lg:fx:"):
+            fid = what[6:]
+
+            def rmf():
+                d["fixed"] = [f for f in d["fixed"] if str(f.get("id")) != fid]
+                self._lg_save()
+                self._board_toast("고정 지출을 지웠어요 (적힌 기록은 남아요)")
+                self._board_draw()
+            mn.add_command(label="고치기", command=lambda: self._lg_fixed_edit(fid))
+            mn.add_separator()
+            mn.add_command(label="지우기", command=rmf)
+        elif what.startswith("lg:day:"):
+            try:
+                n = int(what[7:])
+            except ValueError:
+                return
+            self._cal_sel = n
+            self._board_draw()
+            mn.add_command(label="%s에 적기" % self._cal_span(n, n),
+                           command=lambda: self._lg_quick(None, n))
+        else:
+            return
+        try:
+            mn.tk_popup(e.x_root, e.y_root)
+        finally:
+            mn.grab_release()
+
+    # ── 적기 창 (한 줄로) ──
+    def _lg_quick(self, iid=None, day=None):
+        """쓴 돈 · 받은 돈 적기 — 한 줄로 적으면 알아듣고, 틀린 것만 눌러서 고친다.
+        입력 칸은 그대로 두고 미리보기만 다시 그린다 (다시 그리면 쓰던 칸이 사라진다)."""
+        old = getattr(self, "_lg_q_st", None)
+        if old is not None:
+            try:
+                old["close"]()
+            except Exception:
+                pass
+        d = self._lg_data()
+        it = self._lg_get(iid) if iid else None
+        base = day if day is not None else self._cal_selday()
+        td = self._cal_today()
+        ed = {"sign": None, "cat": None, "day": None, "memo_user": False, "msg": ""}
+        init, memo0 = "", ""
+        if it is not None:
+            a9 = int(it.get("amt") or 0)
+            init = ("%s %d" % (str(it.get("name") or ""), abs(a9))).strip()
+            ed["sign"] = 1 if a9 > 0 else -1
+            ed["cat"] = str(it.get("cat") or "")
+            ed["day"] = self._lg_dn(it.get("d"))
+            ed["memo_user"] = True
+            memo0 = str(it.get("memo") or "")
+            base = ed["day"] if ed["day"] is not None else base
+        W = 600
+        H = 448 if it is not None else 520
+
+        def closed():
+            self._lg_q_st = None
+            self._lg_q_w = None
+        win, cv, st = self._bd_dlg("기록 고치기" if it is not None else "쓴 돈 · 받은 돈 적기", W, H,
+                                   on_close=closed)
+        pal = st["pal"]
+        self._lg_q_st = st
+        st["head"]()
+        L, R = 24, W - 24
+        ent = st["field"](L, 62, R, 52, init, font=self._bf(12, True))
+        fs, fb = self._bf(8, True), self._bf(9, True)
+        cv.create_text(L, 128, text="이렇게 알아들었어요 — 틀린 것만 눌러서 고치세요", font=fs,
+                       fill=pal["sub"], anchor="w")
+        PY0, PY1 = 144, 144 + 200
+        self._bd_box(cv, L, PY0, R, PY1, 16, pal["fill"])
+        lab_x = L + 18
+        cv.create_text(lab_x, PY0 + 88, text="분류", font=fb, fill=pal["sub"], anchor="w")
+        cv.create_text(lab_x, PY0 + 128, text="날짜", font=fb, fill=pal["sub"], anchor="w")
+        cv.create_text(lab_x, PY0 + 170, text="메모", font=fb, fill=pal["sub"], anchor="w")
+        memo = st["field"](L + 70, PY0 + 150, R - 18, 40, memo0, font=self._bf(9), bg=pal["card"])
+        if it is None:
+            y9 = PY1 + 20
+            cv.create_text(L, y9, text="이렇게도 적을 수 있어요", font=fs, fill=pal["sub"], anchor="w")
+            ex = (("+커미션 120000", "들어온 돈"), ("택시 12,300 어제", "어제 날짜로"),
+                  ("점심 9천", "9,000원"), ("펜촉 14800 아이패드", "뒤는 메모"))
+            for i, (a9, b9) in enumerate(ex):
+                xx = L + (i % 2) * ((R - L) / 2.0)
+                yy = y9 + 24 + (i // 2) * 24
+                cv.create_text(xx, yy, text=a9, font=fb, fill=pal["ink"], anchor="w")
+                cv.create_text(xx + self._tw(a9, fb) + 8, yy, text="→ " + b9, font=fs, fill=pal["sub"],
+                               anchor="w")
+        by = H - 22 - 19
+        base_hits = []
+
+        def cur():
+            p = self._lg_parse(ent.get(), base)
+            sign = ed["sign"] if ed["sign"] in (1, -1) else self._lg_sign_of(p)
+            pool = d["icats"] if sign == 1 else d["cats"]
+            cat = ed["cat"] if ed["cat"] in [str(c["id"]) for c in pool] else self._lg_guess(p["name"], sign)
+            dy = ed["day"] if ed["day"] is not None else (p["day"] if p["day"] is not None else base)
+            return p, sign, cat, dy
+
+        def set_(k, v):
+            ed[k] = v
+            if k == "sign":
+                ed["cat"] = None
+            update()
+
+        def add_cat():
+            sign = cur()[1]
+
+            def done(v):
+                pool = d["icats"] if sign == 1 else d["cats"]
+                if len(pool) >= self.LG_CAT_MAX:
+                    ed["msg"] = "분류는 열 개까지예요"
+                else:
+                    used = set(str(c.get("col")) for c in pool)
+                    col = next((c9 for c9 in self.CAL_COLS if c9 not in used), self.CAL_COLS[len(pool) % 8])
+                    nid = "%s%d" % ("i_" if sign == 1 else "c_", int(time.time() * 1000))
+                    pool.append({"id": nid, "name": v[:10], "col": col})
+                    self._lg_save()
+                    ed["cat"] = nid
+                update()
+            self._board_ask("새 분류 이름", "", done)
+
+        def update(_e=None):
+            if st["closed"]:
+                return
+            p, sign, cat, dy = cur()
+            if not ed["memo_user"]:
+                try:
+                    if memo.get() != p["memo"]:
+                        memo.delete(0, "end")
+                        memo.insert(0, p["memo"])
+                except Exception:
+                    pass
+            cv.delete("pv")
+            hits = []
+            tg = ("pv",)
+            # 나간 돈 | 들어온 돈
+            cy = PY0 + 36
+            x = lab_x
+            fsg = self._bf(9, True)
+            tot = sum(int(self._tw(t9, fsg)) + 28 for t9 in ("나간 돈", "들어온 돈")) + 8
+            self._bd_box(cv, x, cy - 17, x + tot, cy + 17, 11, pal["seg"], tags=tg)
+            xx = x + 3
+            for s9, t9 in ((-1, "나간 돈"), (1, "들어온 돈")):
+                w9 = int(self._tw(t9, fsg)) + 28
+                if sign == s9:
+                    self._bd_box(cv, xx, cy - 14, xx + w9, cy + 14, 9, pal["card"], shadow=(2, .10, 1),
+                                 tags=tg)
+                cv.create_text(xx + w9 / 2.0, cy, text=t9, font=fsg, tags=tg,
+                               fill=pal["ink"] if sign == s9 else pal["sub"])
+                hits.append((xx, cy - 16, xx + w9, cy + 16, lambda s=s9: set_("sign", s)))
+                xx += w9 + 2
+            if p["amt"]:
+                t9 = ("+" if sign == 1 else "−") + "{:,}".format(p["amt"])
+                fbig = self._bf(17, 2)
+                fu = self._bf(9, True)
+                uw = int(self._tw("원", fu))
+                cv.create_text(R - 18 - uw - 4, cy, text=t9, font=fbig, anchor="e", tags=tg,
+                               fill=self.LG_IN if sign == 1 else pal["ink"])
+                cv.create_text(R - 18, cy + 4, text="원", font=fu, fill=pal["sub"], anchor="e", tags=tg)
+            else:
+                cv.create_text(R - 18, cy, text="금액을 적어 주세요 — 4500 처럼", font=fs, anchor="e",
+                               fill=self.CAL_DUE if ed["msg"] else pal["sub"], tags=tg)
+            # 분류
+            cy = PY0 + 88
+            x = L + 70
+            fc = self._bf(8, True)
+            pool = list(d["icats"] if sign == 1 else d["cats"])
+            # 칩이 한 줄에 다 안 들어가면 고른 분류는 늘 보이게 (직접 더한 분류가 뒤에 숨지 않게)
+            xx9, k9 = x, 0
+            for c in pool:
+                w9 = int(self._tw(str(c["name"]), fc)) + 30
+                if xx9 + w9 > R - 18 - 32:
+                    break
+                xx9 += w9 + 4
+                k9 += 1
+            if k9 < len(pool) and cat not in [str(c["id"]) for c in pool[:k9]] and k9 > 0:
+                pool = pool[:k9 - 1] + [c for c in pool if str(c["id"]) == cat]
+            for c in pool:
+                w9 = int(self._tw(str(c["name"]), fc)) + 30
+                if x + w9 > R - 18 - 32:
+                    break
+                on = str(c["id"]) == cat
+                self._bd_box(cv, x, cy - 14, x + w9, cy + 14, 14, pal["ink"] if on else pal["card"], tags=tg)
+                self._bd_box(cv, x + 11, cy - 4, x + 19, cy + 4, 4, c["col"], tags=tg)
+                cv.create_text(x + 24, cy, text=str(c["name"]), font=fc, anchor="w", tags=tg,
+                               fill=self._bd_on(pal["ink"]) if on else pal["ink2"])
+                hits.append((x, cy - 14, x + w9, cy + 14, lambda cid=str(c["id"]): set_("cat", cid)))
+                x += w9 + 4
+            self._bd_box(cv, x, cy - 14, x + 28, cy + 14, 14, pal["card"], tags=tg)
+            cv.create_text(x + 14, cy, text="+", font=self._bf(10, True), fill=pal["ink2"], tags=tg)
+            hits.append((x, cy - 14, x + 28, cy + 14, add_cat))
+            # 날짜
+            cy = PY0 + 128
+            x = L + 70
+            opts = [(td, "오늘"), (td - 1, "어제")]
+            if base not in (td, td - 1):
+                opts.append((base, self._cal_span(base, base)))
+            if dy not in [o[0] for o in opts]:
+                opts.append((dy, self._cal_span(dy, dy)))
+            for n9, t9 in opts:
+                w9 = int(self._tw(t9, fc)) + 26
+                on = (n9 == dy)
+                self._bd_box(cv, x, cy - 14, x + w9, cy + 14, 14, pal["ink"] if on else pal["card"], tags=tg)
+                cv.create_text(x + w9 / 2.0, cy, text=t9, font=fc, tags=tg,
+                               fill=self._bd_on(pal["ink"]) if on else pal["ink2"])
+                hits.append((x, cy - 14, x + w9, cy + 14, lambda n=n9: set_("day", n)))
+                x += w9 + 5
+            if ed["msg"]:
+                cv.create_text(L, by - 34, text=self._bd_fit(ed["msg"], fb, R - L), font=fb,
+                               fill=self.CAL_DUE, anchor="w", tags=tg)
+            st["hits"][:] = base_hits + hits
+
+        def save(_e=None):
+            p, sign, cat, dy = cur()
+            if not p["amt"]:
+                ed["msg"] = "금액을 적어 주세요 — '커피 4500' 처럼 이름 뒤에"
+                update()
+                return "break"
+            try:
+                mm = memo.get().strip()
+            except Exception:
+                mm = p["memo"]
+            got = self._lg_add(dy, sign * int(p["amt"]), cat, p["name"], mm, iid=iid)
+            if not got:
+                ed["msg"] = "기록이 너무 많아요"
+                update()
+                return "break"
+            st["close"]()
+            self._lg_pick = got
+            self._cal_sel = dy
+            self._cal_ym = self._cal_ymd(dy)[:2]
+            nm9 = p["name"] or self._lg_cat(cat)["name"]
+            self._board_toast("%s %s원 %s" % (nm9[:12], self._lg_won(p["amt"], False),
+                                             "고쳤어요" if iid else "적었어요"))
+            if self._board_alive():
+                self._board_draw()
+            return "break"
+
+        def remove():
+            st["close"]()
+            if self._lg_del(iid):
+                self._lg_pick = None
+                self._board_toast("기록을 지웠어요")
+                if self._board_alive():
+                    self._board_draw()
+
+        def memo_typed(e):
+            if getattr(e, "keysym", "") not in ("Return", "Escape", "Tab"):
+                ed["memo_user"] = True
+        x = st["button"](R, by, "적기" if it is None else "저장", save, "ink")
+        st["button"](x - 8, by, "취소", st["close"], "fill")
+        if it is not None:
+            st["button"](L + int(self._tw("지우기", self._bf(10, True))) + 12, by, "지우기", remove, "danger")
+        base_hits[:] = list(st["hits"])
+        ent.bind("<KeyRelease>", update, add="+")
+        ent.bind("<Return>", save)
+        memo.bind("<KeyRelease>", memo_typed, add="+")
+        memo.bind("<Return>", save)
+        update()
+        self._lg_q_w = {"ent": ent, "memo": memo, "ed": ed, "save": save, "update": update,
+                        "cur": cur, "st": st}
+        st["place"]()
+        try:
+            ent.focus_force()
+            ent.icursor("end")
+        except Exception:
+            pass
+
+    def _lg_fixed_edit(self, fid):
+        """고정 지출 넣기·고치기 — 이름 · 금액 · 매달 며칠 · 분류."""
+        d = self._lg_data()
+        f = None
+        for x in d["fixed"]:
+            if str(x.get("id")) == str(fid):
+                f = x
+        if fid and f is None:
+            return
+        if f is None and len(d["fixed"]) >= self.LG_FIX_MAX:
+            self._board_toast("고정 지출은 서른 개까지예요")
+            return
+        ed = {"cat": str(f.get("cat") or "sub") if f else "sub", "msg": ""}
+        W, H = 460, 400
+        win, cv, st = self._bd_dlg("고정 지출 고치기" if f else "고정 지출 추가", W, H)
+        pal = st["pal"]
+        fl, fs = self._bf(9, True), self._bf(8, True)
+        L, R = 24, W - 24
+        w = {}
+
+        def draw():
+            vals = {k: w[k].get() for k in ("name", "amt", "day") if k in w} or {
+                "name": str(f.get("name") or "") if f else "",
+                "amt": "{:,}".format(int(f.get("amt") or 0)) if f else "",
+                "day": str(f.get("day") or "") if f else ""}
+            st["clear"]()
+            st["head"]("날이 되면 그달 가계부에 저절로 적혀요")
+            cv.create_text(L, 70, text="이름", font=fl, fill=pal["ink2"], anchor="w")
+            w["name"] = st["field"](L, 82, R, 44, vals["name"], font=self._bf(10, True))
+            cv.create_text(L, 146, text="금액", font=fl, fill=pal["ink2"], anchor="w")
+            cv.create_text((L + R) / 2.0 + 8, 146, text="매달 며칠", font=fl, fill=pal["ink2"], anchor="w")
+            w["amt"] = st["field"](L, 158, (L + R) / 2.0 - 8, 44, vals["amt"])
+            w["day"] = st["field"]((L + R) / 2.0 + 8, 158, R, 44, vals["day"])
+            cv.create_text(L, 222, text="분류", font=fl, fill=pal["ink2"], anchor="w")
+            x, y = L, 236
+            for c in d["cats"]:
+                w9 = int(self._tw(str(c["name"]), fs)) + 34
+                if x + w9 > R:
+                    x, y = L, y + 34
+                on = str(c["id"]) == ed["cat"]
+                self._bd_box(cv, x, y, x + w9, y + 28, 14, pal["ink"] if on else pal["fill"])
+                self._bd_box(cv, x + 11, y + 10, x + 19, y + 18, 4, c["col"])
+                cv.create_text(x + 24, y + 14, text=str(c["name"]), font=fs, anchor="w",
+                               fill=self._bd_on(pal["ink"]) if on else pal["ink2"])
+                st["hits"].append((x, y, x + w9, y + 28, lambda cid=str(c["id"]): pick(cid)))
+                x += w9 + 5
+            by = H - 22 - 19
+            if ed["msg"]:
+                cv.create_text(L, by - 34, text=self._bd_fit(ed["msg"], fl, R - L), font=fl,
+                               fill=self.CAL_DUE, anchor="w")
+            x = st["button"](R, by, "저장", save, "ink")
+            st["button"](x - 8, by, "취소", st["close"], "fill")
+            if f:
+                st["button"](L + int(self._tw("지우기", self._bf(10, True))) + 12, by, "지우기", remove,
+                             "danger")
+            for w9 in st["ents"]:
+                w9.bind("<Return>", save)
+
+        def pick(cid):
+            ed["cat"] = cid
+            draw()
+
+        def save(_e=None):
+            nm = w["name"].get().strip()
+            a9 = self._lg_amt(w["amt"].get())
+            try:
+                dy = int(str(w["day"].get()).replace("일", "").strip())
+            except ValueError:
+                dy = 0
+            if not nm:
+                ed["msg"] = "이름을 적어 주세요"
+            elif a9 is None:
+                ed["msg"] = "금액을 읽지 못했어요 — 6600 처럼 적어 주세요"
+            elif not (1 <= dy <= 31):
+                ed["msg"] = "매달 며칠인지 1~31 로 적어 주세요"
+            else:
+                g = f
+                if g is None:
+                    g = {"id": "f%d" % int(time.time() * 1000), "on": True}
+                    d["fixed"].append(g)
+                g["name"], g["amt"], g["day"], g["cat"] = nm[:20], int(a9), dy, ed["cat"]
+                g.pop("skip", None)
+                self._lg_save()
+                st["close"]()
+                self._lg_fixed_tick(time.time(), force=True)
+                self._board_toast("고정 지출 '%s' — 매달 %d일" % (nm[:10], dy))
+                if self._board_alive():
+                    self._board_draw()
+                return "break"
+            draw()
+            return "break"
+
+        def remove():
+            d["fixed"] = [x9 for x9 in d["fixed"] if x9 is not f]
+            self._lg_save()
+            st["close"]()
+            self._board_toast("고정 지출을 지웠어요 (적힌 기록은 남아요)")
+            if self._board_alive():
+                self._board_draw()
+        draw()
+        self._lg_fx_w = {"w": w, "save": save, "ed": ed, "st": st}
+        st["place"]()
+        try:
+            w["name"].focus_force()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _cal_amt(ev):
+        """일정의 금액 (원 · 없으면 0)."""
+        try:
+            return max(0, int((ev or {}).get("amt") or 0))
+        except Exception:
+            return 0
+
     def _board_anim(self):
         """스티커 모션 — 그 항목만 옮기거나 그림을 갈아 끼운다 (통째로 안 그린다)."""
         if not self._board_alive():
             return
-        if self._board_tab == "cal":
-            # 달력 탭 — 무대는 안 보인다. 알림 글 만료와 날짜 넘김만 본다.
+        if self._board_tab in ("cal", "money"):
+            # 달력·가계부 탭 — 무대는 안 보인다. 알림 글 만료와 날짜 넘김만 본다.
             tv = getattr(self, "_board_toast_v", None)
             day9 = time.strftime("%Y-%m-%d")
             if (tv and time.time() - tv[1] > 3.0) or (self._board_day and day9 != self._board_day):
@@ -68008,6 +70366,8 @@ class Mascot:
 
     def _room_rclick(self, e):
         """우클릭 — 남의 노래 말풍선이면 좋아요를 보낸다."""
+        if self._strip_rc(e):            # 띠 위를 누른 우클릭이 샌 것 (지뢰 244)
+            return
         for slot, (box, url) in list(self._room_song_hits.items()):
             if not (box[0] <= e.x <= box[2] and box[1] <= e.y <= box[3]):
                 continue
